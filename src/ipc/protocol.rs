@@ -473,6 +473,10 @@ pub struct FocusMeta {
     /// The effort chosen when the focus was created (`None`: the default).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub initial_effort: Option<String>,
+    /// True for a focus with no codebase: it runs in its own private folder,
+    /// and `project_path` stays `None`. Absent (an older app): false.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub no_codebase: Option<bool>,
 }
 
 // ── agent-authored pane layout (Phase 1: agent-driven-pane-layout) ───────────
@@ -1277,6 +1281,10 @@ pub struct ConversationEntryWire {
     /// still exists. What "Resume in <main repo>" resumes in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub main_checkout: Option<String>,
+    /// The conversation runs in a private no-codebase folder (its project reads
+    /// "No codebase"). Carried by a sensitive entry too: it is no content.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_codebase: bool,
 }
 
 /// The outcome of `conversation_resume`.
@@ -1481,6 +1489,11 @@ pub enum ClientMsg {
         /// Spawn with `--remote-control <view_name>` for native cross-device
         /// (phone) control via Anthropic's relay.
         remote_control: bool,
+        /// The focus has no codebase and must run in its own folder: the daemon
+        /// refuses the spawn when `cwd` is absent, without waiting for the focus
+        /// registry push (which the app debounces). Absent: not claimed.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_codebase: bool,
     },
 
     /// Attach to a session: daemon replies with a `SessionTurns` snapshot then
@@ -2120,6 +2133,10 @@ pub enum ClientMsg {
         /// main checkout, when its worktree is gone. Absent: the original.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         place: Option<String>,
+        /// Resume in this new, empty no-codebase folder (a direct child of the
+        /// spaces root) when the original folder is gone. Absent: not asked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        no_codebase_folder: Option<String>,
         /// The user chose "Resume anyway" for a conversation that may be open
         /// in another Claude window.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -3164,6 +3181,17 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         degraded_kept: Option<u32>,
         revision: u64,
+        /// The no-codebase folders (under the spaces root) that any entry not
+        /// yet purged names, visible or hidden. The app moves every other
+        /// folder there to the Trash. Always sent, even empty: an older daemon
+        /// omits it, and the app then trashes nothing.
+        #[serde(default)]
+        referenced_space_folders: Vec<String>,
+        /// The daemon's spaces root (canonical when it exists). The app sweeps
+        /// only when this is the root it computed itself; absent (an older
+        /// daemon): no sweep.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spaces_root: Option<String>,
     },
     /// Answer to `ConversationResume`, to the asking client only. `LocalOnly`.
     ConversationResumeResult {
@@ -3512,6 +3540,7 @@ mod tests {
             cwd: Some("/tmp".into()),
             session_id: Some("sid-1".into()),
             remote_control: true,
+            no_codebase: false,
         });
         round_trip_client(ClientMsg::SessionAttach { tag: "fred".into() });
         round_trip_client(ClientMsg::SessionDetach { tag: "fred".into() });
@@ -3915,6 +3944,7 @@ mod tests {
         let full = FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: "cody-abc12345".into(),
             display_name: "Cody in Admin Portal".into(),
             agent_name: "cody".into(),
@@ -3934,6 +3964,7 @@ mod tests {
         let minimal = FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: "fred".into(),
             display_name: "Fred".into(),
             agent_name: "fred".into(),
@@ -4055,6 +4086,7 @@ mod tests {
         let meta = FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: "fred".into(),
             display_name: "Fred".into(),
             agent_name: "fred".into(),
@@ -4131,6 +4163,7 @@ mod tests {
             meta: FocusMeta {
                 initial_model: None,
                 initial_effort: None,
+                no_codebase: None,
                 tag: "cody-core-1234".into(),
                 display_name: "CORE-1234".into(),
                 agent_name: "cody".into(),
@@ -9210,10 +9243,13 @@ mod slash_commands_wire_tests {
                 resumed_from_tag: None,
                 transcript_path: None,
                 main_checkout: Some("/m".into()),
+                no_codebase: false,
             }],
             first_prompts_enabled: true,
             degraded_kept: Some(3),
             revision: 9,
+            referenced_space_folders: vec![],
+            spaces_root: None,
         };
         let json = serde_json::to_string(&reply).unwrap();
         assert!(
@@ -9416,5 +9452,171 @@ mod authored_prs_wire_tests {
         ] {
             assert_eq!(serde_json::to_value(&topic).unwrap(), json!(name));
         }
+    }
+}
+
+/// The no-codebase focus on the wire: every new field is optional on the way in
+/// (an older app or daemon) and absent on the way out when it says nothing.
+#[cfg(test)]
+mod no_codebase_wire_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A focus frame as an app that predates `no_codebase` pushes it.
+    fn old_focus_frame() -> serde_json::Value {
+        json!({
+            "tag": "cody-abc12345",
+            "display_name": "Cody",
+            "agent_name": "cody",
+            "is_built_in": false
+        })
+    }
+
+    #[test]
+    fn a_focus_that_has_no_codebase_says_so_and_reads_back_the_same() {
+        let mut frame = old_focus_frame();
+        frame["no_codebase"] = json!(true);
+        let meta: FocusMeta = serde_json::from_value(frame.clone()).unwrap();
+        assert_eq!(meta.no_codebase, Some(true));
+        assert_eq!(serde_json::to_value(&meta).unwrap(), frame);
+    }
+
+    #[test]
+    fn an_older_apps_focus_push_reads_as_having_a_codebase_and_is_written_without_the_key() {
+        let old = json!({"type": "focus_registry_updated", "focuses": [old_focus_frame()]});
+        let msg: ServerMsg = serde_json::from_value(old.clone()).unwrap();
+        let ServerMsg::FocusRegistryUpdated { focuses } = &msg else {
+            panic!("{msg:?}")
+        };
+        assert_eq!(focuses[0].no_codebase, None, "absent reads as not set");
+        let again = serde_json::to_value(&msg).unwrap();
+        assert!(
+            !again.to_string().contains("no_codebase"),
+            "an unset flag adds no key: {again}"
+        );
+        assert_eq!(again, old);
+        // The focus message from the app, too (the registry push the daemon receives).
+        let meta: FocusMeta = serde_json::from_value(old_focus_frame()).unwrap();
+        assert_eq!(meta.no_codebase, None);
+    }
+
+    fn history_entry(no_codebase: bool) -> ConversationEntryWire {
+        ConversationEntryWire {
+            id: "s1".into(),
+            title: "T".into(),
+            label: None,
+            agent: "cody".into(),
+            project_name: None,
+            project_path: None,
+            branch: None,
+            model: None,
+            effort: None,
+            pr_numbers: vec![],
+            first_prompt: None,
+            first_prompt_withheld: None,
+            sensitive: false,
+            last_active_ms: 5,
+            status: ConversationStatus::Available,
+            resumed_from_tag: None,
+            transcript_path: None,
+            main_checkout: None,
+            no_codebase,
+        }
+    }
+
+    #[test]
+    fn a_history_entry_carries_no_codebase_only_when_true() {
+        let yes = serde_json::to_value(history_entry(true)).unwrap();
+        assert_eq!(yes["no_codebase"], json!(true));
+        let back: ConversationEntryWire = serde_json::from_value(yes).unwrap();
+        assert!(back.no_codebase);
+
+        let no = serde_json::to_value(history_entry(false)).unwrap();
+        assert!(no.get("no_codebase").is_none(), "{no}");
+        // An older daemon's entry has no such key and reads as false.
+        let back: ConversationEntryWire = serde_json::from_value(no).unwrap();
+        assert!(!back.no_codebase);
+    }
+
+    #[test]
+    fn a_resume_into_a_no_codebase_folder_round_trips_and_the_old_form_reads_as_none() {
+        let with = r#"{"type":"conversation_resume","request_id":"r","id":"s1","new_tag":"t1","no_codebase_folder":"/spaces/abc"}"#;
+        let parsed: ClientMsg = serde_json::from_str(with).unwrap();
+        let ClientMsg::ConversationResume {
+            no_codebase_folder, ..
+        } = &parsed
+        else {
+            panic!("{parsed:?}")
+        };
+        assert_eq!(no_codebase_folder.as_deref(), Some("/spaces/abc"));
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), with);
+
+        let old = r#"{"type":"conversation_resume","request_id":"r","id":"s1","new_tag":"t1"}"#;
+        let parsed: ClientMsg = serde_json::from_str(old).unwrap();
+        let ClientMsg::ConversationResume {
+            no_codebase_folder, ..
+        } = &parsed
+        else {
+            panic!("{parsed:?}")
+        };
+        assert_eq!(*no_codebase_folder, None);
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), old);
+    }
+
+    #[test]
+    fn the_history_always_says_which_space_folders_it_references() {
+        let reply = |folders: Vec<String>| ServerMsg::ConversationHistory {
+            request_id: "r".into(),
+            entries: vec![],
+            first_prompts_enabled: true,
+            degraded_kept: None,
+            revision: 1,
+            referenced_space_folders: folders,
+            spaces_root: None,
+        };
+        let some = serde_json::to_value(reply(vec!["/spaces/a".into()])).unwrap();
+        assert_eq!(some["referenced_space_folders"], json!(["/spaces/a"]));
+        let back: ServerMsg = serde_json::from_value(some).unwrap();
+        let ServerMsg::ConversationHistory {
+            referenced_space_folders,
+            ..
+        } = back
+        else {
+            panic!()
+        };
+        assert_eq!(referenced_space_folders, vec!["/spaces/a".to_owned()]);
+
+        // Present even when empty: that is how the app tells "none" from an older daemon.
+        let none = serde_json::to_value(reply(vec![])).unwrap();
+        assert_eq!(none["referenced_space_folders"], json!([]), "{none}");
+    }
+
+    #[test]
+    fn the_history_carries_the_daemons_spaces_root_and_an_older_daemon_omits_it() {
+        let with = ServerMsg::ConversationHistory {
+            request_id: "r".into(),
+            entries: vec![],
+            first_prompts_enabled: true,
+            degraded_kept: None,
+            revision: 1,
+            referenced_space_folders: vec![],
+            spaces_root: Some("/spaces".into()),
+        };
+        let v = serde_json::to_value(&with).unwrap();
+        assert_eq!(v["spaces_root"], json!("/spaces"));
+        let back: ServerMsg = serde_json::from_value(v).unwrap();
+        let ServerMsg::ConversationHistory { spaces_root, .. } = back else {
+            panic!()
+        };
+        assert_eq!(spaces_root.as_deref(), Some("/spaces"));
+
+        let old = json!({"type":"conversation_history","request_id":"r","entries":[],
+            "first_prompts_enabled":true,"revision":1});
+        let ServerMsg::ConversationHistory { spaces_root, .. } =
+            serde_json::from_value(old).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(spaces_root, None);
     }
 }

@@ -5453,6 +5453,7 @@ fn every_conversation_verb() -> Vec<ClientMsg> {
             id: "sid-conv".into(),
             new_tag: "cody-resumed".into(),
             place: Some("/elsewhere".into()),
+            no_codebase_folder: Some("/space".into()),
             confirm_active_elsewhere: true,
         },
         ClientMsg::ConversationHistoryRename {
@@ -5564,6 +5565,7 @@ fn seed_conversations(rig: &Rig) -> nostromo::conversations::ConversationHistory
                 title: "A title",
                 label: None,
                 model: None,
+                no_codebase: false,
             },
             now,
         );

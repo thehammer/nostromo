@@ -64,6 +64,8 @@ struct ConversationEntryWire: Equatable, Decodable, Identifiable {
     var transcriptPath: String?
     /// For a conversation whose worktree is gone: its main checkout, when it still exists.
     var mainCheckout: String?
+    /// The conversation runs in a private no-codebase folder (its project reads "No codebase").
+    var noCodebase: Bool
 
     var lastActive: Date { Date(timeIntervalSince1970: TimeInterval(lastActiveMs) / 1000) }
 
@@ -73,6 +75,7 @@ struct ConversationEntryWire: Equatable, Decodable, Identifiable {
         case firstPrompt = "first_prompt", firstPromptWithheld = "first_prompt_withheld"
         case lastActiveMs = "last_active_ms", resumedFromTag = "resumed_from_tag"
         case transcriptPath = "transcript_path", mainCheckout = "main_checkout"
+        case noCodebase = "no_codebase"
     }
 
     init(from decoder: Decoder) throws {
@@ -95,6 +98,7 @@ struct ConversationEntryWire: Equatable, Decodable, Identifiable {
         resumedFromTag = try c.decodeIfPresent(String.self, forKey: .resumedFromTag)
         transcriptPath = try c.decodeIfPresent(String.self, forKey: .transcriptPath)
         mainCheckout = try c.decodeIfPresent(String.self, forKey: .mainCheckout)
+        noCodebase = try c.decodeIfPresent(Bool.self, forKey: .noCodebase) ?? false
     }
 
     /// Memberwise init for tests and the model.
@@ -102,14 +106,14 @@ struct ConversationEntryWire: Equatable, Decodable, Identifiable {
          label: String? = nil, projectName: String? = nil, projectPath: String? = nil, branch: String? = nil,
          model: String? = nil, effort: String? = nil, prNumbers: [Int] = [], firstPrompt: String? = nil,
          firstPromptWithheld: String? = nil, sensitive: Bool = false, resumedFromTag: String? = nil,
-         transcriptPath: String? = nil, mainCheckout: String? = nil) {
+         transcriptPath: String? = nil, mainCheckout: String? = nil, noCodebase: Bool = false) {
         self.id = id; self.title = title; self.label = label; self.agent = agent
         self.projectName = projectName; self.projectPath = projectPath; self.branch = branch
         self.model = model; self.effort = effort; self.prNumbers = prNumbers
         self.firstPrompt = firstPrompt; self.firstPromptWithheld = firstPromptWithheld
         self.sensitive = sensitive; self.lastActiveMs = lastActiveMs; self.status = status
         self.resumedFromTag = resumedFromTag; self.transcriptPath = transcriptPath
-        self.mainCheckout = mainCheckout
+        self.mainCheckout = mainCheckout; self.noCodebase = noCodebase
     }
 }
 
@@ -119,16 +123,26 @@ struct ConversationHistoryWire: Equatable, Decodable {
     var firstPromptsEnabled: Bool
     var degradedKept: Int?
     var revision: UInt64
+    /// The no-codebase folders any entry not yet purged names (visible or hidden). Every other folder under
+    /// the spaces root is the clean-up's to trash.
+    /// Nil from a daemon that does not say (it predates No codebase): then nothing is trashed.
+    var referencedSpaceFolders: [String]?
+    /// The spaces root the daemon means (canonical when it exists). The clean-up runs only when it is the
+    /// root this app computed. Nil from a daemon that does not say: then nothing is trashed.
+    var spacesRoot: String?
 
     enum CodingKeys: String, CodingKey {
         case entries, revision
+        case referencedSpaceFolders = "referenced_space_folders", spacesRoot = "spaces_root"
         case requestId = "request_id", firstPromptsEnabled = "first_prompts_enabled", degradedKept = "degraded_kept"
     }
 
     init(requestId: String, entries: [ConversationEntryWire], firstPromptsEnabled: Bool,
-         degradedKept: Int? = nil, revision: UInt64) {
+         degradedKept: Int? = nil, revision: UInt64, referencedSpaceFolders: [String]? = nil,
+         spacesRoot: String? = nil) {
         self.requestId = requestId; self.entries = entries; self.firstPromptsEnabled = firstPromptsEnabled
         self.degradedKept = degradedKept; self.revision = revision
+        self.referencedSpaceFolders = referencedSpaceFolders; self.spacesRoot = spacesRoot
     }
 
     /// Entries decode one by one: a bad entry is skipped, never blanks the whole list.
@@ -138,6 +152,8 @@ struct ConversationHistoryWire: Equatable, Decodable {
         firstPromptsEnabled = try c.decode(Bool.self, forKey: .firstPromptsEnabled)
         degradedKept = try c.decodeIfPresent(Int.self, forKey: .degradedKept)
         revision = try c.decode(UInt64.self, forKey: .revision)
+        referencedSpaceFolders = try c.decodeIfPresent([String].self, forKey: .referencedSpaceFolders)
+        spacesRoot = try c.decodeIfPresent(String.self, forKey: .spacesRoot)
         var list = try c.nestedUnkeyedContainer(forKey: .entries)
         var out: [ConversationEntryWire] = []
         while !list.isAtEnd {
@@ -184,10 +200,13 @@ struct ClientConversationResume: Encodable {
     let newTag: String
     /// Resume in this folder instead of the original (the main checkout of a gone worktree).
     var place: String?
+    /// Resume in this new, empty no-codebase folder (a child of the spaces root) instead.
+    var noCodebaseFolder: String?
     /// The user chose "Resume anyway" for a conversation that may be open in another Claude window.
     var confirmActiveElsewhere = false
     enum CodingKeys: String, CodingKey {
         case type, id, place, requestId = "request_id", newTag = "new_tag",
+             noCodebaseFolder = "no_codebase_folder",
              confirmActiveElsewhere = "confirm_active_elsewhere"
     }
 
@@ -198,6 +217,7 @@ struct ClientConversationResume: Encodable {
         try c.encode(id, forKey: .id)
         try c.encode(newTag, forKey: .newTag)
         try c.encodeIfPresent(place, forKey: .place)
+        try c.encodeIfPresent(noCodebaseFolder, forKey: .noCodebaseFolder)
         if confirmActiveElsewhere { try c.encode(true, forKey: .confirmActiveElsewhere) }
     }
 }

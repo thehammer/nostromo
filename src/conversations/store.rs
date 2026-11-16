@@ -72,6 +72,11 @@ pub struct ConversationEntry {
     /// The tracker board file bound to the conversation's focus, last seen.
     #[serde(default)]
     pub tracker_board: Option<String>,
+    /// The conversation runs in a private no-codebase folder (`project_path`).
+    /// Sticky once set by a spawn or a refresh from the focus; a resume into a
+    /// new no-codebase folder sets it too.
+    #[serde(default)]
+    pub no_codebase: bool,
 }
 
 impl ConversationEntry {
@@ -101,6 +106,7 @@ impl ConversationEntry {
             removed_at_ms: None,
             user_title: None,
             tracker_board: None,
+            no_codebase: false,
         }
     }
 
@@ -156,6 +162,8 @@ pub struct SpawnNote<'a> {
     pub title: &'a str,
     pub label: Option<&'a str>,
     pub model: Option<(&'a str, Option<&'a str>)>,
+    /// The focus has no codebase (its registry meta says so).
+    pub no_codebase: bool,
 }
 
 /// What a turn or a send refreshes about an entry.
@@ -167,6 +175,8 @@ pub struct MetaUpdate {
     pub sensitive: bool,
     /// The focus's bound tracker board file, when it has one.
     pub tracker_board: Option<String>,
+    /// The focus has no codebase.
+    pub no_codebase: bool,
 }
 
 /// A cached look at a transcript file (never a read on the list path).
@@ -298,6 +308,7 @@ impl ConversationHistory {
         if let Some(e) = s.data.entries.iter_mut().find(|e| e.sid == n.sid) {
             e.tag = n.tag.to_owned();
             e.agent = n.agent.to_owned();
+            e.no_codebase |= n.no_codebase;
             if cwd.is_some() {
                 e.main_checkout = cwd.as_deref().and_then(main_checkout_of);
                 e.project_path = cwd;
@@ -308,6 +319,7 @@ impl ConversationHistory {
             entry.label = n.label.map(str::to_owned);
             entry.project_path = cwd;
             entry.main_checkout = main_checkout;
+            entry.no_codebase = n.no_codebase;
             entry.model = n.model.map(|(m, _)| m.to_owned());
             entry.effort = n.model.and_then(|(_, e)| e.map(str::to_owned));
             s.data.entries.push(entry);
@@ -452,6 +464,7 @@ impl ConversationHistory {
         if m.tracker_board.is_some() {
             e.tracker_board = m.tracker_board;
         }
+        e.no_codebase |= m.no_codebase;
         if m.sensitive && !e.sensitive {
             e.mark_sensitive();
         }
@@ -574,6 +587,17 @@ impl ConversationHistory {
         }
     }
 
+    /// The working directory of every entry not yet purged: visible, hidden
+    /// (no message yet) or soft-removed. For the no-codebase folder sweep.
+    pub fn all_project_paths(&self) -> Vec<(String, bool)> {
+        lock(&self.inner)
+            .data
+            .entries
+            .iter()
+            .filter_map(|e| e.project_path.clone().map(|p| (p, e.no_codebase)))
+            .collect()
+    }
+
     /// Soft-remove (undoable for the sheet's lifetime). False if unknown.
     pub fn remove(&self, sid: &str, now: i64) -> bool {
         self.mutate_one(sid, now, |e| e.removed_at_ms = Some(now))
@@ -632,10 +656,13 @@ impl ConversationHistory {
 
     /// The conversation now runs in `path` (a resume into the main checkout):
     /// it is no longer a linked worktree.
-    pub fn set_place(&self, sid: &str, path: &str, now: i64) {
+    pub fn set_place(&self, sid: &str, path: &str, no_codebase: bool, now: i64) {
         self.mutate_one(sid, now, |e| {
             e.project_path = Some(path.to_owned());
             e.main_checkout = None;
+            if no_codebase {
+                e.no_codebase = true;
+            }
         });
     }
 
@@ -646,11 +673,13 @@ impl ConversationHistory {
         sid: &str,
         project_path: Option<String>,
         main_checkout: Option<String>,
+        no_codebase: bool,
         now: i64,
     ) {
         self.mutate_one(sid, now, |e| {
             e.project_path = project_path;
             e.main_checkout = main_checkout;
+            e.no_codebase = no_codebase;
         });
     }
 

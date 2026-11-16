@@ -464,9 +464,21 @@ impl TrackerRegistry {
         if !path.is_file() {
             return false;
         }
+        // A board at `<dir>/.claude/wip/<topic>/index.md` belongs to `<dir>`. Where `<dir>` is no git
+        // checkout (a no-codebase folder) the root is the working directory itself, so the board's own
+        // folder would make the board look outside its root.
+        let board_root = path
+            .parent()
+            .and_then(Path::parent)
+            .filter(|wip| wip.ends_with(".claude/wip"))
+            .and_then(Path::parent)
+            .and_then(Path::parent);
         let args = OpenArgs {
             path: Some(path.to_string_lossy().into_owned()),
-            cwd: path.parent().map(Path::to_path_buf).unwrap_or_default(),
+            cwd: board_root
+                .or_else(|| path.parent())
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
             ..OpenArgs::default()
         };
         self.open(tag, "conversation-resume", &args).is_ok()

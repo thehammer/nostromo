@@ -418,7 +418,8 @@ final class DynamicFocusView: NSView {
                 tag:              focus.sessionTag,
                 agentName:        focus.agentTag,
                 displayName:      focus.displayName,
-                workingDirectory: focus.projectPath,
+                workingDirectory: focus.sessionWorkingDirectory,
+                requiresWorkingDirectory: focus.noCodebase,
                 quickActions:     focus.quickActions.isEmpty
                                       ? QuickAction.replDefaults
                                       : focus.quickActions
@@ -482,7 +483,7 @@ final class DynamicFocusView: NSView {
             // set_pane_content — no wire protocol changes needed.
             wrapper.onRefresh = { [weak self] in
                 guard let self else { return }
-                AppStore.shared.session(for: self.focus.sessionTag).send("refresh")
+                AppStore.shared.session(for: self.focus).send("refresh")
             }
             leafViews[paneId] = wrapper
             return wrapper

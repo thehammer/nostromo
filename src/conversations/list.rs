@@ -165,6 +165,7 @@ fn to_wire(
         resumed_from_tag: None,
         transcript_path: None,
         main_checkout: None,
+        no_codebase: e.no_codebase,
     };
     // Where a gone worktree may resume is no conversation content: a sensitive
     // entry carries it too, or it could never be resumed.
@@ -183,11 +184,14 @@ fn to_wire(
     }
     w.label = e.label.clone();
     w.project_path = e.project_path.clone();
-    w.project_name = e
-        .project_path
-        .as_deref()
-        .and_then(|p| Path::new(p).file_name())
-        .map(|n| n.to_string_lossy().into_owned());
+    w.project_name = if e.no_codebase {
+        Some("No codebase".to_owned())
+    } else {
+        e.project_path
+            .as_deref()
+            .and_then(|p| Path::new(p).file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+    };
     w.branch = e.branch.clone();
     w.model = e.model.clone();
     w.effort = e.effort.clone();

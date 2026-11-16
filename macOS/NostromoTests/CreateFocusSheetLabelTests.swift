@@ -240,7 +240,7 @@ final class CreateFocusSheetLabelTests: XCTestCase {
         let fields = editableFields(content)
         XCTAssertEqual(fields.count, 1, "exactly one editable text field: the label")
         let field = try XCTUnwrap(fields.first)
-        let preview = try XCTUnwrap(textFields.first { $0.font?.pointSize == 11 && $0 !== field })
+        let preview = try XCTUnwrap(textFields.first { $0.font?.pointSize == 11 && $0 !== field && $0.accessibilityLabel() != "Project error" })
 
         let projectFrame = frame(of: projectLabel, in: content)
         let captionFrame = frame(of: labelLabel, in: content)

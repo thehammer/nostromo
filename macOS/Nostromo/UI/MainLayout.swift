@@ -489,7 +489,11 @@ class MainLayout: NSView {
     var terminalWindowId: String { String(windowIndex) }
 
     /// The directory a new terminal opens in: the active focus's project, else the daemon's `$HOME`.
-    var activeFocusProjectPath: String? { activeFocus.projectPath }
+    var activeFocusProjectPath: String? { activeFocus.sessionWorkingDirectory }
+
+    /// The active focus's repo, for the remote-shell picker's project preselection: nil for a no-codebase
+    /// focus, whose folder is not a project.
+    var activeFocusRepoPath: String? { activeFocus.projectPath }
 
     /// The pane of the active focus that holds `responder`, if any.
     func activePaneId(containing responder: NSResponder?) -> String? {
@@ -498,12 +502,7 @@ class MainLayout: NSView {
     }
 
     private func forceStart(_ focus: Focus) {
-        AppStore.shared.session(
-            for: focus.sessionTag,
-            agentName: focus.agentTag,
-            displayName: focus.displayName,
-            workingDirectory: focus.projectPath
-        ).restart()
+        AppStore.shared.session(for: focus).restart()
     }
 
     private func removeFocus(_ focus: Focus) {

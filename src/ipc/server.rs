@@ -1533,16 +1533,18 @@ fn handle_client_msg(
             cwd,
             session_id,
             remote_control,
+            no_codebase,
         } => {
             let (result, registry) = {
                 let mut mgr = session_mgr.lock().unwrap();
-                let result = mgr.spawn_session(
+                let result = mgr.spawn_session_requested(
                     tag.clone(),
                     agent_name,
                     view_name,
                     cwd,
                     session_id,
                     remote_control,
+                    no_codebase,
                 );
                 (result, mgr.pane_registry())
             };
@@ -2693,6 +2695,7 @@ fn handle_client_msg(
             id,
             new_tag,
             place,
+            no_codebase_folder,
             confirm_active_elsewhere,
         } => {
             let mut reply = session_mgr.lock().unwrap().resume_conversation_with(
@@ -2700,6 +2703,7 @@ fn handle_client_msg(
                 &new_tag,
                 crate::ipc::session_manager::ResumeOptions {
                     place: place.as_deref(),
+                    no_codebase_folder: no_codebase_folder.as_deref(),
                     confirm_active_elsewhere,
                 },
             );

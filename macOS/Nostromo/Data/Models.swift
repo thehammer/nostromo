@@ -76,6 +76,17 @@ struct Focus: Codable, Hashable, Identifiable {
     /// Set when this focus was made by resuming a conversation from History; the sidebar says
     /// "resumed · date" until the first new message is sent.
     var resumedAt: Date? = nil
+    /// A focus with no codebase: it runs in its own private folder (`workingDirectory`) and `projectPath`
+    /// stays nil, so everything that means "the repo" (branch, PR, repo grouping) stays off for it.
+    var noCodebase: Bool = false
+    /// The private folder a no-codebase focus runs in. Only meaningful with `noCodebase`.
+    var workingDirectory: String? = nil
+
+    /// Where this focus's session, and a new Terminal, run: the repo, or a no-codebase focus's folder.
+    /// Nil makes the daemon use the home folder. Never use this for "the repo": that is `projectPath`.
+    var sessionWorkingDirectory: String? {
+        projectPath ?? (noCodebase ? workingDirectory : nil)
+    }
 
     /// "resumed · <date>" while a focus made from History has not been written to yet.
     var resumedLabel: String? {
@@ -125,6 +136,7 @@ struct Focus: Codable, Hashable, Identifiable {
 
     var displayName: String {
         if let label = Focus.normalizedLabel(label) { return label }
+        if noCodebase { return "\(agentTag.capitalized) (no codebase)" }
         guard let repo = repoName else { return agentTag.capitalized }
         return "\(agentTag.capitalized) in \(repo)"
     }
@@ -153,6 +165,7 @@ struct Focus: Codable, Hashable, Identifiable {
     /// field existed) have `org == nil`: project sessions fall under "Carefeed", pathless
     /// ones under "Personal".
     var effectiveOrg: String {
+        if noCodebase { return "Personal" }
         if let org, !org.isEmpty { return org }
         return projectPath == nil ? "Personal" : "Carefeed"
     }
@@ -225,6 +238,9 @@ extension Focus {
         initialEffort  = try c.decodeIfPresent(String.self, forKey: .initialEffort)
         // Additive and optional: absent in every `focuses.json` written before History.
         resumedAt      = try c.decodeIfPresent(Date.self, forKey: .resumedAt)
+        // Additive: absent in every `focuses.json` written before No codebase.
+        noCodebase       = try c.decodeIfPresent(Bool.self, forKey: .noCodebase) ?? false
+        workingDirectory = try c.decodeIfPresent(String.self, forKey: .workingDirectory)
 
         // Self-heal a daemon-created focus persisted before `daemonTag` existed.
         //

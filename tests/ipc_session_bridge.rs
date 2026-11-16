@@ -626,6 +626,7 @@ async fn spawn_session(unix: &mut UnixStream, tag: &str) {
             cwd: None,
             session_id: Some(format!("sid-{tag}")),
             remote_control: false,
+            no_codebase: false,
         },
     )
     .await;

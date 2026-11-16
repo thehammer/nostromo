@@ -655,9 +655,11 @@ private struct SessionSpawnMsg: Encodable {
     let cwd: String?
     let sessionId: String?
     let remoteControl: Bool
+    /// The focus has no codebase: the daemon refuses the spawn without a `cwd`, whatever its registry says.
+    let noCodebase: Bool
     enum CodingKeys: String, CodingKey {
         case type_ = "type", tag, agentName = "agent_name", viewName = "view_name"
-        case cwd, sessionId = "session_id", remoteControl = "remote_control"
+        case cwd, sessionId = "session_id", remoteControl = "remote_control", noCodebase = "no_codebase"
     }
 }
 
@@ -1080,9 +1082,10 @@ class NostromodClient {
 
     /// Spawn (or resume) a focus's persistent daemon-hosted session. Idempotent.
     func sessionSpawn(tag: String, agentName: String, viewName: String,
-                      cwd: String?, sessionId: String?, remoteControl: Bool) {
+                      cwd: String?, sessionId: String?, remoteControl: Bool, noCodebase: Bool = false) {
         send(SessionSpawnMsg(tag: tag, agentName: agentName, viewName: viewName,
-                             cwd: cwd, sessionId: sessionId, remoteControl: remoteControl),
+                             cwd: cwd, sessionId: sessionId, remoteControl: remoteControl,
+                             noCodebase: noCodebase),
              type: "session_spawn", tag: tag)
     }
 
@@ -1247,9 +1250,11 @@ class NostromodClient {
         send(ClientConversationHistoryGet(requestId: requestId), type: "conversation_history_get")
     }
 
-    func conversationResume(requestId: String, id: String, newTag: String, place: String?, confirmActiveElsewhere: Bool) {
+    func conversationResume(requestId: String, id: String, newTag: String, place: String?,
+                            noCodebaseFolder: String?, confirmActiveElsewhere: Bool) {
         guard daemonAdvertisesConversationHistory else { return }
         send(ClientConversationResume(requestId: requestId, id: id, newTag: newTag, place: place,
+                                      noCodebaseFolder: noCodebaseFolder,
                                       confirmActiveElsewhere: confirmActiveElsewhere),
              type: "conversation_resume")
     }
@@ -1577,6 +1582,8 @@ class NostromodClient {
         /// focus's model record. Omitted from the JSON when nil.
         var initial_model: String? = nil
         var initial_effort: String? = nil
+        /// True for a focus with no codebase (it runs in a private folder). Omitted when false.
+        var no_codebase: Bool? = nil
     }
 
     private struct FocusRegistryPushMsg: Encodable {

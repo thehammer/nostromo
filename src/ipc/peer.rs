@@ -1531,6 +1531,7 @@ mod tests {
         let meta = FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: "t".into(),
             display_name: "T".into(),
             agent_name: "cody".into(),
@@ -1723,6 +1724,7 @@ mod tests {
             cwd: None,
             session_id: None,
             remote_control: false,
+            no_codebase: false,
         };
         assert!(refuse_for_network(&spawn("anything", "fred"), &tags));
         assert!(refuse_for_network(&spawn("anything", "Teri"), &tags));
@@ -1807,6 +1809,7 @@ mod tests {
         let meta = |tag: &str, agent: &str| FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: tag.into(),
             display_name: "Cody on SECRET".into(),
             agent_name: agent.into(),
@@ -1920,6 +1923,7 @@ mod tests {
                 let meta = FocusMeta {
                     initial_model: None,
                     initial_effort: None,
+                    no_codebase: None,
                     tag: tag.into(),
                     display_name: "SECRET".into(),
                     agent_name: agent.into(),
@@ -2022,6 +2026,7 @@ mod tests {
                 cwd: Some("/tmp".into()),
                 session_id: None,
                 remote_control: false,
+                no_codebase: false,
             },
             ClientMsg::SessionAttach { tag: "x1".into() },
             ClientMsg::SessionDetach { tag: "x1".into() },
@@ -2241,6 +2246,7 @@ mod tests {
                 id: "s1".into(),
                 new_tag: "t1".into(),
                 place: Some("/x".into()),
+                no_codebase_folder: Some("/y".into()),
                 confirm_active_elsewhere: true,
             },
             ClientMsg::ConversationHistoryRename {
@@ -2596,6 +2602,7 @@ mod tests {
             cwd: Some("/tmp".into()),
             session_id: None,
             remote_control: false,
+            no_codebase: false,
         };
         assert!(refuse_for_network(&spawn, &tags));
     }
@@ -4625,6 +4632,8 @@ mod tests {
                 first_prompts_enabled: true,
                 degraded_kept: None,
                 revision: 1,
+                referenced_space_folders: vec![],
+                spaces_root: None,
             },
             ServerMsg::ConversationResumeResult {
                 request_id: "r".into(),
@@ -5012,6 +5021,7 @@ mod huey_surface_tests {
         FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: tag.into(),
             display_name: "Huey on SECRET".into(),
             agent_name: agent.into(),

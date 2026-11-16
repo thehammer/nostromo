@@ -52,6 +52,57 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
     private var agents:   [String] = []
     private var projects: [String] = []
 
+    /// What the Project menu has selected: the single source of truth, so nothing indexes `projects` by
+    /// menu position (the menu starts with No codebase and a separator).
+    enum ProjectChoice: Equatable {
+        case noCodebase
+        case project(String)
+    }
+    /// Menu tag of the No codebase item; a repo's tag is its index in `projects`.
+    private static let noCodebaseTag = -1
+    /// An NSMenuItem's tag defaults to 0, which is also the first repo's: the separator gets its own.
+    private static let separatorTag = -2
+    private static let projectErrorHeight: CGFloat = 30
+    private let projectError = NSTextField(wrappingLabelWithString: "")
+    private var projectErrorHeightConstraint: NSLayoutConstraint?
+    private var newTabExtraHeight: CGFloat = 0
+
+    private var selectedProjectChoice: ProjectChoice? {
+        guard let item = projectPopup.selectedItem else { return nil }
+        if item.tag == Self.noCodebaseTag { return .noCodebase }
+        return projects.indices.contains(item.tag) ? .project(projects[item.tag]) : nil
+    }
+
+    /// The menu: No codebase, a separator, then the repos. A repo is selected by default (as before);
+    /// No codebase only when there are none.
+    private func fillProjectMenu() {
+        projectPopup.removeAllItems()
+        guard let menu = projectPopup.menu else { return }
+        let none = NSMenuItem(title: "No codebase", action: nil, keyEquivalent: "")
+        none.tag = Self.noCodebaseTag
+        menu.addItem(none)
+        let separator = NSMenuItem.separator()
+        separator.tag = Self.separatorTag
+        menu.addItem(separator)
+        for (index, path) in projects.enumerated() {
+            let item = NSMenuItem(title: URL(fileURLWithPath: path).lastPathComponent, action: nil, keyEquivalent: "")
+            item.tag = index
+            menu.addItem(item)
+        }
+        projectPopup.selectItem(at: projects.isEmpty ? 0 : 2)
+    }
+
+    private func showProjectError(_ text: String?) {
+        projectError.stringValue = text ?? ""
+        let extra = text == nil ? 0 : Self.projectErrorHeight
+        projectErrorHeightConstraint?.constant = extra
+        guard extra != newTabExtraHeight else { return }
+        newTabExtraHeight = extra
+        if currentTab == .new { window?.setContentSize(newTabSize) }
+    }
+
+    private var newTabSize: NSSize { NSSize(width: Self.newSize.width, height: Self.newSize.height + newTabExtraHeight) }
+
     /// `agents` / `projects` override filesystem discovery (used by tests).
     init(orgResolver: RepoOrgResolver = RepoOrgResolver(),
          agents: [String]? = nil, projects: [String]? = nil,
@@ -80,8 +131,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
         if let agents { self.agents = agents; agentPopup.removeAllItems(); agentPopup.addItems(withTitles: agents) }
         if let projects {
             self.projects = projects
-            projectPopup.removeAllItems()
-            projectPopup.addItems(withTitles: projects.map { URL(fileURLWithPath: $0).lastPathComponent })
+            fillProjectMenu()
         }
         createBtn.isEnabled = !self.agents.isEmpty
         updatePreview()
@@ -160,6 +210,16 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
         projectPopup.action = #selector(pickerChanged)
         contentView.addSubview(projectPopup)
 
+        // Why a No codebase folder could not be made: under the Project row, hidden (zero height) otherwise.
+        projectError.font = .systemFont(ofSize: 11)
+        projectError.textColor = NSColor(srgbRed: 255/255, green: 130/255, blue: 120/255, alpha: 1)
+        projectError.maximumNumberOfLines = 2
+        projectError.translatesAutoresizingMaskIntoConstraints = false
+        projectError.setAccessibilityLabel("Project error")
+        contentView.addSubview(projectError)
+        projectErrorHeightConstraint = projectError.heightAnchor.constraint(equalToConstant: 0)
+        projectErrorHeightConstraint?.isActive = true
+
         // Label row (optional)
         let labelLabel = NSTextField(labelWithString: "Label:")
         labelLabel.font      = .systemFont(ofSize: 12)
@@ -237,7 +297,11 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
             projectPopup.leadingAnchor.constraint(equalTo: projectLabel.trailingAnchor, constant: 8),
             projectPopup.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
 
-            labelLabel.topAnchor.constraint(equalTo: projectLabel.bottomAnchor, constant: 14),
+            projectError.topAnchor.constraint(equalTo: projectLabel.bottomAnchor, constant: 4),
+            projectError.leadingAnchor.constraint(equalTo: projectPopup.leadingAnchor),
+            projectError.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+
+            labelLabel.topAnchor.constraint(equalTo: projectError.bottomAnchor, constant: 10),
             labelLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
             labelLabel.widthAnchor.constraint(equalToConstant: 60),
 
@@ -269,8 +333,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
         }
 
         projects = Self.discoverProjects()
-        projectPopup.removeAllItems()
-        projectPopup.addItems(withTitles: projects.map { URL(fileURLWithPath: $0).lastPathComponent })
+        fillProjectMenu()
 
         createBtn.isEnabled = !agents.isEmpty
     }
@@ -321,29 +384,36 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
     func controlTextDidChange(_ obj: Notification) { refreshPreviewText() }
 
     private func updatePreview() {
-        guard !agents.isEmpty, !projects.isEmpty else {
+        guard !agents.isEmpty, let choice = selectedProjectChoice else {
             labelField.placeholderString = nil
             namePreview.stringValue = agents.isEmpty ? "No agents found in ~/.claude/agents" : ""
             return
         }
-        let agentTag    = agents[agentPopup.indexOfSelectedItem]
-        let projectPath = projects[projectPopup.indexOfSelectedItem]
+        showProjectError(nil)
+        let agentTag = agents[agentPopup.indexOfSelectedItem]
+        guard case .project(let projectPath) = choice else {
+            showPreview(agentTag: agentTag, choice: .noCodebase, org: nil)   // always Personal: no org lookup
+            return
+        }
         let cached = orgResolver.cached(projectPath)
-        showPreview(agentTag: agentTag, projectPath: projectPath, org: cached ?? nil)
+        showPreview(agentTag: agentTag, choice: choice, org: cached ?? nil)
         if cached == nil {
             orgResolver.resolve(projectPath) { [weak self] org in
-                guard let self, !self.agents.isEmpty, !self.projects.isEmpty,
-                      self.projects[self.projectPopup.indexOfSelectedItem] == projectPath
+                guard let self, !self.agents.isEmpty,
+                      self.selectedProjectChoice == .project(projectPath)
                 else { return }   // selection moved on; drop the stale result
                 self.showPreview(agentTag: self.agents[self.agentPopup.indexOfSelectedItem],
-                                 projectPath: projectPath, org: org)
+                                 choice: choice, org: org)
             }
         }
     }
 
-    private func showPreview(agentTag: String, projectPath: String, org: String?) {
-        let preview = Focus(id: "preview", agentTag: agentTag, projectPath: projectPath,
-                            isBuiltIn: false, org: org)
+    private func showPreview(agentTag: String, choice: ProjectChoice, org: String?) {
+        var preview = Focus(id: "preview", agentTag: agentTag, projectPath: nil, isBuiltIn: false, org: org)
+        switch choice {
+        case .noCodebase: preview.noCodebase = true
+        case .project(let path): preview.projectPath = path
+        }
         // The placeholder is the default name, so a blank label field reads as
         // "this is what you'll get".
         labelField.placeholderString = preview.displayName
@@ -353,9 +423,8 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
     /// Re-render the preview after the label text changed (no org lookup needed:
     /// the org never affects the name).
     private func refreshPreviewText() {
-        guard !agents.isEmpty, !projects.isEmpty else { return }
-        showPreview(agentTag: agents[agentPopup.indexOfSelectedItem],
-                    projectPath: projects[projectPopup.indexOfSelectedItem], org: nil)
+        guard !agents.isEmpty, let choice = selectedProjectChoice else { return }
+        showPreview(agentTag: agents[agentPopup.indexOfSelectedItem], choice: choice, org: nil)
     }
 
     // MARK: - Actions
@@ -421,7 +490,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
         setResumeViewsAttached(!onNew)
         createBtn.keyEquivalent = onNew ? "\r" : ""
         resumeBtn.keyEquivalent = onNew ? "" : "\r"
-        window?.setContentSize(onNew ? Self.newSize : Self.resumeSize)
+        window?.setContentSize(onNew ? newTabSize : Self.resumeSize)
         if onNew {
             window?.makeFirstResponder(nil)
         } else {
@@ -490,15 +559,33 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
 
     /// The folder each conversation's last resume asked for, kept for a "Resume anyway" that follows.
     private var resumePlaces: [String: String] = [:]
+    private var resumeNoCodebaseFolders: [String: String] = [:]
+
+    /// Makes a no-codebase folder (Create, and Resume with no codebase). Tests replace it; it must not
+    /// touch the real home or `~/.nostromo-spaces`.
+    var noCodebaseFolderMaker: () -> Result<URL, NoCodebaseFolder.Failure> = { NoCodebaseFolder.create() }
 
     private func ask(_ choice: ResumeChoice, _ handle: @escaping (ResumeChoice.Outcome) -> Void) {
         if let present = choicePresenter { present(choice, handle) }
         else if let window { choice.present(on: window, completion: handle) }
     }
 
-    private func startResume(_ id: String, place: String?, confirmActiveElsewhere: Bool) {
+    private func startResume(_ id: String, place: String?, noCodebaseFolder: String? = nil,
+                             confirmActiveElsewhere: Bool) {
         resumePlaces[id] = place
-        history.resume(id, place: place, confirmActiveElsewhere: confirmActiveElsewhere)
+        resumeNoCodebaseFolders[id] = noCodebaseFolder
+        history.resume(id, place: place, noCodebaseFolder: noCodebaseFolder,
+                       confirmActiveElsewhere: confirmActiveElsewhere)
+    }
+
+    /// Make the new folder (nothing is sent when that fails: the reason is shown) and resume into it.
+    private func resumeWithNoCodebase(_ id: String, confirmActiveElsewhere: Bool) {
+        switch noCodebaseFolderMaker() {
+        case .success(let folder):
+            startResume(id, place: nil, noCodebaseFolder: folder.path, confirmActiveElsewhere: confirmActiveElsewhere)
+        case .failure(let failure):
+            resumeTab.showMessage(failure.reason)
+        }
     }
 
     private func beginResume(_ e: ConversationEntryWire) {
@@ -518,6 +605,14 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
                     }
                 } else {
                     self.startResume(e.id, place: place, confirmActiveElsewhere: false)
+                }
+            case .resumeWithNoCodebase:
+                if e.status.isAlsoActiveElsewhere {
+                    self.ask(ResumeChoice.activeElsewhere()) { [weak self] second in
+                        if second == .resumeAnyway { self?.resumeWithNoCodebase(e.id, confirmActiveElsewhere: true) }
+                    }
+                } else {
+                    self.resumeWithNoCodebase(e.id, confirmActiveElsewhere: false)
                 }
             case .resumeAnyway: self.startResume(e.id, place: nil, confirmActiveElsewhere: true)
             case .showTranscript: self.resumeTab.onShowTranscript?(e)
@@ -559,6 +654,8 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
             self.closeSheet()
             self.onCreate(focus)
         }
+        // A no-codebase focus is always Personal: no org lookup.
+        if focus.noCodebase { finish("Personal"); return }
         orgResolver.resolve(focus.projectPath ?? "", completion: finish)
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.resumeOrgLookupLimit) { finish(nil) }
     }
@@ -574,7 +671,8 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
         case .refused("active_elsewhere"):
             ask(ResumeChoice.activeElsewhere()) { [weak self] outcome in
                 guard outcome == .resumeAnyway else { return }
-                self?.startResume(id, place: self?.resumePlaces[id], confirmActiveElsewhere: true)
+                self?.startResume(id, place: self?.resumePlaces[id],
+                                  noCodebaseFolder: self?.resumeNoCodebaseFolders[id], confirmActiveElsewhere: true)
             }
         case .refused(let reason): resumeTab.showMessage(Self.refusalText(reason))
         }
@@ -614,18 +712,14 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
     }
 
     @objc func createTapped() {
-        guard !isCreating, !isCancelled, !agents.isEmpty, !projects.isEmpty else { return }
+        guard !isCreating, !isCancelled, !agents.isEmpty, let projectChoice = selectedProjectChoice else { return }
         isCreating = true
         createBtn.isEnabled = false
-        let agentTag    = agents[agentPopup.indexOfSelectedItem]
-        let projectPath = projects[projectPopup.indexOfSelectedItem]
-        let label       = Focus.normalizedLabel(labelField.stringValue)
-        let choice      = modelPickers.choice
-        orgResolver.resolve(projectPath) { [weak self] org in   // org is nil if the lookup failed
-            guard let self else { return }
-            self.isCreating = false
-            guard !self.isCancelled else { return }
-            let focus = Focus(id: UUID().uuidString,
+        let agentTag = agents[agentPopup.indexOfSelectedItem]
+        let label    = Focus.normalizedLabel(labelField.stringValue)
+        let choice   = modelPickers.choice
+        func make(projectPath: String?, folder: String?, org: String?) -> Focus {
+            var focus = Focus(id: UUID().uuidString,
                               agentTag: agentTag,
                               projectPath: projectPath,
                               isBuiltIn: false,
@@ -634,8 +728,31 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
                               label: label,
                               initialModel: choice?.model,
                               initialEffort: choice?.effort)
-            self.closeSheet()
-            self.onCreate(focus)
+            if let folder { focus.noCodebase = true; focus.workingDirectory = folder }
+            return focus
+        }
+        switch projectChoice {
+        case .noCodebase:
+            // The folder is made now; a failure shows its reason, makes no focus and leaves nothing behind.
+            switch noCodebaseFolderMaker() {
+            case .failure(let failure):
+                isCreating = false
+                createBtn.isEnabled = !agents.isEmpty
+                showProjectError(failure.reason)
+            case .success(let folder):
+                let focus = make(projectPath: nil, folder: folder.path, org: "Personal")
+                closeSheet()
+                onCreate(focus)
+            }
+        case .project(let projectPath):
+            orgResolver.resolve(projectPath) { [weak self] org in   // org is nil if the lookup failed
+                guard let self else { return }
+                self.isCreating = false
+                guard !self.isCancelled else { return }
+                let focus = make(projectPath: projectPath, folder: nil, org: org)
+                self.closeSheet()
+                self.onCreate(focus)
+            }
         }
     }
 
@@ -656,7 +773,14 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
     /// The Model / Effort pickers' controller.
     var pickers: CreateFocusModelPickers { modelPickers }
     func selectAgent(at index: Int) { agentPopup.selectItem(at: index); pickerChanged() }
-    func selectProject(at index: Int) { projectPopup.selectItem(at: index); updatePreview() }
+    /// Select the repo at `index` in the discovered projects (not a menu position).
+    func selectProject(at index: Int) {
+        guard let item = projectPopup.menu?.items.first(where: { !$0.isSeparatorItem && $0.tag == index }) else { return }
+        projectPopup.select(item); updatePreview()
+    }
+    func selectNoCodebase() { projectPopup.selectItem(withTag: Self.noCodebaseTag); updatePreview() }
+    var projectMenuTitles: [String] { projectPopup.menu?.items.map { $0.isSeparatorItem ? "-" : $0.title } ?? [] }
+    var projectErrorText: String { projectError.stringValue }
     var isResumeButtonEnabled: Bool { resumeBtn.isEnabled }
     func pressResume() { resumeTapped() }
 }

@@ -286,6 +286,7 @@ fn meta(tag: &str, agent: &str, model: Option<&str>, effort: Option<&str>) -> Fo
         select_for_client: None,
         initial_model: model.map(str::to_owned),
         initial_effort: effort.map(str::to_owned),
+        no_codebase: None,
     }
 }
 

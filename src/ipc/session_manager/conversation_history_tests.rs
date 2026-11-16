@@ -5,6 +5,7 @@ use super::tests::CLAUDE_BIN_ENV_LOCK;
 use super::*;
 use crate::conversations::list;
 use crate::conversations::transcript::PROJECTS_DIR_ENV;
+use crate::conversations::SPACES_ROOT_ENV;
 use crate::conversations::{ConversationHistory, FirstPrompt, Reason};
 use crate::ipc::protocol::{ConversationResumeOutcome, ConversationStatus};
 use crate::model::store::{FocusModelRecord, ModelSource};
@@ -28,6 +29,8 @@ impl Drop for Rig {
         }
         std::env::remove_var(CLAUDE_BIN_ENV);
         std::env::remove_var(PROJECTS_DIR_ENV);
+        std::env::remove_var(SPACES_ROOT_ENV);
+        std::env::remove_var("NOSTROMO_QA_DAEMON");
     }
 }
 
@@ -52,6 +55,10 @@ impl Rig {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var(CLAUDE_BIN_ENV, &script);
         std::env::set_var(PROJECTS_DIR_ENV, dir.path().join("projects"));
+        // No-codebase folders live under the temp dir, never under the real home.
+        std::env::set_var("NOSTROMO_QA_DAEMON", "1");
+        std::env::set_var(SPACES_ROOT_ENV, dir.path().join("spaces"));
+        std::fs::create_dir_all(dir.path().join("spaces")).unwrap();
         let cwd = dir.path().join("work");
         std::fs::create_dir_all(&cwd).unwrap();
         let mgr = SessionManager::with_store_path(dir.path().join("daemon-sessions.json"));
@@ -222,6 +229,7 @@ fn test_focus(tag: &str) -> FocusMeta {
         select_for_client: None,
         initial_model: None,
         initial_effort: None,
+        no_codebase: None,
     }
 }
 
@@ -712,6 +720,7 @@ fn visible_entry(history: &ConversationHistory, sid: &str, cwd: &Path, now: i64)
             title: "T",
             label: None,
             model: None,
+            no_codebase: false,
         },
         now,
     );
@@ -1263,6 +1272,7 @@ fn the_content_check_never_opens_a_file_behind_a_symlinked_project_folder() {
             title: "A title",
             label: None,
             model: None,
+            no_codebase: false,
         },
         crate::conversations::now_ms(),
     );
@@ -1311,6 +1321,7 @@ fn place(path: &Path) -> ResumeOptions<'_> {
     ResumeOptions {
         place: path.to_str(),
         confirm_active_elsewhere: false,
+        ..Default::default()
     }
 }
 
@@ -1529,6 +1540,7 @@ async fn an_unconfirmed_resume_of_an_active_elsewhere_conversation_is_refused_an
         ResumeOptions {
             place: None,
             confirm_active_elsewhere: true,
+            ..Default::default()
         },
     );
     assert_eq!(outcome(&confirmed).0, ConversationResumeOutcome::Ready);
@@ -1757,6 +1769,7 @@ fn confirmed_in(path: &Path) -> ResumeOptions<'_> {
     ResumeOptions {
         place: path.to_str(),
         confirm_active_elsewhere: true,
+        ..Default::default()
     }
 }
 
@@ -1795,6 +1808,7 @@ async fn a_gone_worktree_written_to_a_moment_ago_needs_both_confirmations() {
         ResumeOptions {
             place: None,
             confirm_active_elsewhere: true,
+            ..Default::default()
         },
     );
     assert_eq!(outcome(&no_place).2.as_deref(), Some("folder_gone"));
@@ -1931,6 +1945,8 @@ async fn the_place_file_is_bounded() {
                 sid: format!("sid-{i}"),
                 old_path: None,
                 old_main: None,
+                old_no_codebase: false,
+                no_codebase: false,
                 at_ms: now + i,
             },
         );
@@ -1951,6 +1967,8 @@ async fn an_old_place_is_dropped_whatever_the_count() {
         sid: sid.into(),
         old_path: None,
         old_main: None,
+        old_no_codebase: false,
+        no_codebase: false,
         at_ms,
     };
     rig.mgr.insert_place("cody-old", place("sid-old", 1));
@@ -2039,4 +2057,839 @@ async fn resuming_right_after_closing_a_focus_is_not_active_elsewhere_but_a_late
         list::status_now(&entry, &history, None),
         ConversationStatus::ActiveElsewhere
     );
+}
+
+// ── a focus with no codebase runs in a private folder ────────────────────────
+
+fn no_codebase_focus(tag: &str) -> FocusMeta {
+    let mut meta = test_focus(tag);
+    meta.no_codebase = Some(true);
+    meta
+}
+
+fn folder_resume(folder: &Path) -> ResumeOptions<'_> {
+    ResumeOptions {
+        no_codebase_folder: folder.to_str(),
+        ..Default::default()
+    }
+}
+
+impl Rig {
+    /// Where no-codebase folders live in this rig.
+    fn spaces(&self) -> PathBuf {
+        self.dir.path().join("spaces")
+    }
+
+    /// A new empty folder directly under the spaces root.
+    fn new_space(&self, name: &str) -> PathBuf {
+        use std::hash::{Hash, Hasher};
+        use std::os::unix::fs::PermissionsExt;
+        // The daemon only resumes into a UUID-named, 0700 folder: derive a UUID from `name`.
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        name.hash(&mut h);
+        let uuid = uuid::Uuid::from_u64_pair(h.finish(), 0x5eed);
+        let p = self.spaces().join(uuid.to_string());
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
+        p
+    }
+
+    /// Start `tag` the way the app does for a no-codebase focus: registered as
+    /// one, with its own folder as the working directory.
+    fn spawn_no_codebase(&mut self, tag: &str, folder: &Path) -> String {
+        self.mgr.set_focus_registry(vec![no_codebase_focus(tag)]);
+        self.mgr
+            .spawn_session(
+                tag.into(),
+                "cody".into(),
+                "View".into(),
+                Some(folder.to_path_buf()),
+                None,
+                false,
+            )
+            .unwrap()
+            .expect("a session id")
+    }
+
+    /// Wait until the stub has logged the directory of `n` spawns.
+    async fn wait_cwds(&self, n: usize) -> Vec<PathBuf> {
+        injected_tests::eventually("the stub's working directory", || {
+            let l = self.cwd_lines();
+            (l.len() >= n).then_some(l)
+        })
+        .await
+    }
+
+    /// A no-codebase conversation `cody-aaaa1111` that ran in a private folder
+    /// that is gone now. Returns `(sid, the gone folder)`.
+    async fn gone_no_codebase_conversation(&mut self) -> (String, PathBuf) {
+        let folder = self.new_space("space-gone");
+        self.cwd = folder.clone();
+        let sid = self.spawn_no_codebase("cody-aaaa1111", &folder);
+        self.send("cody-aaaa1111", "hello");
+        self.transcript(&sid, USER_LINE);
+        self.wait_spawns(1).await;
+        self.mgr.stop_session("cody-aaaa1111");
+        self.mgr.sessions.remove("cody-aaaa1111");
+        self.mgr.set_focus_registry(vec![]);
+        std::fs::remove_dir_all(&folder).unwrap();
+        (sid, folder)
+    }
+}
+
+/// The argument words of a spawn, with the ids and tags of the run taken out.
+fn argv_shape(line: &str, ids: &[&str]) -> Vec<String> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        if (words[i] == "--session-id" || words[i] == "--resume") && ids.contains(&words[i + 1]) {
+            i += 2;
+            continue;
+        }
+        let mut w = words[i].to_owned();
+        for id in ids {
+            w = w.replace(id, "ID");
+        }
+        out.push(w);
+        i += 1;
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_no_codebase_focus_starts_the_agent_as_a_repo_focus_is_started_but_in_its_own_folder() {
+    let mut rig = Rig::new();
+    let folder = rig.new_space("space-one");
+    let nc_sid = rig.spawn_no_codebase("cody-nc000001", &folder);
+    rig.wait_spawns(1).await;
+    let repo_sid = rig.spawn("cody-rp000001", "cody");
+    let lines = rig.wait_spawns(2).await;
+    let cwds = rig.wait_cwds(2).await;
+
+    let shape = |line: &str, tag: &str, sid: &str| -> Vec<String> { argv_shape(line, &[sid, tag]) };
+    assert_eq!(
+        shape(&lines[0], "cody-nc000001", &nc_sid),
+        shape(&lines[1], "cody-rp000001", &repo_sid),
+        "a no-codebase focus's agent gets no extra or missing arguments"
+    );
+
+    assert_eq!(cwds[0], folder.canonicalize().unwrap());
+    assert_eq!(cwds[1], rig.cwd.canonicalize().unwrap());
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        assert_ne!(
+            Some(cwds[0].clone()),
+            Path::new(&home).canonicalize().ok(),
+            "never the home directory"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_no_codebase_focus_is_restarted_in_its_own_folder_too() {
+    let mut rig = Rig::new();
+    let folder = rig.new_space("space-restart");
+    rig.spawn_no_codebase("cody-nc000001", &folder);
+    rig.wait_spawns(1).await;
+    rig.mgr.stop_session("cody-nc000001");
+    rig.mgr.sessions.remove("cody-nc000001");
+    rig.spawn_no_codebase("cody-nc000001", &folder);
+    let cwds = rig.wait_cwds(2).await;
+    assert_eq!(cwds[1], folder.canonicalize().unwrap());
+}
+
+#[tokio::test]
+async fn a_no_codebase_focus_marks_its_conversation_and_the_mark_stays() {
+    let mut rig = Rig::new();
+    let folder = rig.new_space("space-mark");
+    let sid = rig.spawn_no_codebase("cody-nc000001", &folder);
+    let repo_sid = rig.spawn("cody-rp000001", "cody");
+    rig.send("cody-nc000001", "hello");
+    rig.send("cody-rp000001", "hello");
+
+    let entry = rig.mgr.conversations().get(&sid).unwrap();
+    assert!(entry.no_codebase);
+    assert_eq!(entry.project_path.as_deref(), folder.to_str());
+    assert!(
+        !rig.mgr.conversations().get(&repo_sid).unwrap().no_codebase,
+        "a repo focus's conversation is not marked"
+    );
+
+    // The focus is described without the flag from now on (an older app, a
+    // registry rebuilt): the conversation is still the folder's.
+    rig.mgr
+        .set_focus_registry(vec![test_focus("cody-nc000001")]);
+    rig.send("cody-nc000001", "again");
+    assert!(rig.mgr.conversations().get(&sid).unwrap().no_codebase);
+}
+
+#[tokio::test]
+async fn a_conversation_started_before_its_focus_was_known_to_have_no_codebase_is_marked_on_the_next_message(
+) {
+    let mut rig = Rig::new();
+    let folder = rig.new_space("space-late");
+    let sid = rig
+        .mgr
+        .spawn_session(
+            "cody-nc000001".into(),
+            "cody".into(),
+            "View".into(),
+            Some(folder),
+            None,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(!rig.mgr.conversations().get(&sid).unwrap().no_codebase);
+    rig.mgr
+        .set_focus_registry(vec![no_codebase_focus("cody-nc000001")]);
+    rig.send("cody-nc000001", "hello");
+    assert!(rig.mgr.conversations().get(&sid).unwrap().no_codebase);
+}
+
+// ── resuming into a new no-codebase folder ───────────────────────────────────
+
+#[tokio::test]
+async fn a_no_codebase_conversation_whose_folder_is_gone_resumes_in_a_fresh_empty_folder() {
+    let mut rig = Rig::new();
+    let (sid, gone) = rig.gone_no_codebase_conversation().await;
+    let entry = rig.mgr.conversations().get(&sid).unwrap();
+    assert!(
+        matches!(
+            list::status_now(&entry, &rig.mgr.conversations(), None),
+            ConversationStatus::FolderGone { .. }
+        ),
+        "the row says the folder is gone"
+    );
+    let fresh = rig.new_space("space-fresh");
+    let before = rig.stdin_log();
+
+    let reply = rig
+        .mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", folder_resume(&fresh));
+    assert_eq!(outcome(&reply).0, ConversationResumeOutcome::Ready);
+    let ServerMsg::ConversationResumeResult { project_path, .. } = &reply else {
+        panic!()
+    };
+    assert_eq!(project_path.as_deref(), fresh.to_str());
+    let entry = rig.mgr.conversations().get(&sid).unwrap();
+    assert_eq!(entry.project_path.as_deref(), fresh.to_str());
+    assert!(entry.no_codebase);
+    assert!(entry.main_checkout.is_none());
+
+    // The app's focus still names the folder that is gone: the spawn goes to the new one.
+    rig.mgr
+        .set_focus_registry(vec![no_codebase_focus("cody-bbbb2222")]);
+    rig.cwd = gone.clone();
+    rig.spawn("cody-bbbb2222", "cody");
+    let lines = rig.wait_spawns(2).await;
+    let cwds = rig.wait_cwds(2).await;
+    assert_eq!(cwds[1], fresh.canonicalize().unwrap());
+    let argv = &lines[1];
+    assert_eq!(
+        argv.matches("--append-system-prompt").count(),
+        1,
+        "exactly one flag: {argv}"
+    );
+    assert!(argv.contains("no-codebase folder"), "{argv}");
+    assert!(argv.contains(&format!("--resume {sid}")), "{argv}");
+
+    // Nothing was typed into the conversation and nothing was put in the folder.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(rig.stdin_log(), before, "no user turn was written");
+    assert!(
+        std::fs::read_dir(&fresh).unwrap().next().is_none(),
+        "the new folder is still empty"
+    );
+    assert!(rig.mgr.conversations().get(&sid).unwrap().no_codebase);
+}
+
+#[tokio::test]
+async fn a_no_codebase_resume_that_never_opens_puts_the_old_folder_and_the_mark_back() {
+    for via_release in [true, false] {
+        let mut rig = Rig::new();
+        let (sid, gone) = rig.gone_no_codebase_conversation().await;
+        let fresh = rig.new_space("space-fresh");
+        let reply = rig
+            .mgr
+            .resume_conversation_with(&sid, "cody-bbbb2222", folder_resume(&fresh));
+        assert_eq!(outcome(&reply).0, ConversationResumeOutcome::Ready);
+        if via_release {
+            rig.mgr.release_resumed_tag("cody-bbbb2222");
+        } else {
+            rig.spawn("cody-bbbb2222", "cody");
+            rig.mgr.fail_resumed_tag("cody-bbbb2222");
+        }
+        let after = rig.mgr.conversations().get(&sid).unwrap();
+        assert_eq!(after.project_path.as_deref(), gone.to_str());
+        assert!(
+            after.no_codebase,
+            "release={via_release}: still a no-codebase conversation"
+        );
+        assert_eq!(after.tag, "cody-aaaa1111");
+        assert!(rig.mgr.resume_place_for("cody-bbbb2222", &sid).is_none());
+        // The row reads "folder gone" again and the folder can be offered again.
+        assert!(matches!(
+            list::status_now(&after, &rig.mgr.conversations(), None),
+            ConversationStatus::FolderGone { .. }
+        ));
+        let again = rig
+            .mgr
+            .resume_conversation_with(&sid, "cody-cccc3333", folder_resume(&fresh));
+        assert_eq!(outcome(&again).0, ConversationResumeOutcome::Ready);
+    }
+}
+
+/// The earlier value of the flag comes back, not a fixed one: a conversation
+/// that was not a no-codebase one before the move is not one after it is undone.
+#[tokio::test]
+async fn undoing_a_resume_into_a_no_codebase_folder_restores_the_flag_the_entry_had() {
+    let mut rig = Rig::new();
+    // An ordinary conversation, its folder gone, no main checkout.
+    let sid = rig.spawn("cody-aaaa1111", "cody");
+    rig.send("cody-aaaa1111", "hello");
+    rig.transcript(&sid, USER_LINE);
+    rig.wait_spawns(1).await;
+    rig.mgr.stop_session("cody-aaaa1111");
+    rig.mgr.sessions.remove("cody-aaaa1111");
+    std::fs::remove_dir_all(&rig.cwd).unwrap();
+    let old = rig.mgr.conversations().get(&sid).unwrap();
+    assert!(!old.no_codebase);
+    let fresh = rig.new_space("space-fresh");
+
+    let reply = rig
+        .mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", folder_resume(&fresh));
+    if outcome(&reply).0 != ConversationResumeOutcome::Ready {
+        // The daemon holds that only a no-codebase conversation moves into a
+        // no-codebase folder: there is nothing to undo.
+        return;
+    }
+    rig.mgr.release_resumed_tag("cody-bbbb2222");
+    let after = rig.mgr.conversations().get(&sid).unwrap();
+    assert_eq!(after.project_path, old.project_path);
+    assert!(!after.no_codebase);
+}
+
+#[tokio::test]
+async fn a_folder_that_is_not_a_fresh_empty_child_of_the_spaces_root_is_never_resumed_into() {
+    let mut rig = Rig::new();
+    let (sid, gone) = rig.gone_no_codebase_conversation().await;
+    let spawns = rig.argv_lines().len();
+
+    let outside = rig.dir.path().join("elsewhere");
+    std::fs::create_dir_all(&outside).unwrap();
+    let non_empty = rig.new_space("space-used");
+    std::fs::write(non_empty.join("notes.txt"), "keep").unwrap();
+    let real = rig.new_space("space-real");
+    let link = rig.spaces().join(uuid::Uuid::new_v4().to_string());
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let missing = rig.spaces().join(uuid::Uuid::new_v4().to_string());
+    let nested = rig
+        .new_space("group")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&nested).unwrap();
+    let dotdot_name = uuid::Uuid::new_v4().to_string();
+    let dotdot = rig.spaces().join("group").join("..").join(&dotdot_name);
+    std::fs::create_dir_all(rig.spaces().join(&dotdot_name)).unwrap();
+    let root_itself = rig.spaces();
+
+    let cases: [(&str, &Path); 8] = [
+        ("outside the root", &outside),
+        ("not empty", &non_empty),
+        ("a symlink to a real folder under the root", &link),
+        ("does not exist", &missing),
+        ("a grandchild of the root", &nested),
+        ("reached through ..", &dotdot),
+        ("the root itself", &root_itself),
+        ("a file", &non_empty.join("notes.txt")),
+    ];
+    for (why, folder) in cases {
+        let reply = rig
+            .mgr
+            .resume_conversation_with(&sid, "cody-bbbb2222", folder_resume(folder));
+        assert_eq!(
+            outcome(&reply).2.as_deref(),
+            Some("folder_gone"),
+            "{why} must be refused"
+        );
+        assert!(
+            !load_id_store(&rig.mgr.store_path).contains_key("cody-bbbb2222"),
+            "{why}: no tag was reserved"
+        );
+        assert!(rig.mgr.resume_place_for("cody-bbbb2222", &sid).is_none());
+        let entry = rig.mgr.conversations().get(&sid).unwrap();
+        assert_eq!(
+            entry.project_path.as_deref(),
+            gone.to_str(),
+            "{why}: nothing moved"
+        );
+        assert_eq!(entry.tag, "cody-aaaa1111");
+    }
+    assert_eq!(rig.argv_lines().len(), spawns, "nothing was spawned");
+    // Nothing was written anywhere it was pointed.
+    assert_eq!(
+        std::fs::read_dir(&real).unwrap().count(),
+        0,
+        "the folder behind the symlink is untouched"
+    );
+    assert_eq!(std::fs::read_dir(&non_empty).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    assert!(!missing.exists(), "a missing folder is not created");
+    assert!(!rig.mgr.conversations().get(&sid).unwrap().tag.is_empty());
+}
+
+#[tokio::test]
+async fn no_codebase_folder_is_ignored_for_a_conversation_whose_own_folder_still_exists() {
+    let mut rig = Rig::new();
+    let folder = rig.new_space("space-here");
+    rig.cwd = folder.clone();
+    let sid = rig.spawn_no_codebase("cody-aaaa1111", &folder);
+    rig.send("cody-aaaa1111", "hello");
+    let path = rig.transcript(&sid, USER_LINE);
+    age(&path, 3600);
+    rig.wait_spawns(1).await;
+    rig.mgr.stop_session("cody-aaaa1111");
+    rig.mgr.sessions.remove("cody-aaaa1111");
+    rig.mgr.set_focus_registry(vec![]);
+    // The folder to resume in is a different empty one, offered anyway.
+    std::fs::write(folder.join("work.txt"), "x").unwrap();
+    let other = rig.new_space("space-other");
+
+    let reply = rig
+        .mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", folder_resume(&other));
+    assert_eq!(outcome(&reply).0, ConversationResumeOutcome::Ready);
+    let ServerMsg::ConversationResumeResult { project_path, .. } = &reply else {
+        panic!()
+    };
+    assert_eq!(
+        project_path.as_deref(),
+        folder.to_str(),
+        "it resumes where it was"
+    );
+    assert!(rig.mgr.resume_place_for("cody-bbbb2222", &sid).is_none());
+    assert_eq!(std::fs::read_dir(&other).unwrap().count(), 0);
+}
+
+// ── which folders the history still names ────────────────────────────────────
+
+fn referenced(rig: &mut Rig) -> Vec<String> {
+    let ServerMsg::ConversationHistory {
+        referenced_space_folders,
+        ..
+    } = rig.mgr.conversation_history_msg("r".into())
+    else {
+        panic!()
+    };
+    let mut out = referenced_space_folders;
+    out.sort();
+    out
+}
+
+#[tokio::test]
+async fn the_history_names_every_folder_under_the_spaces_root_an_unpurged_entry_uses_and_no_other()
+{
+    use crate::conversations::store::SpawnNote;
+    let mut rig = Rig::new();
+    let history = rig.mgr.conversations();
+    let now = crate::conversations::now_ms();
+    let root = rig.spaces();
+    let note = |sid: &str, cwd: &Path| {
+        history.note_spawn(
+            SpawnNote {
+                tag: "t",
+                sid,
+                agent: "cody",
+                cwd: Some(cwd),
+                title: "T",
+                label: None,
+                model: None,
+                no_codebase: true,
+            },
+            now,
+        );
+    };
+    let shown = |sid: &str| {
+        history.note_user_send(sid, "hello", false, false, now);
+        history.turn_completed(sid, true, false, now);
+    };
+    // Visible.
+    note("s-visible", &root.join("a-visible"));
+    shown("s-visible");
+    // Hidden: spawned, no message yet.
+    note("s-hidden", &root.join("b-hidden"));
+    // Soft-removed: still there until the sheet closes.
+    note("s-removed", &root.join("c-removed"));
+    shown("s-removed");
+    history.remove("s-removed", now);
+    // Sensitive: its path is withheld from the list, but its folder is in use.
+    note("s-sensitive", &root.join("d-sensitive"));
+    shown("s-sensitive");
+    history.mark_sensitive("s-sensitive", now);
+    // Not a direct child of the root.
+    note("s-outside", &rig.cwd);
+    shown("s-outside");
+    // (Their parents exist: a no-codebase entry whose parent cannot be read is named as text, below.)
+    std::fs::create_dir_all(root.join("group")).unwrap();
+    std::fs::create_dir_all(rig.dir.path().join("spaces-sibling")).unwrap();
+    note("s-nested", &root.join("group").join("nested"));
+    shown("s-nested");
+    note(
+        "s-sibling",
+        &rig.dir.path().join("spaces-sibling").join("x"),
+    );
+    shown("s-sibling");
+
+    let canonical_root = std::fs::canonicalize(&root).unwrap();
+    let path = |name: &str| canonical_root.join(name).to_string_lossy().into_owned();
+    assert_eq!(
+        referenced(&mut rig),
+        vec![
+            path("a-visible"),
+            path("b-hidden"),
+            path("c-removed"),
+            path("d-sensitive")
+        ]
+    );
+
+    // The sheet closes: the removed one is purged, and its folder is no longer named.
+    history.purge_removed(now);
+    assert_eq!(
+        referenced(&mut rig),
+        vec![path("a-visible"), path("b-hidden"), path("d-sensitive")]
+    );
+}
+
+#[tokio::test]
+async fn a_daemon_root_left_as_a_symlink_still_names_a_folder_stored_by_its_real_path() {
+    use crate::conversations::store::SpawnNote;
+    let mut rig = Rig::new();
+    let real = std::fs::canonicalize(rig.spaces()).unwrap();
+    let link = rig.dir.path().join("spaces-link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    // The daemon's root is spelled through the link; the history holds the real path.
+    std::env::set_var(SPACES_ROOT_ENV, &link);
+    let folder = rig.new_space("by-real-path");
+    let folder = real.join(folder.file_name().unwrap());
+    let history = rig.mgr.conversations();
+    let now = crate::conversations::now_ms();
+    history.note_spawn(
+        SpawnNote {
+            tag: "t",
+            sid: "s-real",
+            agent: "cody",
+            cwd: Some(&folder),
+            title: "T",
+            label: None,
+            model: None,
+            no_codebase: true,
+        },
+        now,
+    );
+    assert_eq!(
+        referenced(&mut rig),
+        vec![folder.to_string_lossy().into_owned()]
+    );
+}
+
+/// One no-codebase entry whose stored path runs through `link`, which `after` then removes or re-points.
+fn history_with_entry_stored_through_a_link(
+    rig: &mut Rig,
+    after: impl FnOnce(&Path, &Path),
+) -> (PathBuf, String) {
+    use crate::conversations::store::SpawnNote;
+    let real = std::fs::canonicalize(rig.spaces()).unwrap();
+    let folder = rig.new_space("through-a-link");
+    let leaf = folder.file_name().unwrap().to_owned();
+    let link = rig.dir.path().join("a-link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let stored = link.join(&leaf);
+    rig.mgr.conversations().note_spawn(
+        SpawnNote {
+            tag: "t",
+            sid: "s-link",
+            agent: "cody",
+            cwd: Some(&stored),
+            title: "T",
+            label: None,
+            model: None,
+            no_codebase: true,
+        },
+        crate::conversations::now_ms(),
+    );
+    after(&link, &real);
+    (real.join(leaf), stored.to_string_lossy().into_owned())
+}
+
+#[tokio::test]
+async fn a_folder_stored_through_a_symlink_that_was_later_removed_is_still_named() {
+    let mut rig = Rig::new();
+    let (folder, stored) = history_with_entry_stored_through_a_link(&mut rig, |link, _| {
+        std::fs::remove_file(link).unwrap()
+    });
+    assert!(folder.is_dir(), "the folder is still under the root");
+    let named = referenced(&mut rig);
+    // Its stored path is passed on as text, so the app cannot resolve it and declines to sweep...
+    assert!(named.contains(&stored), "{named:?}");
+    // ...and the root's own child of that name is protected on top.
+    assert!(
+        named.contains(&folder.to_string_lossy().into_owned()),
+        "{named:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_folder_stored_through_a_symlink_that_now_points_elsewhere_is_still_named() {
+    let mut rig = Rig::new();
+    let elsewhere = rig.dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let (folder, _stored) = history_with_entry_stored_through_a_link(&mut rig, |link, _| {
+        std::fs::remove_file(link).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, link).unwrap();
+    });
+    assert!(folder.is_dir());
+    assert_eq!(
+        referenced(&mut rig),
+        vec![folder.to_string_lossy().into_owned()]
+    );
+}
+
+#[tokio::test]
+async fn a_spawn_request_that_says_no_codebase_without_a_folder_is_refused_before_any_registry_push(
+) {
+    let mut rig = Rig::new();
+    // The registry is empty: the app's push has not landed yet.
+    let err = rig
+        .mgr
+        .spawn_session_requested(
+            "cody-cccc3333".into(),
+            "cody".into(),
+            "View".into(),
+            None,
+            None,
+            false,
+            true,
+        )
+        .expect_err("the request itself says no-codebase");
+    assert!(err.to_string().contains("folder"), "{err}");
+    assert!(!rig.mgr.sessions.contains_key("cody-cccc3333"));
+}
+
+#[tokio::test]
+async fn a_no_codebase_focus_without_a_working_directory_is_never_started() {
+    let mut rig = Rig::new();
+    rig.mgr
+        .set_focus_registry(vec![no_codebase_focus("cody-aaaa1111")]);
+    let err = rig
+        .mgr
+        .spawn_session(
+            "cody-aaaa1111".into(),
+            "cody".into(),
+            "View".into(),
+            None,
+            None,
+            false,
+        )
+        .expect_err("no folder, no start");
+    assert!(err.to_string().contains("folder"), "{err}");
+    assert!(!rig.mgr.sessions.contains_key("cody-aaaa1111"));
+    // An ordinary focus with no directory still starts.
+    rig.mgr
+        .set_focus_registry(vec![test_focus("cody-bbbb2222")]);
+    assert!(rig
+        .mgr
+        .spawn_session(
+            "cody-bbbb2222".into(),
+            "cody".into(),
+            "View".into(),
+            None,
+            None,
+            false
+        )
+        .is_ok());
+}
+
+#[tokio::test]
+async fn the_history_names_no_folder_when_no_conversation_has_one_under_the_root() {
+    let mut rig = Rig::new();
+    rig.spawn("cody-aaaa1111", "cody");
+    rig.send("cody-aaaa1111", "hello");
+    assert!(referenced(&mut rig).is_empty());
+}
+
+#[tokio::test]
+async fn the_history_says_which_spaces_root_it_means() {
+    let mut rig = Rig::new();
+    let ServerMsg::ConversationHistory { spaces_root, .. } =
+        rig.mgr.conversation_history_msg("r".into())
+    else {
+        panic!()
+    };
+    let want = std::fs::canonicalize(rig.spaces()).unwrap();
+    assert_eq!(spaces_root.as_deref(), want.to_str());
+}
+
+#[tokio::test]
+async fn a_stray_spaces_root_variable_does_not_move_a_daemon_that_is_not_in_qa_mode() {
+    let mut rig = Rig::new();
+    std::env::remove_var("NOSTROMO_QA_DAEMON");
+    let folder = rig.new_space("space-stray");
+    assert!(
+        !crate::conversations::usable_space_folder(folder.to_str().unwrap()),
+        "the variable is ignored, so this is not under the root"
+    );
+    let ServerMsg::ConversationHistory { spaces_root, .. } =
+        rig.mgr.conversation_history_msg("r".into())
+    else {
+        panic!()
+    };
+    assert_ne!(
+        spaces_root.as_deref(),
+        std::fs::canonicalize(rig.spaces()).unwrap().to_str()
+    );
+}
+
+// ── how the list shows it ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_no_codebase_conversation_lists_as_no_codebase_and_a_sensitive_one_only_says_it_has_none()
+{
+    let mut rig = Rig::new();
+    let folder = rig.new_space("space-listed");
+    let nc = rig.spawn_no_codebase("cody-nc000001", &folder);
+    let repo = rig.spawn("cody-rp000001", "cody");
+    rig.send("cody-nc000001", "hello");
+    rig.send("cody-rp000001", "hello");
+
+    let entries = |rig: &mut Rig| {
+        let ServerMsg::ConversationHistory { entries, .. } =
+            rig.mgr.conversation_history_msg("r".into())
+        else {
+            panic!()
+        };
+        entries
+    };
+    let by_id = |entries: &[crate::ipc::protocol::ConversationEntryWire], id: &str| {
+        entries.iter().find(|e| e.id == id).cloned().unwrap()
+    };
+    let listed = entries(&mut rig);
+    let w = by_id(&listed, &nc);
+    assert_eq!(w.project_name.as_deref(), Some("No codebase"));
+    assert!(w.no_codebase);
+    assert_eq!(w.project_path.as_deref(), folder.to_str());
+    let r = by_id(&listed, &repo);
+    assert!(!r.no_codebase);
+    assert_eq!(
+        r.project_name.as_deref(),
+        Some("work"),
+        "a repo keeps its folder's name"
+    );
+
+    rig.mgr
+        .conversations()
+        .mark_sensitive(&nc, crate::conversations::now_ms());
+    let listed = entries(&mut rig);
+    let w = by_id(&listed, &nc);
+    assert!(w.sensitive);
+    assert!(w.no_codebase, "carried: it is no content");
+    assert!(w.project_name.is_none() && w.project_path.is_none());
+    let json = serde_json::to_string(&w).unwrap();
+    let name = folder.file_name().unwrap().to_str().unwrap();
+    assert!(!json.contains(name), "{json}");
+}
+
+// ── the tracker board follows it ─────────────────────────────────────────────
+
+/// A board opened by `cody-aaaa1111` working in `folder`, which is no git
+/// checkout: the board falls back to `<folder>/.claude/wip/<topic>/index.md`.
+fn no_codebase_tracker(
+    rig: &Rig,
+    folder: &Path,
+) -> (Arc<crate::tracker::TrackerRegistry>, PathBuf) {
+    use crate::tracker::registry::{OpenArgs, RegistryParts};
+    let base = rig.dir.path().canonicalize().unwrap();
+    let home = base.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let reg = Arc::new(crate::tracker::TrackerRegistry::new(
+        RegistryParts::hermetic(
+            base.join("tracker-state"),
+            home,
+            Arc::new(crate::tracker::FakeClock::at_secs(1_760_540_000)),
+        ),
+    ));
+    let args = OpenArgs {
+        topic: Some("work".into()),
+        cwd: folder.to_path_buf(),
+        ..Default::default()
+    };
+    let path = reg.open("cody-aaaa1111", "s", &args).unwrap().path;
+    (reg, path)
+}
+
+#[tokio::test]
+async fn a_no_codebase_focus_keeps_its_board_in_its_folder_and_a_resume_there_is_bound_to_it() {
+    let mut rig = Rig::new();
+    let folder = rig.new_space("space-board");
+    rig.cwd = folder.clone();
+    let (reg, board) = no_codebase_tracker(&rig, &folder);
+    assert!(
+        board.starts_with(folder.canonicalize().unwrap()),
+        "the board lives under the focus's folder: {board:?}"
+    );
+    assert!(board.ends_with(".claude/wip/work/index.md"), "{board:?}");
+    rig.mgr.configure_tracker_frame_provider(reg.clone());
+    let sid = rig.spawn_no_codebase("cody-aaaa1111", &folder);
+    rig.send("cody-aaaa1111", "hello");
+    let path = rig.transcript(&sid, USER_LINE);
+    age(&path, 3600);
+    rig.wait_spawns(1).await;
+    rig.mgr.stop_session("cody-aaaa1111");
+    rig.mgr.sessions.remove("cody-aaaa1111");
+    rig.mgr.set_focus_registry(vec![]);
+    assert_eq!(
+        rig.mgr
+            .conversations()
+            .get(&sid)
+            .unwrap()
+            .tracker_board
+            .as_deref(),
+        board.to_str(),
+        "each send records the bound board"
+    );
+
+    let reply = rig.mgr.resume_conversation(&sid, "cody-bbbb2222");
+    assert_eq!(outcome(&reply).0, ConversationResumeOutcome::Ready);
+    assert_eq!(
+        reg.bound_path("cody-bbbb2222").as_deref(),
+        Some(board.as_path()),
+        "the resumed focus has its board back"
+    );
+}
+
+#[tokio::test]
+async fn a_resume_into_a_fresh_no_codebase_folder_binds_no_board_and_creates_none() {
+    let mut rig = Rig::new();
+    let old = rig.new_space("space-board");
+    rig.cwd = old.clone();
+    let (reg, board) = no_codebase_tracker(&rig, &old);
+    rig.mgr.configure_tracker_frame_provider(reg.clone());
+    let sid = rig.spawn_no_codebase("cody-aaaa1111", &old);
+    rig.send("cody-aaaa1111", "hello");
+    rig.transcript(&sid, USER_LINE);
+    rig.wait_spawns(1).await;
+    rig.mgr.stop_session("cody-aaaa1111");
+    rig.mgr.sessions.remove("cody-aaaa1111");
+    rig.mgr.set_focus_registry(vec![]);
+    reg.unbind("cody-aaaa1111");
+    std::fs::remove_dir_all(&old).unwrap();
+    let fresh = rig.new_space("space-fresh");
+
+    let reply = rig
+        .mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", folder_resume(&fresh));
+    assert_eq!(outcome(&reply).0, ConversationResumeOutcome::Ready);
+    assert!(reg.bound_path("cody-bbbb2222").is_none());
+    assert!(!board.exists());
+    assert_eq!(std::fs::read_dir(&fresh).unwrap().count(), 0);
 }

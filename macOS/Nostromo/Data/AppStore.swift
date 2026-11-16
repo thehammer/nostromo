@@ -498,6 +498,14 @@ class AppStore: ObservableObject {
 
     // MARK: - Session registry
 
+    /// The session for a focus, created with everything the focus says about where it runs: its folder, and
+    /// that a no-codebase focus must have one. Every path that may create a focus's session goes through
+    /// here, so none can make it first without the guard (an existing session ignores the flags).
+    func session(for focus: Focus) -> ChatSession {
+        session(for: focus.sessionTag, agentName: focus.agentTag, displayName: focus.displayName,
+                workingDirectory: focus.sessionWorkingDirectory, requiresWorkingDirectory: focus.noCodebase)
+    }
+
     /// Returns the shared `ChatSession` for `tag`, creating one if none
     /// exists yet. This is a **lazy creator**, which is exactly why the
     /// ordering in `FocusStore.remove(_:)` matters (see its comment): any
@@ -505,14 +513,15 @@ class AppStore: ObservableObject {
     /// view holding a reference to its old session has let go would silently
     /// recreate — and re-spawn — the session eviction just removed.
     func session(for tag: String, agentName: String? = nil, displayName: String? = nil,
-                 workingDirectory: String? = nil) -> ChatSession {
+                 workingDirectory: String? = nil, requiresWorkingDirectory: Bool = false) -> ChatSession {
         if let s = sessionRegistry[tag] {
             // Re-attach after a rename: carry the current label so the next spawn uses it.
             if let displayName, s.displayName != displayName { s.displayName = displayName }
             return s
         }
         let s = ChatSession(tag: tag, agentName: agentName, displayName: displayName,
-                            workingDirectory: workingDirectory, client: client)
+                            workingDirectory: workingDirectory,
+                            requiresWorkingDirectory: requiresWorkingDirectory, client: client)
         sessionRegistry[tag] = s
         return s
     }

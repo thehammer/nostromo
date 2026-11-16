@@ -46,6 +46,12 @@ pub(super) struct ResumePlace {
     pub old_path: Option<String>,
     #[serde(default)]
     pub old_main: Option<String>,
+    /// The entry was a no-codebase one before the move.
+    #[serde(default)]
+    pub old_no_codebase: bool,
+    /// The place is a new no-codebase folder.
+    #[serde(default)]
+    pub no_codebase: bool,
     /// When it was made (ms), for pruning.
     #[serde(default)]
     pub at_ms: i64,
@@ -77,6 +83,18 @@ fn moved_notice(
     text
 }
 
+/// The text of a resume into a new no-codebase folder.
+fn no_codebase_notice(old_path: Option<&str>) -> String {
+    match old_path {
+        Some(old) => format!(
+            "This conversation ran in {old}, which no longer exists. Now in a no-codebase folder."
+        ),
+        None => {
+            "This conversation's folder no longer exists. Now in a no-codebase folder.".to_owned()
+        }
+    }
+}
+
 /// The branch checked out in `dir` (from `.git/HEAD`); `None` when detached or unreadable.
 fn current_branch(dir: &Path) -> Option<String> {
     let head = std::fs::read_to_string(dir.join(".git").join("HEAD")).ok()?;
@@ -104,6 +122,9 @@ pub struct ResumeOptions<'a> {
     /// Resume in this folder instead of the original (only for a conversation
     /// whose worktree is gone, and only its own main checkout).
     pub place: Option<&'a str>,
+    /// Resume in this new, empty no-codebase folder instead (only for a
+    /// conversation whose folder is gone, and only a fresh child of the spaces root).
+    pub no_codebase_folder: Option<&'a str>,
     /// The user chose "Resume anyway" for a conversation that may be open elsewhere.
     pub confirm_active_elsewhere: bool,
 }
@@ -180,8 +201,13 @@ impl SessionManager {
         let mut places = self.load_places();
         if let Some(p) = places.remove(tag) {
             if p.sid == sid {
-                self.conversations
-                    .restore_place(sid, p.old_path, p.old_main, now_ms());
+                self.conversations.restore_place(
+                    sid,
+                    p.old_path,
+                    p.old_main,
+                    p.old_no_codebase,
+                    now_ms(),
+                );
             }
             self.save_places(&places);
         }
@@ -264,6 +290,7 @@ impl SessionManager {
                 title,
                 label: focus.and_then(|f| f.label.as_deref()),
                 model: model.map(|m| (m.model.as_str(), m.effort.as_deref())),
+                no_codebase: focus.is_some_and(|f| f.no_codebase == Some(true)),
             },
             now_ms(),
         );
@@ -297,6 +324,7 @@ impl SessionManager {
             label: focus.and_then(|f| f.label.clone()),
             model,
             sensitive: false,
+            no_codebase: focus.is_some_and(|f| f.no_codebase == Some(true)),
             tracker_board: self
                 .tracker_frame_provider
                 .as_ref()
@@ -356,6 +384,10 @@ impl SessionManager {
             first_prompts_enabled: snap.first_prompts_enabled,
             degraded_kept: snap.degraded_kept,
             revision: snap.revision,
+            referenced_space_folders: referenced_space_folders(
+                self.conversations.all_project_paths(),
+            ),
+            spaces_root: crate::conversations::spaces_root_for_wire(),
         }
     }
 
@@ -489,6 +521,7 @@ impl SessionManager {
         let live = self.live_conversations();
         let live_here = live.get(sid).cloned();
         let mut moving: Option<String> = None;
+        let mut moving_no_codebase = false;
         match status_now(&entry, &self.conversations, live_here.as_ref()) {
             ConversationStatus::Running { tag, open: true } => return switch(&tag),
             ConversationStatus::UnavailableDeleted | ConversationStatus::UnavailableUnreadable => {
@@ -502,6 +535,13 @@ impl SessionManager {
                 active_elsewhere, ..
             } => {
                 moving = Self::usable_place(&entry, options.place);
+                if moving.is_none() {
+                    moving = options
+                        .no_codebase_folder
+                        .filter(|f| crate::conversations::usable_space_folder(f))
+                        .map(str::to_owned);
+                    moving_no_codebase = moving.is_some();
+                }
                 if moving.is_none() {
                     return refuse("folder_gone");
                 }
@@ -586,12 +626,16 @@ impl SessionManager {
         // A conversation whose worktree is gone runs in its main checkout.
         let mut project_path = entry.project_path.clone();
         if let Some(place) = &moving {
-            let notice = moved_notice(
-                entry.project_path.as_deref(),
-                place,
-                entry.branch.as_deref(),
-                current_branch(Path::new(place)).as_deref(),
-            );
+            let notice = if moving_no_codebase {
+                no_codebase_notice(entry.project_path.as_deref())
+            } else {
+                moved_notice(
+                    entry.project_path.as_deref(),
+                    place,
+                    entry.branch.as_deref(),
+                    current_branch(Path::new(place)).as_deref(),
+                )
+            };
             self.insert_place(
                 new_tag,
                 ResumePlace {
@@ -601,10 +645,13 @@ impl SessionManager {
                     sid: sid.to_owned(),
                     old_path: entry.project_path.clone(),
                     old_main: entry.main_checkout.clone(),
+                    old_no_codebase: entry.no_codebase,
+                    no_codebase: moving_no_codebase,
                     at_ms: now_ms(),
                 },
             );
-            self.conversations.set_place(sid, place, now_ms());
+            self.conversations
+                .set_place(sid, place, moving_no_codebase, now_ms());
             project_path = Some(place.clone());
         }
         self.session_history.move_session(sid, &entry.tag, new_tag);
@@ -624,6 +671,20 @@ impl SessionManager {
             title: Some(entry.user_title.clone().unwrap_or(entry.title.clone())),
         }
     }
+}
+
+/// The folders under the spaces root that any entry not yet purged names, hidden
+/// or visible, sensitive or not. The app trashes every other folder there, so
+/// this errs toward listing: a path counts when its parent IS the root by file
+/// identity (device and inode), however either is spelled.
+fn referenced_space_folders(paths: Vec<(String, bool)>) -> Vec<String> {
+    let mut out: Vec<String> = paths
+        .into_iter()
+        .flat_map(|(p, no_codebase)| crate::conversations::space_folders_named_by(&p, no_codebase))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// A turn completed in the session `shared` belongs to: bump the entry's time,

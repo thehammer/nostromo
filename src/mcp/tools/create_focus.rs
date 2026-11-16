@@ -508,6 +508,7 @@ async fn create_focus_session(
     let meta = FocusMeta {
         initial_model: None,
         initial_effort: None,
+        no_codebase: None,
         tag: tag.clone(),
         display_name: title,
         agent_name: agent,

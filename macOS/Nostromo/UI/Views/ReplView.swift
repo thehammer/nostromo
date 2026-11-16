@@ -204,14 +204,17 @@ class ReplView: NSView {
     private lazy var announcer = ToolActivityAnnouncer(post: ToolActivityAnnouncer.voiceOver(from: self))
 
     init(tag: String, agentName: String? = nil, displayName: String? = nil,
-         workingDirectory: String? = nil, quickActions: [QuickAction] = [],
+         workingDirectory: String? = nil, requiresWorkingDirectory: Bool = false,
+         quickActions: [QuickAction] = [],
          foldStore: TranscriptFoldStore = .shared) {
         self.quickActions = quickActions
         foldSync = PaneFoldSync(tag: tag, store: foldStore,
                                 harnessMode: TranscriptLoadHarness.foldsExpandedByDefault ? .allActivity : nil)
         // Use the shared registry so multiple windows showing the same tag
         // observe the same session and stay in sync (mirrored).
-        let shared = AppStore.shared.session(for: tag, agentName: agentName, displayName: displayName, workingDirectory: workingDirectory)
+        let shared = AppStore.shared.session(for: tag, agentName: agentName, displayName: displayName,
+                                               workingDirectory: workingDirectory,
+                                               requiresWorkingDirectory: requiresWorkingDirectory)
         session = shared
         // The guard bar names who was blocked (`Blocked: Cody tried to …`).
         approvalHost = ApprovalOverlayHost(tag: tag, store: ApprovalStore.shared, agentName: { shared.agentName },

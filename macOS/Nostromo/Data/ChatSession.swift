@@ -68,6 +68,9 @@ class ChatSession: ObservableObject {
     /// Updated on rename (see `AppStore.updateSessionLabel`); read at each spawn.
     var displayName: String    // `-n` / `--remote-control` name (phone-facing label)
     let workingDirectory: String?
+    /// A no-codebase focus: with no folder to run in it must not start at all. `nil` would make the daemon
+    /// run it in `$HOME`.
+    let requiresWorkingDirectory: Bool
 
     /// The addressable transcript. Deliberately NOT `@Published`.
     ///
@@ -149,11 +152,12 @@ class ChatSession: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     init(tag: String, agentName: String? = nil, displayName: String? = nil,
-         workingDirectory: String? = nil, client: NostromodClient) {
+         workingDirectory: String? = nil, requiresWorkingDirectory: Bool = false, client: NostromodClient) {
         self.tag              = tag
         self.agentName        = agentName ?? tag
         self.displayName      = displayName ?? (agentName ?? tag)
         self.workingDirectory = workingDirectory
+        self.requiresWorkingDirectory = requiresWorkingDirectory
         self.client           = client
         log.info("ChatSession[\(tag, privacy: .public)] init (daemon-hosted)")
 
@@ -179,6 +183,10 @@ class ChatSession: ObservableObject {
     /// Spawn (or resume) this focus's session and attach for turn deltas.
     /// Both calls are idempotent daemon-side, so re-issuing on reconnect is safe.
     private func spawnAndAttach() {
+        if requiresWorkingDirectory && workingDirectory == nil {
+            log.error("ChatSession[\(self.tag, privacy: .public)] not started: no-codebase focus without a folder")
+            return
+        }
         attachCount += 1
         // remoteControl: false. EMPIRICAL FINDING (2026-05-31): `--remote-control`
         // is INERT in `--input-format stream-json`/`--print` mode — it's accepted
@@ -191,7 +199,8 @@ class ChatSession: ObservableObject {
         // name if/when we ever drive a focus in interactive mode). See the PRD's
         // "Remote control — disproven" note for the path forward (our own client).
         client.sessionSpawn(tag: tag, agentName: agentName, viewName: displayName,
-                            cwd: workingDirectory, sessionId: nil, remoteControl: false)
+                            cwd: workingDirectory, sessionId: nil, remoteControl: false,
+                            noCodebase: requiresWorkingDirectory)
         client.sessionAttach(tag: tag)
     }
 

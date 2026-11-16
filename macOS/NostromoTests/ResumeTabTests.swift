@@ -84,13 +84,15 @@ final class ResumeTabTests: XCTestCase {
     }
 
     func testReturnResumesTheSelectedRowAndAnUnresumableRowIsIgnored() {
-        show([F.entry("a"), F.entry("gone", daysAgo: 0.1, status: .folderGone(worktree: false))])
+        show([F.entry("a"), F.entry("gone", daysAgo: 0.1, status: .unavailableDeleted)])
         XCTAssertTrue(command(#selector(NSResponder.insertNewline(_:))))
         XCTAssertEqual(sender.resumes.map(\.id), ["a"])
+        sheet.resumeTab.toggleUnavailable()   // an unavailable row lives in the collapsed group
         sheet.resumeTab.moveSelection(by: 1)
+        XCTAssertEqual(sheet.resumeTab.selectedEntry?.id, "gone")
         XCTAssertFalse(sheet.isResumeButtonEnabled)
         _ = command(#selector(NSResponder.insertNewline(_:)))
-        XCTAssertEqual(sender.resumes.count, 1, "a row with no folder cannot be resumed")
+        XCTAssertEqual(sender.resumes.count, 1, "a row Claude no longer has cannot be resumed")
     }
 
     func testCommandDeleteRemovesAndUndoRestores() {

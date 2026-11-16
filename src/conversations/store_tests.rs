@@ -24,6 +24,7 @@ fn spawn(h: &ConversationHistory, sid: &str, tag: &str, at: i64) {
             title: "A title",
             label: None,
             model: None,
+            no_codebase: false,
         },
         at,
     );

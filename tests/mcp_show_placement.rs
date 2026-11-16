@@ -157,6 +157,7 @@ fn register_focuses(harness: &Harness, tags: &[&str]) {
         .map(|t| FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: t.to_string(),
             display_name: t.to_string(),
             agent_name: t.to_string(),
@@ -1978,6 +1979,7 @@ fn register_focus_with_agent(harness: &Harness, tag: &str, agent: &str) {
     let meta = FocusMeta {
         initial_model: None,
         initial_effort: None,
+        no_codebase: None,
         tag: tag.to_string(),
         display_name: tag.to_string(),
         agent_name: agent.to_string(),
@@ -2131,6 +2133,7 @@ async fn a_show_aimed_at_a_perri_focus_from_a_non_perri_caller_is_a_noop() {
             .map(|t| FocusMeta {
                 initial_model: None,
                 initial_effort: None,
+                no_codebase: None,
                 tag: t.to_string(),
                 display_name: t.to_string(),
                 agent_name: if *t == "cody" { "cody" } else { "perri" }.to_string(),
