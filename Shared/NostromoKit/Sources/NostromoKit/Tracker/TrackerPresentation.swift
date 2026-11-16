@@ -109,7 +109,7 @@ public struct TrackerNeedsYouSource: TrackerWaitingSource {
                 titles[id] = title
             case .item(let item) where item.status == .needsYou:
                 entries.append(TrackerWaitingEntry(key: "item:\(item.id)",
-                                                   text: TrackerTitle.split(TrackerText.plain(item.textSpans)).title,
+                                                   text: TrackerTitle.split(TrackerTitle.stripInvisible(TrackerText.plain(item.textSpans))).title,
                                                    detail: titles[item.section],
                                                    target: .boardItem(item.id)))
             default:
@@ -134,7 +134,7 @@ public struct TrackerUnrunCommandSource: TrackerWaitingSource {
                 titles[id] = title
             case .item(let item) where item.kind == .command && !item.ran && item.status != .done:
                 entries.append(TrackerWaitingEntry(key: "item:\(item.id)",
-                                                   text: TrackerTitle.split(TrackerText.plain(item.textSpans)).title,
+                                                   text: TrackerTitle.split(TrackerTitle.stripInvisible(TrackerText.plain(item.textSpans))).title,
                                                    detail: titles[item.section],
                                                    target: .boardItem(item.id)))
             default:
@@ -325,8 +325,8 @@ public struct TrackerItemRow: Equatable {
     /// "now", "4 m", "2 h", "Oct 14" (empty without a time).
     public let relativeTime: String
     public let noteBlocks: [MdBlock]
-    /// The note's first line as plain text (nil without a note): what a collapsed note shows,
-    /// and what a `blocked` item always shows.
+    /// The note's first line as plain text (nil without a note). A collapsed item no longer shows
+    /// it (the fold holds it); `tracker show` still reports it.
     public let noteFirstLine: String?
     /// The one-line title (`TrackerTitle.split` of `text`).
     public let title: String
@@ -445,7 +445,26 @@ public struct TrackerRow: Equatable {
     }
 }
 
+extension TrackerRow {
+    /// `other` and this row differ only in whether the item is expanded (the user's own fold
+    /// toggle, which is not a content change and must not flash the change highlight).
+    public func differsOnlyInFold(from other: TrackerRow) -> Bool {
+        guard key == other.key, case .item(let a) = content, case .item(let b) = other.content,
+              a.isExpanded != b.isExpanded else { return false }
+        return a.withExpanded(b.isExpanded) == b
+    }
+}
+
 extension TrackerItemRow {
+    func withExpanded(_ expanded: Bool) -> TrackerItemRow {
+        TrackerItemRow(id: id, sectionId: sectionId, sectionTitle: sectionTitle, status: status, mark: mark,
+                       textSpans: textSpans, text: text, owner: owner, updatedAt: updatedAt, relativeTime: relativeTime,
+                       noteBlocks: noteBlocks, noteFirstLine: noteFirstLine, title: title, bodyLead: bodyLead,
+                       isFoldable: isFoldable, isExpanded: expanded, linkTexts: linkTexts, links: links, bound: bound,
+                       staleFootnote: staleFootnote, env: env, envBadge: envBadge,
+                       isHazard: isHazard, kind: kind, source: source)
+    }
+
     func withTime(_ relative: String, _ updated: Date?) -> TrackerItemRow {
         TrackerItemRow(id: id, sectionId: sectionId, sectionTitle: sectionTitle, status: status, mark: mark,
                        textSpans: textSpans, text: text, owner: owner, updatedAt: updated, relativeTime: relative,
@@ -667,7 +686,7 @@ public enum TrackerPresenter {
                         now: Date, timeZone: TimeZone) -> TrackerItemRow {
         let lines = TrackerText.lines(wire.noteBlocks)
         let plain = TrackerText.plain(wire.textSpans)
-        let split = TrackerTitle.split(plain)
+        let split = TrackerTitle.split(TrackerTitle.stripInvisible(plain))
         let foldable = split.rest != nil || !wire.noteBlocks.isEmpty
         return TrackerItemRow(
             id: wire.id,

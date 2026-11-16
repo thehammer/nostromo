@@ -6058,6 +6058,47 @@ fn a_title_with_a_newline_is_invalid_args_naming_title() {
 }
 
 #[test]
+fn a_title_with_bidi_zero_width_or_line_separator_characters_is_invalid_args_naming_title() {
+    let (_, parsed) = board60();
+    let id = fold_item(&parsed.board).id.clone();
+    let refused = [
+        '\u{200B}', '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{2028}', '\u{2029}',
+        '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
+        '\u{2068}', '\u{2069}', '\u{FEFF}',
+    ];
+    for c in refused {
+        // In the middle, and at the edges where trimming could otherwise hide it.
+        for title in [
+            format!("pay{c}load"),
+            format!("{c}lead"),
+            format!("trail{c}"),
+        ] {
+            let reason = refusal_reason(Upsert {
+                title: Some(title),
+                ..upsert(&id)
+            });
+            assert!(reason.contains("title"), "U+{:04X}: {reason}", c as u32);
+        }
+    }
+}
+
+#[test]
+fn ordinary_non_ascii_titles_are_still_accepted() {
+    let (_, parsed) = board60();
+    let id = fold_item(&parsed.board).id.clone();
+    let title = "Café – ünï 日本語 ✅ — done".to_string();
+    let (board, _) = apply_ok(
+        &parsed.board,
+        &[Op::Upsert(Upsert {
+            title: Some(title.clone()),
+            ..upsert(&id)
+        })],
+        &agent(),
+    );
+    assert_eq!(board.item(&id).unwrap().text, title);
+}
+
+#[test]
 fn an_empty_title_is_invalid_args_naming_title() {
     let (_, parsed) = board60();
     let id = fold_item(&parsed.board).id.clone();

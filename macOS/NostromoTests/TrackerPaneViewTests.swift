@@ -1940,9 +1940,10 @@ final class TrackerHostileTextTests: MouseQueueTestCase {
         }
     }
 
-    // Documents current behaviour: the pane does not rewrite board text, so bidi controls, zero-width
-    // characters and a BOM reach the text view exactly as the file has them.
-    func testBidiZeroWidthAndBomCharactersAreShownExactlyAsTheFileHasThem() throws {
+    // The pane does not rewrite the file or the stored text, but the title it derives from item text
+    // is drawn without bidi controls, zero-width characters and a BOM (a title is one line the reader
+    // trusts; a right-to-left override in it could reorder what follows). The item's own text keeps them.
+    func testBidiZeroWidthAndBomCharactersAreStrippedFromTheDrawnTitleButKeptInTheItemText() throws {
         let cases = try hostileCases().filter { ["bidi_rlo", "zero_width", "bom"].contains($0.name) }
         XCTAssertEqual(cases.count, 3)
         let tag = Fx.uniqueTag()
@@ -1954,8 +1955,11 @@ final class TrackerHostileTextTests: MouseQueueTestCase {
 
         for (id, hostile) in zip(ids, cases) {
             let row = try XCTUnwrap(rig.rowView("item:\(id)"))
-            XCTAssertEqual(row.textViews.first?.string, hostile.payload, "\(hostile.name): shown as is")
-            XCTAssertTrue(row.visibleText.contains(hostile.payload), "\(hostile.name): and read back as is")
+            let stripped = TrackerTitle.stripInvisible(hostile.payload)
+            XCTAssertNotEqual(stripped, hostile.payload, "\(hostile.name): setup: the payload has hidden characters")
+            XCTAssertEqual(row.textViews.first?.string, stripped, "\(hostile.name): the title is drawn without them")
+            XCTAssertTrue(row.visibleText.contains(stripped), "\(hostile.name): and read back without them")
+            XCTAssertEqual(row.row.item?.text, hostile.payload, "\(hostile.name): the item's own text is untouched")
         }
     }
 

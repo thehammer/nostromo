@@ -57,10 +57,14 @@ round-trip it unchanged; there is no migration.
 text). Counts are characters, on the item's plain text trimmed of outer whitespace.
 
 1. **whole**: at most 80 characters → the title is the text, nothing is under the fold from it.
-2. **separator**: otherwise scan offsets `i` from 0 through 80, tracking bracket depth over the characters before `i` (`(`, `[`, `{` add 1; `)`, `]`, `}` subtract 1, floored at 0). At the first `i ≥ 3` with depth 0 where the text at `i` starts with `": "`, `"; "`, two spaces, `" — "` or `". "`: the title is the text before `i` (trailing whitespace trimmed) and the rest after the separator (trimmed) goes under the fold.
+2. **separator**: otherwise scan offsets `i` from 0 through 80, tracking bracket depth over the characters before `i` (`(`, `[`, `{` add 1; `)`, `]`, `}` subtract 1, floored at 0). At the first `i ≥ 3` with depth 0 where the text at `i` starts with `": "`, `"; "`, two spaces, `" — "` or `". "`, except that a `". "` right after an abbreviation is skipped (the word ending at the period is `e.g.`, `i.e.`, `vs.`, `etc.` or `approx.`, compared case-insensitively, or a single capital letter such as `J.`): the title is the text before `i` (trailing whitespace trimmed) and the rest after the separator (trimmed) goes under the fold.
 3. **cut**: otherwise cut at the last space before offset 80 with offset ≥ 3, else at 79. The title is the text before the cut + `"…"`; the fold starts with `"…"` + the rest.
 
-A title written through `title` is at most 80 characters, so it is always whole.
+A title written through `title` is at most 80 characters, so it is always whole. A `title` also refuses
+(`invalid_args`, naming `title`) bidi controls (U+200E/F, U+202A-U+202E, U+2066-U+2069), zero-width characters
+(U+200B-U+200D, U+FEFF) and U+2028/2029, as well as control characters. The pane strips the same characters from
+a title it derives from older text (the stored text is not rewritten). The rule is implemented once, in
+`TrackerTitle.split` (NostromoKit); `src/tracker/ops.rs` only enforces the 80-character limit.
 
 **For agents:** write `title` + `body`. To restructure a long legacy item, send
 both in one upsert (`{id, title, body}`).

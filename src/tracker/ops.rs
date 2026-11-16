@@ -22,6 +22,15 @@ pub const MAX_ITEMS: usize = 500;
 pub const MAX_BATCH_OPS: usize = 200;
 /// Longest item text, link text and Log line, in characters.
 pub const MAX_LINE_CHARS: usize = 500;
+/// Characters a `title` refuses beyond controls: bidi controls (U+200E/F, U+202A-E, U+2066-9),
+/// zero-width (U+200B-D, U+FEFF) and the line/paragraph separators (U+2028/9). The pane strips
+/// the same set from a title it derives from old text (`TrackerTitle.stripInvisible`).
+fn is_hidden_format_char(c: char) -> bool {
+    matches!(c,
+        '\u{200B}'..='\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}'
+        | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+}
+
 /// Longest `title`, in characters. Equals `TrackerTitle.maxChars` in NostromoKit;
 /// a title this short is never split for display.
 pub const MAX_TITLE_CHARS: usize = 80;
@@ -462,7 +471,15 @@ impl Apply<'_> {
         }
         let text = match (&u.text, &u.title) {
             (Some(t), _) => Some(self.single_line("text", t, MAX_LINE_CHARS)?),
-            (None, Some(t)) => Some(self.single_line("title", t, MAX_TITLE_CHARS)?),
+            (None, Some(t)) => {
+                if t.chars().any(is_hidden_format_char) {
+                    return Err(self.invalid(
+                        "title must not contain bidi-control, zero-width or line-separator characters"
+                            .to_string(),
+                    ));
+                }
+                Some(self.single_line("title", t, MAX_TITLE_CHARS)?)
+            }
             (None, None) => None,
         };
         let mut f = Fields {

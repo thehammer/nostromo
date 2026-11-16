@@ -696,6 +696,18 @@ final class TrackerPresentationTests: XCTestCase {
         }
     }
 
+    func testATitleDrawnFromOldTextHasBidiAndZeroWidthCharactersStripped() throws {
+        let hostile = "Deploy\u{202E}\u{200B} pipeline: waiting on the vendor to confirm the\u{FEFF} window, then roll out to every region"
+        let board = try TFx.edited { try $0.setText("verif-1037", hostile) }
+        let p = TFx.present(board)
+        let item = try XCTUnwrap(TFx.itemRow("verif-1037", in: p))
+        XCTAssertEqual(item.title, Self.longTitle)
+        XCTAssertEqual(item.bodyLead, Self.longRest)
+        // A short text shows no hidden characters in its title either.
+        let short = try TFx.edited { try $0.setText("verif-1037", "Fix\u{202E} it\u{200B}") }
+        XCTAssertEqual(try XCTUnwrap(TFx.itemRow("verif-1037", in: TFx.present(short))).title, "Fix it")
+    }
+
     func testALongTextWithASeparatorIsFoldableWithItsTailAsTheBodyLead() throws {
         let board = try TFx.edited { try $0.setText("verif-1037", Self.longText) }
         let item = try XCTUnwrap(TFx.itemRow("verif-1037", in: TFx.present(board)))

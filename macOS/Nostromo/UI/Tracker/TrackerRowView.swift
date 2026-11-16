@@ -53,7 +53,8 @@ final class TrackerRowView: NSView {
     static let markWidth: CGFloat = 18
     /// Reserved on every item row (foldable or not) so titles align.
     static let foldColumnWidth: CGFloat = 16
-    static let foldButtonSize = NSSize(width: 24, height: 20)
+    /// The chevron itself: it sits in the fold column, clear of the status mark and of the title.
+    static let foldButtonSize = NSSize(width: foldColumnWidth, height: 20)
     static let timeWidth: CGFloat = 44
     static let gap: CGFloat = 6
     /// The owner chip never grows past this (a 32-character owner is ~190 pt at 11 pt); longer owners
@@ -68,6 +69,15 @@ final class TrackerRowView: NSView {
     static func minimumTextWidth(forRowWidth width: CGFloat) -> CGFloat {
         max(120, width * 0.4)
     }
+
+    /// Where a click toggles the item's fold (when it has one): the status-mark column and the fold
+    /// column on the item's first line, ending exactly where the title starts.
+    var foldHitRect: NSRect {
+        NSRect(x: Self.hPad, y: 0, width: Self.textX - Self.hPad, height: Self.vPad + Self.foldButtonSize.height)
+    }
+
+    /// Where an item's title (and the rest of its content) starts.
+    static let textX: CGFloat = hPad + markWidth + foldColumnWidth
 
     private(set) var row: TrackerRow
     /// A stub keeps at least the height of the row it replaced, so holding a change never moves
@@ -220,12 +230,17 @@ final class TrackerRowView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let hit = super.hitTest(point) else { return nil }
         if case .doneGroup = row.content { return self }
+        if hit !== disclosureButton, disclosureButton != nil, foldHitRect.contains(convert(point, from: superview)) {
+            return self
+        }
         return hit
     }
 
     override func mouseDown(with event: NSEvent) {
         switch row.content {
         case .doneGroup(let group): onToggleDone?(group.sectionId)
+        case .item where disclosureButton != nil && foldHitRect.contains(convert(event.locationInWindow, from: nil)):
+            toggleFold(nil)
         default: super.mouseDown(with: event)
         }
     }
@@ -304,7 +319,7 @@ final class TrackerRowView: NSView {
 
     private func layoutItem(_ item: TrackerItemRow, width: CGFloat) -> CGFloat {
         let h = Self.hPad, v = Self.vPad
-        let textX = h + Self.markWidth + Self.foldColumnWidth
+        let textX = Self.textX
         // Right column: the fixed-width time, then the badges if they leave the text its minimum
         // width; otherwise the badges take a line below the text.
         var right = width - h
@@ -348,7 +363,7 @@ final class TrackerRowView: NSView {
             leadText.frame = NSRect(x: textX, y: y, width: blockWidth, height: lh)
             y += lh
         }
-        disclosureButton?.frame = NSRect(x: h + Self.markWidth - 4, y: v - 1,
+        disclosureButton?.frame = NSRect(x: h + Self.markWidth, y: v - 1,
                                          width: Self.foldButtonSize.width, height: Self.foldButtonSize.height)
         if let proseView {
             y += 2
@@ -387,6 +402,11 @@ final class TrackerRowView: NSView {
     // MARK: - Building
 
     private func build() {
+        // The rebuild destroys the disclosure button: whoever had keyboard focus on it keeps it on the new one.
+        let disclosureHadFocus = disclosureButton.map { window?.firstResponder === $0 } ?? false
+        defer {
+            if disclosureHadFocus, let fresh = disclosureButton { window?.makeFirstResponder(fresh) }
+        }
         subviews.forEach { $0.removeFromSuperview() }
         textViews = []
         badges = []

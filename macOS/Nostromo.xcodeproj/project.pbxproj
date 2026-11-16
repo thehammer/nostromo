@@ -742,6 +742,9 @@
 		ZZ0000000000000000TK2301 /* TrackerWaitingStripTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2300 /* TrackerWaitingStripTests.swift */; };
 		ZZ0000000000000000TK2401 /* TrackerLinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2400 /* TrackerLinkTests.swift */; };
 		ZZ0000000000000000TK2501 /* TranscriptWidthAnchorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2500 /* TranscriptWidthAnchorTests.swift */; };
+		ZZ0000000000000000TK3201 /* MotherLimiterStripTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK3200 /* MotherLimiterStripTests.swift */; };
+		ZZ0000000000000000TK3101 /* TrackerFoldAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK3100 /* TrackerFoldAppearanceTests.swift */; };
+		ZZ0000000000000000TK3001 /* TrackerFoldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK3000 /* TrackerFoldTests.swift */; };
 		ZZ0000000000000000TK2601 /* TrackerRowHoldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2600 /* TrackerRowHoldTests.swift */; };
 		ZZ0000000000000000TK2701 /* TrackerRowHoldReleaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2700 /* TrackerRowHoldReleaseTests.swift */; };
 		ZZ0000000000000000TK2801 /* TrackerRowHoldMouseDownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2800 /* TrackerRowHoldMouseDownTests.swift */; };
@@ -1360,6 +1363,9 @@
 		ZZ0000000000000000TK2300 /* TrackerWaitingStripTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerWaitingStripTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2400 /* TrackerLinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerLinkTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2500 /* TranscriptWidthAnchorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptWidthAnchorTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK3200 /* MotherLimiterStripTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherLimiterStripTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK3100 /* TrackerFoldAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerFoldAppearanceTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK3000 /* TrackerFoldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerFoldTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2600 /* TrackerRowHoldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerRowHoldTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2700 /* TrackerRowHoldReleaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerRowHoldReleaseTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2800 /* TrackerRowHoldMouseDownTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerRowHoldMouseDownTests.swift; sourceTree = "<group>"; };
@@ -2060,6 +2066,9 @@
 				ZZ0000000000000000TK2300 /* TrackerWaitingStripTests.swift */,
 				ZZ0000000000000000TK2400 /* TrackerLinkTests.swift */,
 				ZZ0000000000000000TK2500 /* TranscriptWidthAnchorTests.swift */,
+				ZZ0000000000000000TK3200 /* MotherLimiterStripTests.swift */,
+				ZZ0000000000000000TK3100 /* TrackerFoldAppearanceTests.swift */,
+				ZZ0000000000000000TK3000 /* TrackerFoldTests.swift */,
 				ZZ0000000000000000TK2600 /* TrackerRowHoldTests.swift */,
 				ZZ0000000000000000TK2700 /* TrackerRowHoldReleaseTests.swift */,
 				ZZ0000000000000000TK2800 /* TrackerRowHoldMouseDownTests.swift */,
@@ -3121,6 +3130,9 @@
 				ZZ0000000000000000TK2301 /* TrackerWaitingStripTests.swift in Sources */,
 				ZZ0000000000000000TK2401 /* TrackerLinkTests.swift in Sources */,
 				ZZ0000000000000000TK2501 /* TranscriptWidthAnchorTests.swift in Sources */,
+				ZZ0000000000000000TK3201 /* MotherLimiterStripTests.swift in Sources */,
+				ZZ0000000000000000TK3101 /* TrackerFoldAppearanceTests.swift in Sources */,
+				ZZ0000000000000000TK3001 /* TrackerFoldTests.swift in Sources */,
 				ZZ0000000000000000TK2601 /* TrackerRowHoldTests.swift in Sources */,
 				ZZ0000000000000000TK2701 /* TrackerRowHoldReleaseTests.swift in Sources */,
 				ZZ0000000000000000TK2801 /* TrackerRowHoldMouseDownTests.swift in Sources */,

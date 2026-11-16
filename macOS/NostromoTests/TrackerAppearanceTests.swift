@@ -177,11 +177,12 @@ final class TrackerAppearanceTests: XCTestCase {
             measure("muted-time", pane.rowViews[plain]?.timeLabel, scrollingTo: plain)
             measure("muted-section-count", pane.rowViews["section:now"].flatMap { label("10", in: $0) }, scrollingTo: "section:now")
             let noted = "item:check-1000"
+            // A link chip (T6): its text on the chip's fill. Measured on the row as it first renders
+            // (the normal fill), before anything opens or flashes the change highlight.
+            measure("link-chip", pane.rowViews[noted]?.linkChips.first, scrollingTo: noted)
             // The note is under the fold now: open it, so its text is what gets measured.
             pane.toggleNote(item: "check-1000")
             measure("muted-note-first-line", pane.rowViews[noted]?.proseView, scrollingTo: noted)
-            // A link chip (T6): its text on the chip's fill.
-            measure("link-chip", pane.rowViews[noted]?.linkChips.first, scrollingTo: noted)
             measure("muted-done-group", pane.rowViews["done:done"]?.textViews.first, scrollingTo: "done:done")
 
             // Status marks.

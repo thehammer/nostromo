@@ -174,6 +174,44 @@ final class TrackerTitleTests: XCTestCase {
         ])
     }
 
+    func testASentenceSeparatorAfterAnAbbreviationIsNotASeparator() {
+        let more = "then a good deal more text so the whole thing runs well past the eighty character limit"
+        for abbreviation in ["e.g.", "i.e.", "vs.", "etc.", "approx.", "E.G.", "J."] {
+            // Alone, the abbreviation's ". " is the only candidate: it must be skipped (a cut results).
+            let text = "Check the flaky suites \(abbreviation) the slow ones, \(more)"
+            XCTAssertEqual(TrackerTitle.split(text).rule, .cut, "split after \(abbreviation)")
+        }
+        check([
+            Case("e.g. is skipped, the sentence end after it is used",
+                 "Cover the retry paths, e.g. the timeout one. Then compare the counts against the previous run and report",
+                 .separator, title: "Cover the retry paths, e.g. the timeout one",
+                 rest: "Then compare the counts against the previous run and report"),
+            Case("a single capital letter is skipped",
+                 "Ask J. Smith about the rollout window. Then compare the counts against the previous run, please",
+                 .separator, title: "Ask J. Smith about the rollout window",
+                 rest: "Then compare the counts against the previous run, please"),
+            Case("vs. etc. and approx. are skipped in one text",
+                 "Compare A vs. B etc. approx. ten rounds. Then report the numbers back in the channel when done",
+                 .separator, title: "Compare A vs. B etc. approx. ten rounds",
+                 rest: "Then report the numbers back in the channel when done"),
+            Case("a word that only ends in an abbreviation's letters is still a sentence end",
+                 "Rebuild the whole index of the previous release after the nightly chaos. Then compare against the previous",
+                 .separator, title: "Rebuild the whole index of the previous release after the nightly chaos",
+                 rest: "Then compare against the previous"),
+            Case("two capital letters are a word, not an initial",
+                 "Rebuild the index and then restart the whole thing after the nightly job on QA. Then compare, ok",
+                 .separator, title: "Rebuild the index and then restart the whole thing after the nightly job on QA",
+                 rest: "Then compare, ok"),
+        ])
+    }
+
+    func testInvisibleCharactersAreStrippedAndNothingElse() {
+        let hidden = "\u{200B}\u{200C}\u{200D}\u{200E}\u{200F}\u{2028}\u{2029}\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}"
+            + "\u{2066}\u{2067}\u{2068}\u{2069}\u{FEFF}"
+        XCTAssertEqual(TrackerTitle.stripInvisible("a\(hidden)b"), "ab")
+        XCTAssertEqual(TrackerTitle.stripInvisible("Café — ünï 日本語 ✅ done"), "Café — ünï 日本語 ✅ done")
+    }
+
     func testTheEarliestSeparatorWinsWhateverItsKind() {
         let tail = "and then a good deal more text so the whole thing runs well past the eighty character limit"
         check([

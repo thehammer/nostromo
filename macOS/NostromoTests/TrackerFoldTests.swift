@@ -226,6 +226,110 @@ final class TrackerFoldTests: XCTestCase {
                        "nothing in the tracker took focus: \(String(describing: rig.window.firstResponder))")
     }
 
+    func testWithTheDisclosureFocusedABoardUpdateToTheItemKeepsFocusOnItsRebuiltDisclosure() throws {
+        let (rig, script) = try foldRig()
+        let first = try disclosure(rig, foldItem)
+        XCTAssertTrue(rig.window.makeFirstResponder(first), "setup: the disclosure has focus")
+
+        var newer = script
+        newer.setVersion(8)
+        try newer.setNote(foldItem, paragraphs: Self.noteLines + ["Runbook step three: confirm the canary"])
+        try newer.setStatus(foldItem, "blocked")
+        rig.push(newer)
+
+        let rebuilt = try disclosure(rig, foldItem)
+        XCTAssertFalse(rebuilt === first, "setup: the agent's update rebuilt the row's button")
+        XCTAssertTrue(rig.window.firstResponder === rebuilt,
+                      "focus follows the row's new disclosure: \(String(describing: rig.window.firstResponder))")
+    }
+
+    func testAnUpdateToAnItemWhoseDisclosureIsNotFocusedTakesNoFocus() throws {
+        let (rig, script) = try foldRig()
+        XCTAssertTrue(rig.window.makeFirstResponder(rig.composer), "setup: the composer has focus")
+        var newer = script
+        newer.setVersion(8)
+        try newer.setStatus(foldItem, "blocked")
+        rig.push(newer)
+        XCTAssertFalse(rig.window.firstResponder === (try disclosure(rig, foldItem)), "the rebuilt button did not take focus")
+    }
+
+    func testTheDisclosureCanTakeKeyboardFocusSoSpaceCanOperateIt() throws {
+        let (rig, _) = try foldRig()
+        let button = try disclosure(rig, foldItem)
+        XCTAssertTrue(button.acceptsFirstResponder, "the disclosure accepts first responder")
+        XCTAssertTrue(button.canBecomeKeyView, "the disclosure is in the key-view loop")
+        XCTAssertFalse(button.refusesFirstResponder)
+    }
+
+    // MARK: - The fold's change highlight
+
+    func testTheUsersOwnFoldToggleDoesNotFlashTheChangeHighlightButARealChangeDoes() throws {
+        let (rig, script) = try foldRig()
+        XCTAssertTrue(rig.pane.rowViews.values.allSatisfy { !$0.isHighlighted }, "setup: nothing is highlighted")
+
+        try click(rig, foldItem)
+        try assertExpanded(rig, foldItem, "setup: the click opened the item")
+        XCTAssertTrue(rig.pane.rowViews.values.allSatisfy { !$0.isHighlighted }, "opening is not a content change")
+        XCTAssertTrue(rig.scheduler.scheduled.isEmpty, "and nothing was scheduled to clear a highlight")
+
+        try click(rig, foldItem)
+        try assertCollapsed(rig, foldItem, "setup: the click closed it")
+        XCTAssertTrue(rig.pane.rowViews.values.allSatisfy { !$0.isHighlighted }, "closing is not a content change either")
+
+        var newer = script
+        newer.setVersion(8)
+        try newer.setNote(foldItem, paragraphs: Self.noteLines + ["Runbook step three: confirm the canary"])
+        rig.push(newer)
+        XCTAssertTrue(try row(rig, foldItem).isHighlighted, "a real content change still flashes")
+    }
+
+    // MARK: - The disclosure's click area
+
+    func testTheFoldClickAreaCoversTheMarkAndFoldColumnsAndStopsWhereTheTitleStarts() throws {
+        let (rig, _) = try foldRig()
+        let item = try row(rig, foldItem)
+        let title = try XCTUnwrap(item.textViews.first)
+        let button = try disclosure(rig, foldItem)
+        XCTAssertEqual(item.foldHitRect.minX, TrackerRowView.hPad, accuracy: 0.01, "starts at the mark column")
+        XCTAssertEqual(item.foldHitRect.maxX, title.frame.minX, accuracy: 0.01, "ends exactly where the title starts")
+        XCTAssertLessThanOrEqual(button.frame.maxX, title.frame.minX + 0.01, "the chevron does not overlap the title")
+        XCTAssertGreaterThanOrEqual(button.frame.minX, TrackerRowView.hPad + TrackerRowView.markWidth - 0.01,
+                                    "the chevron does not overlap the status mark")
+
+        func hit(_ x: CGFloat) -> NSView? {
+            item.hitTest(item.convert(NSPoint(x: x, y: 10), to: item.superview))
+        }
+        for x in [TrackerRowView.hPad + 1, 20, TrackerRowView.hPad + TrackerRowView.markWidth + 1, title.frame.minX - 1] {
+            let target = try XCTUnwrap(hit(x), "x=\(x) hits something")
+            XCTAssertTrue(target === item || target === button, "x=\(x) is on the fold's click area, got \(target)")
+        }
+        for x in [title.frame.minX + 0.5, title.frame.minX + 4, title.frame.minX + 8] {
+            let target = try XCTUnwrap(hit(x), "x=\(x) hits something")
+            XCTAssertTrue(target === title || target.isDescendant(of: title), "x=\(x) is the title's, got \(target)")
+        }
+    }
+
+    func testClickingTheStatusMarkColumnOfAFoldableItemTogglesItAndAPlainItemIgnoresIt() throws {
+        let (rig, _) = try foldRig()
+        func mouseDown(_ id: String, atX x: CGFloat) throws {
+            let item = try row(rig, id)
+            let inWindow = item.convert(NSPoint(x: x, y: 10), to: nil)
+            let event = try XCTUnwrap(NSEvent.mouseEvent(
+                with: .leftMouseDown, location: inWindow, modifierFlags: [], timestamp: 0,
+                windowNumber: rig.window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+            item.mouseDown(with: event)
+            rig.settle()
+        }
+        try mouseDown(foldItem, atX: TrackerRowView.hPad + 4)
+        try assertExpanded(rig, foldItem, "a click on the status mark opens the item")
+        try mouseDown(foldItem, atX: TrackerRowView.hPad + 4)
+        try assertCollapsed(rig, foldItem, "and again closes it")
+        try mouseDown(foldItem, atX: 60)
+        try assertCollapsed(rig, foldItem, "a click on the title does not toggle")
+        try mouseDown(plainItem, atX: TrackerRowView.hPad + 4)
+        XCTAssertNil(try row(rig, plainItem).disclosureButton, "an item with nothing under a fold has no fold to toggle")
+    }
+
     // MARK: - Accessibility
 
     func testTheDisclosureIsADisclosureTriangleThatSaysItsItemAndWhetherItIsOpen() throws {
