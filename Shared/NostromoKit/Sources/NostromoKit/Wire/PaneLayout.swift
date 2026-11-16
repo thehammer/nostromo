@@ -128,9 +128,11 @@ public struct PrListItemModel: Decodable, Identifiable, Equatable {
     public let newActivity: Bool
     public let url:         String
     public let headSha:     String
+    /// Jira ticket keys the daemon detected; empty when none.
+    public let tickets:     [String]
 
     enum CodingKeys: String, CodingKey {
-        case repo, number, title, author, bucket, url
+        case repo, number, title, author, bucket, url, tickets
         case ciState     = "ci_state"
         case newActivity = "new_activity"
         case headSha     = "head_sha"
@@ -146,7 +148,8 @@ public struct PrListItemModel: Decodable, Identifiable, Equatable {
         ciState:     CiState,
         newActivity: Bool,
         url:         String,
-        headSha:     String
+        headSha:     String,
+        tickets:     [String] = []
     ) {
         self.repo        = repo
         self.number      = number
@@ -157,6 +160,7 @@ public struct PrListItemModel: Decodable, Identifiable, Equatable {
         self.newActivity = newActivity
         self.url         = url
         self.headSha     = headSha
+        self.tickets     = TicketKeys.sanitize(tickets)
     }
 
     public init(from decoder: Decoder) throws {
@@ -170,6 +174,7 @@ public struct PrListItemModel: Decodable, Identifiable, Equatable {
         newActivity = (try? c.decode(Bool.self,    forKey: .newActivity))  ?? false
         url         = (try? c.decode(String.self,  forKey: .url))          ?? ""
         headSha     = (try? c.decode(String.self,  forKey: .headSha))      ?? ""
+        tickets     = TicketKeys.sanitize((try? c.decode([String].self, forKey: .tickets)) ?? [])
     }
 
     /// Map to the shared `PerriPRRowModel` used by `PerriPRRow`.

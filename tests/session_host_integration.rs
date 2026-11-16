@@ -104,6 +104,7 @@ async fn session_round_trip_drives_real_claude() {
             cwd: Some(tmp.clone()),
             session_id: None,
             remote_control: false,
+            no_codebase: false,
         },
     )
     .await;

@@ -136,8 +136,32 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.100.0
 
+      # A hung test must fail this step with its name, not leave a silent job
+      # until the 30-minute limit cancels it (a cancelled job also hides which
+      # test hung). The step limit is under the job limit and over a green run
+      # (about 14 minutes with the build); `--no-fail-fast` reports every
+      # failing binary, not only the first. `Build & Lint` still needs this
+      # job to succeed: a step timeout fails the job.
       - name: Test
-        run: cargo test
+        id: test
+        shell: bash
+        timeout-minutes: 20
+        run: cargo test --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
+
+      # libtest prints `test <name> has been running for over 60 seconds` for a
+      # slow test and `test <name> ... ok` when it ends: what is left over is
+      # what was running when the step ended.
+      - name: Name the tests still running
+        if: ${{ always() && steps.test.outcome != 'success' }}
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/cargo-test.log"
+          [ -f "$log" ] || exit 0
+          grep -a -o '^test .* has been running for over 60 seconds' "$log" \
+            | sed -e 's/^test //' -e 's/ has been running for over 60 seconds$//' \
+            | sort -u | while IFS= read -r name; do
+                grep -a -q -F "test $name ... " "$log" || echo "::error::still running when the step ended: $name"
+              done
 
   # The required status check. Its name is the same as before the split, so
   # branch protection needs no change. `always()` makes it run (and fail) when a

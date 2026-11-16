@@ -43,6 +43,47 @@ class AppStore: ObservableObject {
     /// `mother_notice_state` frame; published only when it changes. The UI reflects this alone: a
     /// switch is never shown as changed before the daemon says so.
     @Published private(set) var motherNoticeState: MotherNoticeStateWire?
+    /// The author's open PRs, as the daemon last sent them. Kept through a disconnect (shown dimmed, marked
+    /// reconnecting); nil until the first `authored_prs` frame of this launch.
+    @Published private(set) var authoredPrs: AuthoredPrsSnapshot?
+    /// Whether the last `welcome` advertised `authored_prs_v1`. False means the Mother pane is unchanged.
+    @Published private(set) var authoredPrsSupported = false
+    /// Whether the last `welcome` advertised `authored_prs_notify_v1`: the Overview's buttons, picker and
+    /// pills appear only then. False leaves the read-only Overview.
+    @Published private(set) var authoredPrsNotifySupported = false
+    /// Whether the daemon link is up. While `.reconnecting` the last snapshot stays on screen, dimmed.
+    @Published private(set) var authoredPrsConnection: AuthoredPrsConnection = .connected
+    /// The hand-off verbs on the daemon connection. Available only while the link is up.
+    private(set) lazy var authoredPrHandoffTransport = AuthoredPrHandoffTransportLive(
+        supported: { [weak self] in
+            self?.authoredPrsNotifySupported == true && self?.authoredPrsConnection == .connected
+        },
+        sendPreview: { [weak self] in self?.client.sendAuthoredPrPreview($0) },
+        sendNotify: { [weak self] in self?.client.sendAuthoredPrNotify($0) },
+        sendStart: { [weak self] in self?.client.sendAuthoredPrStartSession($0) },
+        sendLink: { [weak self] in self?.client.sendAuthoredPrLink($0) })
+    /// Opens the preview, picker or sheet for a PR row and carries a send through to its focus.
+    private(set) lazy var authoredPrHandoff = AuthoredPrHandoff(
+        transport: authoredPrHandoffTransport,
+        presenter: FocusPresenter(),
+        openFocuses: {
+            FocusStore.shared.focuses
+                .filter { AuthoredPrsPicker.isTellable(builtIn: $0.isBuiltIn, agentName: $0.agentTag) }
+                .map {
+                    AuthoredPrPickerFocus(tag: $0.sessionTag, name: $0.displayName,
+                                          repoName: $0.projectPath.map { URL(fileURLWithPath: $0).lastPathComponent })
+                }
+        },
+        openFocusTags: FocusStore.shared.$focuses
+            .map { Set($0.map(\.sessionTag)) }
+            .removeDuplicates()
+            .eraseToAnyPublisher())
+    /// Reports whether the Overview is visible, hidden or the user idle. Sends only on change.
+    lazy var authoredPrsDemand = AuthoredPrsDemandReporter(
+        supported: { [weak self] in self?.authoredPrsSupported == true },
+        send: { [weak self] level in self?.client.sendAuthoredPrsDemand(level: level) })
+    /// Where the Overview's refresh goes. Tests replace it.
+    var authoredPrsRefreshSender: () -> Void = {}
     /// The daemon's last refusal of a notice switch, as one line; cleared by the next state frame or a disconnect.
     @Published private(set) var motherNoticeRefusal: String?
     /// Mother's quota block as the broker last reported it; nil when it sent none (an older Mother) or the
@@ -220,6 +261,19 @@ class AppStore: ObservableObject {
     /// it is the key window.
     let focusSelectionRequests = PassthroughSubject<Focus, Never>()
     private let orgResolver = RepoOrgResolver()
+
+    /// Test seam: receives `(action, prNumber, repo, tag)` instead of the daemon
+    /// connection when set.
+    var perriActionSender: ((String, Int?, String?, String?) -> Void)?
+
+    /// The Perri state directory (sentinels and the PR cache). Settable so
+    /// tests can point it away from the real home.
+    var perriStateDirectory: String =
+        "\(FileManager.default.homeDirectoryForCurrentUser.path)/.claude/state/perri"
+
+    /// The Jira site (bare host) the daemon reported on its last `perri_state`
+    /// frame; nil when none is configured. Nothing reads it yet.
+    @Published private(set) var perriJiraSite: String?
 
     // MARK: - Internals
 
@@ -444,6 +498,14 @@ class AppStore: ObservableObject {
 
     // MARK: - Session registry
 
+    /// The session for a focus, created with everything the focus says about where it runs: its folder, and
+    /// that a no-codebase focus must have one. Every path that may create a focus's session goes through
+    /// here, so none can make it first without the guard (an existing session ignores the flags).
+    func session(for focus: Focus) -> ChatSession {
+        session(for: focus.sessionTag, agentName: focus.agentTag, displayName: focus.displayName,
+                workingDirectory: focus.sessionWorkingDirectory, requiresWorkingDirectory: focus.noCodebase)
+    }
+
     /// Returns the shared `ChatSession` for `tag`, creating one if none
     /// exists yet. This is a **lazy creator**, which is exactly why the
     /// ordering in `FocusStore.remove(_:)` matters (see its comment): any
@@ -451,14 +513,15 @@ class AppStore: ObservableObject {
     /// view holding a reference to its old session has let go would silently
     /// recreate — and re-spawn — the session eviction just removed.
     func session(for tag: String, agentName: String? = nil, displayName: String? = nil,
-                 workingDirectory: String? = nil) -> ChatSession {
+                 workingDirectory: String? = nil, requiresWorkingDirectory: Bool = false) -> ChatSession {
         if let s = sessionRegistry[tag] {
             // Re-attach after a rename: carry the current label so the next spawn uses it.
             if let displayName, s.displayName != displayName { s.displayName = displayName }
             return s
         }
         let s = ChatSession(tag: tag, agentName: agentName, displayName: displayName,
-                            workingDirectory: workingDirectory, client: client)
+                            workingDirectory: workingDirectory,
+                            requiresWorkingDirectory: requiresWorkingDirectory, client: client)
         sessionRegistry[tag] = s
         return s
     }
@@ -565,6 +628,8 @@ class AppStore: ObservableObject {
         ModelStore.shared.sender = client
         TaskRequests.shared.sender = client
         SlashCommandStore.shared.sender = client
+        ConversationHistoryStore.shared.sender = client
+        ConversationHistoryStore.shared.onResumeFailed = { ConversationHistoryStore.presentResumeFailure(transcriptPath: $0) }
         ApprovalsLogStore.shared.sender = client
 
         // IPC messages (session, activity)
@@ -675,6 +740,8 @@ class AppStore: ObservableObject {
         // The global staging switch goes to the daemon right after every Subscribe that declares `terminal_staging_ui`.
         client.onStagingUISubscribed = { TerminalStagingStore.shared.resendGlobal() }
         RemoteShellStore.shared.transport = { [client] in client.sendRemoteShell($0) }
+        authoredPrsRefreshSender = { [client] in client.sendAuthoredPrsRefresh() }
+        authoredPrsDemand.start()
 
         // The work store holds what one connection pushed. When it drops, requests
         // still waiting for an answer can never get one; when a connection comes
@@ -688,6 +755,10 @@ class AppStore: ObservableObject {
                 self?.perriHealth.connectionChanged(connected)
                 self?.sessionListRefresher.connectionChanged(connected)
                 if !connected { self?.daemonDisconnected() }
+                if connected, let self {
+                    self.authoredPrsConnectionStarted(supported: self.client.daemonAdvertisesAuthoredPrs,
+                                                      notify: self.client.daemonAdvertisesAuthoredPrsNotify)
+                }
                 // Tells every chip whether the daemon is reachable, and on a new connection
                 // asks for the model catalogue and the per-agent defaults.
                 ModelStore.shared.connectionChanged(connected)
@@ -964,7 +1035,9 @@ class AppStore: ObservableObject {
             cycles: job.cycles,
             crew:   job.crew,
             originLabel: job.originLabel,
-            limiterWait: (state == "ready" || state == "queued") ? job.limiterWait : nil
+            limiterWait: (state == "ready" || state == "queued") ? job.limiterWait : nil,
+            dependsOn: job.dependsOn,
+            depWait: state == "queued" ? job.depWait : nil
         )
     }
 
@@ -1317,10 +1390,10 @@ class AppStore: ObservableObject {
 
     /// Ask the Rust daemon for an immediate queue re-fetch by writing the dirty sentinel.
     func refreshPerriQueue() {
-        let home    = FileManager.default.homeDirectoryForCurrentUser.path
-        let dirty   = "\(home)/.claude/state/perri/queue.dirty"
+        let stateDir = perriStateDirectory
+        let dirty    = "\(stateDir)/queue.dirty"
         DispatchQueue.global(qos: .userInitiated).async {
-            try? FileManager.default.createDirectory(atPath: "\(home)/.claude/state/perri",
+            try? FileManager.default.createDirectory(atPath: stateDir,
                                                      withIntermediateDirectories: true)
             FileManager.default.createFile(atPath: dirty, contents: nil)
             log.debug("wrote queue.dirty sentinel")
@@ -1349,34 +1422,17 @@ class AppStore: ObservableObject {
         // Cache miss: show loading state and ask the daemon.
         perriDetail        = nil
         perriDetailLoading = true
-
-        let home    = FileManager.default.homeDirectoryForCurrentUser.path
-        let stateDir = "\(home)/.claude/state/perri"
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                try FileManager.default.createDirectory(atPath: stateDir,
-                                                        withIntermediateDirectories: true)
-                // Write current-pr.json (single-slot signal to the daemon).
-                let pointer: [String: Any] = ["number": item.number, "repo": item.repo]
-                let data = try JSONSerialization.data(withJSONObject: pointer,
-                                                      options: [.prettyPrinted])
-                try data.write(to: URL(fileURLWithPath: "\(stateDir)/current-pr.json"),
-                               options: .atomic)
-                // Write the dirty sentinel so the daemon fetches immediately.
-                FileManager.default.createFile(atPath: "\(stateDir)/current-pr.dirty",
-                                               contents: nil)
-            } catch {
-                log.warning("selectPR signal write failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
+        // The daemon is told through `loadPR(repo:number:tag:)`, which sends the
+        // focus's own pin; the old machine-wide `current-pr.json` write is gone
+        // (the daemon stopped reading it when the pin became per focus).
     }
 
     // MARK: - Thin helpers for typed-content action dispatch
 
     /// Load a PR by identity only — used by `pr_list` pane rows where we have
-    /// `repo` + `number` but no full `PRQueueItem`. Writes the same sentinels as
-    /// `selectPR(_:)` so the daemon fetches and broadcasts the diff/CI detail.
-    func loadPR(repo: String, number: Int) {
+    /// `repo` + `number` but no full `PRQueueItem`. Pins the PR for `tag`'s own
+    /// focus through the daemon (`perri_action` `load_pr`), which opens no view.
+    func loadPR(repo: String, number: Int, tag: String) {
         // Build a minimal PRQueueItem shell so we can reuse selectPR's cache key logic.
         let shell = PRQueueItem(
             repo:        repo,
@@ -1390,14 +1446,24 @@ class AppStore: ObservableObject {
             headSha:     ""
         )
         selectPR(shell)
+        sendPerriAction("load_pr", number, repo, tag)
+    }
+
+    /// Sends a `perri_action` frame: through the injected sender when a test
+    /// set one, else over the daemon connection.
+    private func sendPerriAction(_ action: String, _ prNumber: Int?, _ repo: String?, _ tag: String?) {
+        if let sender = perriActionSender {
+            sender(action, prNumber, repo, tag)
+        } else {
+            client.sendPerriAction(action: action, prNumber: prNumber, repo: repo, tag: tag)
+        }
     }
 
     /// Called when the pr-cache/ directory changes — re-check if pending selection is warm.
     private func checkPrCacheForPendingSelection() {
         guard let pending = pendingSelection, perriDetailLoading else { return }
         let key  = prDetailCacheKey(pending)
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let path = "\(home)/.claude/state/perri/pr-cache/\(key).json"
+        let path = "\(perriStateDirectory)/pr-cache/\(key).json"
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let data   = try? Data(contentsOf: URL(fileURLWithPath: path)),
@@ -1540,9 +1606,42 @@ class AppStore: ObservableObject {
     /// Test seam: the nostromod connection dropped.
     func daemonDisconnectedForTesting() { daemonDisconnected() }
 
+    /// Test seam: a connection came up whose `welcome` did or did not advertise `authored_prs_v1`.
+    func daemonConnectedForTesting(authoredPrs supported: Bool, notify: Bool = false) {
+        authoredPrsConnectionStarted(supported: supported, notify: notify)
+    }
+
+    /// Ask the daemon for a full reconcile of the author's PRs now (⟳, ⌘R in the Overview).
+    func requestAuthoredPrsRefresh() { authoredPrsRefreshSender() }
+
+    private func authoredPrsConnectionStarted(supported: Bool, notify: Bool) {
+        if authoredPrsSupported != supported { authoredPrsSupported = supported }
+        if authoredPrsNotifySupported != (supported && notify) { authoredPrsNotifySupported = supported && notify }
+        // A daemon that no longer lists PRs cannot clear what it raised: the pills go with the list.
+        if !supported { needsYouCoordinator.setProducer(AuthoredPrNeedsYouProducer.name, items: []) }
+        if authoredPrsConnection != .connected { authoredPrsConnection = .connected }
+        if supported { authoredPrsDemand.connectionStarted() }
+    }
+
+    /// Test seam: forget the open-PR list, the feature flag and the link state (a test leaves the shared store as it found it).
+    func resetAuthoredPrsForTesting() {
+        authoredPrs = nil
+        authoredPrsSupported = false
+        authoredPrsNotifySupported = false
+        needsYouCoordinator.setProducer(AuthoredPrNeedsYouProducer.name, items: [])
+        authoredPrsConnection = .connected
+        authoredPrsRefreshSender = {}
+    }
+
+    /// Test seam: the Overview's snapshot, as `handle(.authoredPrs)` stores it.
+    func applyAuthoredPrsForTesting(_ snapshot: AuthoredPrsSnapshot) { handle(.authoredPrs(snapshot)) }
+
     /// A dropped daemon connection cannot take a notice switch, so the bell and the held bars must not
     /// look live: the state goes, and the reconnect replay brings it back.
     private func daemonDisconnected() {
+        if authoredPrsConnection != .reconnecting { authoredPrsConnection = .reconnecting }
+        authoredPrHandoffTransport.connectionLost()
+        authoredPrsDemand.connectionLost()
         if motherNoticeState != nil { motherNoticeState = nil }
         if motherNoticeRefusal != nil { motherNoticeRefusal = nil }
     }
@@ -1657,7 +1756,8 @@ class AppStore: ObservableObject {
         case .sessionSummaryUpdate(let tag, let summary):
             FocusStore.shared.updateSummary(tag: tag, summary: summary)
 
-        case .perriState(let tag, let queue, let current):
+        case .perriState(let tag, let queue, let current, let jiraSite):
+            if perriJiraSite != jiraSite { perriJiraSite = jiraSite }
             // Daemon push is an additive, lower-latency source feeding the same
             // publishers the file-watchers already drive.  The file-watcher path
             // is preserved (not removed) in this wedge.
@@ -1866,6 +1966,22 @@ class AppStore: ObservableObject {
         // The slash commands a session's CLI reports: every window's picker reads them from the store.
         case .sessionCommands:
             SlashCommandStore.shared.ingest(msg)
+
+        // The author's open PRs: the Mother pane's Overview reads them from here.
+        case .authoredPrs(let snapshot):
+            if snapshot != authoredPrs { authoredPrs = snapshot }
+            if authoredPrsConnection != .connected { authoredPrsConnection = .connected }
+            // A PR that needs the user, whose open owner has not been told, is one waiting item on that focus.
+            needsYouCoordinator.setProducer(AuthoredPrNeedsYouProducer.name,
+                                            items: AuthoredPrNeedsYouProducer.items(from: snapshot))
+
+        // The answer to a preview, send, start or link this connection asked for.
+        case .authoredPrAnswer(let frame):
+            authoredPrHandoffTransport.deliver(frame)
+
+        // The conversation history and the resume rules' answers: the Resume tab reads the store.
+        case .conversationHistory, .conversationResumeResult, .conversationHistoryChanged, .conversationResumeFailed:
+            ConversationHistoryStore.shared.ingest(msg)
 
         // The tracker pane's board and the focus's counts: every window's pane reads them from the store.
         case .trackerBoard, .trackerSummary:
@@ -2258,4 +2374,10 @@ struct MotherNoticeSwitches {
         }
         return true
     }
+}
+
+/// Whether the daemon link behind the Overview's snapshot is up.
+enum AuthoredPrsConnection: Equatable {
+    case connected
+    case reconnecting
 }

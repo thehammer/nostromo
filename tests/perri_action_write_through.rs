@@ -223,6 +223,7 @@ fn focus_meta(tag: &str) -> nostromo::ipc::protocol::FocusMeta {
     nostromo::ipc::protocol::FocusMeta {
         initial_model: None,
         initial_effort: None,
+        no_codebase: None,
         tag: tag.into(),
         display_name: tag.into(),
         agent_name: tag.into(),

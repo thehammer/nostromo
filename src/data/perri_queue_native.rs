@@ -91,6 +91,10 @@ use crate::{
         },
         perri_suppress::{unix_now_secs, SuppressStore},
         relay_client::{QueueSignal, RelayEvent},
+        ticket_keys::{scan_body, BodyKey, TicketScope},
+        tickets::jira::JiraProvider,
+        tickets::jira_projects,
+        work::credentials::JiraSite,
     },
 };
 
@@ -130,6 +134,18 @@ pub struct SearchIssueItem {
     user: Option<GhUser>,
     draft: Option<bool>,
     updated_at: Option<String>,
+    /// The keys scanned out of the PR body while it was parsed. The body itself is
+    /// dropped there: this item is cached across polls and must not keep it.
+    #[serde(default, rename = "body", deserialize_with = "scan_body_field")]
+    body_keys: Vec<BodyKey>,
+}
+
+fn scan_body_field<'de, D>(d: D) -> Result<Vec<BodyKey>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let body: Option<String> = Deserialize::deserialize(d)?;
+    Ok(body.as_deref().map(scan_body).unwrap_or_default())
 }
 
 #[derive(Deserialize, Clone)]
@@ -295,6 +311,9 @@ pub struct QueueCaches {
     /// up with a targeted probe yet.  The divergence audit exempts them: their
     /// difference from the poll's raw verdict is explained, not drift.
     pub last_grace_retained: HashSet<(String, u64)>,
+    /// The Jira site and project list ticket detection runs against. The
+    /// default has no site, so no PR carries tickets.
+    pub ticket_scope: TicketScope,
 }
 
 /// How long a targeted probe's verdict outlives a search that doesn't confirm
@@ -390,6 +409,10 @@ pub struct Candidate {
     /// PR the search index never confirms be carried forever instead of for two
     /// cycles.
     pub targeted_seen_at: Option<u64>,
+    /// Head branch name; empty until a `/pulls/{n}` read or a probe supplies it.
+    pub head_ref: String,
+    /// Keys pre-scanned from the PR body. The body itself is never kept.
+    pub body_keys: Vec<BodyKey>,
 }
 
 impl Candidate {
@@ -430,6 +453,8 @@ impl Candidate {
                 in_needs_review: false,
                 my_review: None,
                 targeted_seen_at: None,
+                head_ref: String::new(),
+                body_keys: item.body_keys.clone(),
             }
         })
     }
@@ -479,6 +504,7 @@ pub fn classify(
     me: &str,
     suppress: &SuppressStore,
     now_secs: u64,
+    scope: &TicketScope,
 ) -> Option<PrQueueItem> {
     let (bucket, new_activity) = classify_bucket(c, me)?;
 
@@ -499,6 +525,7 @@ pub fn classify(
         ci_state: c.ci_state,
         head_sha: c.head_sha.clone(),
         is_bot: c.is_bot,
+        tickets: scope.resolve(&c.title, &c.head_ref, &c.body_keys),
     })
 }
 
@@ -544,7 +571,7 @@ pub fn render_with_suppression(
     if suppressed > 0 {
         debug!("perri suppress: hid {suppressed} just-approved PR(s) from snapshot");
     }
-    render_items(&caches.candidates, me, &store, now)
+    render_items(&caches.candidates, me, &store, now, &caches.ticket_scope)
 }
 
 /// Render the whole ledger, in insertion order, into the snapshot's item list.
@@ -553,12 +580,13 @@ pub fn render_items(
     me: &str,
     suppress: &SuppressStore,
     now_secs: u64,
+    scope: &TicketScope,
 ) -> Vec<PrQueueItem> {
     let mut ordered: Vec<&Candidate> = candidates.values().collect();
     ordered.sort_by_key(|c| c.seq);
     ordered
         .into_iter()
-        .filter_map(|c| classify(c, me, suppress, now_secs))
+        .filter_map(|c| classify(c, me, suppress, now_secs, scope))
         .collect()
 }
 
@@ -566,13 +594,18 @@ pub fn render_items(
 
 pub struct PerriQueueNativeSource {
     config: Config,
+    /// Jira site and project list for ticket detection; no site by default.
+    ticket_scope: TicketScope,
 }
 
 impl PerriQueueNativeSource {
     /// Build a source without spawning its run loop — for tests and callers
     /// that want to drive one `fetch()` or one targeted update by hand.
     pub fn new(config: Config) -> Self {
-        Self { config }
+        Self {
+            config,
+            ticket_scope: TicketScope::default(),
+        }
     }
 
     /// Spawn the data source.
@@ -616,8 +649,19 @@ impl PerriQueueNativeSource {
 
         let interval_secs = config.pr_queue_poll_secs;
 
+        // The Jira site and project list; starts the 6-hourly refresh when
+        // credentials resolve.
+        let ticket_scope = jira_projects::spawn(
+            JiraProvider::new(&config),
+            JiraSite::from_config(&config).lookup(),
+            state_dir.join(jira_projects::CACHE_FILE),
+        );
+
         tokio::spawn(async move {
-            let source = PerriQueueNativeSource { config };
+            let source = PerriQueueNativeSource {
+                config,
+                ticket_scope,
+            };
             source
                 .run(
                     tx,
@@ -659,7 +703,10 @@ impl PerriQueueNativeSource {
         };
 
         // All cross-cycle mutable queue state lives here (see `QueueCaches`).
-        let mut caches = QueueCaches::default();
+        let mut caches = QueueCaches {
+            ticket_scope: self.ticket_scope.clone(),
+            ..Default::default()
+        };
         // Dedup / ordering / audit bookkeeping for the targeted path.
         let mut tstate = TargetedState::default();
         // Authenticated user login — fetched once and reused.
@@ -1110,6 +1157,7 @@ impl PerriQueueNativeSource {
                 c.ci_state = ci_state;
                 c.actions_failed = failed;
                 c.head_sha = head_sha;
+                c.head_ref = cached_head_ref(&endpoint_body_cache, &key.0, key.1);
                 if !failed {
                     known_urls.insert(c.url.clone());
                     b12_survivors += 1;
@@ -1260,6 +1308,7 @@ impl PerriQueueNativeSource {
                 c.ci_state = ci_state;
                 c.actions_failed = failed;
                 c.head_sha = head_sha;
+                c.head_ref = cached_head_ref(&endpoint_body_cache, &outcome.key.0, outcome.key.1);
             }
         }
 
@@ -1913,6 +1962,30 @@ pub async fn fetch_check_suites_failure(
     })
 }
 
+/// The PR's head branch, read from the `/pulls/{n}` body `get_pr_head_sha`
+/// already cached. Issues no request; empty when that read never succeeded.
+fn cached_head_ref(
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+    repo: &str,
+    number: u64,
+) -> String {
+    #[derive(Deserialize)]
+    struct Head {
+        #[serde(rename = "ref", default)]
+        head_ref: String,
+    }
+    #[derive(Deserialize)]
+    struct Pr {
+        head: Head,
+    }
+    let url = format!("{}/repos/{repo}/pulls/{number}", api_base());
+    let key = format!("{GITHUB_JSON_ACCEPT}|{url}");
+    let body = body_cache.lock().unwrap().get(&key).cloned();
+    body.and_then(|b| serde_json::from_str::<Pr>(&b).ok())
+        .map(|p| p.head.head_ref)
+        .unwrap_or_default()
+}
+
 async fn get_pr_head_sha(
     client: &GithubClient,
     repo: &str,
@@ -2416,6 +2489,7 @@ mod tests {
             }),
             draft: Some(draft),
             updated_at: updated_at.map(|s| s.to_owned()),
+            body_keys: Vec::new(),
         }
     }
 
@@ -2557,7 +2631,7 @@ mod tests {
             perri_state: Some(dir.path().to_path_buf()),
             ..Default::default()
         };
-        (PerriQueueNativeSource { config: cfg }, dir)
+        (PerriQueueNativeSource::new(cfg), dir)
     }
 
     /// Call `fetch()` with the given suppress store, returning the snapshot.
@@ -2868,6 +2942,127 @@ mod tests {
         );
         assert!(item.is_bot, "is_bot must be true for a dependabot PR");
         assert_eq!(item.head_sha, "bot-sha-1");
+    }
+
+    // ── Ticket detection ──────────────────────────────────────────────────────
+
+    /// A needs-review PR #42 whose title carries no key, with `body` in the
+    /// search response and `head_ref` in `/pulls/42`.
+    async fn mount_ticket_pr_mocks(server: &wiremock::MockServer, head_ref: &str, body: &str) {
+        use serde_json::json;
+        use wiremock::matchers::{method, path, path_regex, query_param};
+        use wiremock::{Mock, ResponseTemplate};
+
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .and(query_param(
+                "q",
+                "is:open is:pr review:required org:Carefeed archived:false",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "items": [{
+                    "number": 42,
+                    "title": "Refund rounding",
+                    "html_url": "https://github.com/Carefeed/admin-portal/pull/42",
+                    "repository_url": "https://api.github.com/repos/Carefeed/admin-portal",
+                    "user": { "login": "alice" },
+                    "draft": false,
+                    "updated_at": "2026-01-01T00:00:00Z",
+                    "body": body
+                }]
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/Carefeed/admin-portal/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "head": { "sha": "sha-42", "ref": head_ref },
+                "state": "open",
+                "merged_at": null
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r".*/commits/.*/check-runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"check_runs": []})))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r".*/commits/.*/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"statuses": []})))
+            .mount(server)
+            .await;
+    }
+
+    async fn fetch_with_scope(
+        server: &wiremock::MockServer,
+        scope: TicketScope,
+    ) -> PrQueueSnapshot {
+        API_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+        let (source, _dir) = make_source();
+        let suppress = Arc::new(Mutex::new(SuppressStore::new(
+            source.config.perri_state_dir().join("approvals-state.json"),
+            std::time::Duration::from_secs(900),
+        )));
+        let client = source.build_client().unwrap();
+        let mut caches = QueueCaches {
+            ticket_scope: scope,
+            ..Default::default()
+        };
+        source
+            .fetch(&client, "tester", &mut caches, &suppress)
+            .await
+            .expect("fetch() should succeed")
+    }
+
+    fn jira_scope() -> TicketScope {
+        use crate::data::ticket_keys::ProjectFilter;
+        TicketScope::fixed(
+            Some("carefeed.atlassian.net".into()),
+            ProjectFilter::Known(["PAYM", "INT", "CORE"].map(String::from).into()),
+        )
+    }
+
+    #[tokio::test]
+    async fn fetch_fills_tickets_from_branch_and_search_body() {
+        let server = wiremock::MockServer::start().await;
+        mount_ticket_pr_mocks(
+            &server,
+            "feature/PAYM-77-refunds",
+            "Fixes https://carefeed.atlassian.net/browse/INT-9; also mentions SHA-256.",
+        )
+        .await;
+        let snap = fetch_with_scope(&server, jira_scope()).await;
+        assert_eq!(snap.items.len(), 1);
+        // Title has none, then branch, then body.
+        assert_eq!(snap.items[0].tickets, ["PAYM-77", "INT-9"]);
+    }
+
+    #[tokio::test]
+    async fn fetch_without_a_site_carries_no_tickets() {
+        let server = wiremock::MockServer::start().await;
+        mount_ticket_pr_mocks(&server, "feature/PAYM-77-refunds", "INT-9").await;
+        let snap = fetch_with_scope(&server, TicketScope::default()).await;
+        assert!(snap.items[0].tickets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ticket_detection_adds_no_requests_per_cycle() {
+        let with = wiremock::MockServer::start().await;
+        mount_ticket_pr_mocks(&with, "feature/PAYM-77-refunds", "INT-9").await;
+        fetch_with_scope(&with, jira_scope()).await;
+        let without = wiremock::MockServer::start().await;
+        mount_ticket_pr_mocks(&without, "feature/PAYM-77-refunds", "INT-9").await;
+        fetch_with_scope(&without, TicketScope::default()).await;
+        let a = with.received_requests().await.unwrap().len();
+        let b = without.received_requests().await.unwrap().len();
+        assert_eq!(a, b, "detection must not add GitHub requests");
+        assert!(a > 0);
     }
 
     // ── Merged/closed PR exclusion integration tests ──────────────────────────

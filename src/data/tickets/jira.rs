@@ -124,8 +124,14 @@ pub fn resolve_credentials(config: &Config) -> Option<JiraCredentials> {
         .or_else(|| file_var(ENV_EMAIL));
     let token = env_var(ENV_TOKEN).or_else(|| file_var(ENV_TOKEN));
 
+    // The token goes to this host, so only the validated `<label>.atlassian.net`
+    // form is ever kept; anything else resolves to "not configured" and no
+    // request is made anywhere.
     match (site, email, token) {
-        (Some(site), Some(email), Some(token)) => Some(JiraCredentials { site, email, token }),
+        (Some(site), Some(email), Some(token)) => {
+            let site = crate::data::work::jira::validate_site(&site)?;
+            Some(JiraCredentials { site, email, token })
+        }
         _ => None,
     }
 }
@@ -189,6 +195,63 @@ impl JiraProvider {
             base_url,
             http: reqwest::Client::new(),
         }
+    }
+
+    /// Every project key on the site: `GET /rest/api/3/project/search`, paged
+    /// 50 at a time until `isLast`. Only keys are kept; the token never leaves
+    /// this provider.
+    pub async fn project_keys(&self) -> Result<Vec<String>, super::TicketError> {
+        let creds =
+            self.credentials
+                .as_ref()
+                .ok_or_else(|| super::TicketError::ProviderUnconfigured {
+                    message: self.unconfigured_message.clone(),
+                })?;
+        let url = format!("{}/rest/api/3/project/search", self.base_url);
+        let mut keys: Vec<String> = Vec::new();
+        let mut start_at = 0usize;
+        // A bound, not a limit anyone should reach: 200 pages is 10,000 projects.
+        for _ in 0..200 {
+            let resp = self
+                .http
+                .get(&url)
+                .basic_auth(&creds.email, Some(&creds.token))
+                .query(&[
+                    ("startAt", start_at.to_string()),
+                    ("maxResults", "50".to_owned()),
+                ])
+                .send()
+                .await
+                .map_err(|e| {
+                    super::TicketError::FetchFailed(format!("jira request failed: {e}"))
+                })?;
+            if !resp.status().is_success() {
+                return Err(super::TicketError::FetchFailed(format!(
+                    "jira project list responded {}",
+                    resp.status()
+                )));
+            }
+            let page: Value = resp.json().await.map_err(|e| {
+                super::TicketError::FetchFailed(format!("parsing jira project list: {e}"))
+            })?;
+            let values = page
+                .get("values")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            keys.extend(
+                values
+                    .iter()
+                    .filter_map(|v| v.get("key").and_then(|k| k.as_str()))
+                    .map(str::to_owned),
+            );
+            let is_last = page.get("isLast").and_then(|v| v.as_bool()).unwrap_or(true);
+            if is_last || values.is_empty() {
+                return Ok(keys);
+            }
+            start_at += values.len();
+        }
+        Ok(keys)
     }
 
     fn ticket_from_json(&self, key: &str, body: &Value) -> Ticket {
@@ -794,6 +857,70 @@ mod tests {
             "the token has no config.toml override — it can only come from env/file"
         );
 
+        clear_env_vars();
+    }
+
+    // 3b. The token only ever goes to the validated `<label>.atlassian.net`
+    //     host: every site form either normalises to exactly that, or the
+    //     provider is unconfigured and makes no request at all.
+    #[test]
+    fn the_site_is_validated_before_any_credential_is_used() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env_vars();
+        std::env::set_var(ENV_EMAIL, "me@acme.com");
+        std::env::set_var(ENV_TOKEN, "tok-secret");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let good = [
+            ("carefeed", "carefeed.atlassian.net"),
+            ("https://carefeed.atlassian.net/", "carefeed.atlassian.net"),
+            ("CareFeed.Atlassian.NET", "carefeed.atlassian.net"),
+            ("carefeed.atlassian.net", "carefeed.atlassian.net"),
+        ];
+        for (raw, host) in good {
+            let config = Config {
+                jira_site: Some(raw.into()),
+                ..config_with_no_credentials_file(tmp.path())
+            };
+            let provider = JiraProvider::new(&config);
+            assert_eq!(
+                provider.base_url,
+                format!("https://{host}"),
+                "{raw:?} must go to the validated host"
+            );
+            assert_eq!(provider.credentials.as_ref().unwrap().site, host);
+        }
+
+        let bad = [
+            "evil.example",
+            "github.com.evil.example",
+            "a.b.atlassian.net",
+            "",
+            "carefeed.atlassian.net:8443",
+            "user:pw@carefeed.atlassian.net",
+            "carefeed.atlassian.net/path",
+            "http://carefeed.atlassian.net",
+            "carefeed.atlassian.net.evil.example",
+        ];
+        for raw in bad {
+            let config = Config {
+                jira_site: Some(raw.into()),
+                ..config_with_no_credentials_file(tmp.path())
+            };
+            let provider = JiraProvider::new(&config);
+            assert!(!provider.is_configured(), "{raw:?}");
+            assert!(provider.base_url.is_empty(), "{raw:?}");
+            assert!(
+                matches!(
+                    rt.block_on(provider.project_keys()),
+                    Err(crate::data::tickets::TicketError::ProviderUnconfigured { .. })
+                ),
+                "{raw:?} must make no request"
+            );
+        }
         clear_env_vars();
     }
 

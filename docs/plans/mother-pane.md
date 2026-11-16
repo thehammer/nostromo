@@ -85,6 +85,9 @@ So P3 header controls, honestly scoped:
 - **Mother daemon status** chip (CLI `mother daemon status`) with Start when down.
 - Not offered: pause/resume queue (no command exists; would need a broker change).
 
+## Dependencies in the Overview
+A job with `depends_on` shows a DEPENDS ON section in its Overview (between the live todo list and the meta rows): each dependency's short id, plain bounded title and state, clickable when the dependency is in the queue. While the job is `queued`, Mother's `dep_wait` names the first unsatisfied dependency and why; its row carries that reason in plain words, and the list row's second line reads "Waiting: on job <short> (PR open, not merged)" ("Blocked: …" in amber for `blocked`). A dependency counts as done only once its PR has merged, so a finished dependency with an open PR still holds the dependent. The Mac reads these keys straight from the broker (no daemon field). Archived dependencies are not in the broker's list and show as "not in the queue (archived or unknown)". More than five dependencies collapse behind "Show all N"; the named one is always visible.
+
 ## Open questions
 - Pause-queue would need a new broker command in the Mother repo — worth filing there if wanted.
 - Should finished jobs older than N hours collapse? (Default: show last 24h.)

@@ -96,6 +96,11 @@ func buildNavRows(
     // stale session summary. Never nil, so every row keeps the same two-line
     // height (D6) — a row with nothing to say gets "" rather than no second line.
     func secondaryLine(for f: Focus, idSuffix: String?) -> String {
+        // No codebase: the session summary when there is one, else the words "No codebase".
+        // Never a branch or a PR: there is no repo.
+        if f.noCodebase {
+            return [f.resumedLabel, summaryOf(f) ?? FocusRowText.noCodebase].compactMap { $0 }.joined(separator: " · ")
+        }
         if f.agentTag.lowercased() == "perri" {
             let (repo, number) = prFor(f.sessionTag)
             return FocusPRLabel.secondary(repo: repo, number: number, fallback: nil)
@@ -104,7 +109,7 @@ func buildNavRows(
            let detail = badgeDetailFor(f.sessionTag) {
             return detail
         }
-        return [branchOf(f), summaryOf(f), idSuffix].compactMap { $0 }.joined(separator: " · ")
+        return [f.resumedLabel, branchOf(f), summaryOf(f), idSuffix].compactMap { $0 }.joined(separator: " · ")
     }
 
     /// A focus row: the user's label when set, else `defaultLabel`.
@@ -131,7 +136,8 @@ func buildNavRows(
         // a. Org-level (pathless) focuses — canonical built-in order, then alpha
         let pathless = orgFocuses.filter { $0.projectPath == nil }
         for f in sortedPathlessFocuses(pathless) {
-            rows.append(focusRow(f, defaultLabel: f.agentTag.capitalized, indented: false))
+            rows.append(focusRow(f, defaultLabel: f.noCodebase ? f.displayName : f.agentTag.capitalized,
+                                 indented: false))
         }
 
         // b. Repo groups — alphabetical by repoName
@@ -170,6 +176,11 @@ func buildNavRows(
 }
 
 // MARK: - Helpers
+
+/// Words the sidebar row says for a no-codebase focus (also what VoiceOver reads).
+enum FocusRowText {
+    static let noCodebase = "No codebase"
+}
 
 /// Canonical sort rank for org names: Carefeed = 0, Personal = 1, others = 2 + alpha.
 private func orgRank(_ org: String) -> (Int, String) {

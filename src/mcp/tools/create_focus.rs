@@ -90,6 +90,14 @@ pub struct CreateFocusRequest {
     pub model: Option<String>,
     /// The effort for the new focus; `None`: the model's default.
     pub effort: Option<String>,
+    /// The tag to create the focus under, instead of one derived from the agent and title. For a caller
+    /// whose title names something that must not reach a log line (a tag is logged). Absent from the MCP
+    /// tool: an agent never chooses a tag.
+    pub tag_override: Option<String>,
+    /// A message written to the new session exactly as given, before the focus is announced (so a failed
+    /// write leaves no focus). Unframed and unfenced: only a caller whose text is already the user's own and
+    /// verified (the PR hand-off, which sends what the person previewed). Absent from the MCP tool.
+    pub first_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,7 +263,7 @@ async fn create(
         .to_owned();
 
     let key = req.source_item.as_ref().map_or_else(
-        || format!("tag:{}", derive_tag(&req.agent, &req.title)),
+        || format!("tag:{}", base_tag(&req)),
         |i| format!("item:{}", i.id),
     );
     let _serialized = lock_key(key).await;
@@ -409,13 +417,15 @@ async fn create_focus_session(
         source_item,
         select_for_client,
         caller,
+        tag_override,
+        first_message,
         ..
     } = req;
 
     // Without a source item the tag is the only identity: a live focus under
     // it is "the same one". With one, a live tag belongs to something else (the
     // same item was handled above), so take the next free suffix.
-    let base = derive_tag(&agent, &title);
+    let base = tag_override.unwrap_or_else(|| derive_tag(&agent, &title));
     let existing = |tag: String, label: String| {
         Ok(CreateFocusOutcome {
             kind: OutcomeKind::Existing,
@@ -484,9 +494,21 @@ async fn create_focus_session(
         }
     }
 
+    if let Some(first) = first_message {
+        let mut mgr = daemon.session_mgr.lock().unwrap();
+        if let Err(e) = mgr.send_user_message(&tag, &first, &[]) {
+            tracing::warn!("create_focus: failed to write the first message: {e}");
+            mgr.stop(&tag);
+            return Err(CreateFocusError::SeedFailed(format!(
+                "the agent started but its first message could not be delivered ({e}); nothing was sent"
+            )));
+        }
+    }
+
     let meta = FocusMeta {
         initial_model: None,
         initial_effort: None,
+        no_codebase: None,
         tag: tag.clone(),
         display_name: title,
         agent_name: agent,
@@ -963,6 +985,13 @@ fn slugify(text: &str) -> String {
     slug.trim_matches('-').to_owned()
 }
 
+/// The tag a request names: its override, else the derived one.
+fn base_tag(req: &CreateFocusRequest) -> String {
+    req.tag_override
+        .clone()
+        .unwrap_or_else(|| derive_tag(&req.agent, &req.title))
+}
+
 /// Derive a stable, filesystem/IPC-safe focus tag from an agent name + title.
 /// e.g. ("cody", "CORE-1234") -> "cody-core-1234".
 fn derive_tag(agent: &str, title: &str) -> String {
@@ -1081,6 +1110,9 @@ fn parse_request(
         queued_by_app: false,
         model: string("model")?.filter(|s| !s.is_empty()),
         effort: string("effort")?.filter(|s| !s.is_empty()),
+        // Deliberately not arguments: an agent never chooses a tag or writes a raw first message.
+        tag_override: None,
+        first_message: None,
     })
 }
 

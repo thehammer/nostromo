@@ -64,6 +64,13 @@ class ReplView: NSView {
     /// Open this focus's Background activity popover from its input bar (the tracker's summary row).
     func showBackgroundList() { inputBar.showBackgroundPopover(nil) }
 
+    /// Put the keyboard in the input (the PR Overview's hand-off). False when this view is not in a window.
+    @discardableResult
+    func focusInput() -> Bool {
+        guard let window else { return false }
+        return window.makeFirstResponder(inputBar.textView)
+    }
+
     /// The router a pane with `tag` installs on its wake markers. `openTask` says whether the task's
     /// window opened (`TaskWindowManager` by default); if not, `showList` runs. Tests pass recorders.
     static func wakeMarkerRouter(
@@ -197,14 +204,17 @@ class ReplView: NSView {
     private lazy var announcer = ToolActivityAnnouncer(post: ToolActivityAnnouncer.voiceOver(from: self))
 
     init(tag: String, agentName: String? = nil, displayName: String? = nil,
-         workingDirectory: String? = nil, quickActions: [QuickAction] = [],
+         workingDirectory: String? = nil, requiresWorkingDirectory: Bool = false,
+         quickActions: [QuickAction] = [],
          foldStore: TranscriptFoldStore = .shared) {
         self.quickActions = quickActions
         foldSync = PaneFoldSync(tag: tag, store: foldStore,
                                 harnessMode: TranscriptLoadHarness.foldsExpandedByDefault ? .allActivity : nil)
         // Use the shared registry so multiple windows showing the same tag
         // observe the same session and stay in sync (mirrored).
-        let shared = AppStore.shared.session(for: tag, agentName: agentName, displayName: displayName, workingDirectory: workingDirectory)
+        let shared = AppStore.shared.session(for: tag, agentName: agentName, displayName: displayName,
+                                               workingDirectory: workingDirectory,
+                                               requiresWorkingDirectory: requiresWorkingDirectory)
         session = shared
         // The guard bar names who was blocked (`Blocked: Cody tried to …`).
         approvalHost = ApprovalOverlayHost(tag: tag, store: ApprovalStore.shared, agentName: { shared.agentName },
@@ -1364,11 +1374,15 @@ class ReplView: NSView {
         }
     }
 
+    /// What the New Session confirmation says: the conversation is kept, not lost.
+    static let newSessionInformativeText =
+        "The current conversation moves to History. You can resume it from New Focus \u{203A} Resume."
+
     @objc private func newSessionTapped() {
         // Confirm before wiping history
         let alert = NSAlert()
         alert.messageText     = "Start new session?"
-        alert.informativeText = "This clears the local display and disconnects from the current Claude session. Claude's memory of this conversation will be lost."
+        alert.informativeText = Self.newSessionInformativeText
         alert.alertStyle      = .warning
         alert.addButton(withTitle: "New Session")
         alert.addButton(withTitle: "Cancel")

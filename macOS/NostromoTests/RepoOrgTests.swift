@@ -360,13 +360,14 @@ final class RepoOrgTests: XCTestCase {
         func walk(_ v: NSView) { all.append(v); v.subviews.forEach(walk) }
         walk(content)
 
-        XCTAssertTrue(all.filter { $0 is NSSegmentedControl }.isEmpty)
+        // The New | Resume tab switch is the one segmented control; there is no Org picker among the rest.
+        XCTAssertTrue(all.filter { $0 is NSSegmentedControl && $0.accessibilityLabel() != "New or Resume" }.isEmpty)
         let labels = all.compactMap { ($0 as? NSTextField) }
         XCTAssertFalse(labels.contains { $0.stringValue == "Org:" })
 
         let project = try XCTUnwrap(labels.first { $0.stringValue == "Project:" })
         // Preview is the grey 11pt label; it must be anchored below the Project row.
-        let preview = try XCTUnwrap(labels.first { $0.font?.pointSize == 11 })
+        let preview = try XCTUnwrap(labels.first { $0.font?.pointSize == 11 && $0.accessibilityLabel() != "Project error" })
         XCTAssertLessThanOrEqual(preview.frame.maxY, project.frame.minY + 0.5)
     }
 

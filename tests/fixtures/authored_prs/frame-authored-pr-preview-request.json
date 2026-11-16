@@ -1,0 +1,9 @@
+{
+  "type": "authored_pr_preview_request",
+  "request_id": "r1",
+  "repo": "thehammer/nostromo",
+  "number": 458,
+  "target": {
+    "tag": "focus-nostromo"
+  }
+}

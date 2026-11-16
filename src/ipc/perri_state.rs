@@ -31,12 +31,38 @@ pub fn build_perri_state(
     tag: &str,
     queue_snap: Option<&PrQueueSnapshot>,
     pr_snap: Option<&PrSnapshot>,
+    jira_site: Option<&str>,
 ) -> ServerMsg {
     ServerMsg::PerriState {
         tag: tag.to_owned(),
         queue: queue_snap.map(|s| s.items.clone()).unwrap_or_default(),
         current: pr_snap.cloned().map(Box::new),
+        jira_site: jira_site.and_then(bare_jira_host),
     }
+}
+
+/// A Jira site reduced to a bare host: scheme, trailing slash and port
+/// stripped. `None` when the value is not a plain hostname (spaces, a path,
+/// other characters, empty).
+pub fn bare_jira_host(site: &str) -> Option<String> {
+    let s = site.trim();
+    let s = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .unwrap_or(s);
+    let s = s.strip_suffix('/').unwrap_or(s);
+    let host = match s.split_once(':') {
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => host,
+        Some(_) => return None,
+        None => s,
+    };
+    let valid = !host.is_empty()
+        && !host.starts_with(['.', '-'])
+        && !host.ends_with(['.', '-'])
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    valid.then(|| host.to_ascii_lowercase())
 }
 
 /// Every focus a `PerriState` frame could be addressed to: those with a PR
@@ -75,6 +101,7 @@ pub fn perri_state_tags(
 pub struct WatchPerriStateProvider {
     queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
     pr_rx: watch::Receiver<PrSnapshots>,
+    jira_site: Option<String>,
 }
 
 impl WatchPerriStateProvider {
@@ -82,7 +109,17 @@ impl WatchPerriStateProvider {
         queue_rx: watch::Receiver<Option<PrQueueSnapshot>>,
         pr_rx: watch::Receiver<PrSnapshots>,
     ) -> Self {
-        Self { queue_rx, pr_rx }
+        Self {
+            queue_rx,
+            pr_rx,
+            jira_site: None,
+        }
+    }
+
+    /// The Jira site every replayed frame carries (resolved once at start).
+    pub fn with_jira_site(mut self, jira_site: Option<String>) -> Self {
+        self.jira_site = jira_site;
+        self
     }
 }
 
@@ -101,7 +138,7 @@ impl PerriStateProvider for WatchPerriStateProvider {
             .into_iter()
             .map(|tag| {
                 let pr = prs.get(&tag).map(|s| &**s);
-                build_perri_state(&tag, queue.as_ref(), pr)
+                build_perri_state(&tag, queue.as_ref(), pr, self.jira_site.as_deref())
             })
             .collect()
     }
@@ -146,6 +183,7 @@ mod tests {
                 ci_state: Default::default(),
                 head_sha: "abc123".into(),
                 is_bot: false,
+                tickets: vec![],
             }],
             stale: false,
             error: None,
@@ -163,6 +201,7 @@ mod tests {
                 tag,
                 queue,
                 current,
+                ..
             } => (
                 tag.clone(),
                 queue.iter().map(|i| (i.repo.clone(), i.number)).collect(),
@@ -179,16 +218,65 @@ mod tests {
         let q = queue();
         let snap = pr("acme/api", 7);
 
-        let (tag, queue_items, current) =
-            parts(&build_perri_state("reviewer-two", Some(&q), Some(&snap)));
+        let (tag, queue_items, current) = parts(&build_perri_state(
+            "reviewer-two",
+            Some(&q),
+            Some(&snap),
+            None,
+        ));
         assert_eq!(tag, "reviewer-two");
         assert_eq!(queue_items, vec![("acme/web".to_owned(), 42)]);
         assert_eq!(current, Some(("acme/api".to_owned(), 7)));
 
-        let (tag, queue_items, current) = parts(&build_perri_state("perri", None, None));
+        let (tag, queue_items, current) = parts(&build_perri_state("perri", None, None, None));
         assert_eq!(tag, "perri");
         assert!(queue_items.is_empty(), "a None queue is an empty list");
         assert_eq!(current, None, "a focus with no PR carries no current");
+    }
+
+    #[test]
+    fn build_perri_state_carries_a_bare_jira_host_and_refuses_anything_else() {
+        let site = |v: &str| match build_perri_state("perri", None, None, Some(v)) {
+            ServerMsg::PerriState { jira_site, .. } => jira_site,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            site("https://carefeed.atlassian.net/").as_deref(),
+            Some("carefeed.atlassian.net")
+        );
+        assert_eq!(
+            site("carefeed.atlassian.net:443").as_deref(),
+            Some("carefeed.atlassian.net")
+        );
+        assert_eq!(
+            site("carefeed.atlassian.net").as_deref(),
+            Some("carefeed.atlassian.net")
+        );
+        assert_eq!(site("carefeed atlassian.net"), None);
+        assert_eq!(site("https://carefeed.atlassian.net/browse/X-1"), None);
+        assert_eq!(site(""), None);
+        match build_perri_state("perri", None, None, None) {
+            ServerMsg::PerriState { jira_site, .. } => assert_eq!(jira_site, None),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn replayed_frames_carry_the_provider_s_jira_site() {
+        let (_qtx, queue_rx) = watch::channel(Some(queue()));
+        let (_ptx, pr_rx) = watch::channel(crate::data::perri_pr::no_prs());
+        let provider = WatchPerriStateProvider::new(queue_rx, pr_rx)
+            .with_jira_site(Some("carefeed.atlassian.net".into()));
+        let frames = provider.perri_states(&["perri".to_owned()]);
+        assert!(!frames.is_empty());
+        for f in frames {
+            match f {
+                ServerMsg::PerriState { jira_site, .. } => {
+                    assert_eq!(jira_site.as_deref(), Some("carefeed.atlassian.net"))
+                }
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     #[test]

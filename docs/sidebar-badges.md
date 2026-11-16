@@ -7,7 +7,7 @@ list.
 | Mark | Meaning | Where it comes from | Look |
 |---|---|---|---|
 | **Blocking** pill + row highlight | An agent is stopped until you decide. | A pending approval (`NeedsYouReason.approvalPending`). | Red pill with a hand glyph and the count, on the second line. The row gets a red-tinted fill and a 3 pt red bar on its leading edge. |
-| **Waiting** pill | Nothing is stalled, but something wants you. | Tracker items marked needs-you (`trackerWaiting`, which includes un-run staged commands), Mother holds and awaiting jobs (`motherHold`, `motherAwaiting`, `motherAttention`) and anything else (`other`). | Quiet amber outlined pill with a list glyph and the count, on the second line. No row highlight. |
+| **Waiting** pill | Nothing is stalled, but something wants you. | Tracker items marked needs-you (`trackerWaiting`, which includes un-run staged commands), Mother holds and awaiting jobs (`motherHold`, `motherAwaiting`, `motherAttention`), one of your open PRs that needs you (`prAttention`: the daemon marks the row `pill`, its owner is a known open focus, it is not a draft, and that focus has not been told about its current state; a notify clears it, a new failing check, change request or comment raises it again) and anything else (`other`). | Quiet amber outlined pill with a list glyph and the count, on the second line. No row highlight. |
 | **Attention dot** | An open decision (AskUserQuestion) is waiting. | `NeedsYouReason.decisionOpen`, via the attention registry. | Purple dot on the title line. Unchanged; open decisions are counted in neither pill. |
 
 A focus with both shows both pills (blocking first), and still gets the highlight. Each kind of mark

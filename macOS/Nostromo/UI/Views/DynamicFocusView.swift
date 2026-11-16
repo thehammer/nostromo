@@ -401,7 +401,7 @@ final class DynamicFocusView: NSView {
         return nil
     }
 
-    private func makeLeafView(paneId: String, reusing existing: NSView?) -> NSView {
+    func makeLeafView(paneId: String, reusing existing: NSView?) -> NSView {
         if let existing {
             // Same pane_id as before this structural change — reuse the
             // instance verbatim (already detached from its old superview by
@@ -418,7 +418,8 @@ final class DynamicFocusView: NSView {
                 tag:              focus.sessionTag,
                 agentName:        focus.agentTag,
                 displayName:      focus.displayName,
-                workingDirectory: focus.projectPath,
+                workingDirectory: focus.sessionWorkingDirectory,
+                requiresWorkingDirectory: focus.noCodebase,
                 quickActions:     focus.quickActions.isEmpty
                                       ? QuickAction.replDefaults
                                       : focus.quickActions
@@ -461,7 +462,17 @@ final class DynamicFocusView: NSView {
             wrapper.focusTag = focus.sessionTag
             // Wire pr_list row actions through AppStore so the existing
             // PerriState load path fires (D2: reuse existing PerriAction path).
-            wrapper.onLoadPR    = { repo, number in AppStore.shared.loadPR(repo: repo, number: number) }
+            // The click pins the PR for this focus only and opens nothing.
+            let focusTag = focus.sessionTag
+            wrapper.isPerriFocus = focus.isPerriFocus
+            if focus.isPerriFocus {
+                // Side-pane controls: tabs open in this focus's own pane; nothing goes to the daemon.
+                let pane = ReviewPaneRegistry.shared.model(for: focusTag)
+                wrapper.rowActions = PerriRowActions.opening(in: pane)
+            }
+            wrapper.onLoadPR    = { repo, number in
+                AppStore.shared.loadPR(repo: repo, number: number, tag: focusTag)
+            }
             // macOS approve: no native approve path exists in Phase 1 (the
             // legacy macOS PerriView had no swipe-approve). The context menu item
             // is wired to a no-op; full macOS approve is Phase 2 work.
@@ -472,7 +483,7 @@ final class DynamicFocusView: NSView {
             // set_pane_content — no wire protocol changes needed.
             wrapper.onRefresh = { [weak self] in
                 guard let self else { return }
-                AppStore.shared.session(for: self.focus.sessionTag).send("refresh")
+                AppStore.shared.session(for: self.focus).send("refresh")
             }
             leafViews[paneId] = wrapper
             return wrapper
@@ -1293,13 +1304,16 @@ final class PaneContentNSView: NSView {
         let tag = focusTag
         guard !tag.isEmpty else { pinCancellable = nil; return }
         pinCancellable = AppStore.shared.$perriDetailByTag
-            .map { details -> PRRef? in
+            .map { details -> ReviewingPR? in
                 guard let d = details[tag], let number = d.prNumber else { return nil }
-                return PRRef(repo: d.repo, number: number)
+                return ReviewingPR(repo: d.repo, number: number, title: d.title)
             }
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] ref in self?.model.selectedPR = ref }
+            .sink { [weak self] pin in
+                self?.model.selectedPR = pin.map { PRRef(repo: $0.repo, number: $0.number) }
+                self?.model.reviewing = pin
+            }
     }
 
     /// The line-addressable renderer for the `code`/`diff` kinds (W2 —
@@ -1334,6 +1348,14 @@ final class PaneContentNSView: NSView {
     /// Injected by `DynamicFocusView.makeLeafView` — called when a `pr_list` row is loaded.
     var onLoadPR: (String, Int) -> Void = { _, _ in } {
         didSet { model.onLoadPR = onLoadPR }
+    }
+    /// Injected by `DynamicFocusView.makeLeafView`: the pane belongs to a Perri focus.
+    var isPerriFocus: Bool = false {
+        didSet { model.isPerriFocus = isPerriFocus }
+    }
+    /// Injected by `DynamicFocusView.makeLeafView` for a Perri focus: the side-pane controls on queue rows.
+    var rowActions: PerriRowActions? {
+        didSet { model.rowActions = rowActions }
     }
     /// Injected by `DynamicFocusView.makeLeafView` — called when a `pr_list` row is approved.
     var onApprovePR: (String, Int) -> Void = { _, _ in } {

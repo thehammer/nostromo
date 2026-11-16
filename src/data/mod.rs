@@ -4,6 +4,7 @@
 //! dirty-file wakeup, and pushes snapshots to a `tokio::sync::watch` channel.
 //! `nostromd` and the MCP tools read the latest value on demand.
 
+pub mod authored_prs;
 pub mod dirty_file;
 pub mod file_source;
 pub mod fred_accounts;
@@ -29,6 +30,7 @@ pub mod perri_suppress;
 pub mod rate_limits;
 pub mod relay_client;
 pub mod teri_todos;
+pub mod ticket_keys;
 pub mod tickets;
 pub mod token_store;
 pub mod unified_diff;

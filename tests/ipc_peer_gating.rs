@@ -1547,6 +1547,7 @@ async fn spawn_fake_session(unix: &mut UnixStream, tag: &str, agent: &str, view:
             cwd: None,
             session_id: Some(format!("sid-{view}")),
             remote_control: false,
+            no_codebase: false,
         },
     )
     .await;
@@ -1979,6 +1980,7 @@ async fn a_tcp_client_cannot_spawn_a_session_under_a_sensitive_tag_or_for_a_fred
                 cwd: None,
                 session_id: Some(format!("sid-{view}")),
                 remote_control: false,
+                no_codebase: false,
             },
         )
         .await;
@@ -3266,6 +3268,7 @@ fn perri_state(tag: &str) -> ServerMsg {
         tag: tag.into(),
         queue: vec![],
         current: None,
+        jira_site: None,
     }
 }
 
@@ -3346,6 +3349,7 @@ async fn a_tcp_client_cannot_reach_a_fred_session_spawned_under_a_plugin_qualifi
                 cwd: None,
                 session_id: None,
                 remote_control: false,
+                no_codebase: false,
             },
         )
         .await;
@@ -3471,6 +3475,7 @@ fn meta(tag: &str, display_name: &str, agent: &str, built_in: bool) -> FocusMeta
     FocusMeta {
         initial_model: None,
         initial_effort: None,
+        no_codebase: None,
         tag: tag.into(),
         display_name: display_name.into(),
         agent_name: agent.into(),
@@ -4155,6 +4160,7 @@ fn spawn_msg(tag: &str, agent: &str, view: &str, session_id: Option<&str>) -> Cl
         cwd: Some("/tmp".into()),
         session_id: session_id.map(str::to_string),
         remote_control: false,
+        no_codebase: false,
     }
 }
 
@@ -5079,6 +5085,7 @@ impl WorkService for AnnouncingWorkService {
         let secret_meta = FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: tag.clone(),
             display_name: "Cody on SECRET-DISPLAY".into(),
             agent_name: "cody".into(),
@@ -5226,6 +5233,7 @@ fn junk_focus(i: usize) -> FocusMeta {
     FocusMeta {
         initial_model: None,
         initial_effort: None,
+        no_codebase: None,
         tag: format!("{i:03}{}:fred", "j".repeat(3_999_000)),
         display_name: "x".into(),
         agent_name: "cody".into(),
@@ -8318,6 +8326,7 @@ mod background_tasks {
                 cwd: Some(cwd.clone()),
                 session_id: Some(format!("sid-{view}")),
                 remote_control: false,
+                no_codebase: false,
             },
         )
         .await;
@@ -9178,6 +9187,7 @@ mod background_tasks {
                     cwd: Some(cwd.clone()),
                     session_id: Some(format!("sid-{view}")),
                     remote_control: false,
+                    no_codebase: false,
                 },
             )
             .await;

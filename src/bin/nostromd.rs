@@ -199,6 +199,8 @@ async fn main() -> Result<()> {
     // predates a fresh process's in-memory index) still attribute correctly
     // from the first event, not just after this process spawns/restarts them.
     session_mgr.lock().unwrap().seed_reverse_index();
+    // Fill the conversation history from the session-id history, once, off-thread.
+    session_mgr.lock().unwrap().start_conversation_backfill();
     // A model switch that was waiting for a turn to end when the daemon last
     // stopped will never apply: clear it, with a note, before anything can
     // connect and respawn the session.
@@ -410,6 +412,7 @@ async fn main() -> Result<()> {
                     let mgr = &mut *session_mgr.lock().unwrap();
                     mgr.reap_and_recover();
                     mgr.emit_pending_summaries();
+                    mgr.flush_conversation_nudge();
                     sweep_due.then(|| mgr.approvals().cloned()).flatten()
                 };
                 if sweep_due {
@@ -772,8 +775,30 @@ async fn main() -> Result<()> {
             Arc::new(nostromo::mother::notices::SystemClock),
         );
         tracker.spawn(signals);
-        if relay_wanted(perri_wants_relay, notice_engine.enabled()) {
+        // The author's PR list registers its relay channel before the relay spawns.
+        let authored_relay_rx = config.authored_prs_enabled.then(|| hub.channel());
+        let relay_status = hub.status();
+        if relay_wanted(
+            perri_wants_relay,
+            notice_engine.enabled(),
+            config.authored_prs_enabled,
+        ) {
             nostromo::data::relay_client::spawn(config.clone(), hub);
+        }
+        if let Some(relay_rx) = authored_relay_rx {
+            start_authored_prs(
+                &config,
+                relay_rx,
+                relay_status,
+                jobs_feed.jobs_rx(),
+                &session_mgr,
+                broadcast_tx.clone(),
+                server.subscribe_republish(),
+                socket_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .to_path_buf(),
+            );
         }
     }
 
@@ -1094,16 +1119,21 @@ impl nostromo::agents::AgentSpawner for RealAgentSpawner {
         let (pr_rx, pr_refresh_tx) =
             PerriPrNativeSource::spawn(self.config.clone(), Some(live_focuses));
 
+        // The Jira site is resolved once here (it reads a file) and rides on
+        // every `PerriState` frame, for the Mac's host allowlist.
+        let jira_site =
+            nostromo::data::work::credentials::JiraSite::from_config(&self.config).lookup();
+
         // f1: attach-replay for `ServerMsg::PerriState` (see `PerriStateProvider`).
         // Registered here, not inside the `write_bridge_mcp_config()` success arm:
         // Perri replay has nothing to do with the MCP bridge.
         self.session_mgr
             .lock()
             .unwrap()
-            .configure_perri_state_provider(Arc::new(WatchPerriStateProvider::new(
-                queue_rx.clone(),
-                pr_rx.clone(),
-            )));
+            .configure_perri_state_provider(Arc::new(
+                WatchPerriStateProvider::new(queue_rx.clone(), pr_rx.clone())
+                    .with_jira_site(jira_site.clone()),
+            ));
         nostromo::agents::PerriSources {
             queue_rx,
             queue_refresh_tx,
@@ -1170,6 +1200,7 @@ impl nostromo::agents::AgentSpawner for RealAgentSpawner {
             Arc::clone(&self.session_mgr),
             queue_rx,
             pr_rx,
+            nostromo::data::work::credentials::JiraSite::from_config(&self.config).lookup(),
         ));
     }
 
@@ -1210,17 +1241,21 @@ async fn run_perri_broadcaster(
     session_mgr: Arc<Mutex<SessionManager>>,
     mut queue_rx: tokio::sync::watch::Receiver<Option<PrQueueSnapshot>>,
     mut pr_rx: tokio::sync::watch::Receiver<PrSnapshots>,
+    jira_site: Option<String>,
 ) {
-    fn broadcast(
-        tx: &broadcast::Sender<ServerMsg>,
-        tags: &[String],
-        queue: Option<&PrQueueSnapshot>,
-        prs: &PrSnapshots,
-    ) {
+    let broadcast = |tx: &broadcast::Sender<ServerMsg>,
+                     tags: &[String],
+                     queue: Option<&PrQueueSnapshot>,
+                     prs: &PrSnapshots| {
         for tag in tags {
-            let _ = tx.send(build_perri_state(tag, queue, prs.get(tag).map(|s| &**s)));
+            let _ = tx.send(build_perri_state(
+                tag,
+                queue,
+                prs.get(tag).map(|s| &**s),
+                jira_site.as_deref(),
+            ));
         }
-    }
+    };
 
     let mut previous: PrSnapshots = pr_rx.borrow().clone();
 
@@ -1360,6 +1395,106 @@ fn daemon_log_dir() -> PathBuf {
         .join(".cache")
         .join("nostromd")
         .join("log")
+}
+
+/// Start the author's PR list: its engine, the demand board the session
+/// manager routes the Mac's verbs to, and the task that broadcasts each
+/// snapshot on the local-only `authored_prs` topic.
+#[allow(clippy::too_many_arguments)]
+fn start_authored_prs(
+    config: &nostromo::config::Config,
+    relay_rx: tokio::sync::mpsc::UnboundedReceiver<nostromo::data::relay_client::QueueSignal>,
+    relay_status: Arc<nostromo::data::relay_client::RelayStatus>,
+    jobs_rx: tokio::sync::watch::Receiver<Vec<nostromo::mother::MotherJob>>,
+    session_mgr: &Arc<std::sync::Mutex<nostromo::ipc::session_manager::SessionManager>>,
+    broadcast_tx: tokio::sync::broadcast::Sender<ServerMsg>,
+    mut republish: tokio::sync::watch::Receiver<u64>,
+    state_root: std::path::PathBuf,
+) {
+    use nostromo::data::authored_prs::{AuthoredPrsSource, Deps, FocusInfo, SystemClock};
+    let github =
+        match nostromo::data::github_client::GithubClient::new(config.github_token_path.as_deref())
+        {
+            Ok(c) => Some(c),
+            Err(_) => {
+                tracing::warn!(
+                    "authored-prs: no GitHub token; the list stays off (token: missing)"
+                );
+                None
+            }
+        };
+    let focuses: nostromo::data::authored_prs::FocusProvider = {
+        let mgr = Arc::clone(session_mgr);
+        Arc::new(move || {
+            let mgr = mgr.lock().unwrap();
+            mgr.focus_registry()
+                .into_iter()
+                .map(|f| FocusInfo {
+                    session_id: mgr.current_session_id(&f.tag),
+                    spawn_cwd: mgr.cwd_for(&f.tag),
+                    project_path: f.project_path.as_ref().map(std::path::PathBuf::from),
+                    name: f.display_name,
+                    agent_name: f.agent_name,
+                    built_in: f.is_built_in,
+                    tag: f.tag,
+                })
+                .collect()
+        })
+    };
+    let projects_root = dirs_next::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join(".claude")
+        .join("projects");
+    let handle = AuthoredPrsSource::spawn(Deps {
+        api_base: nostromo::data::github_client::GITHUB_API_BASE.to_string(),
+        github,
+        token_resolver: Some({
+            let path = config.github_token_path.clone();
+            Arc::new(move || nostromo::data::github_client::GithubClient::new(path.as_deref()).ok())
+        }),
+        relay_status,
+        relay_configured: config.relay_url.is_some() && config.relay_token.is_some(),
+        relay_rx: Some(relay_rx),
+        jobs_rx,
+        focuses,
+        projects_root: projects_root.clone(),
+        clock: Arc::new(SystemClock),
+        state_root: Some(state_root),
+    });
+    {
+        let mut mgr = session_mgr.lock().unwrap();
+        mgr.configure_authored_prs(Arc::clone(&handle.demand));
+        mgr.configure_authored_pr_actions(Arc::new(
+            nostromo::data::authored_prs::AuthoredPrActions::new(
+                &handle,
+                projects_root,
+                dirs_next::home_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                    .join(".claude")
+                    .join("agents"),
+                Arc::new(SystemClock),
+            ),
+        ));
+    }
+    let mut snapshot_rx = handle.snapshot;
+    tokio::spawn(async move {
+        let _keep_alive = handle.task;
+        loop {
+            let latest = snapshot_rx.borrow_and_update().clone();
+            if let Some(snapshot) = latest {
+                let _ = broadcast_tx.send(ServerMsg::AuthoredPrs { snapshot });
+            }
+            tokio::select! {
+                changed = snapshot_rx.changed() => {
+                    if changed.is_err() { return; }
+                }
+                // The retained cache lagged: send the current snapshot again.
+                changed = republish.changed() => {
+                    if changed.is_err() { return; }
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]

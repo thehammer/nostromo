@@ -141,6 +141,8 @@ public enum ServerMsg {
     case sessionTaskOutputResult(SessionTaskOutputResultWire)
     /// The commands a session's CLI reports, the answer to a `session_commands_get`. Local only.
     case sessionCommands(SessionCommandsWire)
+    /// The author's open PRs (`authored_prs_v1`). Local clients only; a client must name the topic.
+    case authoredPrs(AuthoredPrsSnapshot)
 
     // ── agent tracker ─────────────────────────────────────────────────────────
 
@@ -1174,6 +1176,11 @@ extension ServerMsg {
         case "session_commands":
             if let m = try? dec.decode(SessionCommandsWire.self, from: data) {
                 return .sessionCommands(m)
+            }
+
+        case "authored_prs":
+            if let m = try? dec.decode(AuthoredPrsFrame.self, from: data) {
+                return .authoredPrs(m.snapshot)
             }
 
         case "tracker_board":

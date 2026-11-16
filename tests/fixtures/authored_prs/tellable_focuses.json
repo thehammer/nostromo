@@ -1,0 +1,14 @@
+[
+  {"built_in": false, "agent": "cody", "tellable": true},
+  {"built_in": false, "agent": "", "tellable": true},
+  {"built_in": false, "agent": "perri", "tellable": true},
+  {"built_in": false, "agent": "claudia", "tellable": true},
+  {"built_in": true, "agent": "cody", "tellable": false},
+  {"built_in": true, "agent": "mother", "tellable": false},
+  {"built_in": false, "agent": "fred", "tellable": false},
+  {"built_in": false, "agent": "Fred", "tellable": false},
+  {"built_in": false, "agent": "  teri ", "tellable": false},
+  {"built_in": false, "agent": "plugin:Teri", "tellable": false},
+  {"built_in": false, "agent": "huey", "tellable": false},
+  {"built_in": false, "agent": "mother:huey", "tellable": false}
+]

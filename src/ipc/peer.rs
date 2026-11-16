@@ -28,6 +28,7 @@ use tracing::warn;
 use super::protocol::{
     ClientMsg, FocusMeta, PaneContentWire, ServerMsg, TaskOutputOutcome, TaskStopOutcome, Topic,
 };
+use crate::data::authored_prs::wire::AuthoredPrResult;
 use crate::data::work::WorkResult;
 
 /// Wire transport a connection arrived on.
@@ -93,6 +94,12 @@ fn is_huey_tag(tag: &str) -> bool {
 pub fn is_huey_agent(name: &str) -> bool {
     let bare = name.trim().rsplit(':').next().unwrap_or("").trim();
     bare.eq_ignore_ascii_case("huey")
+}
+
+/// Is `name` the Perri agent? Case-insensitive, through a plugin qualifier.
+pub fn is_perri_agent(name: &str) -> bool {
+    let bare = name.trim().rsplit(':').next().unwrap_or("").trim();
+    bare.eq_ignore_ascii_case("perri")
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -776,6 +783,13 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         // held counts and wake counts. The operator's own; never a network
         // peer's (SR6), which cannot change them either.
         ServerMsg::MotherNoticeState { .. } => ServerClass::LocalOnly,
+        // The author's open PRs: repos, titles, check names and the focuses
+        // that own them. Local peers only (SP3), and only on request.
+        ServerMsg::AuthoredPrs { .. }
+        | ServerMsg::AuthoredPrPreview { .. }
+        | ServerMsg::AuthoredPrNotifyResult { .. }
+        | ServerMsg::AuthoredPrStartSessionResult { .. }
+        | ServerMsg::AuthoredPrLinkResult { .. } => ServerClass::LocalOnly,
         // A focus's model is withheld exactly like its transcript.
         ServerMsg::SessionModelState(state) => ServerClass::Focus(&state.tag),
 
@@ -793,6 +807,12 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         // The commands a session reports: user skill and plugin names. The
         // operator's own; a network peer can never ask.
         ServerMsg::SessionCommands { .. } => ServerClass::LocalOnly,
+        // The conversation history and its frames: titles, projects, first
+        // prompts. The operator app's; a network peer never receives one.
+        ServerMsg::ConversationHistory { .. }
+        | ServerMsg::ConversationResumeResult { .. }
+        | ServerMsg::ConversationHistoryChanged { .. }
+        | ServerMsg::ConversationResumeFailed { .. } => ServerClass::LocalOnly,
 
         // The tracker pane's content (title, item text, notes, owners, links,
         // commands, the file path) goes to local clients only. A network peer
@@ -883,6 +903,23 @@ pub fn is_refusal(msg: &ServerMsg) -> bool {
         }
         | ServerMsg::WorkSendResult {
             result: WorkResult::Err(e),
+            ..
+        } => is_secure_refusal(&e.code),
+        // The refusals of the four PR hand-off verbs, which carry a code and no text.
+        ServerMsg::AuthoredPrPreview {
+            result: AuthoredPrResult::Err(e),
+            ..
+        }
+        | ServerMsg::AuthoredPrNotifyResult {
+            result: AuthoredPrResult::Err(e),
+            ..
+        }
+        | ServerMsg::AuthoredPrStartSessionResult {
+            result: AuthoredPrResult::Err(e),
+            ..
+        }
+        | ServerMsg::AuthoredPrLinkResult {
+            result: AuthoredPrResult::Err(e),
             ..
         } => is_secure_refusal(&e.code),
         ServerMsg::Error { message } => message.starts_with("requires_secure_connection"),
@@ -1057,6 +1094,16 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::SessionTaskOutput { .. }
         // The commands a session's CLI reports (user skills, plugin names).
         | ClientMsg::SessionCommandsGet { .. }
+        // The conversation history (titles, projects, first prompts): the
+        // operator app's alone, never a network peer's.
+        | ClientMsg::ConversationHistoryGet { .. }
+        | ClientMsg::ConversationResume { .. }
+        | ClientMsg::ConversationResumeRelease { .. }
+        | ClientMsg::ConversationHistoryRemove { .. }
+        | ClientMsg::ConversationHistoryRename { .. }
+        | ClientMsg::ConversationHistoryRestore { .. }
+        | ClientMsg::ConversationHistoryPurgeRemoved { .. }
+        | ClientMsg::ConversationHistorySettingsSet { .. }
         // Terminal panes: type into, read, resize, close or start a shell.
         // Operator app only; a network peer never reaches the terminal arms.
         | ClientMsg::TerminalOpenLocal { .. }
@@ -1090,7 +1137,16 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::TerminalStagingUiEvent { .. }
         // Mother notice switches decide what wakes the user's sessions: the
         // operator app only.
-        | ClientMsg::MotherNoticeSettingsSet { .. } => NetworkPolicy::Refused,
+        | ClientMsg::MotherNoticeSettingsSet { .. }
+        // What the operator is looking at, and a reconcile: the verified app only.
+        | ClientMsg::AuthoredPrsDemand { .. }
+        | ClientMsg::AuthoredPrsRefresh { .. }
+        // Telling a focus about a PR, starting one, linking one: the verified
+        // app only (SP4).
+        | ClientMsg::AuthoredPrPreviewRequest { .. }
+        | ClientMsg::AuthoredPrNotify { .. }
+        | ClientMsg::AuthoredPrStartSession { .. }
+        | ClientMsg::AuthoredPrLink { .. } => NetworkPolicy::Refused,
     }
 }
 
@@ -1195,7 +1251,23 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::TerminalStagingSetGlobal { .. }
         | ClientMsg::TerminalStagingUiEvent { .. }
         // Names a focus tag, but is refused for a network peer whatever it names.
-        | ClientMsg::MotherNoticeSettingsSet { .. } => false,
+        | ClientMsg::MotherNoticeSettingsSet { .. }
+        // Name a conversation id, never a session; refused for a network peer anyway.
+        | ClientMsg::ConversationHistoryGet { .. }
+        | ClientMsg::ConversationResume { .. }
+        | ClientMsg::ConversationResumeRelease { .. }
+        | ClientMsg::ConversationHistoryRemove { .. }
+        | ClientMsg::ConversationHistoryRename { .. }
+        | ClientMsg::ConversationHistoryRestore { .. }
+        | ClientMsg::ConversationHistoryPurgeRemoved { .. }
+        | ClientMsg::ConversationHistorySettingsSet { .. }
+        // Name no session; refused for a network peer anyway.
+        | ClientMsg::AuthoredPrsDemand { .. }
+        | ClientMsg::AuthoredPrsRefresh { .. }
+        | ClientMsg::AuthoredPrPreviewRequest { .. }
+        | ClientMsg::AuthoredPrNotify { .. }
+        | ClientMsg::AuthoredPrStartSession { .. }
+        | ClientMsg::AuthoredPrLink { .. } => false,
     }
 }
 
@@ -1324,6 +1396,16 @@ mod tests {
     use crate::data::work::{PicksSnapshot, SourceState, SourceStatus, WorkResult, WorkSource};
 
     #[test]
+    fn is_perri_agent_matches_the_bare_name_only() {
+        for yes in ["perri", "Perri", "mother:perri", " perri "] {
+            assert!(is_perri_agent(yes), "{yes}");
+        }
+        for no in ["perri-lens", "cody", "", "perri:cody"] {
+            assert!(!is_perri_agent(no), "{no}");
+        }
+    }
+
+    #[test]
     fn unix_peers_are_local_and_tcp_peers_are_network() {
         assert_eq!(
             PeerTrust::from_transport(Transport::Unix),
@@ -1449,6 +1531,7 @@ mod tests {
         let meta = FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: "t".into(),
             display_name: "T".into(),
             agent_name: "cody".into(),
@@ -1641,6 +1724,7 @@ mod tests {
             cwd: None,
             session_id: None,
             remote_control: false,
+            no_codebase: false,
         };
         assert!(refuse_for_network(&spawn("anything", "fred"), &tags));
         assert!(refuse_for_network(&spawn("anything", "Teri"), &tags));
@@ -1725,6 +1809,7 @@ mod tests {
         let meta = |tag: &str, agent: &str| FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: tag.into(),
             display_name: "Cody on SECRET".into(),
             agent_name: agent.into(),
@@ -1838,6 +1923,7 @@ mod tests {
                 let meta = FocusMeta {
                     initial_model: None,
                     initial_effort: None,
+                    no_codebase: None,
                     tag: tag.into(),
                     display_name: "SECRET".into(),
                     agent_name: agent.into(),
@@ -1940,6 +2026,7 @@ mod tests {
                 cwd: Some("/tmp".into()),
                 session_id: None,
                 remote_control: false,
+                no_codebase: false,
             },
             ClientMsg::SessionAttach { tag: "x1".into() },
             ClientMsg::SessionDetach { tag: "x1".into() },
@@ -2120,6 +2207,69 @@ mod tests {
                 request_id: "r".into(),
                 tag: "x1".into(),
             },
+            ClientMsg::AuthoredPrsDemand {
+                level: "visible".into(),
+            },
+            ClientMsg::AuthoredPrsRefresh {},
+            ClientMsg::AuthoredPrPreviewRequest {
+                request_id: "r".into(),
+                repo: "o/r".into(),
+                number: 1,
+                target: crate::data::authored_prs::wire::PreviewTarget::Focus { tag: "x1".into() },
+            },
+            ClientMsg::AuthoredPrNotify {
+                request_id: "r".into(),
+                repo: "o/r".into(),
+                number: 1,
+                tag: "x1".into(),
+                digest: "d".into(),
+            },
+            ClientMsg::AuthoredPrStartSession {
+                request_id: "r".into(),
+                repo: "o/r".into(),
+                number: 1,
+                folder: "/tmp".into(),
+                agent: "claude".into(),
+                digest: "d".into(),
+            },
+            ClientMsg::AuthoredPrLink {
+                request_id: "r".into(),
+                repo: "o/r".into(),
+                number: 1,
+                tag: Some("x1".into()),
+            },
+            ClientMsg::ConversationHistoryGet {
+                request_id: "r".into(),
+            },
+            ClientMsg::ConversationResume {
+                request_id: "r".into(),
+                id: "s1".into(),
+                new_tag: "t1".into(),
+                place: Some("/x".into()),
+                no_codebase_folder: Some("/y".into()),
+                confirm_active_elsewhere: true,
+            },
+            ClientMsg::ConversationHistoryRename {
+                request_id: "r".into(),
+                id: "s1".into(),
+                title: Some("x".into()),
+            },
+            ClientMsg::ConversationResumeRelease { tag: "t1".into() },
+            ClientMsg::ConversationHistoryRemove {
+                request_id: "r".into(),
+                id: "s1".into(),
+            },
+            ClientMsg::ConversationHistoryRestore {
+                request_id: "r".into(),
+                id: "s1".into(),
+            },
+            ClientMsg::ConversationHistoryPurgeRemoved {
+                request_id: "r".into(),
+            },
+            ClientMsg::ConversationHistorySettingsSet {
+                request_id: "r".into(),
+                first_prompts_enabled: false,
+            },
             ClientMsg::TerminalOpenLocal {
                 tag: "x1".into(),
                 relative_to: None,
@@ -2259,7 +2409,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 78;
+    const CLIENT_MSG_VARIANTS: usize = 92;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2342,6 +2492,20 @@ mod tests {
             ClientMsg::TrackerOpenLink { .. } => 75,
             ClientMsg::TerminalFollowInviteStagingOnly { .. } => 76,
             ClientMsg::SessionCommandsGet { .. } => 77,
+            ClientMsg::AuthoredPrsDemand { .. } => 78,
+            ClientMsg::AuthoredPrsRefresh { .. } => 79,
+            ClientMsg::ConversationHistoryGet { .. } => 80,
+            ClientMsg::ConversationResume { .. } => 81,
+            ClientMsg::ConversationHistoryRemove { .. } => 82,
+            ClientMsg::ConversationHistoryRestore { .. } => 83,
+            ClientMsg::ConversationHistoryPurgeRemoved { .. } => 84,
+            ClientMsg::ConversationHistorySettingsSet { .. } => 85,
+            ClientMsg::ConversationResumeRelease { .. } => 86,
+            ClientMsg::ConversationHistoryRename { .. } => 87,
+            ClientMsg::AuthoredPrPreviewRequest { .. } => 88,
+            ClientMsg::AuthoredPrNotify { .. } => 89,
+            ClientMsg::AuthoredPrStartSession { .. } => 90,
+            ClientMsg::AuthoredPrLink { .. } => 91,
         }
     }
 
@@ -2383,9 +2547,11 @@ mod tests {
         // 69 with the S2 staging frames (set_enabled, set_global, ui_event); 70 with `ApprovalRevokeSessionRule`;
         // 72 with the two Approvals-log requests; 75 with the three persisted-rule verbs (AP6);
         // 76 with `TrackerOpenLink` (T6; expect a trivial conflict on this constant with T3a's tracker verbs);
-        // 77 with `TerminalFollowInviteStagingOnly` (S3a); 78 with `SessionCommandsGet`.
-        assert_eq!(CLIENT_MSG_VARIANTS, 78);
-        assert_eq!(every_client_msg().len(), 78);
+        // 77 with `TerminalFollowInviteStagingOnly` (S3a); 78 with `SessionCommandsGet`;
+        // 80 with the two authored-PR verbs; 87 with the seven conversation-history verbs; 88 with the rename;
+        // 92 with the four authored-PR hand-off verbs (preview, notify, start session, link).
+        assert_eq!(CLIENT_MSG_VARIANTS, 92);
+        assert_eq!(every_client_msg().len(), 92);
     }
 
     #[test]
@@ -2436,6 +2602,7 @@ mod tests {
             cwd: Some("/tmp".into()),
             session_id: None,
             remote_control: false,
+            no_codebase: false,
         };
         assert!(refuse_for_network(&spawn, &tags));
     }
@@ -4434,6 +4601,69 @@ mod tests {
         }
     }
 
+    // ── conversation history ──────────────────────────────────────────────────
+
+    fn conversation_msgs() -> Vec<ClientMsg> {
+        every_client_msg()
+            .into_iter()
+            .filter(|m| variant_name(m).starts_with("Conversation"))
+            .collect()
+    }
+
+    #[test]
+    fn every_conversation_verb_is_refused_for_a_network_peer() {
+        let msgs = conversation_msgs();
+        assert_eq!(msgs.len(), 8, "a new Conversation verb needs a policy row");
+        let tags = SensitiveTags::in_memory();
+        for msg in msgs {
+            assert_eq!(network_policy(&msg), NetworkPolicy::Refused, "{msg:?}");
+            assert!(refuse_for_network(&msg, &tags), "{msg:?}");
+            assert!(!NETWORK_ALLOWED.contains(&variant_name(&msg).as_str()));
+        }
+    }
+
+    #[test]
+    fn no_conversation_frame_reaches_a_network_peer() {
+        let tags = SensitiveTags::in_memory();
+        let frames = [
+            ServerMsg::ConversationHistory {
+                request_id: "r".into(),
+                entries: vec![],
+                first_prompts_enabled: true,
+                degraded_kept: None,
+                revision: 1,
+                referenced_space_folders: vec![],
+                spaces_root: None,
+            },
+            ServerMsg::ConversationResumeResult {
+                request_id: "r".into(),
+                outcome: crate::ipc::protocol::ConversationResumeOutcome::Switch,
+                tag: Some("t".into()),
+                reason: None,
+                agent: None,
+                project_path: None,
+                label: None,
+                title: None,
+            },
+            ServerMsg::ConversationHistoryChanged { revision: 2 },
+            ServerMsg::ConversationResumeFailed {
+                tag: "t".into(),
+                reason: "not_found_here".into(),
+            },
+        ];
+        for frame in frames {
+            assert_eq!(
+                classify_server_msg(&frame),
+                ServerClass::LocalOnly,
+                "{frame:?}"
+            );
+            assert!(
+                outbound(PeerTrust::Tcp, frame.clone(), &tags).is_none(),
+                "{frame:?}"
+            );
+        }
+    }
+
     // ── slash commands: the commands verb ─────────────────────────────────────
 
     fn commands_get(tag: &str) -> ClientMsg {
@@ -4791,6 +5021,7 @@ mod huey_surface_tests {
         FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: tag.into(),
             display_name: "Huey on SECRET".into(),
             agent_name: agent.into(),
@@ -4944,5 +5175,91 @@ mod huey_document_delivery_tests {
         let msg = pane_content("cody-1", PaneContentWire::Text { text: "hi".into() });
         assert!(may_receive(PeerTrust::Tcp, &msg, &tags));
         assert!(outbound(PeerTrust::Tcp, msg, &tags).is_some());
+    }
+}
+
+#[cfg(test)]
+mod authored_prs_policy_tests {
+    //! Who may send and who may receive the author's PR list.
+
+    use super::*;
+    use crate::data::authored_prs::snapshot::*;
+
+    fn snapshot_frame() -> ServerMsg {
+        let counts = UsageCounts::default();
+        ServerMsg::AuthoredPrs {
+            snapshot: AuthoredPrsSnapshot {
+                generated_at: chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap(),
+                token: TokenState::Connected,
+                relay: RelayInfo {
+                    state: RelayState::Live,
+                    since: None,
+                    org: "Carefeed".into(),
+                },
+                poll: PollInfo {
+                    state: PollState::Ok,
+                    checked_at: None,
+                    interval_secs: 60,
+                    resumes_at: None,
+                    retry_at: None,
+                },
+                refresh_blocked: None,
+                hidden_orgs: vec![],
+                total_open: 0,
+                shown: 0,
+                prs: vec![],
+                usage: UsageView {
+                    window_secs: 3600,
+                    window: counts,
+                    since_start: counts,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn the_authored_pr_frame_is_for_local_peers_only() {
+        assert!(
+            matches!(
+                classify_server_msg(&snapshot_frame()),
+                ServerClass::LocalOnly
+            ),
+            "repos, titles, check names and who owns each PR are not for the network"
+        );
+    }
+
+    #[test]
+    fn the_demand_and_refresh_verbs_are_refused_to_a_network_peer() {
+        for msg in [
+            ClientMsg::AuthoredPrsDemand {
+                level: "visible".into(),
+            },
+            ClientMsg::AuthoredPrsDemand {
+                level: "idle".into(),
+            },
+            ClientMsg::AuthoredPrsRefresh {},
+        ] {
+            assert_eq!(network_policy(&msg), NetworkPolicy::Refused, "{msg:?}");
+            assert!(refused_for_network(&msg), "{msg:?}");
+            assert!(
+                refuse_for_network(&msg, &SensitiveTags::in_memory()),
+                "{msg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_verbs_name_no_session_so_they_are_never_about_a_sensitive_one() {
+        let tags = SensitiveTags::in_memory();
+        assert!(!targets_sensitive_session(
+            &ClientMsg::AuthoredPrsDemand {
+                level: "visible".into()
+            },
+            &tags
+        ));
+        assert!(!targets_sensitive_session(
+            &ClientMsg::AuthoredPrsRefresh {},
+            &tags
+        ));
     }
 }

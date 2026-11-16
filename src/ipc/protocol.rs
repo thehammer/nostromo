@@ -110,6 +110,11 @@ pub enum Topic {
     /// topic list still includes it for a local peer; FND-1 keeps every
     /// terminal frame off TCP (`ServerClass::LocalOnly`).
     Terminal,
+    /// The author's open PRs: `ServerMsg::AuthoredPrs`, replayed (the latest
+    /// snapshot) on subscribe. Advertised as `authored_prs_v1`. Delivered only
+    /// to a client that names it (the empty "everything" list does not include
+    /// it) and never to a network peer.
+    AuthoredPrs,
     /// A topic this build does not know (a newer client's). Decoded rather
     /// than rejected so a future topic never makes an older daemon drop the
     /// whole `Subscribe`; it matches no message, and, because it keeps the
@@ -468,6 +473,10 @@ pub struct FocusMeta {
     /// The effort chosen when the focus was created (`None`: the default).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub initial_effort: Option<String>,
+    /// True for a focus with no codebase: it runs in its own private folder,
+    /// and `project_path` stays `None`. Absent (an older app): false.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub no_codebase: Option<bool>,
 }
 
 // ── agent-authored pane layout (Phase 1: agent-driven-pane-layout) ───────────
@@ -679,6 +688,23 @@ pub struct PrListItem {
     /// HEAD commit SHA.
     #[serde(default)]
     pub head_sha: String,
+    /// Jira ticket keys detected daemon-side; absent on the wire when empty.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_ticket_keys"
+    )]
+    pub tickets: Vec<String>,
+}
+
+/// Decode `tickets` keeping only well-formed keys, at most five: an agent can
+/// push a `pr_list` with arbitrary strings.
+fn deserialize_ticket_keys<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<String> = Vec::deserialize(d)?;
+    Ok(crate::data::ticket_keys::sanitize_keys(raw))
 }
 
 /// Content payload pushed to a single pane, decoupled from layout geometry.
@@ -1185,6 +1211,102 @@ pub const FEATURE_FOCUS_ACTIVITY: &str = "focus_activity_v1";
 /// `local_command` turn origins and slash-command echo turns.
 pub const FEATURE_SLASH_COMMANDS: &str = "slash_commands_v1";
 
+/// The optional capability advertised in `Welcome.features`: this daemon keeps a
+/// private conversation history and takes the `conversation_*` verbs (operator
+/// app only; never offered to a network or non-operator peer).
+pub const FEATURE_CONVERSATION_HISTORY: &str = "conversation_history_v1";
+
+/// Where a conversation stands, computed at list time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConversationStatus {
+    /// Live in a focus; `open` when that focus is in the pushed registry.
+    Running {
+        tag: String,
+        open: bool,
+    },
+    /// Claude no longer has the file.
+    UnavailableDeleted,
+    /// The file is empty or is not a transcript.
+    UnavailableUnreadable,
+    /// The working directory no longer exists (`worktree`: it was a linked
+    /// worktree; `active_elsewhere`: the transcript was also written to in the
+    /// last two minutes, so a resume needs that confirmation too).
+    FolderGone {
+        worktree: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        active_elsewhere: bool,
+    },
+    /// The transcript was written to in the last two minutes and no Nostromo
+    /// session runs it: it may be open in another Claude window.
+    ActiveElsewhere,
+    Available,
+}
+
+/// One row of the history, as sent to the operator app. A sensitive entry
+/// carries no branch, path, project name, PR numbers or first prompt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConversationEntryWire {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pr_numbers: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_prompt: Option<String>,
+    /// The fixed reason word when no first prompt is shown (`command:/name` names only the command).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_prompt_withheld: Option<String>,
+    pub sensitive: bool,
+    pub last_active_ms: i64,
+    pub status: ConversationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_from_tag: Option<String>,
+    /// The path of Claude's file, for "Show Transcript in Finder" (never shown as text).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+    /// For a conversation whose worktree is gone: its main checkout, when that
+    /// still exists. What "Resume in <main repo>" resumes in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_checkout: Option<String>,
+    /// The conversation runs in a private no-codebase folder (its project reads
+    /// "No codebase"). Carried by a sensitive entry too: it is no content.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_codebase: bool,
+}
+
+/// The outcome of `conversation_resume`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationResumeOutcome {
+    /// It is running in an open focus: switch to `tag`; nothing started.
+    Switch,
+    /// `tag` is reserved; create the focus and attach (the daemon spawns with `--resume`).
+    Ready,
+    Refused,
+}
+/// The optional capability advertised in `Welcome.features`: this daemon keeps
+/// the author's open-PR list, takes `authored_prs_demand` and
+/// `authored_prs_refresh`, and sends `authored_prs` to a client that names
+/// `Topic::AuthoredPrs`.
+pub const FEATURE_AUTHORED_PRS: &str = "authored_prs_v1";
+
+/// The hand-off half of the author's PR list: preview, notify, start a session
+/// and link, plus the additive `told` and `pill` fields on each row.
+pub const FEATURE_AUTHORED_PRS_NOTIFY: &str = "authored_prs_notify_v1";
+
 /// One slash command a session's CLI reports (`ServerMsg::SessionCommands`).
 /// `description` is one sanitised line of at most 200 characters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1367,6 +1489,11 @@ pub enum ClientMsg {
         /// Spawn with `--remote-control <view_name>` for native cross-device
         /// (phone) control via Anthropic's relay.
         remote_control: bool,
+        /// The focus has no codebase and must run in its own folder: the daemon
+        /// refuses the spawn when `cwd` is absent, without waiting for the focus
+        /// registry push (which the app debounces). Absent: not claimed.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_codebase: bool,
     },
 
     /// Attach to a session: daemon replies with a `SessionTurns` snapshot then
@@ -1991,6 +2118,112 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enabled: Option<bool>,
     },
+    // ── conversation history (operator app only; refused for every other peer) ──
+    /// List the history. Answered with `ServerMsg::ConversationHistory`.
+    ConversationHistoryGet {
+        request_id: String,
+    },
+    /// Resume conversation `id` as focus `new_tag`. Answered with
+    /// `ServerMsg::ConversationResumeResult`.
+    ConversationResume {
+        request_id: String,
+        id: String,
+        new_tag: String,
+        /// Resume in this folder instead of the original: the conversation's
+        /// main checkout, when its worktree is gone. Absent: the original.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        place: Option<String>,
+        /// Resume in this new, empty no-codebase folder (a direct child of the
+        /// spaces root) when the original folder is gone. Absent: not asked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        no_codebase_folder: Option<String>,
+        /// The user chose "Resume anyway" for a conversation that may be open
+        /// in another Claude window.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        confirm_active_elsewhere: bool,
+    },
+    /// Give conversation `id` a title of the user's own (`None` clears it).
+    ConversationHistoryRename {
+        request_id: String,
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    /// The resume the app asked for was cancelled before its focus existed:
+    /// give the reserved `tag` back. Ignored once a focus or session holds it.
+    ConversationResumeRelease {
+        tag: String,
+    },
+    /// Hide an entry (undoable until `ConversationHistoryPurgeRemoved`).
+    ConversationHistoryRemove {
+        request_id: String,
+        id: String,
+    },
+    /// Undo a removal.
+    ConversationHistoryRestore {
+        request_id: String,
+        id: String,
+    },
+    /// The sheet closed: delete soft-removed entries now.
+    ConversationHistoryPurgeRemoved {
+        request_id: String,
+    },
+    /// Turn stored first prompts on or off (off purges the stored ones at once).
+    ConversationHistorySettingsSet {
+        request_id: String,
+        first_prompts_enabled: bool,
+    },
+    /// Who is looking at the author's PR list: `visible`, `hidden` or `idle`
+    /// (an unknown value counts as `hidden`). Honoured only from the verified
+    /// operator app; refused for a network peer. The daemon's demand is the
+    /// highest level over its live operator connections; with none it is idle
+    /// and the feature makes no request.
+    AuthoredPrsDemand {
+        level: String,
+    },
+    /// Ask for a full reconcile now. Same gate. Refused (shown as
+    /// `refresh_blocked` in the snapshot) while one runs or while paused.
+    AuthoredPrsRefresh {},
+    /// Compose the message "Tell <focus>" would send for this PR, from facts
+    /// only. Answered with `ServerMsg::AuthoredPrPreview`. Verified app only.
+    AuthoredPrPreviewRequest {
+        request_id: String,
+        repo: String,
+        number: u64,
+        target: crate::data::authored_prs::wire::PreviewTarget,
+    },
+    /// Send the previewed message to the open focus `tag` as the operator's own
+    /// message. The daemon recomposes from current facts and sends only when
+    /// `digest` still matches. Answered with `ServerMsg::AuthoredPrNotifyResult`.
+    /// Verified app only.
+    AuthoredPrNotify {
+        request_id: String,
+        repo: String,
+        number: u64,
+        tag: String,
+        digest: String,
+    },
+    /// Start a new focus in `folder` running `agent`, deliver the previewed
+    /// message as its first message, and link the PR to it. One focus per
+    /// `request_id`. Answered with `ServerMsg::AuthoredPrStartSessionResult`.
+    /// Verified app only.
+    AuthoredPrStartSession {
+        request_id: String,
+        repo: String,
+        number: u64,
+        folder: String,
+        agent: String,
+        digest: String,
+    },
+    /// Link the PR to the focus `tag` (a picker choice), or unlink it (`tag`
+    /// absent). Answered with `ServerMsg::AuthoredPrLinkResult`. Verified app only.
+    AuthoredPrLink {
+        request_id: String,
+        repo: String,
+        number: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+    },
 }
 
 // ── background tasks ──────────────────────────────────────────────────────────
@@ -2463,6 +2696,10 @@ pub enum ServerMsg {
         tag: String,
         queue: Vec<PrQueueItem>,
         current: Option<Box<PrSnapshot>>,
+        /// The daemon's Jira site as a bare host (`example.atlassian.net`),
+        /// for the Mac's host allowlist. Absent when none is configured.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        jira_site: Option<String>,
     },
 
     /// Broadcast snapshot of Fred's mailbox + calendar state. Re-sent whenever
@@ -2936,6 +3173,54 @@ pub enum ServerMsg {
         source: String,
         commands: Vec<SlashCommandEntry>,
     },
+    /// Answer to `ConversationHistoryGet`, to the asking client only. `LocalOnly`.
+    ConversationHistory {
+        request_id: String,
+        entries: Vec<ConversationEntryWire>,
+        first_prompts_enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        degraded_kept: Option<u32>,
+        revision: u64,
+        /// The no-codebase folders (under the spaces root) that any entry not
+        /// yet purged names, visible or hidden. The app moves every other
+        /// folder there to the Trash. Always sent, even empty: an older daemon
+        /// omits it, and the app then trashes nothing.
+        #[serde(default)]
+        referenced_space_folders: Vec<String>,
+        /// The daemon's spaces root (canonical when it exists). The app sweeps
+        /// only when this is the root it computed itself; absent (an older
+        /// daemon): no sweep.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spaces_root: Option<String>,
+    },
+    /// Answer to `ConversationResume`, to the asking client only. `LocalOnly`.
+    ConversationResumeResult {
+        request_id: String,
+        outcome: ConversationResumeOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    /// The history changed; ask again. Payload-free. Operator-app connections
+    /// only, never the broadcast channel. `LocalOnly`.
+    ConversationHistoryChanged {
+        revision: u64,
+    },
+    /// A resumed focus's conversation could not be opened (`reason`: `not_found_here`).
+    /// Operator-app connections only. `LocalOnly`.
+    ConversationResumeFailed {
+        tag: String,
+        reason: String,
+    },
     /// Answer to `SessionTaskStop`, to the asking client only. `LocalOnly`.
     SessionTaskStopResult {
         request_id: String,
@@ -3131,6 +3416,39 @@ pub enum ServerMsg {
         enabled: bool,
         focuses: Vec<crate::mother::notices::FocusNoticeState>,
     },
+    /// Targeted answer to `AuthoredPrPreviewRequest`. Local peers only.
+    AuthoredPrPreview {
+        request_id: String,
+        result: crate::data::authored_prs::wire::AuthoredPrResult<
+            crate::data::authored_prs::wire::PreviewOk,
+        >,
+    },
+    /// Targeted answer to `AuthoredPrNotify`.
+    AuthoredPrNotifyResult {
+        request_id: String,
+        result: crate::data::authored_prs::wire::AuthoredPrResult<
+            crate::data::authored_prs::wire::Done,
+        >,
+    },
+    /// Targeted answer to `AuthoredPrStartSession`.
+    AuthoredPrStartSessionResult {
+        request_id: String,
+        result: crate::data::authored_prs::wire::AuthoredPrResult<
+            crate::data::authored_prs::wire::StartOk,
+        >,
+    },
+    /// Targeted answer to `AuthoredPrLink`.
+    AuthoredPrLinkResult {
+        request_id: String,
+        result: crate::data::authored_prs::wire::AuthoredPrResult<
+            crate::data::authored_prs::wire::Done,
+        >,
+    },
+    /// The author's open PRs (`Topic::AuthoredPrs`, local peers only, and only
+    /// to a client that names the topic). Sent on change and after Subscribe.
+    AuthoredPrs {
+        snapshot: crate::data::authored_prs::AuthoredPrsSnapshot,
+    },
 }
 
 fn default_true() -> bool {
@@ -3222,6 +3540,7 @@ mod tests {
             cwd: Some("/tmp".into()),
             session_id: Some("sid-1".into()),
             remote_control: true,
+            no_codebase: false,
         });
         round_trip_client(ClientMsg::SessionAttach { tag: "fred".into() });
         round_trip_client(ClientMsg::SessionDetach { tag: "fred".into() });
@@ -3625,6 +3944,7 @@ mod tests {
         let full = FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: "cody-abc12345".into(),
             display_name: "Cody in Admin Portal".into(),
             agent_name: "cody".into(),
@@ -3644,6 +3964,7 @@ mod tests {
         let minimal = FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: "fred".into(),
             display_name: "Fred".into(),
             agent_name: "fred".into(),
@@ -3765,6 +4086,7 @@ mod tests {
         let meta = FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: "fred".into(),
             display_name: "Fred".into(),
             agent_name: "fred".into(),
@@ -3841,6 +4163,7 @@ mod tests {
             meta: FocusMeta {
                 initial_model: None,
                 initial_effort: None,
+                no_codebase: None,
                 tag: "cody-core-1234".into(),
                 display_name: "CORE-1234".into(),
                 agent_name: "cody".into(),
@@ -4293,6 +4616,7 @@ mod tests {
             tag: "perri".into(),
             queue: vec![],
             current: None,
+            jira_site: None,
         });
     }
 
@@ -4314,6 +4638,7 @@ mod tests {
             ci_state: CiState::Success,
             head_sha: "abc123".into(),
             is_bot: false,
+            tickets: vec![],
         };
         let snap = PrSnapshot {
             pr_number: Some(42),
@@ -4342,6 +4667,7 @@ mod tests {
             tag: "perri".into(),
             queue: vec![item],
             current: Some(Box::new(snap)),
+            jira_site: Some("carefeed.atlassian.net".into()),
         });
     }
 
@@ -4351,9 +4677,32 @@ mod tests {
             tag: "perri".into(),
             queue: vec![],
             current: None,
+            jira_site: None,
         })
         .unwrap();
         assert_eq!(v["type"], "perri_state");
+        assert!(v.get("jira_site").is_none(), "None is omitted");
+    }
+
+    #[test]
+    fn perri_state_without_jira_site_decodes_to_none() {
+        let frame = r#"{"type":"perri_state","tag":"perri","queue":[],"current":null}"#;
+        match serde_json::from_str::<ServerMsg>(frame).unwrap() {
+            ServerMsg::PerriState { jira_site, .. } => assert_eq!(jira_site, None),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn perri_state_with_jira_site_serializes_it() {
+        let v = serde_json::to_value(ServerMsg::PerriState {
+            tag: "perri".into(),
+            queue: vec![],
+            current: None,
+            jira_site: Some("carefeed.atlassian.net".into()),
+        })
+        .unwrap();
+        assert_eq!(v["jira_site"], "carefeed.atlassian.net");
     }
 
     #[test]
@@ -4455,11 +4804,64 @@ mod tests {
                     new_activity: false,
                     url: "https://github.com/acme/web/pull/42".into(),
                     head_sha: "abc123".into(),
+                    tickets: vec![],
                 }],
             },
             freshness: None,
             address: None,
         });
+    }
+
+    #[test]
+    fn pr_list_item_tickets_decode_drops_malformed_keys_and_keeps_five() {
+        let junk = format!("CORE-{}", "9".repeat(60_000));
+        let mut raw = serde_json::to_value(PrListItem {
+            repo: "acme/web".into(),
+            number: 1,
+            title: "t".into(),
+            author: "a".into(),
+            bucket: "requested".into(),
+            ci_state: crate::data::perri_queue::CiState::Success,
+            new_activity: false,
+            url: String::new(),
+            head_sha: String::new(),
+            tickets: vec![],
+        })
+        .unwrap();
+        raw["tickets"] = serde_json::json!([
+            "core-1", junk, "<x>", "CORE-1", "CORE-2", "CORE-3", "CORE-4", "CORE-5", "CORE-6"
+        ]);
+        let item: PrListItem = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            item.tickets,
+            ["CORE-1", "CORE-2", "CORE-3", "CORE-4", "CORE-5"]
+        );
+    }
+
+    #[test]
+    fn pr_list_item_tickets_round_trip_and_empty_is_not_serialized() {
+        let mk = |tickets: Vec<String>| PrListItem {
+            repo: "acme/web".into(),
+            number: 1,
+            title: "t".into(),
+            author: "a".into(),
+            bucket: "requested".into(),
+            ci_state: crate::data::perri_queue::CiState::Success,
+            new_activity: false,
+            url: String::new(),
+            head_sha: String::new(),
+            tickets,
+        };
+        let v = serde_json::to_value(mk(vec!["CORE-1".into()])).unwrap();
+        assert_eq!(v["tickets"], serde_json::json!(["CORE-1"]));
+        let back: PrListItem = serde_json::from_value(v).unwrap();
+        assert_eq!(back.tickets, ["CORE-1"]);
+
+        let mut v = serde_json::to_value(mk(vec![])).unwrap();
+        assert!(v.get("tickets").is_none(), "empty must be omitted");
+        v.as_object_mut().unwrap().remove("tickets");
+        let back: PrListItem = serde_json::from_value(v).unwrap();
+        assert!(back.tickets.is_empty());
     }
 
     #[test]
@@ -8801,9 +9203,420 @@ mod slash_commands_wire_tests {
     }
 
     #[test]
+    fn conversation_history_messages_round_trip() {
+        let msgs = [
+            r#"{"type":"conversation_history_get","request_id":"r"}"#,
+            r#"{"type":"conversation_resume","request_id":"r","id":"s1","new_tag":"t1"}"#,
+            r#"{"type":"conversation_resume","request_id":"r","id":"s1","new_tag":"t1","place":"/m","confirm_active_elsewhere":true}"#,
+            r#"{"type":"conversation_history_rename","request_id":"r","id":"s1","title":"New"}"#,
+            r#"{"type":"conversation_resume_release","tag":"t1"}"#,
+            r#"{"type":"conversation_history_remove","request_id":"r","id":"s1"}"#,
+            r#"{"type":"conversation_history_restore","request_id":"r","id":"s1"}"#,
+            r#"{"type":"conversation_history_purge_removed","request_id":"r"}"#,
+            r#"{"type":"conversation_history_settings_set","request_id":"r","first_prompts_enabled":false}"#,
+        ];
+        for m in msgs {
+            let parsed: ClientMsg = serde_json::from_str(m).unwrap();
+            assert_eq!(serde_json::to_string(&parsed).unwrap(), m);
+        }
+        let reply = ServerMsg::ConversationHistory {
+            request_id: "r".into(),
+            entries: vec![ConversationEntryWire {
+                id: "s1".into(),
+                title: "T".into(),
+                label: None,
+                agent: "cody".into(),
+                project_name: None,
+                project_path: None,
+                branch: None,
+                model: None,
+                effort: None,
+                pr_numbers: vec![],
+                first_prompt: None,
+                first_prompt_withheld: Some("image".into()),
+                sensitive: false,
+                last_active_ms: 5,
+                status: ConversationStatus::FolderGone {
+                    worktree: true,
+                    active_elsewhere: false,
+                },
+                resumed_from_tag: None,
+                transcript_path: None,
+                main_checkout: Some("/m".into()),
+                no_codebase: false,
+            }],
+            first_prompts_enabled: true,
+            degraded_kept: Some(3),
+            revision: 9,
+            referenced_space_folders: vec![],
+            spaces_root: None,
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert!(
+            json.contains(r#""status":{"kind":"folder_gone","worktree":true}"#),
+            "{json}"
+        );
+        let back: ServerMsg = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            ServerMsg::ConversationHistory { revision: 9, .. }
+        ));
+        for m in [
+            ServerMsg::ConversationHistoryChanged { revision: 3 },
+            ServerMsg::ConversationResumeFailed {
+                tag: "t".into(),
+                reason: "not_found_here".into(),
+            },
+            ServerMsg::ConversationResumeResult {
+                request_id: "r".into(),
+                outcome: ConversationResumeOutcome::Ready,
+                tag: Some("t".into()),
+                reason: None,
+                agent: Some("cody".into()),
+                project_path: None,
+                label: None,
+                title: None,
+            },
+        ] {
+            let j = serde_json::to_string(&m).unwrap();
+            let _: ServerMsg = serde_json::from_str(&j).unwrap();
+        }
+        assert_eq!(FEATURE_CONVERSATION_HISTORY, "conversation_history_v1");
+    }
+
+    #[test]
     fn the_capability_is_named_slash_commands_v1() {
         assert_eq!(FEATURE_SLASH_COMMANDS, "slash_commands_v1");
         // Additive: the protocol version does not move.
         assert_eq!(PROTOCOL_VERSION, 4);
+    }
+}
+
+#[cfg(test)]
+mod authored_prs_wire_tests {
+    //! The author's-PR-list additions to the wire: the topic, the capability,
+    //! the two verbs and the frame, and that nothing older changed shape.
+
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn the_capability_and_the_topic_are_spelled_as_documented() {
+        assert_eq!(FEATURE_AUTHORED_PRS, "authored_prs_v1");
+        assert_eq!(
+            serde_json::to_value(Topic::AuthoredPrs).unwrap(),
+            json!("authored_prs")
+        );
+        assert_eq!(
+            serde_json::from_value::<Topic>(json!("authored_prs")).unwrap(),
+            Topic::AuthoredPrs
+        );
+        assert_eq!(
+            PROTOCOL_VERSION, 4,
+            "additive: the protocol version does not move"
+        );
+    }
+
+    #[test]
+    fn a_subscribe_naming_the_topic_keeps_it_and_an_unknown_topic_is_still_only_unknown() {
+        let msg: ClientMsg = serde_json::from_value(json!({
+            "type": "subscribe",
+            "topics": ["activity", "authored_prs", "a_topic_from_the_future", 7]
+        }))
+        .unwrap();
+        match msg {
+            ClientMsg::Subscribe { topics, .. } => {
+                assert_eq!(
+                    topics,
+                    vec![
+                        Topic::Activity,
+                        Topic::AuthoredPrs,
+                        Topic::Unknown,
+                        Topic::Unknown
+                    ]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_two_verbs_have_their_documented_wire_shapes() {
+        assert_eq!(
+            serde_json::to_value(ClientMsg::AuthoredPrsDemand {
+                level: "visible".into()
+            })
+            .unwrap(),
+            json!({"type": "authored_prs_demand", "level": "visible"})
+        );
+        assert_eq!(
+            serde_json::to_value(ClientMsg::AuthoredPrsRefresh {}).unwrap(),
+            json!({"type": "authored_prs_refresh"})
+        );
+        match serde_json::from_value::<ClientMsg>(
+            json!({"type": "authored_prs_demand", "level": "idle"}),
+        )
+        .unwrap()
+        {
+            ClientMsg::AuthoredPrsDemand { level } => assert_eq!(level, "idle"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            serde_json::from_value::<ClientMsg>(json!({"type": "authored_prs_refresh"})).unwrap(),
+            ClientMsg::AuthoredPrsRefresh {}
+        ));
+        round_trip(ClientMsg::AuthoredPrsDemand {
+            level: "hidden".into(),
+        });
+        round_trip(ClientMsg::AuthoredPrsRefresh {});
+    }
+
+    fn round_trip(msg: ClientMsg) {
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: ClientMsg = serde_json::from_str(&json).unwrap();
+        assert_eq!(json, serde_json::to_string(&back).unwrap());
+    }
+
+    #[test]
+    fn the_frame_is_tagged_authored_prs_with_the_snapshot_under_snapshot() {
+        let snapshot: crate::data::authored_prs::AuthoredPrsSnapshot =
+            serde_json::from_value(json!({
+                "generated_at": "2026-11-14T12:00:00Z",
+                "token": "connected",
+                "relay": {"state": "live", "org": "Carefeed"},
+                "poll": {"state": "ok", "interval_secs": 60},
+                "total_open": 0,
+                "shown": 0,
+                "prs": [],
+                "usage": {
+                    "window_secs": 3600,
+                    "charged": 0, "not_modified": 0, "search": 0, "graphql_points": 0,
+                    "relay_charged": 0, "visible_charged": 0, "hidden_charged": 0,
+                    "since_start": {
+                        "charged": 0, "not_modified": 0, "search": 0, "graphql_points": 0,
+                        "relay_charged": 0, "visible_charged": 0, "hidden_charged": 0
+                    }
+                }
+            }))
+            .expect("the minimal snapshot decodes");
+        let v = serde_json::to_value(ServerMsg::AuthoredPrs { snapshot }).unwrap();
+        assert_eq!(v["type"], "authored_prs");
+        assert_eq!(v["snapshot"]["relay"]["state"], "live");
+        assert_eq!(v["snapshot"]["usage"]["window_secs"], 3600);
+        assert_eq!(
+            v["snapshot"]["usage"]["charged"], 0,
+            "the window counts sit beside window_secs"
+        );
+        assert!(v["snapshot"]["usage"]["since_start"].is_object());
+    }
+
+    #[test]
+    fn frames_from_an_older_client_decode_unchanged() {
+        // Frames as clients sent them before the author's PR list existed.
+        let old = [
+            json!({"type": "hello", "client_id": "mac-1", "protocol_version": 4}),
+            json!({"type": "hello", "client_id": "mac-1", "protocol_version": 4, "client_kind": "mac_app"}),
+            json!({"type": "subscribe", "topics": []}),
+            json!({"type": "subscribe", "topics": ["activity", "mother_jobs", "focuses", "perri", "terminal"]}),
+            json!({"type": "subscribe", "topics": ["model", "decision"], "renders_decisions": true, "capabilities": ["terminal_ui"]}),
+            json!({"type": "ping"}),
+            json!({"type": "session_list"}),
+        ];
+        for frame in old {
+            let msg: ClientMsg = serde_json::from_value(frame.clone())
+                .unwrap_or_else(|e| panic!("{frame} no longer decodes: {e}"));
+            let again = serde_json::to_value(&msg).unwrap();
+            // Optional keys the old frame left out stay out, and what it sent is kept.
+            for (k, v) in frame.as_object().unwrap() {
+                assert_eq!(&again[k], v, "{k} changed in {frame}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_earlier_topics_keep_their_names() {
+        for (topic, name) in [
+            (Topic::Activity, "activity"),
+            (Topic::MotherJobs, "mother_jobs"),
+            (Topic::MotherStatusline, "mother_statusline"),
+            (Topic::Focuses, "focuses"),
+            (Topic::MotherPeek, "mother_peek"),
+            (Topic::Perri, "perri"),
+            (Topic::Fred, "fred"),
+            (Topic::Teri, "teri"),
+            (Topic::Work, "work"),
+            (Topic::Layout, "layout"),
+            (Topic::Decision, "decision"),
+            (Topic::Model, "model"),
+            (Topic::Terminal, "terminal"),
+        ] {
+            assert_eq!(serde_json::to_value(&topic).unwrap(), json!(name));
+        }
+    }
+}
+
+/// The no-codebase focus on the wire: every new field is optional on the way in
+/// (an older app or daemon) and absent on the way out when it says nothing.
+#[cfg(test)]
+mod no_codebase_wire_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A focus frame as an app that predates `no_codebase` pushes it.
+    fn old_focus_frame() -> serde_json::Value {
+        json!({
+            "tag": "cody-abc12345",
+            "display_name": "Cody",
+            "agent_name": "cody",
+            "is_built_in": false
+        })
+    }
+
+    #[test]
+    fn a_focus_that_has_no_codebase_says_so_and_reads_back_the_same() {
+        let mut frame = old_focus_frame();
+        frame["no_codebase"] = json!(true);
+        let meta: FocusMeta = serde_json::from_value(frame.clone()).unwrap();
+        assert_eq!(meta.no_codebase, Some(true));
+        assert_eq!(serde_json::to_value(&meta).unwrap(), frame);
+    }
+
+    #[test]
+    fn an_older_apps_focus_push_reads_as_having_a_codebase_and_is_written_without_the_key() {
+        let old = json!({"type": "focus_registry_updated", "focuses": [old_focus_frame()]});
+        let msg: ServerMsg = serde_json::from_value(old.clone()).unwrap();
+        let ServerMsg::FocusRegistryUpdated { focuses } = &msg else {
+            panic!("{msg:?}")
+        };
+        assert_eq!(focuses[0].no_codebase, None, "absent reads as not set");
+        let again = serde_json::to_value(&msg).unwrap();
+        assert!(
+            !again.to_string().contains("no_codebase"),
+            "an unset flag adds no key: {again}"
+        );
+        assert_eq!(again, old);
+        // The focus message from the app, too (the registry push the daemon receives).
+        let meta: FocusMeta = serde_json::from_value(old_focus_frame()).unwrap();
+        assert_eq!(meta.no_codebase, None);
+    }
+
+    fn history_entry(no_codebase: bool) -> ConversationEntryWire {
+        ConversationEntryWire {
+            id: "s1".into(),
+            title: "T".into(),
+            label: None,
+            agent: "cody".into(),
+            project_name: None,
+            project_path: None,
+            branch: None,
+            model: None,
+            effort: None,
+            pr_numbers: vec![],
+            first_prompt: None,
+            first_prompt_withheld: None,
+            sensitive: false,
+            last_active_ms: 5,
+            status: ConversationStatus::Available,
+            resumed_from_tag: None,
+            transcript_path: None,
+            main_checkout: None,
+            no_codebase,
+        }
+    }
+
+    #[test]
+    fn a_history_entry_carries_no_codebase_only_when_true() {
+        let yes = serde_json::to_value(history_entry(true)).unwrap();
+        assert_eq!(yes["no_codebase"], json!(true));
+        let back: ConversationEntryWire = serde_json::from_value(yes).unwrap();
+        assert!(back.no_codebase);
+
+        let no = serde_json::to_value(history_entry(false)).unwrap();
+        assert!(no.get("no_codebase").is_none(), "{no}");
+        // An older daemon's entry has no such key and reads as false.
+        let back: ConversationEntryWire = serde_json::from_value(no).unwrap();
+        assert!(!back.no_codebase);
+    }
+
+    #[test]
+    fn a_resume_into_a_no_codebase_folder_round_trips_and_the_old_form_reads_as_none() {
+        let with = r#"{"type":"conversation_resume","request_id":"r","id":"s1","new_tag":"t1","no_codebase_folder":"/spaces/abc"}"#;
+        let parsed: ClientMsg = serde_json::from_str(with).unwrap();
+        let ClientMsg::ConversationResume {
+            no_codebase_folder, ..
+        } = &parsed
+        else {
+            panic!("{parsed:?}")
+        };
+        assert_eq!(no_codebase_folder.as_deref(), Some("/spaces/abc"));
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), with);
+
+        let old = r#"{"type":"conversation_resume","request_id":"r","id":"s1","new_tag":"t1"}"#;
+        let parsed: ClientMsg = serde_json::from_str(old).unwrap();
+        let ClientMsg::ConversationResume {
+            no_codebase_folder, ..
+        } = &parsed
+        else {
+            panic!("{parsed:?}")
+        };
+        assert_eq!(*no_codebase_folder, None);
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), old);
+    }
+
+    #[test]
+    fn the_history_always_says_which_space_folders_it_references() {
+        let reply = |folders: Vec<String>| ServerMsg::ConversationHistory {
+            request_id: "r".into(),
+            entries: vec![],
+            first_prompts_enabled: true,
+            degraded_kept: None,
+            revision: 1,
+            referenced_space_folders: folders,
+            spaces_root: None,
+        };
+        let some = serde_json::to_value(reply(vec!["/spaces/a".into()])).unwrap();
+        assert_eq!(some["referenced_space_folders"], json!(["/spaces/a"]));
+        let back: ServerMsg = serde_json::from_value(some).unwrap();
+        let ServerMsg::ConversationHistory {
+            referenced_space_folders,
+            ..
+        } = back
+        else {
+            panic!()
+        };
+        assert_eq!(referenced_space_folders, vec!["/spaces/a".to_owned()]);
+
+        // Present even when empty: that is how the app tells "none" from an older daemon.
+        let none = serde_json::to_value(reply(vec![])).unwrap();
+        assert_eq!(none["referenced_space_folders"], json!([]), "{none}");
+    }
+
+    #[test]
+    fn the_history_carries_the_daemons_spaces_root_and_an_older_daemon_omits_it() {
+        let with = ServerMsg::ConversationHistory {
+            request_id: "r".into(),
+            entries: vec![],
+            first_prompts_enabled: true,
+            degraded_kept: None,
+            revision: 1,
+            referenced_space_folders: vec![],
+            spaces_root: Some("/spaces".into()),
+        };
+        let v = serde_json::to_value(&with).unwrap();
+        assert_eq!(v["spaces_root"], json!("/spaces"));
+        let back: ServerMsg = serde_json::from_value(v).unwrap();
+        let ServerMsg::ConversationHistory { spaces_root, .. } = back else {
+            panic!()
+        };
+        assert_eq!(spaces_root.as_deref(), Some("/spaces"));
+
+        let old = json!({"type":"conversation_history","request_id":"r","entries":[],
+            "first_prompts_enabled":true,"revision":1});
+        let ServerMsg::ConversationHistory { spaces_root, .. } =
+            serde_json::from_value(old).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(spaces_root, None);
     }
 }

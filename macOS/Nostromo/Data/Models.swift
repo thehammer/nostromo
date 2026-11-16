@@ -73,16 +73,54 @@ struct Focus: Codable, Hashable, Identifiable {
     var initialModel: String? = nil
     /// The effort chosen in the create sheet. Nil: the model's default.
     var initialEffort: String? = nil
+    /// Set when this focus was made by resuming a conversation from History; the sidebar says
+    /// "resumed · date" until the first new message is sent.
+    var resumedAt: Date? = nil
+    /// A focus with no codebase: it runs in its own private folder (`workingDirectory`) and `projectPath`
+    /// stays nil, so everything that means "the repo" (branch, PR, repo grouping) stays off for it.
+    var noCodebase: Bool = false
+    /// The private folder a no-codebase focus runs in. Only meaningful with `noCodebase`.
+    var workingDirectory: String? = nil
+
+    /// Where this focus's session, and a new Terminal, run: the repo, or a no-codebase focus's folder.
+    /// Nil makes the daemon use the home folder. Never use this for "the repo": that is `projectPath`.
+    var sessionWorkingDirectory: String? {
+        projectPath ?? (noCodebase ? workingDirectory : nil)
+    }
+
+    /// "resumed · <date>" while a focus made from History has not been written to yet.
+    var resumedLabel: String? {
+        guard let at = resumedAt else { return nil }
+        return "resumed \u{00B7} " + at.formatted(date: .abbreviated, time: .omitted)
+    }
 
     /// Longest label the UI accepts.
     static let maxLabelLength = 60
 
-    /// Trims whitespace/newlines, caps at `maxLabelLength` characters, and maps
-    /// blank to nil. Trim happens before the cap so leading spaces never eat
-    /// the budget; a cut can leave trailing whitespace, so trim again.
+    /// Is this a Perri focus: its agent's bare name (through a plugin qualifier,
+    /// case-insensitive) is `perri`. The daemon's `is_perri_agent` rule.
+    var isPerriFocus: Bool {
+        let bare = agentTag.trimmingCharacters(in: .whitespaces)
+            .split(separator: ":", omittingEmptySubsequences: false).last.map(String.init) ?? ""
+        return bare.trimmingCharacters(in: .whitespaces).lowercased() == "perri"
+    }
+
+    /// Cleans, trims, caps at `maxLabelLength` characters, and maps blank to nil.
+    /// Cleaning: line breaks and tabs become spaces; other control, bidi, zero-width and
+    /// line-separator characters are dropped (a label is one visible line). Trim happens
+    /// before the cap so leading spaces never eat the budget; a cut can leave trailing
+    /// whitespace, so trim again.
     static func normalizedLabel(_ raw: String?) -> String? {
         guard let raw else { return nil }
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        var cleaned = String.UnicodeScalarView()
+        for scalar in raw.unicodeScalars {
+            switch scalar.value {
+            case 0x0A, 0x0D, 0x09, 0x2028, 0x2029: cleaned.append(" ")
+            case 0x00...0x1F, 0x7F...0x9F, 0x200B...0x200F, 0x202A...0x202E, 0x2060...0x206F, 0xFEFF: continue
+            default: cleaned.append(scalar)
+            }
+        }
+        let trimmed = String(cleaned).trimmingCharacters(in: .whitespacesAndNewlines)
         let capped = String(trimmed.prefix(maxLabelLength))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return capped.isEmpty ? nil : capped
@@ -98,6 +136,7 @@ struct Focus: Codable, Hashable, Identifiable {
 
     var displayName: String {
         if let label = Focus.normalizedLabel(label) { return label }
+        if noCodebase { return "\(agentTag.capitalized) (no codebase)" }
         guard let repo = repoName else { return agentTag.capitalized }
         return "\(agentTag.capitalized) in \(repo)"
     }
@@ -126,6 +165,7 @@ struct Focus: Codable, Hashable, Identifiable {
     /// field existed) have `org == nil`: project sessions fall under "Carefeed", pathless
     /// ones under "Personal".
     var effectiveOrg: String {
+        if noCodebase { return "Personal" }
         if let org, !org.isEmpty { return org }
         return projectPath == nil ? "Personal" : "Carefeed"
     }
@@ -196,6 +236,11 @@ extension Focus {
         label          = try c.decodeIfPresent(String.self, forKey: .label)
         initialModel   = try c.decodeIfPresent(String.self, forKey: .initialModel)
         initialEffort  = try c.decodeIfPresent(String.self, forKey: .initialEffort)
+        // Additive and optional: absent in every `focuses.json` written before History.
+        resumedAt      = try c.decodeIfPresent(Date.self, forKey: .resumedAt)
+        // Additive: absent in every `focuses.json` written before No codebase.
+        noCodebase       = try c.decodeIfPresent(Bool.self, forKey: .noCodebase) ?? false
+        workingDirectory = try c.decodeIfPresent(String.self, forKey: .workingDirectory)
 
         // Self-heal a daemon-created focus persisted before `daemonTag` existed.
         //
@@ -372,6 +417,14 @@ struct MotherStatus: Equatable {
     }
 }
 
+/// Mother's `dep_wait` object: which dependency a queued job waits on, and why.
+struct MotherDepWait: Equatable {
+    let depId: String
+    let blocked: Bool
+    let reason: String
+    let prURL: String?
+}
+
 struct MotherJob: Identifiable, Equatable {
     let id:              String
     let state:           String
@@ -399,6 +452,10 @@ struct MotherJob: Identifiable, Equatable {
     var costUsd: Double? = nil
     /// Why a `ready`/`queued` job is waiting, from the job's `limiter.wait` (Mother's backpressure limiter).
     var limiterWait: MotherLimiter.Waiting? = nil
+    /// Job ids this job depends on (`depends_on`), bounded and cleaned at decode.
+    var dependsOn: [String] = []
+    /// Mother's `dep_wait`: the first unsatisfied dependency, present only while `queued`.
+    var depWait: MotherDepWait? = nil
 
     /// Apply a `progress_updated` overlay. A strictly older `updated_at` is ignored (events can
     /// arrive out of order, or after a `query.get` that already has a later one); a tie goes to
@@ -516,6 +573,8 @@ struct MotherJobSlim: Decodable {
     let failureReason:   String?
     let costUsd:         Double?
     let limiterWait:     MotherLimiter.Waiting?
+    let dependsOn:       [String]
+    let depWait:         MotherDepWait?
 
     private struct Origin: Decodable { let label: String? }
 
@@ -528,6 +587,36 @@ struct MotherJobSlim: Decodable {
             let raw = try? c.decodeIfPresent(WireValue.self, forKey: .wait)
             wait = MotherLimiter.decodeWait(raw?.value)
         }
+    }
+
+    /// Removes control characters, trims, and bounds to `limit` characters.
+    private static func clean(_ s: String, limit: Int) -> String {
+        let scalars = s.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        var out = String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: .whitespacesAndNewlines)
+        if out.count > limit { out = String(out.prefix(limit)) }
+        return out
+    }
+
+    static func decodeDependsOn(_ raw: Any?) -> [String] {
+        guard let arr = raw as? [Any] else { return [] }
+        var out: [String] = []
+        for case let s as String in arr {
+            let id = clean(s, limit: 64)
+            if id.isEmpty || out.contains(id) { continue }
+            out.append(id)
+            if out.count >= 50 { break }
+        }
+        return out
+    }
+
+    static func decodeDepWait(_ raw: Any?) -> MotherDepWait? {
+        guard let o = raw as? [String: Any], let idRaw = o["dep_id"] as? String else { return nil }
+        let id = clean(idRaw, limit: 64)
+        if id.isEmpty { return nil }
+        let reason = (o["reason"] as? String).map { clean($0, limit: 64) } ?? ""
+        let url = (o["pr_url"] as? String).map { clean($0, limit: 300) } ?? ""
+        return MotherDepWait(depId: id, blocked: (o["status"] as? String) == "blocked",
+                             reason: reason, prURL: url.isEmpty ? nil : url)
     }
 
     /// Any JSON value, as `JSONSerialization` would have given it.
@@ -547,6 +636,8 @@ struct MotherJobSlim: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case id, state, repo, isolation, title, question, kind, phases, cycles, origin, limiter
+        case dependsOn       = "depends_on"
+        case depWait         = "dep_wait"
         case createdAt       = "created_at"
         case startedAt       = "started_at"
         case finishedAt      = "finished_at"
@@ -567,7 +658,7 @@ struct MotherJobSlim: Decodable {
         state           = try c.decode(String.self, forKey: .state)
         repo            = try c.decode(String.self, forKey: .repo)
         isolation       = try c.decode(String.self, forKey: .isolation)
-        title           = try c.decode(String.self, forKey: .title)
+        title           = FoldTextSanitizer.sanitizeInline(try c.decode(String.self, forKey: .title))
         createdAt       = try c.decodeIfPresent(String.self, forKey: .createdAt)
         startedAt       = try c.decodeIfPresent(String.self, forKey: .startedAt)
         finishedAt      = try c.decodeIfPresent(String.self, forKey: .finishedAt)
@@ -585,6 +676,8 @@ struct MotherJobSlim: Decodable {
         failureReason   = (try? c.decodeIfPresent(String.self, forKey: .failureReason)) ?? nil
         costUsd         = (try? c.decodeIfPresent(Double.self, forKey: .costUsd)) ?? nil
         limiterWait     = ((try? c.decodeIfPresent(LimiterField.self, forKey: .limiter)) ?? nil)?.wait
+        dependsOn       = Self.decodeDependsOn((try? c.decodeIfPresent(WireValue.self, forKey: .dependsOn))??.value)
+        depWait         = Self.decodeDepWait((try? c.decodeIfPresent(WireValue.self, forKey: .depWait))??.value)
     }
 
     private static let fmtFrac: ISO8601DateFormatter = {
@@ -620,7 +713,9 @@ struct MotherJobSlim: Decodable {
                   originLabel:     originLabel,
                   failureReason:   failureReason,
                   costUsd:         costUsd,
-                  limiterWait:     limiterWait)
+                  limiterWait:     limiterWait,
+                  dependsOn:       dependsOn,
+                  depWait:         depWait)
     }
 }
 
@@ -653,9 +748,12 @@ struct PRQueueItem: Identifiable, Encodable, Equatable {
     let ciState:     CiState
     /// HEAD commit SHA — used by the GUI to validate its detail cache.
     let headSha:     String
+    /// Jira ticket keys the daemon detected for this PR (title, branch, body);
+    /// empty when none or when no Jira site is configured.
+    var tickets:     [String] = []
 
     enum CodingKeys: String, CodingKey {
-        case repo, number, title, author, bucket, url
+        case repo, number, title, author, bucket, url, tickets
         case newActivity = "new_activity"
         case ciState     = "ci_state"
         case headSha     = "head_sha"

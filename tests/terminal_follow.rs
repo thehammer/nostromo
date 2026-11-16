@@ -159,6 +159,7 @@ fn focus_meta(tag: &str) -> FocusMeta {
     FocusMeta {
         initial_model: None,
         initial_effort: None,
+        no_codebase: None,
         tag: tag.to_string(),
         display_name: tag.to_string(),
         agent_name: "cody".to_string(),
