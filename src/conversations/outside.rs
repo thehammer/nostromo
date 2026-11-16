@@ -197,7 +197,14 @@ impl OutsideIndex {
         s.ready = true;
         s.running = false;
         if let Some(path) = &s.path {
-            if write_private(path, &FileData { entries: s.entries.clone() }).is_err() {
+            if write_private(
+                path,
+                &FileData {
+                    entries: s.entries.clone(),
+                },
+            )
+            .is_err()
+            {
                 tracing::warn!("outside conversation index could not be written");
             }
         }
@@ -224,7 +231,12 @@ impl OutsideIndex {
         }
         if let Some(path) = &s.path {
             if path.exists() {
-                let _ = write_private(path, &FileData { entries: s.entries.clone() });
+                let _ = write_private(
+                    path,
+                    &FileData {
+                        entries: s.entries.clone(),
+                    },
+                );
             }
         }
     }
@@ -297,11 +309,7 @@ fn candidates(env: &ScanEnv<'_>) -> Vec<Candidate> {
 
 type Rejected = HashMap<PathBuf, (u64, i64)>;
 
-fn scan(
-    env: &ScanEnv<'_>,
-    previous: Vec<Indexed>,
-    rejected: Rejected,
-) -> (Vec<Indexed>, Rejected) {
+fn scan(env: &ScanEnv<'_>, previous: Vec<Indexed>, rejected: Rejected) -> (Vec<Indexed>, Rejected) {
     let cache: HashMap<PathBuf, Indexed> = previous
         .into_iter()
         .map(|e| (e.transcript_path.clone(), e))
@@ -356,7 +364,13 @@ fn index_file(env: &ScanEnv<'_>, c: &Candidate) -> Option<Indexed> {
     let agent = head.agent_name.clone();
     let sensitive = (env.is_sensitive)(agent.as_deref());
     let title = agent.clone().unwrap_or_else(|| "claude".to_owned());
-    let mut e = ConversationEntry::new(&c.sid, "", agent.as_deref().unwrap_or(""), &title, env.now_ms);
+    let mut e = ConversationEntry::new(
+        &c.sid,
+        "",
+        agent.as_deref().unwrap_or(""),
+        &title,
+        env.now_ms,
+    );
     e.sensitive = sensitive;
     e.last_active_ms = c.mtime_ms;
     e.transcript_path = Some(c.path.clone());

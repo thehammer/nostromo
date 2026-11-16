@@ -2959,9 +2959,13 @@ async fn terminal_rows_appear_only_while_the_switch_is_on_and_off_deletes_the_in
     wait_outside_ready(&mut rig);
     let (rows, on, _) = listing(&mut rig);
     assert!(on);
-    let row = rows.iter().find(|r| r.id == "term-1").expect("a terminal row");
+    let row = rows
+        .iter()
+        .find(|r| r.id == "term-1")
+        .expect("a terminal row");
     assert_eq!(row.origin.as_deref(), Some("terminal"));
-    let index_file = crate::conversations::outside::path_beside(&rig.dir.path().join("daemon-sessions.json"));
+    let index_file =
+        crate::conversations::outside::path_beside(&rig.dir.path().join("daemon-sessions.json"));
     assert!(index_file.exists());
 
     rig.mgr.set_include_outside(false);
@@ -2971,7 +2975,8 @@ async fn terminal_rows_appear_only_while_the_switch_is_on_and_off_deletes_the_in
 }
 
 #[tokio::test]
-async fn a_terminal_conversation_with_no_usable_agent_asks_for_one_and_adopts_nothing_until_it_starts() {
+async fn a_terminal_conversation_with_no_usable_agent_asks_for_one_and_adopts_nothing_until_it_starts(
+) {
     let mut rig = Rig::new();
     agents_dir(&rig, &["cody"]);
     terminal_transcript(&rig, "term-2", Some("not-an-agent"), 3600);
@@ -2996,7 +3001,14 @@ async fn a_terminal_conversation_with_no_usable_agent_asks_for_one_and_adopts_no
     assert!(rig.mgr.conversations().known_sids().contains("term-2"));
     let (rows, _, _) = listing(&mut rig);
     assert_eq!(rows.iter().filter(|r| r.id == "term-2").count(), 1);
-    assert!(rows.iter().find(|r| r.id == "term-2").unwrap().origin.is_none(), "now a Nostromo conversation");
+    assert!(
+        rows.iter()
+            .find(|r| r.id == "term-2")
+            .unwrap()
+            .origin
+            .is_none(),
+        "now a Nostromo conversation"
+    );
     std::env::remove_var(crate::conversations::outside::AGENTS_DIR_ENV);
 }
 
@@ -3018,7 +3030,11 @@ async fn a_terminal_conversation_written_to_a_moment_ago_is_refused_and_stays_a_
             ..ResumeOptions::default()
         },
     );
-    assert_eq!(outcome(&confirmed).0, ConversationResumeOutcome::Ready, "the recorded agent exists: none asked");
+    assert_eq!(
+        outcome(&confirmed).0,
+        ConversationResumeOutcome::Ready,
+        "the recorded agent exists: none asked"
+    );
     std::env::remove_var(crate::conversations::outside::AGENTS_DIR_ENV);
 }
 

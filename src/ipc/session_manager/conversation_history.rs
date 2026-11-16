@@ -522,7 +522,10 @@ impl SessionManager {
             return Err("not_found");
         }
         let indexed = self.outside.get(sid).ok_or("not_found")?;
-        let recorded = indexed.agent.as_deref().filter(|a| outside::agent_exists(a));
+        let recorded = indexed
+            .agent
+            .as_deref()
+            .filter(|a| outside::agent_exists(a));
         let agent = recorded
             .or(chosen.filter(|a| outside::agent_exists(a)))
             .ok_or("needs_agent")?;

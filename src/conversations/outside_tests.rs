@@ -26,7 +26,8 @@ fn rec(kind: &str, entrypoint: &str, cwd: &str, sidechain: bool, text: &str) -> 
 }
 
 fn conversation(entrypoint: &str, cwd: &str, sidechain: bool, prompt: &str) -> String {
-    rec("user", entrypoint, cwd, sidechain, prompt) + &rec("assistant", entrypoint, cwd, sidechain, "")
+    rec("user", entrypoint, cwd, sidechain, prompt)
+        + &rec("assistant", entrypoint, cwd, sidechain, "")
 }
 
 struct Rig {
@@ -80,19 +81,51 @@ impl Rig {
 #[test]
 fn the_index_keeps_an_interactive_conversation_and_drops_each_kind_that_is_not_one() {
     let rig = Rig::new();
-    rig.put("good", &conversation("cli", "/work/app", false, "fix the login bug"), 1000);
+    rig.put(
+        "good",
+        &conversation("cli", "/work/app", false, "fix the login bug"),
+        1000,
+    );
     // One discriminator at a time: each fixture differs from "good" in exactly one way.
-    rig.put("dash-p", &conversation("sdk-cli", "/work/app", false, "x"), 1000);
-    rig.put("sdk", &conversation("sdk-ts", "/work/app", false, "x"), 1000);
-    rig.put("mother", &conversation("cli", "/Users/me/.mother/work/job-1", false, "x"), 1000);
-    rig.put("sidechain", &conversation("cli", "/work/app", true, "x"), 1000);
+    rig.put(
+        "dash-p",
+        &conversation("sdk-cli", "/work/app", false, "x"),
+        1000,
+    );
+    rig.put(
+        "sdk",
+        &conversation("sdk-ts", "/work/app", false, "x"),
+        1000,
+    );
+    rig.put(
+        "mother",
+        &conversation("cli", "/Users/me/.mother/work/job-1", false, "x"),
+        1000,
+    );
+    rig.put(
+        "sidechain",
+        &conversation("cli", "/work/app", true, "x"),
+        1000,
+    );
     rig.put("held", &conversation("cli", "/work/app", false, "x"), 1000);
-    rig.put("old", &conversation("cli", "/work/app", false, "x"), 31 * 24 * 3600 * 1000);
+    rig.put(
+        "old",
+        &conversation("cli", "/work/app", false, "x"),
+        31 * 24 * 3600 * 1000,
+    );
     rig.put("empty", "", 1000);
     // A subagent's thread lives in a per-session subfolder.
-    let sub = rig.projects.join("-work-app").join("good").join("subagents");
+    let sub = rig
+        .projects
+        .join("-work-app")
+        .join("good")
+        .join("subagents");
     std::fs::create_dir_all(&sub).unwrap();
-    std::fs::write(sub.join("agent-a1.jsonl"), conversation("cli", "/work/app", false, "x")).unwrap();
+    std::fs::write(
+        sub.join("agent-a1.jsonl"),
+        conversation("cli", "/work/app", false, "x"),
+    )
+    .unwrap();
     // A symlinked transcript is never followed.
     #[cfg(unix)]
     std::os::unix::fs::symlink(
@@ -110,7 +143,11 @@ fn the_index_keeps_an_interactive_conversation_and_drops_each_kind_that_is_not_o
 #[test]
 fn a_file_is_read_within_its_head_and_tail_budget_and_an_unchanged_one_not_again() {
     let rig = Rig::new();
-    let path = rig.put("big", &conversation("cli", "/work/app", false, "big one"), 1000);
+    let path = rig.put(
+        "big",
+        &conversation("cli", "/work/app", false, "big one"),
+        1000,
+    );
     // 100 MB, sparse: the head and one record near the end are real.
     let tail = rec("user", "cli", "/work/app", false, "later").replace("main", "topic");
     {
@@ -122,29 +159,63 @@ fn a_file_is_read_within_its_head_and_tail_budget_and_an_unchanged_one_not_again
         f.write_all(tail.as_bytes()).unwrap();
         f.set_modified(secs(NOW - 1000)).unwrap();
     }
-    rig.put("sdk-big", &conversation("sdk-cli", "/work/app", false, "x"), 1000);
+    rig.put(
+        "sdk-big",
+        &conversation("sdk-cli", "/work/app", false, "x"),
+        1000,
+    );
     let sdk = rig.projects.join("-work-app").join("sdk-big.jsonl");
-    std::fs::OpenOptions::new().write(true).open(&sdk).unwrap().set_len(100 << 20).unwrap();
-    std::fs::File::options().write(true).open(&sdk).unwrap().set_modified(secs(NOW - 1000)).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&sdk)
+        .unwrap()
+        .set_len(100 << 20)
+        .unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&sdk)
+        .unwrap()
+        .set_modified(secs(NOW - 1000))
+        .unwrap();
 
     let index = OutsideIndex::in_memory();
     let before = bytes_read_on_this_thread();
     rig.scan(&index, &[]);
     let read = bytes_read_on_this_thread() - before;
-    assert!(read <= (512 + 256 + 512) << 10, "read {read} bytes of two 100 MB files");
+    assert!(
+        read <= (512 + 256 + 512) << 10,
+        "read {read} bytes of two 100 MB files"
+    );
     let e = index.get("big").expect("indexed");
     assert_eq!(e.branch.as_deref(), Some("topic"), "the tail was read");
 
     let before = bytes_read_on_this_thread();
     rig.scan(&index, &[]);
-    assert_eq!(bytes_read_on_this_thread() - before, 0, "nothing changed: nothing re-read");
+    assert_eq!(
+        bytes_read_on_this_thread() - before,
+        0,
+        "nothing changed: nothing re-read"
+    );
 }
 
 #[test]
 fn a_flagged_first_prompt_is_withheld_and_its_text_is_in_no_file() {
     let rig = Rig::new();
-    rig.put("flagged", &conversation("cli", "/work/app", false, "Call back, SSN was 219-09-9999 ok"), 1000);
-    rig.put("plain", &conversation("cli", "/work/app", false, "tidy the readme"), 2000);
+    rig.put(
+        "flagged",
+        &conversation(
+            "cli",
+            "/work/app",
+            false,
+            "Call back, SSN was 219-09-9999 ok",
+        ),
+        1000,
+    );
+    rig.put(
+        "plain",
+        &conversation("cli", "/work/app", false, "tidy the readme"),
+        2000,
+    );
     let store = rig.dir.path().join("conversation-history.json");
     let file = path_beside(&store);
     let index = OutsideIndex::open(file.clone());
@@ -156,11 +227,17 @@ fn a_flagged_first_prompt_is_withheld_and_its_text_is_in_no_file() {
     let bytes = std::fs::read(&file).unwrap();
     let text = String::from_utf8_lossy(&bytes);
     assert!(!text.contains("219-09-9999") && !text.contains("Call back"));
-    assert!(text.contains("tidy the readme"), "an ordinary first prompt is kept");
+    assert!(
+        text.contains("tidy the readme"),
+        "an ordinary first prompt is kept"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }
 
@@ -174,18 +251,27 @@ fn a_sensitive_agent_keeps_no_branch_and_no_prompt() {
     rig.scan(&index, &[]);
     let e = index.get("fredsid").unwrap();
     assert!(e.sensitive && e.branch.is_none());
-    assert_eq!(e.first_prompt, FirstPrompt::Withheld(Reason::SensitiveConversation));
+    assert_eq!(
+        e.first_prompt,
+        FirstPrompt::Withheld(Reason::SensitiveConversation)
+    );
 }
 
 #[test]
 fn clear_deletes_the_file_and_first_prompts_off_drops_the_texts() {
     let rig = Rig::new();
-    rig.put("a", &conversation("cli", "/work/app", false, "tidy the readme"), 1000);
+    rig.put(
+        "a",
+        &conversation("cli", "/work/app", false, "tidy the readme"),
+        1000,
+    );
     let file = path_beside(&rig.dir.path().join("conversation-history.json"));
     let index = OutsideIndex::open(file.clone());
     rig.scan(&index, &[]);
     index.withhold_first_prompts();
-    assert!(!std::fs::read_to_string(&file).unwrap().contains("tidy the readme"));
+    assert!(!std::fs::read_to_string(&file)
+        .unwrap()
+        .contains("tidy the readme"));
     index.clear();
     assert!(!Path::new(&file).exists());
     assert!(index.is_empty() && !index.ready());
