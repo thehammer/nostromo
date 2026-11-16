@@ -465,6 +465,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
         resumeTab.onCancel = { [weak self] in self?.cancelTapped() }
         resumeTab.onSelectionChange = { [weak self] in self?.refreshResumeButton() }
         resumeTab.onFirstPromptsToggled = { [weak history] on in history?.setFirstPrompts(enabled: on) }
+        resumeTab.onIncludeOutsideToggled = { [weak history] on in history?.setIncludeOutside(on) }
 
         // The store speaks on the main thread, so these are synchronous.
         history.changes.sink { [weak self] in self?.reloadHistory() }.store(in: &cancellables)
@@ -559,6 +560,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
 
     /// The folder each conversation's last resume asked for, kept for a "Resume anyway" that follows.
     private var resumePlaces: [String: String] = [:]
+    private var resumeAgents: [String: String] = [:]
     private var resumeNoCodebaseFolders: [String: String] = [:]
 
     /// Makes a no-codebase folder (Create, and Resume with no codebase). Tests replace it; it must not
@@ -575,7 +577,36 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
         resumePlaces[id] = place
         resumeNoCodebaseFolders[id] = noCodebaseFolder
         history.resume(id, place: place, noCodebaseFolder: noCodebaseFolder,
-                       confirmActiveElsewhere: confirmActiveElsewhere)
+                       confirmActiveElsewhere: confirmActiveElsewhere, agent: resumeAgents[id])
+    }
+
+    /// The agent a terminal conversation continues with when Claude's recorded one is not an agent here:
+    /// asked first (Cancel resumes nothing). The default is the New tab's default agent.
+    var agentChoiceProvider: ((_ agents: [String], _ preselected: String?, @escaping (String?) -> Void) -> Void)?
+
+    private func chooseAgent(then proceed: @escaping () -> Void, for id: String) {
+        guard !agents.isEmpty else { resumeTab.showMessage("No agents found in ~/.claude/agents"); return }
+        let preselected = agents.firstIndex(of: "claudia").map { agents[$0] } ?? agents.first
+        let done: (String?) -> Void = { [weak self] agent in
+            guard let self, let agent else { return }
+            self.resumeAgents[id] = agent
+            proceed()
+        }
+        if let provider = agentChoiceProvider { provider(agents, preselected, done); return }
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Which agent should continue this conversation?"
+        alert.informativeText = "It was started in a terminal, so it has no Nostromo agent."
+        alert.addButton(withTitle: "Resume").keyEquivalent = "\r"
+        alert.addButton(withTitle: "Cancel")
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 220, height: 26))
+        popup.addItems(withTitles: agents)
+        if let preselected { popup.selectItem(withTitle: preselected) }
+        popup.setAccessibilityLabel("Agent")
+        alert.accessoryView = popup
+        alert.beginSheetModal(for: window) { response in
+            done(response == .alertFirstButtonReturn ? popup.titleOfSelectedItem : nil)
+        }
     }
 
     /// Make the new folder (nothing is sent when that fails: the reason is shown) and resume into it.
@@ -590,6 +621,11 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
 
     private func beginResume(_ e: ConversationEntryWire) {
         resumeTab.showMessage(nil)
+        // A terminal conversation whose recorded agent is not one of ours needs one picked first.
+        if e.isTerminal, e.agent.isEmpty, resumeAgents[e.id] == nil {
+            chooseAgent(then: { [weak self] in self?.beginResume(e) }, for: e.id)
+            return
+        }
         guard let choice = ResumeChoice.make(for: e) else { startResume(e.id, place: nil, confirmActiveElsewhere: false); return }
         // Nothing is sent until the user chooses; Cancel (the default for "open elsewhere") sends nothing.
         ask(choice) { [weak self] outcome in
@@ -674,6 +710,11 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
                 self?.startResume(id, place: self?.resumePlaces[id],
                                   noCodebaseFolder: self?.resumeNoCodebaseFolders[id], confirmActiveElsewhere: true)
             }
+        case .refused("needs_agent"):
+            chooseAgent(then: { [weak self] in
+                self?.startResume(id, place: self?.resumePlaces[id], noCodebaseFolder: self?.resumeNoCodebaseFolders[id],
+                                  confirmActiveElsewhere: false)
+            }, for: id)
         case .refused(let reason): resumeTab.showMessage(Self.refusalText(reason))
         }
     }

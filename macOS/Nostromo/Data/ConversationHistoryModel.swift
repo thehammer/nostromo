@@ -94,6 +94,7 @@ struct ConversationHistoryModel {
     static func matches(_ e: ConversationEntryWire, words: [String]) -> Bool {
         guard !words.isEmpty else { return true }
         var fields = [e.title, e.agent]
+        if e.isTerminal { fields.append("terminal") }
         if let p = e.projectName { fields.append(p) }
         if let b = e.branch { fields.append(b) }
         if let f = e.firstPrompt { fields.append(f) }
@@ -104,7 +105,19 @@ struct ConversationHistoryModel {
 
     // MARK: Words on a row
 
+    /// "Terminal" leads the title line of a conversation started outside Nostromo.
+    static let terminalLabel = "Terminal"
+
     func text(for e: ConversationEntryWire) -> RowText {
+        var t = rowText(for: e)
+        if e.isTerminal {
+            t.title = "\(Self.terminalLabel) \u{00B7} \(t.title)"
+            t.accessibilityLabel = "\(Self.terminalLabel), \(t.accessibilityLabel)"
+        }
+        return t
+    }
+
+    private func rowText(for e: ConversationEntryWire) -> RowText {
         let when = lastActiveText(e.lastActive)
         if e.sensitive {
             return RowText(title: e.title, detail: [e.agent, when].joined(separator: " · "), prs: nil,
