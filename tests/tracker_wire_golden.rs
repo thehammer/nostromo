@@ -17,12 +17,14 @@
 use std::path::PathBuf;
 
 use nostromo::ipc::protocol::ServerMsg;
-use nostromo::tracker::view::{build, ViewNode};
+use nostromo::tracker::view::{build, ViewConflict, ViewNode, ViewRemovedConflict};
 use nostromo::tracker::{parse, ParsedBoard, ViewFacts};
 
 const TAG: &str = "cody-fixture";
 const BOARD_FRAME: &str = "frame-tracker-board.json";
 const SUMMARY_FRAME: &str = "frame-tracker-summary.json";
+/// The same board with a conflict, a sensitive badge and a removed item's conflict.
+const CONFLICTS_FRAME: &str = "frame-tracker-board-conflicts.json";
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -40,6 +42,41 @@ fn parsed() -> ParsedBoard {
 }
 
 fn board_frame() -> ServerMsg {
+    board_frame_with(Default::default(), Vec::new(), Default::default())
+}
+
+/// The golden board with T3a's additive fields filled in (synthetic data).
+fn conflicts_frame() -> ServerMsg {
+    let at = chrono::DateTime::from_timestamp(1_760_540_500, 0).unwrap();
+    let conflict = ViewConflict {
+        conflict_id: "7.0".into(),
+        field: "status".into(),
+        losing: "in-progress".into(),
+        losing_by: "agent claudia".into(),
+        winning_by: "pane (you)".into(),
+        at,
+        index: 0,
+    };
+    board_frame_with(
+        [("check-1000".to_string(), vec![conflict])].into(),
+        vec![ViewRemovedConflict {
+            conflict_id: "7.1".into(),
+            item_id: "gone-1".into(),
+            title: "A removed task".into(),
+            losing_by: "pane (you)".into(),
+            winning_by: "agent cody".into(),
+            at,
+            source: "- [ ] A removed task — todo · 14:53 <!-- #gone-1 1760540000 -->\n".into(),
+        }],
+        [("verif-1037".to_string(), vec!["ssn".to_string()])].into(),
+    )
+}
+
+fn board_frame_with(
+    conflicts: std::collections::HashMap<String, Vec<ViewConflict>>,
+    removed_conflicts: Vec<ViewRemovedConflict>,
+    sensitive: std::collections::HashMap<String, Vec<String>>,
+) -> ServerMsg {
     let parsed = parsed();
     let view = build(
         &parsed,
@@ -52,6 +89,10 @@ fn board_frame() -> ServerMsg {
             committable: None,
             hidden_by_user: false,
             bound: Default::default(),
+            conflicts,
+            removed_conflicts,
+            sensitive,
+            dropped: Default::default(),
         },
     );
     ServerMsg::TrackerBoard {
@@ -101,6 +142,40 @@ fn check_golden(name: &str, msg: &ServerMsg) {
 fn the_tracker_board_frame_of_the_sixty_item_board_matches_the_committed_golden_file_byte_for_byte()
 {
     check_golden(BOARD_FRAME, &board_frame());
+}
+
+#[test]
+fn the_conflicts_frame_matches_the_committed_golden_file_byte_for_byte() {
+    check_golden(CONFLICTS_FRAME, &conflicts_frame());
+}
+
+#[test]
+fn the_conflicts_frame_carries_the_additive_t3a_keys_and_decodes_back() {
+    let text = std::fs::read_to_string(fixture_path(CONFLICTS_FRAME)).expect("golden frame");
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["board"]["removed_conflicts"][0]["item_id"], "gone-1");
+    let item = |id: &str| {
+        value["board"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == id)
+            .unwrap_or_else(|| panic!("item {id}"))
+            .clone()
+    };
+    assert_eq!(item("check-1000")["conflicts"][0]["losing"], "in-progress");
+    // Every conflict carries the stable id `resolve_conflict` names it by.
+    assert_eq!(item("check-1000")["conflicts"][0]["conflict_id"], "7.0");
+    assert_eq!(value["board"]["removed_conflicts"][0]["conflict_id"], "7.1");
+    // No item had a conflict dropped: the key is absent, not 0.
+    assert!(item("check-1000").get("dropped_conflicts").is_none());
+    assert_eq!(item("verif-1037")["sensitive"]["classes"][0], "ssn");
+    // Every item carries its raw text; only items with a note carry `note`.
+    assert!(item("check-1000")["text"].is_string());
+    assert!(item("check-1000")["note"].is_string());
+    assert!(item("revie-1111").get("note").is_none());
+    let msg: ServerMsg = serde_json::from_str(&text).expect("decodes as a ServerMsg");
+    assert_eq!(rendered(&msg), text);
 }
 
 #[test]

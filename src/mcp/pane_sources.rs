@@ -255,6 +255,25 @@ impl PaneContentProvider for McpPaneContentProvider {
     ) -> Result<(), String> {
         crate::mcp::tools::tracker_link::open_link(&self.0, tag, item_id, link_index).await
     }
+
+    async fn tracker_edit(
+        &self,
+        tag: &str,
+        request_id: &str,
+        client: &str,
+        base_version: u64,
+        ops: Vec<crate::ipc::protocol::TrackerPaneOp>,
+    ) -> ServerMsg {
+        crate::mcp::tools::tracker_edit::tracker_edit(
+            &self.0,
+            tag,
+            request_id,
+            client,
+            base_version,
+            ops,
+        )
+        .await
+    }
 }
 
 /// Carry out a document pane's action. Only a pane bound to a Huey source of

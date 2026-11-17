@@ -251,6 +251,104 @@ Free prose is kept verbatim.
   marker. Any other markdown is fine.
 - The parser and the splice are `src/tracker/format.rs`; the rules are contract §2.
 
+## When the user edits the board
+
+The pane edits the board as the user through `tracker_edit` (below), a verb only
+the verified Mac app may send. Its changes are attributed `pane (you)` in the
+change log, exactly like `file (unknown editor)` for an editor save. A write
+response (and `open`) carries `user_changes`: how many pane and file changes
+came in after this session's read cursor. When it is above 0, call `read`: the
+delta lists each change with its author, so the agent learns what the user did
+before it writes again. A pane edit never starts or queues an agent turn; the
+agent hears about it the next time it reads, or (a later slice) at the start of
+its next turn.
+
+A pane edit may do what an agent may not: tick a command item `done` ("Ran it")
+and put a removed item back. It never changes an item's `command`. It follows
+the same field rules as `upsert` (`title` is one line of at most 80 characters
+with no hidden formatting characters). Editing the note of a bound item keeps
+the source-owned first line.
+
+## Conflicts
+
+Three writers (agents, the pane, anything saving the file) change one board.
+A write by W that changes field F of item I (or removes I) is a **conflict**
+when F's latest change (for a removal, any change to I) was made by a different
+author L and either
+
+- (a) L's change was at most 10 s before W's, or
+- (b) W could not have seen it: for the pane, L's change came after the edit's
+  `base_version`; for an agent, after its read cursor (a session that never read
+  only has rule (a)); for a file save, the save sets F back to a value F once
+  had (an old editor buffer), or drops an item L added or changed, at any age.
+
+`source` changes never conflict (a bound item follows its source), and two
+changes by one author never do. The write is honoured, since it is the user's
+file; the overwritten value is kept (at most 5 per item field, 50 per board, the
+oldest dropped) until the user settles it with `resolve_conflict` or the daemon
+restarts. Conflicts are **not** persisted: they last until the next daemon
+session.
+
+The agent that reads gets one delta entry per conflict, attributed to the
+winning author (and shown to the winner too: it learns it overwrote something):
+
+```json
+{"by":"pane (you)","id":"deploy-ap","conflict":{"field":"status","kept":"done","lost":"in-progress","lost_by":"agent claudia"}}
+```
+
+Values are quoted like every other delta value, and withheld if sensitive (next
+section). A value the writer had seen and then deliberately replaced is
+superseded, not lost, and makes no conflict. Not covered: a value typed over an
+agent's in an old editor buffer that differs from the current file in nothing
+else looks the same as typing over a fresh one.
+
+The pane's board frame carries each item's `conflicts` (`field`, `losing`,
+`losing_by`, `winning_by`, `at`, `index`) and the board's `removed_conflicts`
+(the removed item's text and its exact markdown in `source`, which `restore`
+puts back byte for byte). The tests (`tests/tracker_two_way.rs` for the rule
+table, `tests/tracker_concurrency.rs` for 200 seeded interleavings of agents,
+pane and file saves checked against an oracle that shares no code with the
+rule) pin all of this.
+
+## Sensitive text the user types
+
+The pane and the file are never refused for sensitive text (the guard that
+refuses agent writes, `possible_sensitive_data`, is unchanged). Instead an item
+with a guard finding in any text-bearing field (text, note, owner, link text or
+url, command) is **badged** in the pane (`sensitive: {classes}`, class names
+only) and **withheld** from everything Nostromo hands an agent until the user
+clears the badge for that exact content: the compact `read`/`open` board, delta
+entries (old values included, so a number the user typed and deleted never
+leaks) and conflict entries read `[withheld: possible sensitive data]`. The
+item's id, status and section still show, so the agent knows something changed.
+`user_changes` is only a count and is unchanged.
+
+Badges are computed from content, so they hold for a board edited while the
+daemon was down and after a restart. `clear_badge` records the approval as
+FNV-1a hashes of the item's current field values (never the text) in
+`state.json`; changing the content makes the hash differ and a new finding
+badges again. A pane `add` whose title has a finding gets a neutral id
+(`item-…`) rather than one made from the title.
+
+**The file keeps the text.** The board file is the user's. An agent with file
+access (`Read`) can still read it; the guarantee is about what Nostromo itself
+hands the agent, not about the file.
+
+### `tracker_edit`
+
+`tracker_edit {tag, request_id, base_version, operator_nonce, ops}` (client →
+daemon, at most 50 ops, all or none; advertised as `tracker_edit_v1`) is applied
+only for the verified Mac app with its connection's nonce. A TCP peer is refused
+`requires_secure_connection`, any other local process `not_operator_app`, and
+nothing is written or broadcast. Ops: `status`, `edit {title?, text?, body?}`,
+`add {section, title, body?, before?, after?}`, `move`, `remove`,
+`restore {source, section, before?, after?}`, `clear_badge {id}` and
+`resolve_conflict {id, field, keep: current|losing, index?}`. The answer is
+`tracker_edit_result {tag, request_id, ok, error?, version, created}` to the
+asking connection only (`created`: the ids `add` generated, in op order); the
+board frame is broadcast before it. `tracker_edit_result` and the new view
+fields are `LocalOnly`.
+
 ## Where it lives in the daemon
 
 | piece | file |
@@ -309,6 +407,9 @@ directory removes those older than a minute.
 log (last 1,000 changes) and the session cursors (LRU, 200 sessions), so a
 `--resume`d session keeps its cursor. `~/.nostromo/trackers/last-good/<fnv64-of-path>.md`
 holds each board's last cleanly parsed bytes, used to recreate a deleted file.
+`state.json` also holds the user's cleared sensitive-text approvals (hashes) and
+`conflict` log entries; a daemon from before this slice ignores such a file
+(it logs "ignoring unreadable state.json") and starts with empty state.
 On start the daemon loads both and re-reads every bound board; an edit made
 while it was down is ingested as `file`.
 
@@ -319,6 +420,8 @@ while it was down is ingested as `file`.
 | `tracker_board {tag, board}` | `LocalOnly` | the whole board as the pane shows it, or `null` |
 | `tracker_summary {tag, has_tracker, counts}` | `Focus(tag)` | the only tracker frame a network peer receives, and only for a non-sensitive focus |
 | `tracker_open_link {tag, item_id, link_index}` | client → daemon, refused for network peers | open a link chip (see Links) |
+| `tracker_edit {tag, request_id, base_version, operator_nonce, ops}` | client → daemon, the verified app only | the user edits the board (see `tracker_edit`) |
+| `tracker_edit_result {tag, request_id, ok, error?, version, created}` | `LocalOnly`, to the asking connection | the answer to `tracker_edit` |
 
 Both are sent to every focus bound to a board after any change, and replayed on
 attach (the board frame to local clients only). Golden JSON for both is in

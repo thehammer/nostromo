@@ -1983,6 +1983,10 @@ class AppStore: ObservableObject {
         case .conversationHistory, .conversationResumeResult, .conversationHistoryChanged, .conversationResumeFailed:
             ConversationHistoryStore.shared.ingest(msg)
 
+        // The answer to an edit this window sent (`tracker_edit`): the store keeps the last per focus.
+        case .trackerEditResult(let result):
+            TrackerStore.shared.ingestEditResult(result)
+
         // The tracker pane's board and the focus's counts: every window's pane reads them from the store.
         case .trackerBoard, .trackerSummary:
             TrackerStore.shared.ingest(msg)

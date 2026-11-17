@@ -1470,7 +1470,7 @@ Pane ids starting with `terminal-` are reserved: `nostromo.create_pane` with one
 
 | Tool | Purpose | Reference |
 |---|---|---|
-| `nostromo.tracker` | Open a markdown task board and change it item by item (`open`, `upsert`, `status`, `remove`, `move`, `log`, `read`); edits made in an editor are picked up and attributed; deltas per session. | [`tracker.md`](tracker.md) |
+| `nostromo.tracker` | Open a markdown task board and change it item by item (`open`, `upsert`, `status`, `remove`, `move`, `log`, `read`); edits made in an editor or the pane are picked up and attributed, conflicts between the three writers are kept, and sensitive text the user types is withheld; deltas per session. | [`tracker.md`](tracker.md) |
 
 Source: `src/mcp/tools/tracker.rs`, `src/tracker/`
 

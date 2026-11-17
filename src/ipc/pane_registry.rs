@@ -83,6 +83,34 @@ pub trait PaneContentProvider: Send + Sync {
     ) -> Result<(), String> {
         Err("not_supported".to_string())
     }
+
+    /// Apply the user's tracker edit (`ClientMsg::TrackerEdit`) as `pane (you)`,
+    /// after the server has checked the peer, then broadcast the board.
+    /// Answers with the `ServerMsg::TrackerEditResult` for the asking
+    /// connection. `client` is the daemon's own id of the asking connection
+    /// (never client-supplied): two pane windows are two writers. Never
+    /// touches a session. The default knows no tracker.
+    async fn tracker_edit(
+        &self,
+        tag: &str,
+        request_id: &str,
+        _client: &str,
+        _base_version: u64,
+        _ops: Vec<crate::ipc::protocol::TrackerPaneOp>,
+    ) -> ServerMsg {
+        ServerMsg::TrackerEditResult {
+            tag: tag.to_string(),
+            request_id: request_id.to_string(),
+            ok: false,
+            error: Some(crate::ipc::protocol::TrackerEditError {
+                code: "not_supported".to_string(),
+                reason: None,
+                index: None,
+            }),
+            version: 0,
+            created: Vec::new(),
+        }
+    }
 }
 
 /// Supplies the tracker frames (`TrackerBoard`, `TrackerSummary`) of every

@@ -1310,6 +1310,130 @@ pub const FEATURE_AUTHORED_PRS: &str = "authored_prs_v1";
 /// and link, plus the additive `told` and `pill` fields on each row.
 pub const FEATURE_AUTHORED_PRS_NOTIFY: &str = "authored_prs_notify_v1";
 
+/// The optional capability advertised in `Welcome.features`: this daemon takes
+/// `tracker_edit` (the pane edits the board as the user) and answers with
+/// `tracker_edit_result`. The Mac shows its edit controls only when present.
+pub const FEATURE_TRACKER_EDIT: &str = "tracker_edit_v1";
+
+/// The optional capability advertised in `Welcome.features`: every conflict in
+/// `tracker_board` has a stable `conflict_id`, and `resolve_conflict` names the
+/// conflict it settles by it (a position is refused). A client without it can
+/// still show conflicts but its `resolve_conflict` is refused with a clear
+/// error rather than settling a different value than the one it showed.
+pub const FEATURE_TRACKER_CONFLICT_IDS: &str = "tracker_conflict_ids_v1";
+
+/// Ops in one `tracker_edit`.
+pub const MAX_TRACKER_EDIT_OPS: usize = 50;
+
+/// One edit the user makes in the tracker pane (`ClientMsg::TrackerEdit`).
+/// A separate type from the agent tool's `Op`: `restore`, `clear_badge` and
+/// `resolve_conflict` exist only here, so an agent can never call them.
+/// `title`/`body` are the names the pane uses for an item's text and note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum TrackerPaneOp {
+    /// The tick (`done`) and untick (the previous status, or `todo`).
+    Status {
+        id: String,
+        status: String,
+    },
+    /// Sets the given fields (at least one). `title` is one line of at most 80
+    /// characters; `text` (at most 500) is for a short rewrite (`restore_text` undoes a restructure); `body`
+    /// is the note (`""` clears it).
+    Edit {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+    },
+    /// A new item with a generated id (reported in `TrackerEditResult.created`).
+    Add {
+        section: String,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+    },
+    Move {
+        id: String,
+        section: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+    },
+    Remove {
+        id: String,
+    },
+    /// Puts an item's text back exactly as it was (undoing a restructure):
+    /// unlike `edit`'s `text` it is not cut at 500 characters, so a long line
+    /// that came from the file returns whole. One line; over 8,000 characters
+    /// (the cap of a note) only the item's recorded original is accepted.
+    RestoreText {
+        id: String,
+        text: String,
+    },
+    /// Puts an item back from its exact markdown (`ViewItem.source`),
+    /// byte for byte.
+    Restore {
+        source: String,
+        section: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+    },
+    /// The user accepts the item's current sensitive-looking text: it is no
+    /// longer badged or withheld from agents (until the content changes).
+    ClearBadge {
+        id: String,
+    },
+    /// Settles a conflict on `field` of item `id` (`removed` for a removed
+    /// item): `keep` is `current` or `losing`. `conflict_id` (from the view)
+    /// names the one losing value: positions shift as conflicts arrive, are
+    /// settled elsewhere or fall off the caps, so it is required, and a
+    /// conflict that no longer exists is refused with nothing written.
+    ResolveConflict {
+        id: String,
+        field: String,
+        keep: ConflictKeep,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conflict_id: Option<String>,
+        /// The pre-`conflict_id` pick by position. Still parsed so an old
+        /// client gets a clear refusal; never acted on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<u32>,
+    },
+}
+
+/// Which side of a conflict the user keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictKeep {
+    Current,
+    Losing,
+}
+
+/// Why a `tracker_edit` changed nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerEditError {
+    /// `invalid_args`, `unknown_item`, `invalid_status`, `board_too_large`,
+    /// `no_tracker`, `path_not_allowed`, `board_missing`, `board_unreadable`,
+    /// `io`, `not_operator_app`, `not_supported`.
+    pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The failing op's position, when the failure is one op's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u32>,
+}
+
 /// One slash command a session's CLI reports (`ServerMsg::SessionCommands`).
 /// `description` is one sanitised line of at most 200 characters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1686,6 +1810,24 @@ pub enum ClientMsg {
         tag: String,
         item_id: String,
         link_index: u32,
+    },
+
+    /// The user edits the board of focus `tag` in the pane (T3a). Applied only
+    /// from the verified Mac app with the connection's `operator_nonce`, as
+    /// `pane (you)`; refused for network peers (`requires_secure_connection`)
+    /// and for any other local process (`not_operator_app`), with nothing
+    /// written. `base_version` is the board version the pane's edit was made
+    /// against: a field that changed after it, by someone else, is a conflict.
+    /// All ops are applied or none (at most 50). Answered to this connection
+    /// with `TrackerEditResult`; the board frame is broadcast before that.
+    /// Never starts or queues an agent turn.
+    TrackerEdit {
+        tag: String,
+        request_id: String,
+        base_version: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
+        ops: Vec<TrackerPaneOp>,
     },
 
     /// A page of the Approvals log (AP5), newest first. Read-only. Applied only
@@ -3275,6 +3417,19 @@ pub enum ServerMsg {
     TrackerBoard {
         tag: String,
         board: Option<crate::tracker::TrackerBoardView>,
+    },
+    /// The answer to a `TrackerEdit`, to the asking connection only. `ok` with
+    /// the board `version` after the edit and the ids `add` generated, in op
+    /// order; otherwise `error` and nothing changed. `LocalOnly`.
+    TrackerEditResult {
+        tag: String,
+        request_id: String,
+        ok: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<TrackerEditError>,
+        version: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        created: Vec<String>,
     },
     /// That a focus has a tracker and how many items it holds per status, and
     /// nothing else: the only tracker frame a network peer may receive (for a
@@ -6741,6 +6896,72 @@ mod work_wire_tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn tracker_edit_and_its_result_round_trip_with_the_wire_names() {
+        let json = round_trip_client(ClientMsg::TrackerEdit {
+            tag: "t".into(),
+            request_id: "r1".into(),
+            base_version: 7,
+            operator_nonce: Some("n".into()),
+            ops: vec![
+                TrackerPaneOp::Status {
+                    id: "a".into(),
+                    status: "done".into(),
+                },
+                TrackerPaneOp::Edit {
+                    id: "a".into(),
+                    title: Some("T".into()),
+                    text: None,
+                    body: Some("".into()),
+                },
+                TrackerPaneOp::Add {
+                    section: "now".into(),
+                    title: "x".into(),
+                    body: None,
+                    before: Some("a".into()),
+                    after: None,
+                },
+                TrackerPaneOp::Restore {
+                    source: "- [ ] x\n".into(),
+                    section: "now".into(),
+                    before: None,
+                    after: None,
+                },
+                TrackerPaneOp::ClearBadge { id: "a".into() },
+                TrackerPaneOp::ResolveConflict {
+                    id: "a".into(),
+                    field: "status".into(),
+                    keep: ConflictKeep::Losing,
+                    conflict_id: Some("7.3".into()),
+                    index: None,
+                },
+            ],
+        });
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "tracker_edit");
+        assert_eq!(v["ops"][0]["op"], "status");
+        assert_eq!(v["ops"][4]["op"], "clear_badge");
+        assert_eq!(v["ops"][5]["keep"], "losing");
+        assert_eq!(v["ops"][5]["conflict_id"], "7.3");
+        assert!(v["ops"][5].get("index").is_none());
+        let json = round_trip_server(ServerMsg::TrackerEditResult {
+            tag: "t".into(),
+            request_id: "r1".into(),
+            ok: false,
+            error: Some(TrackerEditError {
+                code: "invalid_args".into(),
+                reason: Some("why".into()),
+                index: Some(2),
+            }),
+            version: 9,
+            created: vec!["x-1".into()],
+        });
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "tracker_edit_result");
+        assert_eq!(v["error"]["index"], 2);
+        assert_eq!(FEATURE_TRACKER_EDIT, "tracker_edit_v1");
     }
 
     #[test]

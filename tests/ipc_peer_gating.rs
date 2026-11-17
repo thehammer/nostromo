@@ -12766,3 +12766,266 @@ async fn a_unix_peer_reads_the_commands_a_session_reports_and_a_tcp_peer_is_refu
         assert!(!json_of(&frames).contains("SECRET-CMD"), "{frames:?}");
     }
 }
+
+// ── the two-way tracker (T3a, PRD 36, 41, 43): `tracker_edit` is the operator app's alone ──
+//
+// `tracker_edit` writes the board as `pane (you)`: it skips the agent guard and may tick "Ran it",
+// so a TCP peer is refused `requires_secure_connection` and any other local process (an agent's
+// Bash with a socket client) `not_operator_app`, with the file untouched and no board frame sent.
+// `tracker_edit_result`, `conflicts`, `removed_conflicts` and `sensitive` carry the user's own text:
+// none of it ever reaches a TCP peer.
+
+/// A raw `tracker_edit`, as a client writes it.
+fn raw_tracker_edit(tag: &str, nonce: Option<&str>, ops: Value) -> Value {
+    let mut msg = json!({
+        "type": "tracker_edit",
+        "tag": tag,
+        "request_id": "req-1",
+        "base_version": 0,
+        "ops": ops,
+    });
+    if let Some(nonce) = nonce {
+        msg["operator_nonce"] = json!(nonce);
+    }
+    msg
+}
+
+/// A tracker world with the provider installed and a two-item board for `TRACKER_ORDINARY`.
+async fn editable_world(h: &Harness) -> (TrackerWorld, PathBuf) {
+    let world = tracker_world(h);
+    h.session_mgr
+        .lock()
+        .unwrap()
+        .configure_pane_content_provider(Arc::new(
+            nostromo::mcp::pane_sources::McpPaneContentProvider(world.state.clone()),
+        ));
+    world
+        .call(
+            TRACKER_ORDINARY,
+            json!({"op": "open", "topic": "edit-gate", "title": "SECRET-TRACKER-71 title"}),
+        )
+        .await;
+    world
+        .call(
+            TRACKER_ORDINARY,
+            json!({"ops": [
+                {"op": "upsert", "id": "a", "section": "now", "text": "SECRET-TRACKER-72 first"},
+                {"op": "upsert", "id": "b", "section": "now", "text": "SECRET-TRACKER-73 second"},
+            ]}),
+        )
+        .await;
+    let path = world
+        .registry
+        .bound_path(TRACKER_ORDINARY)
+        .expect("a bound board");
+    (world, path)
+}
+
+fn done_op() -> Value {
+    json!([{"op": "status", "id": "a", "status": "done"}])
+}
+
+#[tokio::test]
+async fn a_raw_tcp_tracker_edit_is_refused_and_writes_nothing_while_the_app_s_is_applied() {
+    let _guard = RegistryGuard::acquire().await;
+    let h = spawn_server().await;
+    let (world, path) = editable_world(&h).await;
+    let mut observer = raw_unix(&h).await;
+    raw_handshake(&mut observer, subscribe_everything())
+        .await
+        .expect("observer handshake");
+    let mut tcp = raw_tcp(&h).await;
+    raw_handshake(&mut tcp, subscribe_everything())
+        .await
+        .expect("tcp handshake");
+    let before = std::fs::read(&path).unwrap();
+    world.registry.flush(&h.server.tx);
+    raw_sync_via_broadcast(&h, &mut observer).await;
+    raw_sync_via_broadcast(&h, &mut tcp).await;
+
+    // The network peer, with no nonce, a guessed one: refused, whatever it names.
+    for nonce in [None, Some("guess")] {
+        send_json(
+            &mut tcp,
+            &raw_tracker_edit(TRACKER_ORDINARY, nonce, done_op()),
+        )
+        .await;
+        let answered = read_until_type(&mut tcp, "error").await;
+        let refusal = answered.last().unwrap();
+        assert!(
+            refusal["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("requires_secure_connection")),
+            "{refusal}"
+        );
+        assert!(!types(&answered).iter().any(|t| t == "tracker_edit_result"));
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before, "nothing was written");
+    let seen = raw_sync_via_broadcast(&h, &mut observer).await;
+    assert!(
+        !types(&seen).iter().any(|t| t == "tracker_board"),
+        "a refused edit broadcast a board: {seen:?}"
+    );
+    raw_sync(&mut tcp).await.expect("still served");
+
+    // Control: the app's own edit (with its connection's nonce) is applied, answered to
+    // it alone, and the board is broadcast: the silence above is the gate's doing.
+    let (mut app, nonce) = h.unix_operator(vec![]).await;
+    send_json(
+        &mut app,
+        &raw_tracker_edit(TRACKER_ORDINARY, nonce.as_deref(), done_op()),
+    )
+    .await;
+    let answered = read_until_type(&mut app, "tracker_edit_result").await;
+    let result = answered.last().unwrap();
+    assert_eq!(result["ok"], json!(true), "{result}");
+    assert_eq!(result["request_id"], json!("req-1"));
+    assert_ne!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "control: the edit landed"
+    );
+    let seen = read_until_type(&mut observer, "tracker_board").await;
+    assert_eq!(seen.last().unwrap()["tag"], TRACKER_ORDINARY);
+    // The network peer is told counts, never the result, the board or its text.
+    let tcp_frames = raw_sync_via_broadcast(&h, &mut tcp).await;
+    assert!(
+        !types(&tcp_frames)
+            .iter()
+            .any(|t| t == "tracker_board" || t == "tracker_edit_result"),
+        "{tcp_frames:?}"
+    );
+    assert!(!mentions_a_tracker_sentinel(&tcp_frames), "{tcp_frames:?}");
+}
+
+#[tokio::test]
+async fn another_local_process_or_the_app_without_its_nonce_is_refused_not_operator_app_and_writes_nothing(
+) {
+    let _guard = RegistryGuard::acquire().await;
+    // A local process that is not the verified app (an agent's Bash with a socket client).
+    let h = spawn_server_with_verifier(Arc::new(FakePeerVerifier::always_script())).await;
+    let (world, path) = editable_world(&h).await;
+    let mut observer = raw_unix(&h).await;
+    raw_handshake(&mut observer, subscribe_everything())
+        .await
+        .expect("observer handshake");
+    let before = std::fs::read(&path).unwrap();
+    world.registry.flush(&h.server.tx);
+    raw_sync_via_broadcast(&h, &mut observer).await;
+
+    let (mut other, _) = h.unix(vec![]).await;
+    for nonce in [None, Some("guess")] {
+        send_json(
+            &mut other,
+            &raw_tracker_edit(TRACKER_ORDINARY, nonce, done_op()),
+        )
+        .await;
+        let answered = read_until_type(&mut other, "tracker_edit_result").await;
+        let result = answered.last().unwrap();
+        assert_eq!(result["ok"], json!(false), "{result}");
+        assert_eq!(
+            result["error"]["code"],
+            json!("not_operator_app"),
+            "{result}"
+        );
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before, "nothing was written");
+    let seen = raw_sync_via_broadcast(&h, &mut observer).await;
+    assert!(
+        !types(&seen).iter().any(|t| t == "tracker_board"),
+        "{seen:?}"
+    );
+
+    // The verified app without its connection's nonce is refused the same way.
+    let h = spawn_server().await;
+    let (world, path) = editable_world(&h).await;
+    let before = std::fs::read(&path).unwrap();
+    let (mut app, _nonce) = h.unix_operator(vec![]).await;
+    for nonce in [None, Some("not-the-nonce")] {
+        send_json(
+            &mut app,
+            &raw_tracker_edit(TRACKER_ORDINARY, nonce, done_op()),
+        )
+        .await;
+        let answered = read_until_type(&mut app, "tracker_edit_result").await;
+        assert_eq!(
+            answered.last().unwrap()["error"]["code"],
+            json!("not_operator_app")
+        );
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    drop(world);
+}
+
+#[tokio::test]
+async fn conflicts_and_sensitive_badges_reach_a_local_client_and_never_a_tcp_peer() {
+    let _guard = RegistryGuard::acquire().await;
+    let h = spawn_server().await;
+    let (world, _path) = editable_world(&h).await;
+    // A pane edit with sensitive text, and an agent write over a pane edit (a conflict).
+    let pane = |ops: Value| {
+        let ops: Vec<nostromo::ipc::protocol::TrackerPaneOp> =
+            serde_json::from_value(ops).expect("pane ops");
+        world
+            .registry
+            .apply_pane_ops(TRACKER_ORDINARY, 0, &ops)
+            .expect("pane edit")
+    };
+    pane(json!([{"op": "edit", "id": "a", "body": "SECRET-TRACKER-74 SSN 219-09-9999"}]));
+    pane(json!([{"op": "edit", "id": "b", "body": "SECRET-TRACKER-75 pane note"}]));
+    world
+        .call(
+            TRACKER_ORDINARY,
+            json!({"op": "upsert", "id": "b", "note": "SECRET-TRACKER-76 agent note"}),
+        )
+        .await;
+    world.registry.flush(&h.server.tx);
+
+    let mut local = raw_unix(&h).await;
+    let (_welcome, local_replay) = raw_handshake(&mut local, subscribe_everything())
+        .await
+        .expect("local handshake");
+    let board = frames_of(&local_replay, "tracker_board", TRACKER_ORDINARY)
+        .last()
+        .copied()
+        .unwrap_or_else(|| panic!("control: the app is replayed the board: {local_replay:?}"))
+        .to_string();
+    for key in ["\"conflicts\"", "\"sensitive\"", "\"losing\""] {
+        assert!(
+            board.contains(key),
+            "control: the local board has {key}: {board}"
+        );
+    }
+
+    for topics in [json!([]), json!(["focuses"])] {
+        let mut tcp = raw_tcp(&h).await;
+        let (welcome, replay) = raw_handshake(
+            &mut tcp,
+            json!({"type": "subscribe", "topics": topics.clone(), "renders_decisions": false}),
+        )
+        .await
+        .expect("tcp handshake");
+        let mut everything = replay.clone();
+        everything.push(welcome);
+        let live = raw_sync_via_broadcast(&h, &mut tcp).await;
+        everything.extend(live);
+        let text = serde_json::to_string(&everything).unwrap();
+        assert!(
+            !mentions_a_tracker_sentinel(&everything),
+            "{topics}: {text}"
+        );
+        for needle in [
+            "219-09-9999",
+            "\"conflicts\"",
+            "removed_conflicts",
+            "\"sensitive\"",
+            "tracker_edit_result",
+            "tracker_board",
+        ] {
+            assert!(
+                !text.contains(needle),
+                "{topics}: {needle} reached a TCP peer: {text}"
+            );
+        }
+    }
+}

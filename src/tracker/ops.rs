@@ -156,6 +156,73 @@ pub fn apply_batch(
     author: &Author,
     at: Stamp,
 ) -> Result<(Board, Vec<Change>), OpError> {
+    let steps: Vec<PaneStep> = ops.iter().cloned().map(PaneStep::Op).collect();
+    apply_steps(board, &steps, author, at)
+}
+
+/// One step of a pane edit: an agent-style [`Op`], or a restore. `Restore` is
+/// deliberately not an `Op`: the agent tool deserialises `Op`, so an agent can
+/// never name it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PaneStep {
+    Op(Op),
+    Restore(Restore),
+    /// An item's text put back as it was, past the 500-character cap of an
+    /// edit (the text came from the file, which has no such cap).
+    SetText {
+        id: String,
+        text: String,
+    },
+}
+
+/// An item put back from its exact markdown.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Restore {
+    /// The item as parsed from `block` (its section is replaced by `section`).
+    pub item: Item,
+    /// The item's exact bytes: its task line and indented block, ending with a
+    /// line ending.
+    pub block: String,
+    pub section: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+/// Most bytes of a restored item.
+pub const MAX_RESTORE_BYTES: usize = 9_000;
+
+/// Reads `source` (an item's markdown as the view holds it) as one item.
+/// `Err` says why it is not exactly one item.
+pub fn parse_restorable(source: &str) -> Result<(Item, String), String> {
+    if source.len() > MAX_RESTORE_BYTES {
+        return Err(format!("source is over {MAX_RESTORE_BYTES} bytes"));
+    }
+    // The view's source carries the blank lines that follow the item.
+    let trimmed = source.trim_end_matches(['\n', '\r', ' ', '\t']);
+    if trimmed.is_empty() {
+        return Err("source is empty".to_string());
+    }
+    let mut block = trimmed.to_string();
+    block.push('\n');
+    let wrapped = format!("## Restored\n{block}");
+    let parsed = parse(wrapped.as_bytes()).map_err(|e| format!("source doesn't parse: {e:?}"))?;
+    let board = &parsed.board;
+    if board.items.len() != 1 || board.sections.len() != 1 || !board.log.is_empty() {
+        return Err("source is not exactly one item".to_string());
+    }
+    if parsed.item_span(&board.items[0].id).map(|s| s.end) != Some(wrapped.len()) {
+        return Err("source is not exactly one item".to_string());
+    }
+    Ok((board.items[0].clone(), block))
+}
+
+/// [`apply_batch`] over pane steps.
+pub fn apply_steps(
+    board: &Board,
+    ops: &[PaneStep],
+    author: &Author,
+    at: Stamp,
+) -> Result<(Board, Vec<Change>), OpError> {
     if ops.len() > MAX_BATCH_OPS {
         return Err(OpError::InvalidArgs {
             index: MAX_BATCH_OPS,
@@ -174,9 +241,13 @@ pub fn apply_batch(
         start_bytes: board.byte_len,
         start_items: board.items.len(),
     };
-    for (index, op) in ops.iter().enumerate() {
+    for (index, step) in ops.iter().enumerate() {
         apply.index = index;
-        apply.op(op)?;
+        match step {
+            PaneStep::Op(op) => apply.op(op)?,
+            PaneStep::Restore(restore) => apply.restore(restore)?,
+            PaneStep::SetText { id, text } => apply.set_text(id, text)?,
+        }
         apply.check_size()?;
     }
     let changes = diff(board, &next, author, at.now);
@@ -241,6 +312,41 @@ impl Apply<'_> {
                 Ok(())
             }
         }
+    }
+
+    /// Inserts the restored item, untouched (its `updated_at` stays what its
+    /// marker says), at the given place of `section`.
+    fn set_text(&mut self, id: &str, text: &str) -> Result<(), OpError> {
+        let text = self.single_line("text", text, MAX_RESTORE_BYTES)?;
+        let pos = self.find(id)?;
+        self.edit(pos, |item| set(&mut item.text, text));
+        Ok(())
+    }
+
+    fn restore(&mut self, restore: &Restore) -> Result<(), OpError> {
+        if self.board.items.iter().any(|i| i.id == restore.item.id) {
+            return Err(self.invalid(format!("item {} already exists", restore.item.id)));
+        }
+        if restore.before.is_some() && restore.after.is_some() {
+            return Err(self.invalid("give before or after, not both".to_string()));
+        }
+        let section = self.section(&restore.section)?;
+        let mut item = restore.item.clone();
+        item.section = section.clone();
+        let insert_at = match restore.before.as_ref().or(restore.after.as_ref()) {
+            Some(neighbour) => {
+                let n = self.neighbour(neighbour, &item.id, &section)?;
+                if restore.before.is_some() {
+                    n
+                } else {
+                    n + 1
+                }
+            }
+            None => self.end_of_section(&section),
+        };
+        self.size += self.item_len(&item);
+        self.board.items.insert(insert_at, item);
+        Ok(())
     }
 
     fn upsert(&mut self, u: &Upsert) -> Result<(), OpError> {
@@ -701,14 +807,45 @@ pub fn apply_to_file(
     author: &Author,
     at: Stamp,
 ) -> Result<Applied, WriteError> {
+    let steps: Vec<PaneStep> = ops.iter().cloned().map(PaneStep::Op).collect();
+    apply_steps_to_file(bytes, &steps, author, at)
+}
+
+/// [`apply_to_file`] over pane steps. A restored item's bytes go back exactly
+/// as given: the splice writes the item, then its bytes are replaced by the
+/// block it came from, and the result must still read back as the board.
+pub fn apply_steps_to_file(
+    bytes: &[u8],
+    steps: &[PaneStep],
+    author: &Author,
+    at: Stamp,
+) -> Result<Applied, WriteError> {
     let parsed = parse(bytes)?;
-    let (board, changes) = apply_batch(&parsed.board, ops, author, at)?;
-    let bytes = splice(&parsed, &board, at, true);
+    let (board, changes) = apply_steps(&parsed.board, steps, author, at)?;
+    let mut bytes = splice(&parsed, &board, at, true);
+    for (index, step) in steps.iter().enumerate() {
+        let PaneStep::Restore(restore) = step else {
+            continue;
+        };
+        let fail = |reason: &str| OpError::InvalidArgs {
+            index,
+            reason: reason.to_string(),
+        };
+        let spliced = parse(&bytes).map_err(|_| fail("the restored item can't be written"))?;
+        let span = spliced
+            .item_span(&restore.item.id)
+            .ok_or_else(|| fail("the restored item can't be written"))?;
+        let mut block = restore.block.clone();
+        if bytes.get(span.end.saturating_sub(2)..span.end) == Some(b"\r\n") {
+            block = block.replace('\n', "\r\n");
+        }
+        bytes.splice(span, block.into_bytes());
+    }
     let reparsed = reread(&bytes, &board).map_err(|bad| {
-        let index = ops
+        let index = steps
             .iter()
-            .rposition(|op| bad.item_id.is_some() && op_item_id(op) == bad.item_id.as_deref())
-            .unwrap_or(ops.len().saturating_sub(1));
+            .rposition(|step| bad.item_id.is_some() && step_item_id(step) == bad.item_id.as_deref())
+            .unwrap_or(steps.len().saturating_sub(1));
         OpError::InvalidArgs {
             index,
             reason: format!("{bad}"),
@@ -720,6 +857,15 @@ pub fn apply_to_file(
         parsed: reparsed,
         changes,
     })
+}
+
+/// The item a step names, if any.
+fn step_item_id(step: &PaneStep) -> Option<&str> {
+    match step {
+        PaneStep::Op(op) => op_item_id(op),
+        PaneStep::Restore(r) => Some(&r.item.id),
+        PaneStep::SetText { id, .. } => Some(id),
+    }
 }
 
 /// The item an op names, if any.

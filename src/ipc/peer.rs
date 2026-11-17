@@ -779,6 +779,8 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         // The answer to a document action: a reason in plain English and maybe a
         // file URL on this machine. A network peer can never send the action.
         ServerMsg::PaneActionResult { .. } => ServerClass::LocalOnly,
+        // The answer to a pane edit: ids and an error code; the operator's own.
+        ServerMsg::TrackerEditResult { .. } => ServerClass::LocalOnly,
         // The Mother notice switches and per-focus notice state: focus tags,
         // held counts and wake counts. The operator's own; never a network
         // peer's (SR6), which cannot change them either.
@@ -1070,6 +1072,8 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::ApprovalRulesDiscard { .. }
         // Opens views in a focus's panes: the operator's own client only.
         | ClientMsg::TrackerOpenLink { .. }
+        // Writes the board as the user (`pane (you)`): the operator app's alone.
+        | ClientMsg::TrackerEdit { .. }
         | ClientMsg::ApprovalRefusalReport { .. }
         // Read the audit log, which holds full tool inputs: operator app only.
         | ClientMsg::ApprovalsLogQuery { .. }
@@ -1186,7 +1190,8 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::SessionCommandsGet { tag, .. }
         | ClientMsg::ClaudeLoginAction { tag, .. }
         | ClientMsg::PaneAction { tag, .. }
-        | ClientMsg::TrackerOpenLink { tag, .. } => tags.tag_is_sensitive(tag),
+        | ClientMsg::TrackerOpenLink { tag, .. }
+        | ClientMsg::TrackerEdit { tag, .. } => tags.tag_is_sensitive(tag),
 
         ClientMsg::Hello { .. }
         | ClientMsg::Subscribe { .. }
@@ -2160,6 +2165,15 @@ mod tests {
                 item_id: "deploy-ap".into(),
                 link_index: 0,
             },
+            ClientMsg::TrackerEdit {
+                tag: "x1".into(),
+                request_id: "r".into(),
+                base_version: 1,
+                operator_nonce: None,
+                ops: vec![crate::ipc::protocol::TrackerPaneOp::Remove {
+                    id: "deploy-ap".into(),
+                }],
+            },
             ClientMsg::ApprovalsLogQuery {
                 tag: None,
                 outcome: None,
@@ -2411,7 +2425,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 92;
+    const CLIENT_MSG_VARIANTS: usize = 93;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2508,6 +2522,7 @@ mod tests {
             ClientMsg::AuthoredPrNotify { .. } => 89,
             ClientMsg::AuthoredPrStartSession { .. } => 90,
             ClientMsg::AuthoredPrLink { .. } => 91,
+            ClientMsg::TrackerEdit { .. } => 92,
         }
     }
 
@@ -2551,9 +2566,10 @@ mod tests {
         // 76 with `TrackerOpenLink` (T6; expect a trivial conflict on this constant with T3a's tracker verbs);
         // 77 with `TerminalFollowInviteStagingOnly` (S3a); 78 with `SessionCommandsGet`;
         // 80 with the two authored-PR verbs; 87 with the seven conversation-history verbs; 88 with the rename;
-        // 92 with the four authored-PR hand-off verbs (preview, notify, start session, link).
-        assert_eq!(CLIENT_MSG_VARIANTS, 92);
-        assert_eq!(every_client_msg().len(), 92);
+        // 92 with the four authored-PR hand-off verbs (preview, notify, start session, link);
+        // 93 with `TrackerEdit` (T3a).
+        assert_eq!(CLIENT_MSG_VARIANTS, 93);
+        assert_eq!(every_client_msg().len(), 93);
     }
 
     #[test]

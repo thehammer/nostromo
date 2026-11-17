@@ -86,6 +86,14 @@ fn field_values(item: &Item) -> [(&'static str, Value); 9] {
     ]
 }
 
+/// The JSON value of one named field of `item` (`Null` for an unknown name).
+pub(crate) fn field_value(item: &Item, name: &str) -> Value {
+    field_values(item)
+        .into_iter()
+        .find(|(n, _)| *n == name)
+        .map_or(Value::Null, |(_, v)| v)
+}
+
 fn changed_fields(old: &Item, new: &Item) -> Vec<(&'static str, Value, Value)> {
     field_values(old)
         .into_iter()

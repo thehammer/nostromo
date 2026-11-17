@@ -331,6 +331,8 @@ enum ServerMsg {
     case trackerBoard(TrackerBoardFrameWire)
     /// Whether a focus has a tracker, and its counts.
     case trackerSummary(TrackerSummaryFrameWire)
+    /// The answer to this connection's `tracker_edit`. Local only.
+    case trackerEditResult(TrackerEditResultWire)
 
     // ── terminal panes (1d) ───────────────────────────────────────────────────
     /// Every terminal the daemon knows. Local clients only.
@@ -1496,6 +1498,24 @@ class NostromodClient {
         return true
     }
 
+    /// Edit tracker `tag`'s board as the user (`tracker_edit`): ops made against `baseVersion`, the
+    /// board version the pane showed. The daemon applies it only from the verified app, echoing this
+    /// connection's operator nonce, and answers with `ServerMsg.trackerEditResult`. Returns whether
+    /// the frame was written (dropped when not connected, or without a nonce for this connection).
+    @discardableResult
+    func sendTrackerEdit(tag: String, requestId: String, baseVersion: UInt64, ops: [TrackerPaneOpWire]) -> Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0 else { log.debug("tracker_edit dropped — not connected"); return false }
+        let nonce = operatorNonce.flatMap { $0.sock == curFd ? $0.value : nil }
+        guard let body = try? encoder.encode(TrackerEditRequestWire(tag: tag, requestId: requestId,
+                                                                    baseVersion: baseVersion,
+                                                                    operatorNonce: nonce, ops: ops))
+        else { return false }
+        writeFrameLocked(body, to: curFd, type: "tracker_edit", tag: tag)
+        return true
+    }
+
     /// Tell the daemon an input that was not a person's was refused at an approval control.
     func approvalRefusalReport(requestId: String?, control: String, channel: ApprovalRefusalChannel) {
         sendLock.lock(); defer { sendLock.unlock() }
@@ -2258,6 +2278,13 @@ class NostromodClient {
                 return .trackerSummary(m)
             } else {
                 log.error("failed to decode tracker_summary")
+            }
+
+        case "tracker_edit_result":
+            if let m = try? decoder.decode(TrackerEditResultWire.self, from: raw) {
+                return .trackerEditResult(m)
+            } else {
+                log.error("failed to decode tracker_edit_result")
             }
 
         // ── terminal panes (1d) ─────────────────────────────────────────────
