@@ -474,9 +474,12 @@ public struct TrackerBoardViewWire: Decodable, Equatable {
     public let hiddenByUser: Bool
     /// Items removed over someone's edit (empty from an older daemon).
     public let removedConflicts: [TrackerRemovedConflictWire]
+    /// Which run of the board `version` counts in (changes when the daemon's state for the board is lost).
+    /// Sent back as `base_epoch`. Empty from an older daemon.
+    public let epoch: String
 
     enum CodingKeys: String, CodingKey {
-        case title, path, version, nodes, log, banner, committable
+        case title, path, version, nodes, log, banner, committable, epoch
         case removedConflicts = "removed_conflicts"
         case updatedAt = "updated_at"
         case hiddenByUser = "hidden_by_user"
@@ -487,6 +490,7 @@ public struct TrackerBoardViewWire: Decodable, Equatable {
         title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
         path = try c.decodeIfPresent(String.self, forKey: .path) ?? ""
         version = try c.decodeIfPresent(UInt64.self, forKey: .version) ?? 0
+        epoch = (try? c.decodeIfPresent(String.self, forKey: .epoch)) ?? ""
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt)
         nodes = try c.decodeIfPresent([TrackerNodeWire].self, forKey: .nodes) ?? []
         log = try c.decodeIfPresent([TrackerLogLineWire].self, forKey: .log) ?? []
@@ -534,6 +538,9 @@ public enum TrackerPaneOpWire: Codable, Equatable {
     /// At least one of `title` (one line, at most 80 characters), `text` (to undo a restructure)
     /// and `body` (the note; empty clears it).
     case edit(id: String, title: String?, text: String?, body: String?)
+    /// The item's text put back exactly as it was (`restore_text`): unlike `edit`'s `text` it is not cut at
+    /// 500 characters, so the undo of a long line returns it whole.
+    case restoreText(id: String, text: String)
     /// A new item; the daemon names it (`TrackerEditResultWire.created`).
     case add(section: String, title: String, body: String?, before: String?, after: String?)
     case move(id: String, section: String, before: String?, after: String?)
@@ -564,6 +571,10 @@ public enum TrackerPaneOpWire: Codable, Equatable {
             try c.encodeIfPresent(title, forKey: .title)
             try c.encodeIfPresent(text, forKey: .text)
             try c.encodeIfPresent(body, forKey: .body)
+        case .restoreText(let id, let text):
+            try c.encode("restore_text", forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(text, forKey: .text)
         case .add(let section, let title, let body, let before, let after):
             try c.encode("add", forKey: .op)
             try c.encode(section, forKey: .section)
@@ -609,6 +620,8 @@ public enum TrackerPaneOpWire: Codable, Equatable {
                          title: try c.decodeIfPresent(String.self, forKey: .title),
                          text: try c.decodeIfPresent(String.self, forKey: .text),
                          body: try c.decodeIfPresent(String.self, forKey: .body))
+        case "restore_text":
+            self = .restoreText(id: try c.decode(String.self, forKey: .id), text: try c.decode(String.self, forKey: .text))
         case "add":
             self = .add(section: try c.decode(String.self, forKey: .section),
                         title: try c.decode(String.self, forKey: .title),
@@ -647,13 +660,17 @@ public struct TrackerEditRequestWire: Encodable, Equatable {
     public let requestId: String
     /// The board version the edit was made against (`TrackerBoardViewWire.version`).
     public let baseVersion: UInt64
+    /// The `epoch` of the board view `baseVersion` is from; nil when the board showed none (an older daemon).
+    public let baseEpoch: String?
     public let operatorNonce: String?
     public let ops: [TrackerPaneOpWire]
 
-    public init(tag: String, requestId: String, baseVersion: UInt64, operatorNonce: String?, ops: [TrackerPaneOpWire]) {
+    public init(tag: String, requestId: String, baseVersion: UInt64, baseEpoch: String? = nil,
+                operatorNonce: String?, ops: [TrackerPaneOpWire]) {
         self.tag = tag
         self.requestId = requestId
         self.baseVersion = baseVersion
+        self.baseEpoch = baseEpoch
         self.operatorNonce = operatorNonce
         self.ops = ops
     }
@@ -662,6 +679,7 @@ public struct TrackerEditRequestWire: Encodable, Equatable {
         case type, tag, ops
         case requestId = "request_id"
         case baseVersion = "base_version"
+        case baseEpoch = "base_epoch"
         case operatorNonce = "operator_nonce"
     }
 
@@ -671,6 +689,7 @@ public struct TrackerEditRequestWire: Encodable, Equatable {
         try c.encode(tag, forKey: .tag)
         try c.encode(requestId, forKey: .requestId)
         try c.encode(baseVersion, forKey: .baseVersion)
+        try c.encodeIfPresent(baseEpoch, forKey: .baseEpoch)
         try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
         try c.encode(ops, forKey: .ops)
     }
@@ -684,13 +703,16 @@ public struct TrackerEditErrorWire: Decodable, Equatable {
     public let reason: String?
     /// The failing op's position, when the failure is one op's.
     public let index: Int?
+    /// The pane's view is out of date: look again (the daemon sets it with `invalid_args`). False when absent.
+    public let stale: Bool
 
-    enum CodingKeys: String, CodingKey { case code, reason, index }
+    enum CodingKeys: String, CodingKey { case code, reason, index, stale }
 
-    public init(code: String, reason: String? = nil, index: Int? = nil) {
+    public init(code: String, reason: String? = nil, index: Int? = nil, stale: Bool = false) {
         self.code = code
         self.reason = reason
         self.index = index
+        self.stale = stale
     }
 
     public init(from decoder: Decoder) throws {
@@ -698,6 +720,7 @@ public struct TrackerEditErrorWire: Decodable, Equatable {
         code = try c.decodeIfPresent(String.self, forKey: .code) ?? ""
         reason = try c.decodeIfPresent(String.self, forKey: .reason)
         index = try c.decodeIfPresent(Int.self, forKey: .index)
+        stale = (try? c.decodeIfPresent(Bool.self, forKey: .stale)) ?? false
     }
 }
 

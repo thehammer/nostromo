@@ -8,6 +8,13 @@ enum TrackerEditKind: String {
     case details
 }
 
+/// The board a row's content came from: what `base_version` (and `base_epoch`) name for an edit of that row.
+struct TrackerBase: Equatable {
+    let version: UInt64
+    /// The board's run (nil from a daemon that sends none): sent as `base_epoch` only when the board had one.
+    let epoch: String?
+}
+
 /// The tracker pane's edit controller (one per pane): builds the `tracker_edit` ops for what the user
 /// does in the pane, sends them, takes the daemon's answers, tells the pane why an edit did not
 /// happen, and registers the inverse of every undoable edit with the pane's own `UndoManager`.
@@ -16,20 +23,25 @@ enum TrackerEditKind: String {
 /// arrives, so the pane always shows the file's truth (the strip and the sidebar pill follow the same
 /// board). Rows stay dumb: they call the pane, the pane calls this.
 final class TrackerItemEditing {
-    /// `(tag, request id, base version, ops)`; false when the frame was not written.
-    typealias Sender = (String, String, UInt64, [TrackerPaneOpWire]) -> Bool
+    /// `(tag, request id, base version, base epoch, ops)`; false when the frame was not written.
+    typealias Sender = (String, String, UInt64, String?, [TrackerPaneOpWire]) -> Bool
 
     /// What became of one send.
     enum Outcome: Equatable {
         /// The daemon applied it: the board it produced has `version` (it may already be here).
         case saved(version: UInt64, created: [String])
+        /// The daemon refused it (or the frame was never written): nothing changed.
         case failed(String)
+        /// No answer in time. The edit may still have been applied: a late answer follows as `saved` or `failed`.
+        case timedOut(String)
     }
 
     /// No answer within this long is a failure.
     static let answerTimeout: TimeInterval = 5
     /// A notice goes away after this long, or at the next successful edit.
     static let noticeLifetime: TimeInterval = 6
+    /// How many timed-out sends are remembered so a late answer still finds its edit.
+    private static let rememberedTimeouts = 32
 
     /// Undo and redo of pane edits. Never the window's: the composer's typing undo is not touched.
     let undoManager: UndoManager = {
@@ -43,29 +55,41 @@ final class TrackerItemEditing {
     var onNotice: ((String?) -> Void)?
     /// An edit touching these items was confirmed (ids, board version): the pane does not flash them.
     var onConfirmed: (([String], UInt64) -> Void)?
+    /// The daemon says the pane's view is out of date: the pane shows the board as it is now.
+    var onLookAgain: (() -> Void)?
 
     private let tag: String
     private let send: Sender
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
-    private let currentVersion: () -> UInt64
+    private let currentBase: () -> TrackerBase
     private let itemExists: (String) -> Bool
-    private var pending: [String: (ids: [String], completion: (Outcome) -> Void)] = [:]
+    private typealias Entry = (ids: [String], completion: (Outcome) -> Void)
+    private var pending: [String: Entry] = [:]
+    /// Sends that timed out, oldest first: an answer that comes after all is still theirs.
+    private var timedOut: [(requestId: String, entry: Entry)] = []
     private var sequence = 0
     private var noticeGeneration = 0
     /// The status an item had before this pane ticked it (what an untick goes back to).
     private var statusBeforeTick: [String: String] = [:]
     private var subscription: AnyCancellable?
 
+    /// One registered undo (or redo), so a refused edit takes back only its own.
+    private final class UndoToken {
+        var isVoid = false
+    }
+    private var undoStack: [UndoToken] = []
+    private var redoStack: [UndoToken] = []
+
     init(tag: String,
          results: AnyPublisher<TrackerEditResultWire, Never>,
          send: @escaping Sender,
          schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void,
-         currentVersion: @escaping () -> UInt64,
+         currentBase: @escaping () -> TrackerBase,
          itemExists: @escaping (String) -> Bool) {
         self.tag = tag
         self.send = send
         self.schedule = schedule
-        self.currentVersion = currentVersion
+        self.currentBase = currentBase
         self.itemExists = itemExists
         subscription = results
             .filter { $0.tag == tag }
@@ -78,109 +102,146 @@ final class TrackerItemEditing {
     // MARK: - Actions
 
     /// The tick: done, or (on a done item) the status it had before this pane ticked it, else todo.
-    func tick(_ item: TrackerItemRow, baseVersion: UInt64) {
+    func tick(_ item: TrackerItemRow, base: TrackerBase) {
         guard item.isTickable else { return }
         if item.isDone {
-            setStatus(item, to: statusBeforeTick[item.id] ?? "todo", baseVersion: baseVersion, name: "Tick")
+            setStatus(item, to: statusBeforeTick[item.id] ?? "todo", base: base, name: "Tick")
         } else {
             statusBeforeTick[item.id] = item.status.wireName
-            setStatus(item, to: "done", baseVersion: baseVersion, name: "Tick")
+            setStatus(item, to: "done", base: base, name: "Tick")
         }
     }
 
-    func setStatus(_ item: TrackerItemRow, to status: String, baseVersion: UInt64, name: String = "Status") {
+    func setStatus(_ item: TrackerItemRow, to status: String, base: TrackerBase, name: String = "Status") {
         guard item.isStatusEditable, status != item.status.wireName else { return }
         perform([.status(id: item.id, status: status)], inverse: [.status(id: item.id, status: item.status.wireName)],
-                name: name, baseVersion: baseVersion)
+                name: name, base: base)
     }
 
     /// The title typed into the editor. Returns false (nothing sent) when it is empty after cleaning.
     @discardableResult
-    func saveTitle(_ item: TrackerItemRow, typed: String, baseVersion: UInt64,
+    func saveTitle(_ item: TrackerItemRow, typed: String, base: TrackerBase,
                    completion: @escaping (Outcome) -> Void) -> Bool {
         let title = TrackerTitle.normalizedTitle(typed)
         guard !title.isEmpty else { return false }
         let legacy = TrackerTitle.split(item.editText).rule != .whole
         let op: TrackerPaneOpWire
         var restoresBody = true
-        if legacy || title.count > TrackerTitle.maxChars {
+        // The daemon counts scalars: a title that is 80 characters but more scalars is restructured too.
+        if legacy || !TrackerTitle.fitsTitle(title) {
             let restructured = TrackerTitle.restructure(text: item.editText, note: item.editNote, newTitle: title)
             op = .edit(id: item.id, title: restructured.title, text: nil, body: restructured.body)
         } else {
             op = .edit(id: item.id, title: title, text: nil, body: nil)
             restoresBody = false
         }
-        perform([op], inverse: [Self.restoreText(item, includingNote: restoresBody)], name: "Title Edit",
-                baseVersion: baseVersion, completion: completion)
+        perform([op], inverse: Self.restoreOps(item, includingNote: restoresBody), name: "Title Edit",
+                base: base, completion: completion)
         return true
     }
 
     /// The details typed into the editor (the note; for a legacy item the text after the title too).
-    func saveDetails(_ item: TrackerItemRow, typed: String, baseVersion: UInt64,
+    func saveDetails(_ item: TrackerItemRow, typed: String, base: TrackerBase,
                      completion: @escaping (Outcome) -> Void) {
-        let body = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        var body = typed.trimmingCharacters(in: .whitespacesAndNewlines)
         let legacy = TrackerTitle.split(item.editText).rule != .whole
-        let op: TrackerPaneOpWire = legacy
-            ? .edit(id: item.id, title: TrackerTitle.editableTitle(text: item.editText), text: nil, body: body)
-            : .edit(id: item.id, title: nil, text: nil, body: body)
-        perform([op], inverse: [Self.restoreText(item, includingNote: true, textToo: legacy)], name: "Details Edit",
-                baseVersion: baseVersion, completion: completion)
+        let op: TrackerPaneOpWire
+        if legacy {
+            // The title goes as the daemon wants it: no hidden characters, at most 80 scalars.
+            let fitted = TrackerTitle.fitScalars(TrackerTitle.normalizedTitle(TrackerTitle.editableTitle(text: item.editText)))
+            if let overflow = fitted.overflow { body = [overflow, body].filter { !$0.isEmpty }.joined(separator: "\n\n") }
+            op = .edit(id: item.id, title: fitted.title, text: nil, body: body)
+        } else {
+            op = .edit(id: item.id, title: nil, text: nil, body: body)
+        }
+        perform([op], inverse: Self.restoreOps(item, includingNote: true, textToo: legacy), name: "Details Edit",
+                base: base, completion: completion)
     }
 
     /// Keep or use a conflict's losing value. `keep: losing` is undoable (an edit back to the kept value);
-    /// `keep: current` is not.
-    func resolve(_ entry: TrackerConflictEntry, keep: TrackerConflictKeepWire, baseVersion: UInt64) {
+    /// `keep: current` is not. `completion` hears the outcome (a restored item's new id arrives in `created`).
+    func resolve(_ entry: TrackerConflictEntry, keep: TrackerConflictKeepWire, base: TrackerBase,
+                 completion: ((Outcome) -> Void)? = nil) {
         let op = TrackerPaneOpWire.resolveConflict(id: entry.itemId, field: entry.field, keep: keep,
                                                    conflictId: entry.conflictId)
-        guard keep == .losing, let inverse = entry.inverse else {
-            submit([op], baseVersion: baseVersion, completion: { _ in })
+        guard keep == .losing, !entry.inverse.isEmpty else {
+            submit([op], base: base, completion: { completion?($0) })
             return
         }
-        perform([op], inverse: [inverse], name: "Conflict Choice", baseVersion: baseVersion)
+        perform([op], inverse: entry.inverse, name: "Conflict Choice", base: base, completion: completion)
     }
 
     /// "It's fine, share it". Not undoable. Never combined with an edit of the same item in one batch.
-    func clearBadge(itemId: String, baseVersion: UInt64) {
-        submit([.clearBadge(id: itemId)], baseVersion: baseVersion, completion: { _ in })
+    func clearBadge(itemId: String, base: TrackerBase) {
+        submit([.clearBadge(id: itemId)], base: base, completion: { _ in })
     }
 
     // MARK: - Sending
 
-    /// Send `ops` and register `inverse` for ⌘Z (and, from inside the undo, the redo).
+    /// Send `ops` and register `inverse` for ⌘Z (and, from inside the undo, the redo). A refusal takes back
+    /// this edit's registration only: the history before it stays.
     private func perform(_ ops: [TrackerPaneOpWire], inverse: [TrackerPaneOpWire], name: String,
-                         baseVersion: UInt64, completion: ((Outcome) -> Void)? = nil) {
+                         base: TrackerBase, completion: ((Outcome) -> Void)? = nil) {
         let ids = Set(ops.compactMap(Self.itemId)).union(inverse.compactMap(Self.itemId))
+        let token = UndoToken()
         undoManager.beginUndoGrouping()
         undoManager.registerUndo(withTarget: self) { me in
+            // This entry is being run: it is no longer on the stack it was on.
+            if me.undoManager.isUndoing { me.undoStack.removeAll { $0 === token } } else { me.redoStack.removeAll { $0 === token } }
+            guard !token.isVoid else { return }
             guard ids.allSatisfy(me.itemExists) else {
                 me.showNotice("Couldn't undo: the item was removed.")
                 return
             }
-            me.perform(inverse, inverse: ops, name: name, baseVersion: me.currentVersion())
+            me.perform(inverse, inverse: ops, name: name, base: me.currentBase())
         }
         undoManager.setActionName(name)
         undoManager.endUndoGrouping()
-        submit(ops, baseVersion: baseVersion) { [weak self] outcome in
-            if case .failed = outcome, let me = self { me.undoManager.removeAllActions(withTarget: me) }
+        // Registered while undoing, it is a redo; a fresh edit also clears the redo stack.
+        if undoManager.isUndoing {
+            redoStack.append(token)
+        } else {
+            if !undoManager.isRedoing { redoStack.removeAll() }
+            undoStack.append(token)
+        }
+        submit(ops, base: base) { [weak self] outcome in
+            if case .failed = outcome { self?.retract(token) }
             completion?(outcome)
         }
     }
 
-    func submit(_ ops: [TrackerPaneOpWire], baseVersion: UInt64, completion: @escaping (Outcome) -> Void) {
+    /// Take one registered undo (or redo) back, leaving every other as it is. It is popped when it is the
+    /// newest of its stack; otherwise it stays as an entry that does nothing when run.
+    private func retract(_ token: UndoToken) {
+        token.isVoid = true
+        undoManager.disableUndoRegistration()
+        defer { undoManager.enableUndoRegistration() }
+        if undoStack.last === token {
+            undoManager.undo()
+        } else if redoStack.last === token {
+            undoManager.redo()
+        }
+    }
+
+    func submit(_ ops: [TrackerPaneOpWire], base: TrackerBase, completion: @escaping (Outcome) -> Void) {
         sequence += 1
         let requestId = "pane-\(tag)-\(sequence)"
         pending[requestId] = (ops.compactMap(Self.itemId), completion)
-        guard send(tag, requestId, baseVersion, ops) else {
+        guard send(tag, requestId, base.version, base.epoch, ops) else {
             fail(requestId, "Not saved: Nostromo isn't connected to its daemon.")
             return
         }
         schedule(Self.answerTimeout) { [weak self] in
-            self?.fail(requestId, "Not saved: the daemon didn't answer in time.")
+            self?.timeOut(requestId)
         }
     }
 
     private func receive(_ result: TrackerEditResultWire) {
-        guard let entry = pending.removeValue(forKey: result.requestId) else { return }
+        var entry = pending.removeValue(forKey: result.requestId)
+        if entry == nil, let index = timedOut.firstIndex(where: { $0.requestId == result.requestId }) {
+            entry = timedOut.remove(at: index).entry
+        }
+        guard let entry else { return }
         if result.ok {
             showNotice(nil)
             onConfirmed?(entry.ids, result.version)
@@ -188,6 +249,7 @@ final class TrackerItemEditing {
         } else {
             let message = Self.message(for: result.error)
             showNotice(message)
+            if Self.isStale(result.error) { onLookAgain?() }
             entry.completion(.failed(message))
         }
     }
@@ -196,6 +258,16 @@ final class TrackerItemEditing {
         guard let entry = pending.removeValue(forKey: requestId) else { return }
         showNotice(message)
         entry.completion(.failed(message))
+    }
+
+    /// No answer in time: the edit may still have been applied, so it is remembered for a late answer.
+    private func timeOut(_ requestId: String) {
+        guard let entry = pending.removeValue(forKey: requestId) else { return }
+        timedOut.append((requestId, entry))
+        if timedOut.count > Self.rememberedTimeouts { timedOut.removeFirst() }
+        let message = "Not saved yet: the daemon didn't answer in time."
+        showNotice(message)
+        entry.completion(.timedOut(message))
     }
 
     // MARK: - Notice
@@ -213,33 +285,49 @@ final class TrackerItemEditing {
         }
     }
 
+    /// The daemon says the pane's view is out of date (`stale`, or `invalid_args` for the older daemon's
+    /// stale-base and stale-conflict reasons): the user is told to look again, and the pane shows the board as it is.
+    static func isStale(_ error: TrackerEditErrorWire?) -> Bool {
+        guard let error else { return false }
+        if error.stale { return true }
+        let reason = error.reason ?? ""
+        return error.code == "invalid_args" && (reason.contains("no longer kept") || reason.contains("look again"))
+    }
+
     /// One plain sentence for each reason the daemon refuses an edit.
     static func message(for error: TrackerEditErrorWire?) -> String {
         let reason = error?.reason ?? ""
+        if isStale(error) {
+            return reason.contains("no longer kept") ? "That conflict is no longer there: look again."
+                : "Not saved: that changed since you looked. Look again."
+        }
         switch error?.code ?? "" {
         case "board_unreadable": return "Not saved: the board file can't be read" + (reason.isEmpty ? "." : " (\(reason)).")
         case "board_missing": return "Not saved: the board file is gone."
         case "unknown_item": return "Not saved: that item is no longer on the board."
         case "not_operator_app": return "Not saved: only the Nostromo app can change the board."
         case "board_too_large": return "Not saved: the board is too large to edit."
-        case "invalid_args":
-            if reason.contains("no longer kept") { return "That conflict is no longer there: look again." }
-            if reason.contains("look again") { return "Not saved: that changed since you looked. Look again." }
-            return "Not saved: " + (reason.isEmpty ? "the change isn't valid." : reason)
+        case "invalid_args": return "Not saved: " + (reason.isEmpty ? "the change isn't valid." : reason)
         case let code: return "Not saved" + (code.isEmpty ? "." : " (\(code)).")
         }
     }
 
     // MARK: - Inverses
 
-    /// An edit that puts the item's old text (and note) back exactly.
-    private static func restoreText(_ item: TrackerItemRow, includingNote: Bool, textToo: Bool = true) -> TrackerPaneOpWire {
-        .edit(id: item.id, title: nil, text: textToo ? item.editText : nil, body: includingNote ? (item.editNote ?? "") : nil)
+    /// The ops that put the item's old text (and note) back exactly. `restore_text` is not cut at 500
+    /// characters, so a long item comes back whole.
+    static func restoreOps(_ item: TrackerItemRow, includingNote: Bool, textToo: Bool = true) -> [TrackerPaneOpWire] {
+        var ops: [TrackerPaneOpWire] = []
+        if textToo { ops.append(.restoreText(id: item.id, text: item.editText)) }
+        if includingNote { ops.append(.edit(id: item.id, title: nil, text: nil, body: item.editNote ?? "")) }
+        return ops
     }
 
     private static func itemId(of op: TrackerPaneOpWire) -> String? {
         switch op {
-        case .status(let id, _), .edit(let id, _, _, _), .clearBadge(let id), .resolveConflict(let id, _, _, _): return id
+        case .status(let id, _), .edit(let id, _, _, _), .restoreText(let id, _), .clearBadge(let id),
+             .resolveConflict(let id, _, _, _):
+            return id
         default: return nil
         }
     }
@@ -536,7 +624,8 @@ struct TrackerEditSession {
     }
 
     let kind: TrackerEditKind
-    let baseVersion: UInt64
+    /// The board the row was drawn from when the editor opened.
+    let base: TrackerBase
     /// What the editor opened with: a change is a difference from this.
     let original: String
     let row: TrackerItemRow
@@ -544,10 +633,10 @@ struct TrackerEditSession {
     let priorRole: TrackerControlRole?
     var phase: Phase = .editing
 
-    init(kind: TrackerEditKind, baseVersion: UInt64, original: String, row: TrackerItemRow,
+    init(kind: TrackerEditKind, base: TrackerBase, original: String, row: TrackerItemRow,
          priorResponder: NSResponder?, priorRole: TrackerControlRole?) {
         self.kind = kind
-        self.baseVersion = baseVersion
+        self.base = base
         self.original = original
         self.row = row
         self.priorResponder = priorResponder

@@ -72,8 +72,9 @@ final class TrackerRowView: NSView {
 
     /// With editing, the tick owns the status-mark column plus up to 4 pt of left padding.
     static let tickRect = NSRect(x: hPad - 4, y: 0, width: markWidth + 4, height: vPad + foldButtonSize.height)
-    /// With editing, the disclosure owns its own column plus the gap: it starts where the tick ends.
-    static let disclosureRect = NSRect(x: hPad + markWidth, y: 0, width: 20, height: vPad + foldButtonSize.height)
+    /// With editing, the disclosure owns the fold column: it starts where the tick ends and stops where the
+    /// title starts, so no click on the title can toggle the fold.
+    static let disclosureRect = NSRect(x: hPad + markWidth, y: 0, width: foldColumnWidth, height: vPad + foldButtonSize.height)
 
     /// Where a click toggles the item's fold (when it has one). Without a tick: the status-mark column
     /// and the fold column on the item's first line, ending exactly where the title starts. With a tick:
@@ -948,9 +949,19 @@ final class TrackerRowView: NSView {
         titleEditor?.setPending(pending)
         detailsEditor?.setPending(pending)
         guard !pending else { return }
-        focusEditor()
+        // Editable again, but focus is not taken: after a save it went back to where it was (the composer),
+        // and a refusal or a timeout that comes later must not pull what the user types into the tracker.
+        if editorOwnsFocus { focusEditor() }
         titleEditor?.reopen()
         detailsEditor?.reopen()
+    }
+
+    /// The open editor (or its field editor) is the window's first responder.
+    private var editorOwnsFocus: Bool {
+        guard let responder = window?.firstResponder else { return false }
+        if let titleEditor, responder === titleEditor || (responder as? NSTextView)?.delegate === titleEditor { return true }
+        if let detailsEditor, responder === detailsEditor { return true }
+        return false
     }
 
     /// Close the open editor and show the row's own content.

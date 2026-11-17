@@ -375,12 +375,15 @@ public struct TrackerItemRow: Equatable {
     public var boundTooltip: String? {
         bound.map { "Status follows \(TrackerConflictText.sourceLabel($0.source))" }
     }
-    /// What VoiceOver reads on the conflict mark: the first conflict, and how many more.
+    /// What VoiceOver reads on the conflict mark: the first conflict (who set what, and who then set what
+    /// over it), and how many more. Two writers that are both this pane are told apart as "another window".
     public var conflictSummary: String? {
         guard let first = conflicts.first else { return nil }
-        var text = "Conflict on \(first.field): \(TrackerConflictText.actor(first.losingBy)) set "
-            + "\(TrackerConflictText.display(first.losing, field: first.field)), overwritten by \(TrackerConflictText.actor(first.winningBy))"
-        if conflicts.count > 1 { text += " and \(conflicts.count - 1) more" }
+        let (loser, winner) = TrackerConflictText.actors(first)
+        let current = first.field == "status" ? status.wireName : (first.field == "note" ? (editNote ?? "") : editText)
+        var text = "Conflict on \(first.field): \(loser) set \(TrackerConflictText.plain(first.losing, field: first.field)), "
+            + "then \(winner) set \(TrackerConflictText.plain(current, field: first.field))"
+        if conflicts.count > 1 { text += ", and \(conflicts.count - 1) more" }
         return text
     }
     /// "Possible sensitive data (phone number). Not shown to the agent."
@@ -957,6 +960,21 @@ public enum TrackerMarkdown {
 public enum TrackerConflictText {
     /// Longest value shown in a conflict (the popover scrolls past it).
     public static let maxValueChars = 500
+
+    /// The two writers of a conflict as the mark names them. Two writers that are both a pane (two windows)
+    /// are told apart when the daemon gives them distinct names: the earlier one is "another window".
+    public static func actors(_ conflict: TrackerConflictWire) -> (loser: String, winner: String) {
+        if conflict.losingBy.hasPrefix("pane"), conflict.winningBy.hasPrefix("pane"), conflict.losingBy != conflict.winningBy {
+            return ("another window", "you")
+        }
+        return (actor(conflict.losingBy), actor(conflict.winningBy))
+    }
+
+    /// A value as plain text (no quotes), cut at `maxValueChars`: what a spoken sentence uses.
+    public static func plain(_ value: String, field: String) -> String {
+        let shown = field == "status" ? value.replacingOccurrences(of: "-", with: " ") : value
+        return shown.count > maxValueChars ? String(shown.prefix(maxValueChars)) + "…" : shown
+    }
 
     public static func actor(_ by: String) -> String {
         if by.hasPrefix("pane") { return "you" }

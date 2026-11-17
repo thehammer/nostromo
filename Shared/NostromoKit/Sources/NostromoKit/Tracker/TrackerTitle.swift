@@ -61,6 +61,32 @@ public enum TrackerTitle {
         return clean.trimmingCharacters(in: .whitespaces)
     }
 
+    /// The daemon counts Unicode scalars (`chars()`), the display rule counts characters (graphemes): a title
+    /// is sent only when its scalar count fits, or the daemon refuses it ("é" as e + accent is 2 scalars).
+    public static func fitsTitle(_ title: String) -> Bool {
+        title.unicodeScalars.count <= maxChars
+    }
+
+    /// A title cut to at most `maxChars` scalars (never inside a character), at the last space when there is
+    /// one past `minOffset`; what was cut off comes second. A title that fits comes back whole.
+    public static func fitScalars(_ title: String) -> (title: String, overflow: String?) {
+        guard !fitsTitle(title) else { return (title, nil) }
+        var count = 0
+        var end = title.startIndex
+        var lastSpace: String.Index?
+        for index in title.indices {
+            let next = title.index(after: index)
+            count += title[index..<next].unicodeScalars.count
+            if count > maxChars { break }
+            if title[index] == " ", title.distance(from: title.startIndex, to: index) >= minOffset { lastSpace = index }
+            end = next
+        }
+        let cut = lastSpace ?? end
+        let head = String(title[..<cut]).trimmingCharacters(in: .whitespaces)
+        let tail = String(title[cut...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (head, tail.isEmpty ? nil : tail)
+    }
+
     /// The title an editor opens with for the stored `text`: the whole text when it fits, else the
     /// split's title (without the `…` of a cut) computed on the raw text.
     public static func editableTitle(text: String) -> String {
@@ -86,8 +112,10 @@ public enum TrackerTitle {
         let overflow = typedSplit.rule == .cut
             ? typedSplit.rest.map { String($0.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines) }
             : typedSplit.rest
-        let parts = [overflow, rawRest(text: text), note].compactMap { $0 }.filter { !$0.isEmpty }
-        return (title, parts.joined(separator: "\n\n"))
+        // Characters fit but scalars may not (a letter and its combining accent): the daemon counts scalars.
+        let fitted = fitScalars(title)
+        let parts = [fitted.overflow, overflow, rawRest(text: text), note].compactMap { $0 }.filter { !$0.isEmpty }
+        return (fitted.title, parts.joined(separator: "\n\n"))
     }
 
     public static func split(_ text: String) -> TrackerTitleSplit {

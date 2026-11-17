@@ -69,7 +69,7 @@ final class TrackerEditHarness {
             tag: tag, store: store, now: { clock.date }, reduceMotion: { false }, pasteboard: pasteboard,
             schedule: { scheduler.schedule($0, $1) }, timeZone: Fx.utc, tickInterval: nil,
             editSupported: { box.supported },
-            editSender: { _, requestId, base, ops in
+            editSender: { _, requestId, base, _, ops in
                 box.sent.append(Sent(requestId: requestId, base: base, ops: ops))
                 return true
             },

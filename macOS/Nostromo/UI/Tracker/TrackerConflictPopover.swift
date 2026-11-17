@@ -13,8 +13,9 @@ struct TrackerConflictEntry: Equatable {
     /// The value that lost, and the value now in place, as plain text (cut at 500 characters).
     let losingValue: String
     let currentValue: String
-    /// An edit putting the kept (losing) value back, so "Use it" can be undone; nil for a removed item.
-    let inverse: TrackerPaneOpWire?
+    /// The ops putting the kept (losing) value back, so "Use it" can be undone; empty for a removed item.
+    /// A title or text goes back with `restore_text` (it is not cut at 500 characters, `edit`'s text is).
+    let inverse: [TrackerPaneOpWire]
 
     var isRemoval: Bool { field == "removed" }
 
@@ -22,12 +23,12 @@ struct TrackerConflictEntry: Equatable {
     static func entries(for item: TrackerItemRow, now: Date) -> [TrackerConflictEntry] {
         item.conflicts.reversed().map { conflict in
             let current = currentValue(of: conflict.field, in: item)
-            let inverse: TrackerPaneOpWire?
+            let inverse: [TrackerPaneOpWire]
             switch conflict.field {
-            case "status": inverse = .status(id: item.id, status: current)
-            case "title", "text": inverse = .edit(id: item.id, title: nil, text: current, body: nil)
-            case "note": inverse = .edit(id: item.id, title: nil, text: nil, body: current)
-            default: inverse = nil
+            case "status": inverse = [.status(id: item.id, status: current)]
+            case "title", "text": inverse = [.restoreText(id: item.id, text: current)]
+            case "note": inverse = [.edit(id: item.id, title: nil, text: nil, body: current)]
+            default: inverse = []
             }
             return TrackerConflictEntry(
                 itemId: item.id, field: conflict.field, conflictId: conflict.conflictId,
@@ -42,7 +43,7 @@ struct TrackerConflictEntry: Equatable {
         TrackerConflictEntry(itemId: removed.itemId, field: "removed", conflictId: removed.conflictId,
                              sentence: TrackerConflictText.sentence(removed, now: now),
                              losingValue: String(removed.title.prefix(TrackerConflictText.maxValueChars)),
-                             currentValue: "", inverse: nil)
+                             currentValue: "", inverse: [])
     }
 
     private static func currentValue(of field: String, in item: TrackerItemRow) -> String {
@@ -59,10 +60,20 @@ struct TrackerConflictEntry: Equatable {
 struct TrackerPopoverSection {
     struct Button {
         let title: String
+        /// What VoiceOver reads when it differs from the title (a short title carries its value here).
+        var accessibilityLabel: String?
         let action: () -> Void
+
+        init(title: String, accessibilityLabel: String? = nil, action: @escaping () -> Void) {
+            self.title = title
+            self.accessibilityLabel = accessibilityLabel
+            self.action = action
+        }
     }
     let message: String
     var values: [String] = []
+    /// A caption above each value, in order (a value without one has none).
+    var valueCaptions: [String] = []
     var buttons: [Button] = []
 }
 
@@ -143,31 +154,54 @@ final class TrackerConflictPopover: NSObject, NSPopoverDelegate {
             root.addSubview(label)
             messageLabels.append(label)
             y += labelHeight + 6
-            for value in section.values {
+            for (index, value) in section.values.enumerated() {
+                let caption = index < section.valueCaptions.count ? section.valueCaptions[index] : nil
+                if let caption {
+                    let label = NSTextField(labelWithString: caption)
+                    label.font = TrackerTheme.metaFont
+                    label.textColor = TrackerTheme.muted
+                    label.refusesFirstResponder = true
+                    label.frame = NSRect(x: pad, y: y, width: inner, height: 14)
+                    root.addSubview(label)
+                    y += 16
+                }
                 let box = Self.valueBox(value, width: inner)
+                box.text.setAccessibilityLabel((caption ?? "Value") + ": " + value)
+                box.text.toolTip = value
                 box.scroll.frame.origin = NSPoint(x: pad, y: y)
                 root.addSubview(box.scroll)
                 valueViews.append(box.text)
                 y += box.scroll.frame.height + 6
             }
+            // Buttons sit in a row and wrap to the next when the row is full: none runs off the popover.
             var x = pad
+            var rowHeight: CGFloat = 0
             for button in section.buttons {
                 let view = NSButton(title: button.title, target: nil, action: nil)
                 view.bezelStyle = .rounded
                 view.controlSize = .small
                 view.font = TrackerTheme.metaFont
                 view.refusesFirstResponder = true
+                view.lineBreakMode = .byTruncatingTail
                 view.sizeToFit()
+                view.frame.size.width = min(view.frame.width, inner)
+                if x > pad, x + view.frame.width > pad + inner {
+                    x = pad
+                    y += rowHeight + 6
+                }
                 view.frame.origin = NSPoint(x: x, y: y)
+                view.toolTip = button.accessibilityLabel
+                if let label = button.accessibilityLabel { view.setAccessibilityLabel(label) }
                 let action = button.action
                 view.target = self
                 view.action = #selector(pressed(_:))
                 actions[ObjectIdentifier(view)] = action
                 root.addSubview(view)
                 buttons.append(view)
+                rowHeight = max(rowHeight, view.frame.height)
                 x += view.frame.width + 8
             }
-            if !section.buttons.isEmpty { y += (buttons.last?.frame.height ?? 0) + 6 }
+            if !section.buttons.isEmpty { y += rowHeight + 6 }
             y += 8
         }
         root.frame = NSRect(x: 0, y: 0, width: width, height: y + pad - 8)
@@ -227,12 +261,7 @@ enum TrackerPopovers {
     static func item(_ item: TrackerItemRow, now: Date,
                      resolve: @escaping (TrackerConflictEntry, TrackerConflictKeepWire) -> Void) -> TrackerConflictPopover {
         TrackerConflictPopover(sections: TrackerConflictEntry.entries(for: item, now: now).map { entry in
-            TrackerPopoverSection(
-                message: entry.sentence, values: [entry.losingValue],
-                buttons: [
-                    .init(title: "Keep \(TrackerConflictText.display(entry.currentValue, field: entry.field))") { resolve(entry, .current) },
-                    .init(title: "Use \(TrackerConflictText.display(entry.losingValue, field: entry.field))") { resolve(entry, .losing) },
-                ])
+            choice(entry, extra: [], resolve: resolve)
         })
     }
 
@@ -245,13 +274,7 @@ enum TrackerPopovers {
             guard case .item(let wire) = node, !wire.conflicts.isEmpty else { continue }
             let row = TrackerPresenter.itemRow(wire, sectionTitle: "", folds: TrackerFoldState(), now: now, timeZone: .current)
             for entry in TrackerConflictEntry.entries(for: row, now: now) {
-                sections.append(TrackerPopoverSection(
-                    message: entry.sentence, values: [entry.losingValue],
-                    buttons: [
-                        .init(title: "Show") { show(entry.itemId) },
-                        .init(title: "Keep \(TrackerConflictText.display(entry.currentValue, field: entry.field))") { resolve(entry, .current) },
-                        .init(title: "Use \(TrackerConflictText.display(entry.losingValue, field: entry.field))") { resolve(entry, .losing) },
-                    ]))
+                sections.append(choice(entry, extra: [.init(title: "Show") { show(entry.itemId) }], resolve: resolve))
             }
         }
         for removed in board.removedConflicts {
@@ -266,6 +289,30 @@ enum TrackerPopovers {
         TrackerConflictPopover(sections: removed.map {
             removal(TrackerConflictEntry.entry(for: $0, now: now), resolve: resolve)
         })
+    }
+
+    /// Keep what is there or use the value that lost. A status is a short word, so its buttons carry it; a
+    /// title, text or note can be any length, so its buttons have fixed short labels and the two values are
+    /// shown above them as wrapped, selectable text (VoiceOver reads each value on its button).
+    private static func choice(_ entry: TrackerConflictEntry, extra: [TrackerPopoverSection.Button],
+                               resolve: @escaping (TrackerConflictEntry, TrackerConflictKeepWire) -> Void) -> TrackerPopoverSection {
+        let keep: TrackerPopoverSection.Button
+        let use: TrackerPopoverSection.Button
+        var section: TrackerPopoverSection
+        if entry.field == "status" {
+            keep = .init(title: "Keep \(TrackerConflictText.display(entry.currentValue, field: entry.field))") { resolve(entry, .current) }
+            use = .init(title: "Use \(TrackerConflictText.display(entry.losingValue, field: entry.field))") { resolve(entry, .losing) }
+            section = TrackerPopoverSection(message: entry.sentence, values: [entry.losingValue])
+        } else {
+            keep = .init(title: "Keep current",
+                         accessibilityLabel: "Keep current value: \(entry.currentValue)") { resolve(entry, .current) }
+            use = .init(title: "Use other value",
+                        accessibilityLabel: "Use other value: \(entry.losingValue)") { resolve(entry, .losing) }
+            section = TrackerPopoverSection(message: entry.sentence, values: [entry.currentValue, entry.losingValue],
+                                            valueCaptions: ["Current value", "Other value"])
+        }
+        section.buttons = extra + [keep, use]
+        return section
     }
 
     private static func removal(_ entry: TrackerConflictEntry,

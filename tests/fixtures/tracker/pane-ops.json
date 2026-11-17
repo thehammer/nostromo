@@ -1,0 +1,7 @@
+[
+  {"op": "status", "id": "a-1", "status": "done"},
+  {"op": "edit", "id": "a-1", "title": "T", "body": ""},
+  {"op": "restore_text", "id": "a-1", "text": "A long line that came from the file, kept whole by restore_text"},
+  {"op": "clear_badge", "id": "a-1"},
+  {"op": "resolve_conflict", "id": "a-1", "field": "title", "keep": "losing", "conflict_id": "1760540000.7.3"}
+]
