@@ -96,6 +96,7 @@ pub trait PaneContentProvider: Send + Sync {
         request_id: &str,
         _client: &str,
         _base_version: u64,
+        _base_epoch: Option<String>,
         _ops: Vec<crate::ipc::protocol::TrackerPaneOp>,
     ) -> ServerMsg {
         ServerMsg::TrackerEditResult {
@@ -106,6 +107,7 @@ pub trait PaneContentProvider: Send + Sync {
                 code: "not_supported".to_string(),
                 reason: None,
                 index: None,
+                stale: false,
             }),
             version: 0,
             created: Vec::new(),

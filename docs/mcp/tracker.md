@@ -313,15 +313,44 @@ author L and either
 - (a) L's change was at most 10 s before W's, or
 - (b) W could not have seen it: for the pane, L's change came after the edit's
   `base_version`; for an agent, after its read cursor (a session that never read
-  only has rule (a)); for a file save, the save sets F back to a value F once
+  has no cursor and has seen nothing: every other author's change counts as
+  unseen). A reading position *ahead* of the log (the state was rolled back or
+  lost) also counts as having seen nothing, and so does a pane `base_version`
+  whose `base_epoch` is not the board's current epoch (see `tracker_edit`): the
+  version counts another log. For a **history gap**, where the writer's
+  `base_version` or cursor is older than the oldest change the log still holds
+  *or ahead of it* (judged from the position the writer actually had, never a
+  clamped one), a field with no logged history is kept as a *guess* (attributed
+  `file (unknown editor)`): the value may have been someone else's. For a file save, the save sets F back to a value F once
   had (an old editor buffer), or drops an item L added or changed, at any age.
 
 `source` changes never conflict (a bound item follows its source), and two
 changes by one author never do. The write is honoured, since it is the user's
 file; the overwritten value is kept (at most 5 per item field, 50 per board, the
 oldest dropped) until the user settles it with `resolve_conflict` or the daemon
-restarts. Conflicts are **not** persisted: they last until the next daemon
-session.
+restarts. Both caps drop history-gap guesses first: the 5-per-field cap drops
+the oldest guess of that field before the oldest real value, and the
+50-per-board cap does the same across the board (a stale pane view changing 50
+items must not push the one real losing value off the board); only when no
+guess is left does the oldest real conflict go. Conflicts are
+**not** persisted: they last until the next daemon session.
+
+Each pane window is its own writer: the daemon assigns every pane connection an
+id, and a change by one window is news to another (it conflicts with a write the
+other made after its view), though both are `pane (you)` to an agent.
+
+Every conflict has a stable, opaque `conflict_id` (`<epoch>.<version>.<n>`; the
+epoch is random per board and per daemon run, so an id from before a restart or
+a lost `state.json` can never name a new conflict). When a cap drops an item's
+losing values the item says so with `dropped_conflicts: n` (in the pane's view
+and in the agent's `conflict` entries, which carry a bare
+`{"conflict":{"dropped_conflicts":n}}` for an item whose value another item's
+conflict pushed off) until the user settles what is left of its conflicts or
+acknowledges it with `ack_dropped {id}`. One loss has no marker in the pane: a
+`removed` conflict (a removed item kept for `restore`) that a cap drops. The item
+is not on the board, so no row can carry `dropped_conflicts`; the count is
+kept under its id and the agent's delta still says a cap dropped something, but
+the pane shows nothing for it. It is the cap's one silent loss.
 
 The agent that reads gets one delta entry per conflict, attributed to the
 winning author (and shown to the winner too: it learns it overwrote something):
@@ -336,11 +365,11 @@ superseded, not lost, and makes no conflict. Not covered: a value typed over an
 agent's in an old editor buffer that differs from the current file in nothing
 else looks the same as typing over a fresh one.
 
-The pane's board frame carries each item's `conflicts` (`field`, `losing`,
-`losing_by`, `winning_by`, `at`, `index`) and the board's `removed_conflicts`
+The pane's board frame carries each item's `conflicts` (`conflict_id`, `field`,
+`losing`, `losing_by`, `winning_by`, `at`) and `dropped_conflicts`, and the board's `removed_conflicts`
 (the removed item's text and its exact markdown in `source`, which `restore`
 puts back byte for byte). The tests (`tests/tracker_two_way.rs` for the rule
-table, `tests/tracker_concurrency.rs` for 200 seeded interleavings of agents,
+table, `tests/tracker_concurrency.rs` for 400 seeded interleavings of agents,
 pane and file saves checked against an oracle that shares no code with the
 rule) pin all of this.
 
@@ -370,14 +399,47 @@ hands the agent, not about the file.
 
 ### `tracker_edit`
 
-`tracker_edit {tag, request_id, base_version, operator_nonce, ops}` (client →
-daemon, at most 50 ops, all or none; advertised as `tracker_edit_v1`) is applied
+`tracker_edit {tag, request_id, base_version, base_epoch?, operator_nonce, ops}`
+(client → daemon, at most 50 ops, all or none; advertised as `tracker_edit_v1`) is applied
 only for the verified Mac app with its connection's nonce. A TCP peer is refused
 `requires_secure_connection`, any other local process `not_operator_app`, and
 nothing is written or broadcast. Ops: `status`, `edit {title?, text?, body?}`,
 `add {section, title, body?, before?, after?}`, `move`, `remove`,
-`restore {source, section, before?, after?}`, `clear_badge {id}` and
-`resolve_conflict {id, field, keep: current|losing, index?}`. The answer is
+`restore {source, section, before?, after?}`, `clear_badge {id}`,
+`ack_dropped {id}` and
+`resolve_conflict {id, field, keep: current|losing, conflict_id}`. `conflict_id`
+(from the view; advertised as `tracker_conflict_ids_v1`) is required: an old
+client sending only `index` is refused with a clear error and nothing is
+written, as is a `conflict_id` that no longer exists (settled elsewhere,
+dropped by a cap, or from before a restart). A `restore` of a removed item whose
+id was taken again since puts it back under a new id (listed in `created`).
+The batch is refused, writing nothing, when it settles one `conflict_id` twice or
+puts back two losing values of the same item field (only one can be written and
+the other would be lost: keep one and settle the rest as `current`).
+`ack_dropped` is refused for an item with nothing dropped, or when more were
+dropped since the edit's `base_version`. A daemon that decodes the op
+advertises `tracker_ack_dropped_v1` (its own flag, not folded into
+`tracker_conflict_ids_v1`: conflict ids shipped without it, so ids do not imply
+the op); a pane must not send `ack_dropped` without it.
+
+`base_epoch` (additive, optional) is the `epoch` of the board view the edit was
+made from (`tracker_board.board.epoch`, random per board and per daemon run). A
+`base_version` from another epoch (the daemon lost or rolled back its state, so
+version numbers start over and could land at or below a newer log's) counts as
+having seen nothing: every other author's change is unseen, and
+`clear_badge` / `ack_dropped` are refused as stale. Absent (an older pane): the
+`base_version` is trusted, as before.
+
+A refusal that means "your view is out of date" carries `stale: true` in the
+error next to `code: "invalid_args"` (which an older client still reads):
+`tracker_edit_result.error = {code, reason?, index?, stale?}`. A pane re-reads
+the board and lets the user try again, without parsing `reason`. It is set for a
+`conflict_id` or ack that no longer exists (settled elsewhere, dropped by a cap,
+or from an earlier run), `ack_dropped` with nothing dropped, more dropped
+since the view, and `clear_badge` of an item that changed since (or whose
+history no longer reaches the view). It is absent for refusals looking again
+would not fix (a position instead of a `conflict_id`, a batch settling one
+conflict twice, an unknown item). The answer is
 `tracker_edit_result {tag, request_id, ok, error?, version, created}` to the
 asking connection only (`created`: the ids `add` generated, in op order); the
 board frame is broadcast before it. `tracker_edit_result` and the new view

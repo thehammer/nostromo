@@ -45,8 +45,23 @@
 //! write in the same batch), a restructure and its undo, and an agent
 //! re-opening the board are generated too.
 //!
-//! Failing interleavings print their seed and every step. `TRACKER_FUZZ_SEED`
-//! reruns one seed. Hermetic: `FakeClock`, temp dirs, no network.
+//! Also generated: a state-loss restart in the middle of a run (a new registry
+//! over the same files with `state.json` gone: versions and counters start
+//! over, every window's view and every conflict id it holds is from before);
+//! the oracle keeps what it knows of the values still in the file at the
+//! restart, and right after it a window with the old view overwrites one of
+//! them: the new log knows nothing of that value, so it must be kept (the view
+//! carries the board's epoch, as the Mac's does, and the window sends it back);
+//! a batch that settles one conflict twice, or puts back two losing values of
+//! one field, which must be refused; any `resolve_conflict` naming an id the
+//! board no longer keeps, which must be refused; and in two runs, a
+//! stale window (its view older than the log reaches) that changes 50 items at
+//! once next to one real conflict: the real one must outlive the guesses the
+//! stale view makes.
+//!
+//! Failing interleavings print their seed and every step (a panic in one is
+//! reported with its seed too). `TRACKER_FUZZ_SEED` reruns one seed;
+//! `TRACKER_FUZZ_COUNT` runs more. Hermetic: `FakeClock`, temp dirs, no network.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -68,6 +83,8 @@ const SESS: [&str; 2] = ["sess-a", "sess-b"];
 /// The two pane windows' connection ids (the daemon assigns them in life).
 const WINDOW: [&str; 2] = ["win-a", "win-b"];
 const INTERLEAVINGS: u64 = 400;
+/// Items a stale window changes at once.
+const BULK: usize = 50;
 const SEED_BASE: u64 = 0x7a11_0000;
 const FIELDS: [&str; 4] = ["text", "status", "owner", "note"];
 const STATUSES: [&str; 5] = ["todo", "in-progress", "blocked", "needs-you", "done"];
@@ -95,7 +112,10 @@ impl Rng {
         self.next() % 100 < percent
     }
 
+    /// A random element. Callers never pick from an empty list (a step with
+    /// no item to act on does nothing instead).
     fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+        assert!(!items.is_empty(), "pick from an empty list");
         &items[self.below(items.len())]
     }
 }
@@ -179,6 +199,13 @@ struct Write {
     /// The version once the write was in.
     applied: u64,
     step: usize,
+    /// The writer's base is from this run of the daemon: an agent that opened
+    /// or read the board since the restart, a window that looked since. Only
+    /// such a writer has seen a value written before the restart.
+    fresh: bool,
+    /// Written before a state-loss restart (still in the file at the restart,
+    /// which the new log knows nothing about).
+    pre_restart: bool,
 }
 
 /// The writes `who` made, from what the file said before and after.
@@ -200,6 +227,8 @@ fn writes_between(
             base,
             applied,
             step,
+            fresh: true,
+            pre_restart: false,
         });
     };
     for (id, fields) in after {
@@ -269,6 +298,8 @@ impl Shown {
 #[derive(Debug, Clone, Default)]
 struct PaneView {
     version: u64,
+    /// The board's epoch the view carried (a real pane sends it back).
+    epoch: String,
     shown: Vec<Shown>,
 }
 
@@ -314,6 +345,30 @@ struct World {
     dropped_seen: u32,
     /// Every conflict's (item, field, losing value) by id after the last step.
     named: BTreeMap<String, (String, String, String)>,
+    /// Every id any conflict ever had, and what it named: an id is never
+    /// reused, across a restart either.
+    ever_named: BTreeMap<String, (String, String, String)>,
+    state_dir: PathBuf,
+    home_dir: PathBuf,
+    /// The step at which the state is lost and the daemon restarts, if any.
+    restart_at: Option<usize>,
+    /// A window whose view is from before the restart: the oracle counts it as
+    /// having seen nothing, though the daemon is sent its stale version.
+    view_stale: [bool; 2],
+    /// The run starts with a log that no longer reaches window 1's view.
+    gap_run: bool,
+    /// Conflict ids a pane batch settled this step.
+    settled_now: Vec<String>,
+    /// Items whose `removed` conflict a cap dropped: the item is not on the
+    /// board, so the pane has no `dropped_conflicts` to show for it. The
+    /// cap's one silent loss; accepted here, and listed in the PR.
+    cap_dropped_removed: BTreeSet<String>,
+    /// The items on the board after the last step.
+    prev_items: BTreeSet<String>,
+    /// The cap's drop count at the last step.
+    cap_drops: u32,
+    /// The conflicts after the last step: (id, item, field, guess, version).
+    prev_list: Vec<(String, String, String, bool, u64)>,
 }
 
 fn agent(i: usize, session: &str) -> Author {
@@ -339,6 +394,7 @@ impl World {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path().canonicalize().unwrap();
         let (repo, home, state) = (base.join("repo"), base.join("home"), base.join("state"));
+        let (state_dir, home_dir) = (state.clone(), home.clone());
         for dir in [&repo, &home] {
             std::fs::create_dir_all(dir).unwrap();
         }
@@ -398,14 +454,169 @@ impl World {
             marked_now: BTreeSet::new(),
             dropped_seen: 0,
             named: BTreeMap::new(),
+            ever_named: BTreeMap::new(),
+            state_dir: state_dir.clone(),
+            home_dir: home_dir.clone(),
+            restart_at: None,
+            view_stale: [false; 2],
+            gap_run: (seed - SEED_BASE).is_multiple_of(200),
+            settled_now: Vec::new(),
+            prev_list: Vec::new(),
+            cap_dropped_removed: BTreeSet::new(),
+            cap_drops: 0,
+            prev_items: BTreeSet::new(),
         };
         for i in 0..2 {
             world.read(i);
             world.look(i);
         }
+        if world.gap_run {
+            world.roll_the_log_past_window_one();
+        } else if world.rng.chance(20) {
+            world.restart_at = Some(3 + world.rng.below(8));
+        }
         world.steps.clear();
         world.snapshot();
         world
+    }
+
+    /// Window 1 keeps the view it has; 50 items are added and the log then
+    /// rolls over (more than its 1,000 entries), so nothing logged says what
+    /// those items held. Agents and window 0 read and look again.
+    fn roll_the_log_past_window_one(&mut self) {
+        let mut text = String::from_utf8(self.bytes()).unwrap();
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        let mut ops: Vec<Op> = Vec::new();
+        for n in 0..BULK {
+            ops.push(Op::Upsert(Upsert {
+                id: Some(format!("bulk-{n}")),
+                section: Some("next".into()),
+                text: Some(format!("Bulk item {n}")),
+                ..Default::default()
+            }));
+        }
+        let bytes = apply_to_file(text.as_bytes(), &ops, &Author::File, self.stamp())
+            .expect("the bulk items are added")
+            .bytes;
+        std::fs::write(&self.path, bytes).unwrap();
+        self.reg.ingest_file_change(&self.path);
+        for n in 0..1_010 {
+            let ops = [Op::Upsert(Upsert {
+                id: Some("item-5".into()),
+                owner: Some(format!("roll-{n}")),
+                ..Default::default()
+            })];
+            let bytes = apply_to_file(&self.bytes(), &ops, &Author::File, self.stamp())
+                .expect("a scratch save")
+                .bytes;
+            std::fs::write(&self.path, bytes).unwrap();
+            self.reg.ingest_file_change(&self.path);
+        }
+        for i in 0..2 {
+            self.read(i);
+        }
+        self.look(0);
+    }
+
+    /// The daemon restarts with its state lost: a new registry over the same
+    /// files, no `state.json`. Versions and counters start over; the windows
+    /// keep the views they have and the agents are handed the board again.
+    fn restart(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.state_dir);
+        let mut parts = RegistryParts::hermetic(
+            self.state_dir.clone(),
+            self.home_dir.clone(),
+            self.clock.clone(),
+        );
+        parts.fs = self.fs.clone();
+        self.reg = Arc::new(TrackerRegistry::new(parts));
+        for i in 0..2 {
+            self.reg
+                .open(TAG[i], &self.session[i], &self.open_args)
+                .expect("re-open after the restart");
+            self.cursor[i] = Some(self.version());
+        }
+        // What the daemon kept in memory is gone, and so are the conflicts it
+        // held (and the premises that rested on them). What the oracle
+        // remembers of the values still in the file is not: those are the old
+        // values a stale window may now overwrite, and the new daemon's log
+        // knows nothing about them.
+        let in_file = items_of(&self.bytes());
+        self.writes.retain(|e| {
+            e.field != "removed" && in_file.get(&e.item).is_some_and(|f| f[e.field] == e.value)
+        });
+        for e in &mut self.writes {
+            e.pre_restart = true;
+        }
+        self.excused.clear();
+        self.restored_elsewhere.clear();
+        self.history.clear();
+        self.snapshot();
+        self.marked.clear();
+        self.marked_now.clear();
+        self.dropped_seen = 0;
+        self.named.clear();
+        self.prev_list.clear();
+        self.cap_dropped_removed.clear();
+        self.cap_drops = 0;
+        self.view_stale = [true; 2];
+        self.steps
+            .push("*** the daemon restarts with its state lost ***".to_string());
+    }
+
+    /// Right after a restart, a window still showing the old run's view
+    /// overwrites a value somebody else wrote before it: the new log has no
+    /// entry for that value (its field is "unlogged"), and the view's version
+    /// is meaningless to the new log. The oracle counts the window to have seen
+    /// nothing, so the value must be kept as a conflict. (Random steps hit this
+    /// only now and then: this one makes every restart run do it.)
+    fn stale_window_overwrites_an_old_value(&mut self, step: usize) {
+        let Some((item, field)) = self
+            .writes
+            .iter()
+            .filter(|e| e.pre_restart && !matches!(e.who, Who::Pane(_)))
+            .find(|e| e.field == "note" || e.field == "status")
+            .map(|e| (e.item.clone(), e.field))
+        else {
+            return;
+        };
+        let current = items_of(&self.bytes());
+        let current = current[&item][field].clone().unwrap_or_default();
+        let op = if field == "note" {
+            TrackerPaneOp::Edit {
+                id: item.clone(),
+                title: None,
+                text: None,
+                body: Some(self.unique("probe-note-")),
+            }
+        } else {
+            TrackerPaneOp::Status {
+                id: item.clone(),
+                status: if current == "blocked" {
+                    "needs-you"
+                } else {
+                    "blocked"
+                }
+                .into(),
+            }
+        };
+        let w = self.rng.below(2);
+        let (before, base, epoch) = (
+            self.bytes(),
+            self.views[w].version,
+            self.views[w].epoch.clone(),
+        );
+        let ops = vec![op];
+        let r = self
+            .reg
+            .apply_pane_ops_in(TAG[0], WINDOW[w], base, Some(&epoch), &ops);
+        self.steps.push(format!(
+            "window {w} (old view v{base}) overwrites a value from before the restart: {ops:?} -> {}",
+            r.is_ok()
+        ));
+        self.settle(Who::Pane(w), 0, &before, &[item], false, step);
     }
 
     fn version(&self) -> u64 {
@@ -499,8 +710,10 @@ impl World {
         ));
         self.views[w] = PaneView {
             version: view.version,
+            epoch: view.epoch.clone(),
             shown,
         };
+        self.view_stale[w] = false;
     }
 
     /// Arms a save to happen between the daemon's read and its commit.
@@ -562,6 +775,16 @@ impl World {
         if !mid.is_empty() {
             between = self.injected_bytes(&mid, before);
         }
+        // Whether the writer's base is from this run (see `Write::fresh`).
+        let fresh = match who {
+            // Every agent was handed the board at the restart. (A session that
+            // starts later and never reads has seen nothing, and the daemon
+            // has no log of what the file held at the restart to tell it: a
+            // known gap, not generated as a loss here; see the PR.)
+            Who::Agent(..) => true,
+            Who::Pane(w) => !self.view_stale[w],
+            Who::File => true,
+        };
         self.writes.extend(mid);
         let mut ids: Vec<String> = touched.to_vec();
         let new_writes = writes_between(
@@ -573,7 +796,8 @@ impl World {
             step,
         );
         ids.extend(new_writes.iter().map(|w| w.item.clone()));
-        self.writes.extend(new_writes);
+        self.writes
+            .extend(new_writes.into_iter().map(|w| Write { fresh, ..w }));
         if !injected {
             let (b, a) = (
                 String::from_utf8(before.to_vec()).unwrap(),
@@ -635,6 +859,12 @@ impl World {
             return;
         }
         let ids = self.item_ids();
+        if ids.is_empty() {
+            self.steps.push(format!(
+                "agent {i} has nothing to act on (the board has no items)"
+            ));
+            return;
+        }
         let mut touched = Vec::new();
         let hot = self.hot.clone().filter(|h| ids.contains(h));
         let op = match (&hot, self.rng.chance(60)) {
@@ -760,8 +990,19 @@ impl World {
             self.look(w);
         }
         let ids = self.item_ids();
+        if ids.is_empty() {
+            self.steps.push(format!(
+                "window {w} has nothing to act on (the board has no items)"
+            ));
+            return;
+        }
         let mut touched = Vec::new();
         let base = self.views[w].version;
+        // What the oracle counts the window to have seen: nothing, when its
+        // view is from before a restart.
+        let seen = if self.view_stale[w] { 0 } else { base };
+        // A batch that must be refused.
+        let mut must_refuse = false;
         // What a conflict settled by this batch was, to excuse it afterwards.
         let mut settles: Option<(Shown, ConflictKeep)> = None;
         let hot = self.hot.clone().filter(|h| ids.contains(h));
@@ -876,14 +1117,35 @@ impl World {
                         ConflictKeep::Losing
                     };
                     touched.push(c.item.clone());
-                    settles = Some((c.clone(), keep));
-                    vec![TrackerPaneOp::ResolveConflict {
-                        id: c.item,
-                        field: c.field,
+                    let resolve = |c: &Shown, keep| TrackerPaneOp::ResolveConflict {
+                        id: c.item.clone(),
+                        field: c.field.clone(),
                         keep,
-                        conflict_id: Some(c.conflict_id),
+                        conflict_id: Some(c.conflict_id.clone()),
                         index: None,
-                    }]
+                    };
+                    let twin = shown.iter().find(|s| {
+                        s.item == c.item && s.field == c.field && s.conflict_id != c.conflict_id
+                    });
+                    match (self.rng.chance(20), twin) {
+                        // The same conflict twice in one batch.
+                        (true, _) if self.rng.chance(50) => {
+                            must_refuse = true;
+                            vec![resolve(&c, keep), resolve(&c, keep)]
+                        }
+                        // Two losing values of one field in one batch.
+                        (true, Some(other)) if c.field != "removed" => {
+                            must_refuse = true;
+                            vec![
+                                resolve(&c, ConflictKeep::Losing),
+                                resolve(other, ConflictKeep::Losing),
+                            ]
+                        }
+                        _ => {
+                            settles = Some((c.clone(), keep));
+                            vec![resolve(&c, keep)]
+                        }
+                    }
                 }
             }
             9 => {
@@ -948,7 +1210,38 @@ impl World {
         let before = self.bytes();
         let version_before = self.version();
         let conflicts_before = self.conflict_ids_now();
-        let result = self.reg.apply_pane_ops_as(TAG[0], WINDOW[w], base, &ops);
+        let epoch = self.views[w].epoch.clone();
+        let result = self
+            .reg
+            .apply_pane_ops_in(TAG[0], WINDOW[w], base, Some(&epoch), &ops);
+        let unknown_id = ops.iter().any(|op| match op {
+            TrackerPaneOp::ResolveConflict {
+                conflict_id: Some(id),
+                ..
+            } => !conflicts_before.contains(id),
+            _ => false,
+        });
+        if result.is_ok() && (must_refuse || unknown_id) {
+            self.failures.push(format!(
+                "step {step}: a batch settling {} was applied",
+                if must_refuse {
+                    "a conflict twice or two losing values of a field"
+                } else {
+                    "a conflict the board no longer keeps"
+                }
+            ));
+        }
+        if result.is_ok() {
+            for op in &ops {
+                if let TrackerPaneOp::ResolveConflict {
+                    conflict_id: Some(id),
+                    ..
+                } = op
+                {
+                    self.settled_now.push(id.clone());
+                }
+            }
+        }
         if let Ok(done) = &result {
             touched.extend(done.created.clone());
             if let Some((conflict, ConflictKeep::Current)) = &settles {
@@ -997,7 +1290,7 @@ impl World {
                 ));
             }
         }
-        self.settle(Who::Pane(w), base, &before, &touched, injected, step);
+        self.settle(Who::Pane(w), seen, &before, &touched, injected, step);
         // The window's view follows the broadcast of its own edit, most times.
         if self.rng.chance(60) {
             self.look(w);
@@ -1016,6 +1309,10 @@ impl World {
             )
         } else {
             let ids = self.item_ids();
+            if ids.is_empty() {
+                self.steps.push("file save: no items to change".to_string());
+                return;
+            }
             let mut ops = Vec::new();
             for _ in 0..1 + self.rng.below(2) {
                 let id = self.rng.pick(&ids).clone();
@@ -1091,7 +1388,7 @@ impl World {
                 self.failures
                     .push(format!("step {step}: conflict id {} is used twice", c.id));
             }
-            if let Some(before) = self.named.get(&c.id) {
+            if let Some(before) = self.ever_named.get(&c.id) {
                 if *before != named {
                     self.failures.push(format!(
                         "step {step}: conflict id {} named {before:?}, now {named:?}",
@@ -1100,7 +1397,11 @@ impl World {
                 }
             }
         }
+        for (id, named) in &now {
+            self.ever_named.insert(id.clone(), named.clone());
+        }
         self.named = now;
+        self.audit_real_before_guess(step, &conflicts);
 
         let view = self.reg.board_view(TAG[0]).expect("a board");
         let mut marked = BTreeSet::new();
@@ -1137,6 +1438,127 @@ impl World {
         self.marked_now = marked;
     }
 
+    /// A real conflict is never dropped by the board cap while an older guess
+    /// (a value kept only because a stale view couldn't be checked) is still
+    /// kept: the guesses go first.
+    fn audit_real_before_guess(&mut self, step: usize, now: &[nostromo::tracker::Conflict]) {
+        let version = self.version();
+        let ids: BTreeSet<&str> = now.iter().map(|c| c.id.as_str()).collect();
+        let settled = std::mem::take(&mut self.settled_now);
+        let guess_kept = now.iter().any(|c| c.guess);
+        let drops = self.reg.conflicts_dropped(TAG[0]);
+        let cap_dropped = drops > self.cap_drops;
+        self.cap_drops = drops;
+        // A step that both removed an item and made a cap drop may have
+        // dropped that item's kept markdown (the conflict was made and
+        // dropped in the one write).
+        let items: BTreeSet<String> = self.item_ids().into_iter().collect();
+        if cap_dropped {
+            self.cap_dropped_removed
+                .extend(self.prev_items.difference(&items).cloned());
+        }
+        self.prev_items = items;
+        for (id, item, field, guess, born) in &self.prev_list {
+            let gone = !ids.contains(id.as_str()) && !settled.contains(id);
+            let in_group = self
+                .prev_list
+                .iter()
+                .filter(|(_, i, f, _, _)| i == item && f == field)
+                .count();
+            if gone && cap_dropped && field == "removed" {
+                self.cap_dropped_removed.insert(item.clone());
+            }
+            if gone && !guess && field != "removed" && in_group < 5 && guess_kept && *born < version
+            {
+                self.failures.push(format!(
+                    "step {step}: real conflict {id} ({item}.{field}) was dropped while a guess is still kept"
+                ));
+            }
+        }
+        self.prev_list = now
+            .iter()
+            .map(|c| {
+                (
+                    c.id.clone(),
+                    c.item_id.clone(),
+                    c.field.clone(),
+                    c.guess,
+                    c.version,
+                )
+            })
+            .collect();
+    }
+
+    /// Plants one real conflict, then a stale window (window 1, whose view the
+    /// log no longer reaches) changes all the bulk items at once.
+    fn bulk_step(&mut self, step: usize) {
+        // The real one: agent 1 writes a note, window 0 (which saw only up to
+        // before that) overwrites it.
+        let agent_note = self.unique("real-agent-note-");
+        let before = self.bytes();
+        let session = self.session[1].clone();
+        let op = Op::Upsert(Upsert {
+            id: Some("item-2".into()),
+            note: Some(agent_note),
+            ..Default::default()
+        });
+        let base = self.cursor[1].unwrap_or(0);
+        let r = self.reg.apply(
+            TAG[1],
+            &session,
+            std::slice::from_ref(&op),
+            &agent(1, &session),
+        );
+        self.steps.push(format!("agent 1 {op:?} -> {}", r.is_ok()));
+        self.settle(
+            Who::Agent(1, self.generation[1]),
+            base,
+            &before,
+            &["item-2".into()],
+            false,
+            step,
+        );
+        let ops = vec![TrackerPaneOp::Edit {
+            id: "item-2".into(),
+            title: None,
+            text: None,
+            body: Some(self.unique("real-pane-note-")),
+        }];
+        let (before, base) = (self.bytes(), self.views[0].version);
+        let epoch = self.views[0].epoch.clone();
+        let r = self
+            .reg
+            .apply_pane_ops_in(TAG[0], WINDOW[0], base, Some(&epoch), &ops);
+        self.steps
+            .push(format!("window 0 (base {base}) {ops:?} -> {}", r.is_ok()));
+        self.settle(Who::Pane(0), base, &before, &["item-2".into()], false, step);
+        // From here on the real conflict is watched.
+        let kept = self.reg.conflicts(TAG[0]);
+        self.audit_real_before_guess(step, &kept);
+        // The stale window changes every bulk item.
+        let ops: Vec<TrackerPaneOp> = (0..BULK)
+            .map(|n| TrackerPaneOp::Status {
+                id: format!("bulk-{n}"),
+                status: "blocked".into(),
+            })
+            .collect();
+        let (before, base) = (self.bytes(), self.views[1].version);
+        let ids: Vec<String> = (0..BULK).map(|n| format!("bulk-{n}")).collect();
+        let epoch = self.views[1].epoch.clone();
+        let r = self
+            .reg
+            .apply_pane_ops_in(TAG[0], WINDOW[1], base, Some(&epoch), &ops);
+        self.steps.push(format!(
+            "window 1 (stale base {base}) changes {BULK} items -> {}",
+            r.is_ok()
+        ));
+        if let Err(e) = &r {
+            self.failures
+                .push(format!("step {step}: the bulk change was refused: {e:?}"));
+        }
+        self.settle(Who::Pane(1), base, &before, &ids, false, step);
+    }
+
     fn run(&mut self) {
         let count = if self.hot.is_some() {
             40 + self.rng.below(41)
@@ -1151,6 +1573,13 @@ impl World {
             } as i64;
             self.clock.advance(ChronoDuration::seconds(secs));
             self.steps.push(format!("[{step}] +{secs}s"));
+            if self.restart_at == Some(step) {
+                self.restart();
+                self.stale_window_overwrites_an_old_value(step);
+            }
+            if self.gap_run && step == 1 {
+                self.bulk_step(step);
+            }
             match self.rng.below(20) {
                 0..=6 => self.agent_step(step),
                 7..=12 => self.pane_step(step),
@@ -1215,10 +1644,19 @@ impl World {
             let superseded = self.writes[index + 1..].iter().any(|w| {
                 w.item == e.item
                     && (w.field == e.field || w.field == "removed")
-                    && (w.who == e.who || w.base >= e.applied)
+                    && (w.who == e.who
+                        // A value from before a restart was seen only by a
+                        // writer whose base is from after it; any other
+                        // base is a version of another log.
+                        || if e.pre_restart {
+                            w.fresh
+                        } else {
+                            w.base >= e.applied
+                        })
             });
             // A cap dropped it, and the view said so: the accepted loss.
-            let said_dropped = self.marked.contains(&e.item);
+            let said_dropped =
+                self.marked.contains(&e.item) || self.cap_dropped_removed.contains(&e.item);
             if !(in_file || lost_to_conflict || superseded || said_dropped) {
                 failures.push(format!(
                     "LOST: {:?} wrote {}={:?} on {} at step {} (base {}, applied v{}); not in the file, no conflict holds it, not superseded",
@@ -1277,9 +1715,24 @@ fn four_hundred_interleavings_lose_no_edit() {
             (0..count).map(|n| SEED_BASE + n).collect()
         }
     };
+    // A panic inside an interleaving (a bug in the fixture, or in the daemon)
+    // is a failure of that seed, reported with it, not an abort of the run.
     let failed: Vec<(u64, String)> = seeds
         .iter()
-        .filter_map(|s| one(*s).err().map(|e| (*s, e)))
+        .filter_map(|s| {
+            let seed = *s;
+            match std::panic::catch_unwind(|| one(seed)) {
+                Ok(result) => result.err().map(|e| (seed, e)),
+                Err(payload) => {
+                    let why = payload
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "a panic".to_string());
+                    Some((seed, format!("seed {seed:#x} panicked: {why}")))
+                }
+            }
+        })
         .collect();
     if let Some((_, first)) = failed.first() {
         let list: Vec<String> = failed.iter().map(|(s, _)| format!("{s:#x}")).collect();

@@ -49,8 +49,11 @@ pub const REMOVED: &str = "removed";
 /// One overwritten value, kept.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Conflict {
-    /// Stable for the life of the conflict: `<version>.<n>` (the version it
-    /// became visible at, and a per-board counter). Empty until recorded.
+    /// Stable for the life of the conflict: `<epoch>.<version>.<n>` (the
+    /// board's random epoch, the version it became visible at, and a
+    /// per-board counter). Opaque to clients. Empty until recorded. The epoch
+    /// keeps an id from a previous run (state lost, versions restarted) from
+    /// ever naming a new conflict.
     pub id: String,
     pub item_id: String,
     /// The field, or [`REMOVED`].
@@ -72,10 +75,14 @@ pub struct Conflict {
     /// its log entry); 0 until recorded. A pane that saw version `v` has seen
     /// the conflicts with `version <= v`, and no others.
     pub version: u64,
+    /// A guess: the writer's view fell off the log, so the daemon could not
+    /// tell whether the value was anyone else's and kept it to be safe. The
+    /// board cap drops guesses before real conflicts.
+    pub guess: bool,
 }
 
 /// A board's live conflicts, oldest first.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Conflicts {
     list: Vec<Conflict>,
     /// Losing values dropped by a cap since the board was loaded.
@@ -85,12 +92,31 @@ pub struct Conflicts {
     dropped_by_item: HashMap<String, u32>,
     /// Numbers the ids of this board's conflicts.
     counter: u64,
+    /// Random per board (and per run: conflicts are not persisted); part of
+    /// every id.
+    epoch: String,
+}
+
+impl Default for Conflicts {
+    fn default() -> Self {
+        Conflicts {
+            list: Vec::new(),
+            dropped: 0,
+            dropped_by_item: HashMap::new(),
+            counter: 0,
+            epoch: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
+        }
+    }
 }
 
 impl Conflicts {
     /// Adds `conflict`, dropping the oldest of its (item, field) beyond
-    /// [`MAX_PER_FIELD`] and the oldest of the board beyond [`MAX_PER_BOARD`].
-    pub fn push(&mut self, conflict: Conflict) {
+    /// [`MAX_PER_FIELD`] and the oldest of the board beyond [`MAX_PER_BOARD`],
+    /// a guess before any real conflict (a stale view changing many items
+    /// must not push the one real losing value off the board). Returns what a
+    /// cap dropped.
+    pub fn push(&mut self, conflict: Conflict) -> Vec<Conflict> {
+        let mut dropped = Vec::new();
         self.list.push(conflict);
         let last = self.list.last().expect("just pushed");
         let (id, field) = (last.item_id.clone(), last.field.clone());
@@ -102,18 +128,51 @@ impl Conflicts {
             .map(|(i, _)| i)
             .collect();
         if same.len() > MAX_PER_FIELD {
-            let gone = self.list.remove(same[0]);
-            self.count_dropped(gone.item_id);
+            dropped.push(self.list.remove(Self::oldest_to_drop(&self.list, &same)));
         }
         if self.list.len() > MAX_PER_BOARD {
-            let gone = self.list.remove(0);
-            self.count_dropped(gone.item_id);
+            let all: Vec<usize> = (0..self.list.len()).collect();
+            dropped.push(self.list.remove(Self::oldest_to_drop(&self.list, &all)));
+        }
+        for gone in &dropped {
+            self.count_dropped(&gone.item_id);
+        }
+        dropped
+    }
+
+    /// Of the candidate positions (oldest first): the oldest guess, else the
+    /// oldest.
+    fn oldest_to_drop(list: &[Conflict], candidates: &[usize]) -> usize {
+        candidates
+            .iter()
+            .copied()
+            .find(|&i| list[i].guess)
+            .unwrap_or(candidates[0])
+    }
+
+    fn count_dropped(&mut self, item_id: &str) {
+        self.dropped = self.dropped.saturating_add(1);
+        let n = self.dropped_by_item.entry(item_id.to_string()).or_default();
+        *n = n.saturating_add(1);
+    }
+
+    /// The user acknowledges `count` dropped losing values of `item_id` (what
+    /// they were shown): that many are forgotten, never more, so a loss
+    /// recorded since stays counted.
+    pub fn ack_dropped(&mut self, item_id: &str, count: u32) {
+        if let Some(n) = self.dropped_by_item.get_mut(item_id) {
+            *n = n.saturating_sub(count);
+            if *n == 0 {
+                self.dropped_by_item.remove(item_id);
+            }
         }
     }
 
-    fn count_dropped(&mut self, item_id: String) {
-        self.dropped += 1;
-        *self.dropped_by_item.entry(item_id).or_default() += 1;
+    /// This board's epoch for this run: the pane sends the one it saw as
+    /// `base_epoch`, so a `base_version` from another run (the state was lost
+    /// or rolled back) is known not to be about this log.
+    pub fn epoch(&self) -> &str {
+        &self.epoch
     }
 
     /// The conflict with this stable id.
@@ -164,7 +223,7 @@ impl Conflicts {
     pub fn stamp_unversioned(&mut self, version: u64) {
         for c in self.list.iter_mut().filter(|c| c.version == 0) {
             c.version = version;
-            c.id = format!("{version}.{}", self.counter);
+            c.id = format!("{}.{version}.{}", self.epoch, self.counter);
             self.counter += 1;
         }
     }
@@ -238,6 +297,7 @@ pub fn detect(
             ChangeKind::Changed => {
                 for (field, (_, new)) in &change.fields {
                     let last = latest(prior, id, Some(field));
+                    let mut guess = false;
                     let losing_author = match last {
                         Some(last) => {
                             let settled = d.seen_through.is_some_and(|seen| last.seq <= seen)
@@ -250,7 +310,10 @@ pub fn detect(
                         }
                         // Nothing logged: with the history gone, the value
                         // may be someone else's; keep it.
-                        None if gap_overwrite(d) => Author::File,
+                        None if gap_overwrite(d) => {
+                            guess = true;
+                            Author::File
+                        }
                         None => continue,
                     };
                     let losing = old
@@ -270,6 +333,7 @@ pub fn detect(
                         prev: None,
                         next: None,
                         version: 0,
+                        guess,
                     });
                 }
             }
@@ -287,6 +351,7 @@ pub fn detect(
                     c.item_id.as_deref() == Some(id)
                         && matches!(c.kind, ChangeKind::Changed | ChangeKind::Added)
                 });
+                let guess = found.is_none();
                 let losing_author = match found {
                     Some(last) => last.by.clone(),
                     None if !touched && gap_overwrite(d) => Author::File,
@@ -310,6 +375,7 @@ pub fn detect(
                     prev,
                     next,
                     version: 0,
+                    guess,
                 });
             }
             _ => {}
@@ -355,6 +421,19 @@ pub fn change_for(conflict: &Conflict, kept: &Value, dropped: u32) -> Change {
         return change;
     }
     change.with_field("dropped_conflicts", json!(dropped), Value::Null)
+}
+
+/// The log entry that tells an agent a cap dropped older losing values of
+/// `item_id` (`dropped` in all, until the user settles it): attributed to the
+/// write that pushed them off. It carries no value of its own.
+pub fn change_for_dropped(item_id: &str, by: &Conflict, dropped: u32) -> Change {
+    Change::new(
+        &by.winning_author,
+        Some(item_id),
+        ChangeKind::Conflict,
+        by.at,
+    )
+    .with_field("dropped_conflicts", json!(dropped), Value::Null)
 }
 
 /// Does `last` (the latest other-author change to what `d.writer` is writing)
@@ -576,6 +655,7 @@ mod tests {
             prev: None,
             next: None,
             version: 0,
+            guess: false,
         };
         for n in 0..(MAX_PER_FIELD + 2) {
             conflicts.push(make("a", "status", n));
