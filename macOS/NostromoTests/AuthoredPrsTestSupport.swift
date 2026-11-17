@@ -76,6 +76,7 @@ enum APT {
         _ = NSApplication.shared
         let w = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled], backing: .buffered, defer: true)
         w.isReleasedWhenClosed = false
+        w.animationBehavior = .none   // a closing window with an animation parks a pool thread (see TestIsolationTests)
         return w
     }
 
@@ -193,6 +194,7 @@ enum APT {
         let window = NSWindow(contentRect: NSRect(x: -30000, y: -30000, width: size.width, height: size.height),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
+        window.animationBehavior = .none   // a closing window with an animation parks a pool thread (see TestIsolationTests)
         window.appearance = NSAppearance(named: appearance)
         let host = AuthoredPrsInkHost(frame: NSRect(origin: .zero, size: size))
         window.contentView = host
