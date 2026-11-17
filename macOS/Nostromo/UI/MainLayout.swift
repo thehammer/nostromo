@@ -596,7 +596,8 @@ class MainLayout: NSView {
             if let tab { open.selectTab(tab) }
             return
         }
-        guard window.attachedSheet == nil else { return }
+        // Some other sheet (a confirmation, a picker) is up: say so rather than do nothing.
+        guard window.attachedSheet == nil else { NSSound.beep(); return }
         if let tab { CreateFocusSheet.rememberedTab = tab }
         let sheet = CreateFocusSheet(switchToTag: { [weak self] tag in
             guard let self, let focus = self.focusStore.focuses.first(where: { $0.sessionTag == tag }) else { return false }

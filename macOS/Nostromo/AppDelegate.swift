@@ -344,11 +344,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
                                    clientRequestId: requestId))
     }
 
-    /// The main window ⌘N / ⇧⌘N act on: the key window, or the window the key window is a sheet of
-    /// (so ⇧⌘N works while the sheet is open).
+    /// The main window ⌘N / ⇧⌘N act on (see `FileMenuShortcuts`).
     private func shortcutLayout() -> MainLayout? {
-        let key = NSApp.keyWindow
-        return (key?.contentView as? MainLayout) ?? (key?.sheetParent?.contentView as? MainLayout)
+        FileMenuShortcuts.layout(keyWindow: NSApp.keyWindow)
     }
 
     /// File > New Focus… (⌘N).
@@ -560,8 +558,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
             return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) != nil
         }
         if menuItem.action == #selector(openSecondWindowQA(_:)) { return isQAInstance }
-        if menuItem.action == #selector(newFocus(_:)) || menuItem.action == #selector(resumeConversation(_:)) {
-            return shortcutLayout() != nil
+        if FileMenuShortcuts.handles(menuItem) {
+            let client = AppStore.shared.client
+            return FileMenuShortcuts.validate(menuItem, keyWindow: NSApp.keyWindow,
+                                              daemonConnected: client.connected.value,
+                                              daemonKeepsHistory: client.daemonAdvertisesConversationHistory)
         }
         if menuItem.action == #selector(newTerminal(_:)) { return NSApp.keyWindow?.contentView is MainLayout }
         if menuItem.action == #selector(newRemoteShell(_:)) { return NSApp.keyWindow?.contentView is MainLayout }

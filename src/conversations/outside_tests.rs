@@ -60,15 +60,29 @@ impl Rig {
 
     fn scan(&self, index: &OutsideIndex, known: &[&str]) {
         let known: HashSet<String> = known.iter().map(|s| (*s).to_owned()).collect();
-        let sensitive = |agent: Option<&str>| agent == Some("fred");
         assert!(index.try_begin());
+        self.scan_claimed_known(index, &known);
+    }
+
+    /// Scan with the claim already taken; returns whether the list changed.
+    fn scan_claimed(&self, index: &OutsideIndex) -> bool {
+        self.scan_claimed_known(index, &HashSet::new())
+    }
+
+    fn scan_claimed_known(&self, index: &OutsideIndex, known: &HashSet<String>) -> bool {
+        let sensitive = |agent: Option<&str>| agent == Some("fred");
         index.scan_and_store(&ScanEnv {
             projects_dir: &self.projects,
-            known: &known,
+            known,
             first_prompts_enabled: true,
             is_sensitive: &sensitive,
             now_ms: NOW,
-        });
+        })
+    }
+
+    fn scan_changed(&self, index: &OutsideIndex) -> bool {
+        assert!(index.try_begin());
+        self.scan_claimed(index)
     }
 
     fn sids(&self, index: &OutsideIndex) -> Vec<String> {
@@ -275,4 +289,81 @@ fn clear_deletes_the_file_and_first_prompts_off_drops_the_texts() {
     index.clear();
     assert!(!Path::new(&file).exists());
     assert!(index.is_empty() && !index.ready());
+}
+
+fn plain_rig() -> (Rig, PathBuf, OutsideIndex) {
+    let rig = Rig::new();
+    rig.put(
+        "a",
+        &conversation("cli", "/work/app", false, "tidy the readme"),
+        1000,
+    );
+    let file = path_beside(&rig.dir.path().join("conversation-history.json"));
+    let index = OutsideIndex::open(file.clone());
+    (rig, file, index)
+}
+
+#[test]
+fn a_scan_running_when_the_switch_goes_off_stores_nothing_and_writes_no_file() {
+    let (rig, file, index) = plain_rig();
+    assert!(index.try_begin());
+    index.clear();
+    rig.scan_claimed(&index);
+    assert!(index.is_empty() && !index.ready(), "the result was dropped");
+    assert!(!file.exists(), "no index file after the switch went off");
+    // A restart finds nothing to reload.
+    let reopened = OutsideIndex::open(file.clone());
+    assert!(reopened.is_empty() && !reopened.ready());
+    // The claim was released: the next scan (switch on again) works.
+    rig.scan(&index, &[]);
+    assert_eq!(rig.sids(&index), vec!["a".to_owned()]);
+}
+
+#[test]
+fn a_scan_running_when_first_prompts_go_off_stores_no_prompt_text() {
+    let (rig, file, index) = plain_rig();
+    assert!(index.try_begin());
+    index.withhold_first_prompts();
+    // The scan was configured before the setting changed.
+    rig.scan_claimed(&index);
+    assert_eq!(
+        index.get("a").unwrap().first_prompt,
+        FirstPrompt::Withheld(Reason::Off)
+    );
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(!text.contains("tidy the readme"), "no prompt text on disk");
+}
+
+#[test]
+fn a_scan_that_changes_nothing_says_so_and_a_restart_reuses_the_rejected_set() {
+    let rig = Rig::new();
+    rig.put(
+        "a",
+        &conversation("cli", "/work/app", false, "tidy the readme"),
+        1000,
+    );
+    rig.put(
+        "job",
+        &conversation("sdk-cli", "/work/app", false, "x"),
+        1000,
+    );
+    let file = path_beside(&rig.dir.path().join("conversation-history.json"));
+    let index = OutsideIndex::open(file.clone());
+    assert!(rig.scan_changed(&index), "the first scan changes the list");
+    assert!(
+        !rig.scan_changed(&index),
+        "an identical scan changes nothing"
+    );
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("job.jsonl"),
+        "the rejected file is remembered"
+    );
+    assert!(!text.contains("\"x\""), "metadata only");
+
+    // A daemon restart: nothing is read again, and the list is unchanged.
+    let restarted = OutsideIndex::open(file);
+    let before = bytes_read_on_this_thread();
+    assert!(!rig.scan_changed(&restarted));
+    assert_eq!(bytes_read_on_this_thread() - before, 0);
 }

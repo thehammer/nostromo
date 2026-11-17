@@ -455,19 +455,21 @@ impl SessionManager {
         );
         std::thread::spawn(move || {
             let known = history.known_sids();
-            let degraded = sensitive.is_degraded();
+            let degraded = sensitive.is_degraded() || sensitive.tag_is_sensitive("");
             let is_sensitive = |agent: Option<&str>| {
                 degraded || agent.is_some_and(|a| sensitive.focus_is_sensitive("", a))
             };
-            index.scan_and_store(&crate::conversations::outside::ScanEnv {
+            let changed = index.scan_and_store(&crate::conversations::outside::ScanEnv {
                 projects_dir: &projects,
                 known: &known,
                 first_prompts_enabled: history.first_prompts_enabled(),
                 is_sensitive: &is_sensitive,
                 now_ms: now_ms(),
             });
-            // The list the app shows changed: it asks again.
-            history.touch();
+            // Only when the list the app shows changed: it asks again.
+            if changed {
+                history.touch();
+            }
         });
     }
 
@@ -487,6 +489,7 @@ impl SessionManager {
                     .filter(|a| outside::agent_exists(a))
                     .unwrap_or("");
                 let mut e = i.to_entry(agent);
+                self.apply_current_sensitivity(&mut e, i.agent.as_deref());
                 if !first_prompts_enabled && matches!(e.first_prompt, FirstPrompt::Text(_)) {
                     e.first_prompt = FirstPrompt::Withheld(Reason::Off);
                 }
@@ -510,6 +513,24 @@ impl SessionManager {
         rows
     }
 
+    /// The index fixed `sensitive` when it read the file; the registry may have
+    /// changed since, and an unreadable one counts as sensitive.
+    fn apply_current_sensitivity(&self, e: &mut ConversationEntry, recorded_agent: Option<&str>) {
+        // `tag_is_sensitive("")` is true while the registry is unreadable.
+        let now = self.sensitive.is_degraded()
+            || self.sensitive.tag_is_sensitive("")
+            || recorded_agent.is_some_and(|a| self.sensitive.focus_is_sensitive("", a));
+        if now && !e.sensitive {
+            e.sensitive = true;
+        }
+        if e.sensitive {
+            e.branch = None;
+            if matches!(e.first_prompt, FirstPrompt::Text(_)) {
+                e.first_prompt = FirstPrompt::Withheld(Reason::SensitiveConversation);
+            }
+        }
+    }
+
     /// The history entry for terminal conversation `sid`, not yet adopted, to
     /// resume with `chosen` as its agent when Claude's recorded one is not an
     /// agent Nostromo has. Err is the refusal reason.
@@ -529,7 +550,9 @@ impl SessionManager {
         let agent = recorded
             .or(chosen.filter(|a| outside::agent_exists(a)))
             .ok_or("needs_agent")?;
-        Ok(indexed.to_entry(agent))
+        let mut entry = indexed.to_entry(agent);
+        self.apply_current_sensitivity(&mut entry, indexed.agent.as_deref());
+        Ok(entry)
     }
 
     /// Tell the operator app's connections, at most every 500 ms, that the

@@ -321,14 +321,19 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
         ])
     }
 
+    /// The New tab's default agent: claudia if present, else the first. The Resume tab's agent
+    /// question preselects the same one.
+    static func defaultAgent(in agents: [String]) -> String? {
+        agents.contains("claudia") ? "claudia" : agents.first
+    }
+
     // MARK: - Data discovery
 
     private func loadData() {
         agents = Self.discoverAgents()
         agentPopup.removeAllItems()
         agentPopup.addItems(withTitles: agents)
-        // Default to claudia if present
-        if let idx = agents.firstIndex(of: "claudia") {
+        if let idx = Self.defaultAgent(in: agents).flatMap({ agents.firstIndex(of: $0) }) {
             agentPopup.selectItem(at: idx)
         }
 
@@ -586,7 +591,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
 
     private func chooseAgent(then proceed: @escaping () -> Void, for id: String) {
         guard !agents.isEmpty else { resumeTab.showMessage("No agents found in ~/.claude/agents"); return }
-        let preselected = agents.firstIndex(of: "claudia").map { agents[$0] } ?? agents.first
+        let preselected = Self.defaultAgent(in: agents)
         let done: (String?) -> Void = { [weak self] agent in
             guard let self, let agent else { return }
             self.resumeAgents[id] = agent

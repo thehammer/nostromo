@@ -10,8 +10,8 @@
 //!
 //! Bounds: at most the first 512 KiB and the last 256 KiB of a file are read,
 //! only for a file that is new or changed (path, size, mtime); a file that is
-//! not a terminal conversation is remembered (in memory) so it is not read
-//! again. The index is written 0600 and holds the history's allowed fields only.
+//! not a terminal conversation is remembered (path, size, mtime: metadata only,
+//! also in the index file) so it is not read again, even after a restart. The index is written 0600 and holds the history's allowed fields only.
 //!
 //! Nothing here is logged (counts only), sent to a network or non-operator
 //! peer, or reachable by an MCP tool.
@@ -84,10 +84,20 @@ impl Indexed {
     }
 }
 
+/// A file read and found not to be a terminal conversation. Metadata only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct RejectedFile {
+    path: PathBuf,
+    size: u64,
+    mtime_ms: i64,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct FileData {
     #[serde(default)]
     entries: Vec<Indexed>,
+    #[serde(default)]
+    rejected: Vec<RejectedFile>,
 }
 
 struct State {
@@ -96,8 +106,42 @@ struct State {
     /// A scan finished since the switch was turned on (or the file was loaded).
     ready: bool,
     running: bool,
-    /// Files read and found not to be terminal conversations (memory only).
+    /// Files read and found not to be terminal conversations.
     rejected: HashMap<PathBuf, (u64, i64)>,
+    /// Bumped by [`OutsideIndex::clear`]: a scan that began before it is dropped.
+    clear_gen: u64,
+    /// Bumped when first prompts go off: a scan that began before it has its
+    /// texts withheld before they are stored.
+    prompts_off_gen: u64,
+    /// The two counters as they were when the running scan began.
+    begun: (u64, u64),
+}
+
+impl State {
+    fn file_data(&self) -> FileData {
+        let mut rejected: Vec<RejectedFile> = self
+            .rejected
+            .iter()
+            .map(|(path, (size, mtime_ms))| RejectedFile {
+                path: path.clone(),
+                size: *size,
+                mtime_ms: *mtime_ms,
+            })
+            .collect();
+        rejected.sort_by(|a, b| a.path.cmp(&b.path));
+        FileData {
+            entries: self.entries.clone(),
+            rejected,
+        }
+    }
+
+    fn persist(&self) {
+        if let Some(path) = &self.path {
+            if write_private(path, &self.file_data()).is_err() {
+                tracing::warn!("outside conversation index could not be written");
+            }
+        }
+    }
 }
 
 /// The index; cheap to clone, clones share it.
@@ -127,22 +171,35 @@ impl OutsideIndex {
     pub fn open(path: PathBuf) -> Self {
         let (data, ok): (FileData, bool) = load_json_checked(&path);
         let had = ok && path.exists();
-        Self::from_parts(Some(path), data.entries, had)
+        let rejected = data
+            .rejected
+            .into_iter()
+            .map(|r| (r.path, (r.size, r.mtime_ms)))
+            .collect();
+        Self::from_parts(Some(path), data.entries, rejected, had)
     }
 
     /// An index never written to disk.
     pub fn in_memory() -> Self {
-        Self::from_parts(None, Vec::new(), false)
+        Self::from_parts(None, Vec::new(), HashMap::new(), false)
     }
 
-    fn from_parts(path: Option<PathBuf>, entries: Vec<Indexed>, ready: bool) -> Self {
+    fn from_parts(
+        path: Option<PathBuf>,
+        entries: Vec<Indexed>,
+        rejected: HashMap<PathBuf, (u64, i64)>,
+        ready: bool,
+    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(State {
                 path,
                 entries,
                 ready,
                 running: false,
-                rejected: HashMap::new(),
+                rejected,
+                clear_gen: 0,
+                prompts_off_gen: 0,
+                begun: (0, 0),
             })),
         }
     }
@@ -180,39 +237,52 @@ impl OutsideIndex {
             return false;
         }
         s.running = true;
+        s.begun = (s.clear_gen, s.prompts_off_gen);
         true
     }
 
     /// Scan now (blocking: run on its own thread, never under a lock) and
     /// store the result. The caller holds the claim from [`Self::try_begin`].
-    pub fn scan_and_store(&self, env: &ScanEnv<'_>) {
+    ///
+    /// If the switch went off ([`Self::clear`]) since the claim, the result is
+    /// dropped and nothing is written. If first prompts went off since, the
+    /// stored texts are withheld. Returns whether what the list shows changed.
+    pub fn scan_and_store(&self, env: &ScanEnv<'_>) -> bool {
         let (previous, rejected) = {
             let s = lock(&self.inner);
             (s.entries.clone(), s.rejected.clone())
         };
-        let (entries, rejected) = scan(env, previous, rejected);
+        let (mut entries, rejected) = scan(env, previous, rejected);
         let mut s = lock(&self.inner);
+        s.running = false;
+        let (clear_gen, prompts_gen) = s.begun;
+        if s.clear_gen != clear_gen {
+            return false;
+        }
+        if s.prompts_off_gen != prompts_gen {
+            for e in &mut entries {
+                if matches!(e.first_prompt, FirstPrompt::Text(_)) {
+                    e.first_prompt = FirstPrompt::Withheld(Reason::Off);
+                }
+            }
+        }
+        let changed = !s.ready || s.entries != entries;
+        let rejected_changed = s.rejected != rejected;
         s.entries = entries;
         s.rejected = rejected;
         s.ready = true;
-        s.running = false;
-        if let Some(path) = &s.path {
-            if write_private(
-                path,
-                &FileData {
-                    entries: s.entries.clone(),
-                },
-            )
-            .is_err()
-            {
-                tracing::warn!("outside conversation index could not be written");
-            }
+        let missing = s.path.as_ref().is_some_and(|p| !p.exists());
+        if changed || rejected_changed || missing {
+            s.persist();
         }
+        changed
     }
 
-    /// The switch went off: forget everything and delete the file now.
+    /// The switch went off: forget everything and delete the file now. A scan
+    /// already running will find its result dropped.
     pub fn clear(&self) {
         let mut s = lock(&self.inner);
+        s.clear_gen += 1;
         s.entries.clear();
         s.rejected.clear();
         s.ready = false;
@@ -224,20 +294,14 @@ impl OutsideIndex {
     /// First prompts went off: drop every stored text (and rewrite the file).
     pub fn withhold_first_prompts(&self) {
         let mut s = lock(&self.inner);
+        s.prompts_off_gen += 1;
         for e in &mut s.entries {
             if matches!(e.first_prompt, FirstPrompt::Text(_)) {
                 e.first_prompt = FirstPrompt::Withheld(Reason::Off);
             }
         }
-        if let Some(path) = &s.path {
-            if path.exists() {
-                let _ = write_private(
-                    path,
-                    &FileData {
-                        entries: s.entries.clone(),
-                    },
-                );
-            }
+        if s.path.as_ref().is_some_and(|p| p.exists()) {
+            s.persist();
         }
     }
 }
