@@ -2169,6 +2169,7 @@ mod tests {
                 tag: "x1".into(),
                 request_id: "r".into(),
                 base_version: 1,
+                base_epoch: None,
                 operator_nonce: None,
                 ops: vec![crate::ipc::protocol::TrackerPaneOp::Remove {
                     id: "deploy-ap".into(),

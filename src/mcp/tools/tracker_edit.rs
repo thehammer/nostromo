@@ -17,6 +17,20 @@ pub async fn tracker_edit(
     base_version: u64,
     ops: Vec<TrackerPaneOp>,
 ) -> ServerMsg {
+    tracker_edit_in(state, tag, request_id, client, base_version, None, ops).await
+}
+
+/// [`tracker_edit`] for a view of the board's run `base_epoch` (see
+/// `TrackerRegistry::apply_pane_ops_in`).
+pub async fn tracker_edit_in(
+    state: &McpSharedState,
+    tag: &str,
+    request_id: &str,
+    client: &str,
+    base_version: u64,
+    base_epoch: Option<String>,
+    ops: Vec<TrackerPaneOp>,
+) -> ServerMsg {
     let reply = |ok: bool, error: Option<TrackerEditError>, version: u64, created: Vec<String>| {
         ServerMsg::TrackerEditResult {
             tag: tag.to_string(),
@@ -32,6 +46,7 @@ pub async fn tracker_edit(
             code: "not_supported".to_string(),
             reason: None,
             index: None,
+            stale: false,
         };
         return reply(false, Some(error), 0, Vec::new());
     };
@@ -39,7 +54,13 @@ pub async fn tracker_edit(
     let owned_tag = tag.to_string();
     let owned_client = client.to_string();
     let applied = tokio::task::spawn_blocking(move || {
-        registry.apply_pane_ops_as(&owned_tag, &owned_client, base_version, &ops)
+        registry.apply_pane_ops_in(
+            &owned_tag,
+            &owned_client,
+            base_version,
+            base_epoch.as_deref(),
+            &ops,
+        )
     })
     .await;
     // The edit is in the file; the pane sees it now, not on a debounce. A
@@ -52,6 +73,7 @@ pub async fn tracker_edit(
                 code: err.code,
                 reason: err.reason,
                 index: err.index.map(|i| i as u32),
+                stale: err.stale,
             };
             reply(false, Some(error), 0, Vec::new())
         }
@@ -60,6 +82,7 @@ pub async fn tracker_edit(
                 code: "io_error".to_string(),
                 reason: Some("the edit did not finish".to_string()),
                 index: None,
+                stale: false,
             };
             reply(false, Some(error), 0, Vec::new())
         }

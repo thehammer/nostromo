@@ -784,6 +784,21 @@ async fn the_handler_flushes_the_board_and_never_takes_the_session_lock() {
         refused,
         ServerMsg::TrackerEditResult { ok: false, error: Some(e), .. } if e.code == "unknown_item" && e.index == Some(0)
     ));
+    // A look-again refusal carries `stale` on the wire next to `invalid_args`.
+    let stale = tracker_edit(
+        &state,
+        TAG_A,
+        "req-3",
+        "conn-1",
+        0,
+        vec![TrackerPaneOp::AckDropped { id: "beta".into() }],
+    )
+    .await;
+    assert!(matches!(
+        stale,
+        ServerMsg::TrackerEditResult { ok: false, error: Some(e), .. }
+            if e.code == "invalid_args" && e.stale && e.index == Some(0)
+    ));
 }
 
 // ---------------------------------------------------------------------------

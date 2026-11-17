@@ -55,6 +55,7 @@ fn frame(
             path: "/repo/.claude/wip/t/index.md".into(),
             topic: "t".into(),
             version: 1,
+            epoch: "e".into(),
             file_mtime: None,
             banner: None,
             committable: None,
