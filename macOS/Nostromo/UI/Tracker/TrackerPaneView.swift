@@ -626,6 +626,13 @@ final class TrackerPaneView: NSView {
         return item
     }
 
+    /// The item as the newest board has it (a row held back, or one with an open editor, still shows an older one).
+    private func newestItem(_ id: String) -> TrackerItemRow? {
+        let key = TrackerRow.itemKey(id)
+        guard let row = presentation?.rows.first(where: { $0.key == key }), case .item(let item) = row.content else { return nil }
+        return item
+    }
+
     /// The board as it is now.
     private func boardBase() -> TrackerBase {
         TrackerBase(version: board?.version ?? 0, epoch: board?.epoch.isEmpty == false ? board?.epoch : nil)
@@ -750,7 +757,7 @@ final class TrackerPaneView: NSView {
         }
         guard let view = rowViews[key], case .item(let current) = view.row.content else { return }
         let (prefill, boundLine) = Self.prefill(kind, for: current)
-        editSessions[id] = TrackerEditSession(kind: kind, base: base(forItem: id), original: prefill, row: item,
+        editSessions[id] = TrackerEditSession(kind: kind, base: base(forItem: id), original: prefill, row: current,
                                               priorResponder: prior, priorRole: role)
         view.beginEditor(kind, text: prefill, boundLine: boundLine)
         relayoutRows()
@@ -840,6 +847,7 @@ final class TrackerPaneView: NSView {
                 session.original = sent
                 session.base = TrackerBase(version: version, epoch: boardBase().epoch)
                 session.sentText = nil
+                if let saved = newestItem(id) { session.row = saved }   // the next save and its undo start from what was saved
                 editSessions[id] = session   // the editor is already open and editable: nothing to reopen
             } else {
                 session.phase = .awaiting(version)
@@ -852,7 +860,11 @@ final class TrackerPaneView: NSView {
             session.phase = .editing
             session.refusal = message
             editSessions[id] = session
-            rowViews[TrackerRow.itemKey(id)]?.setEditorPending(false)
+            let view = rowViews[TrackerRow.itemKey(id)]
+            view?.setEditorPending(false)
+            // The user clicked back into the read-only editor while it was pending: making it editable ends the
+            // field editor that had focus, and the window is left holding it. Back to the editor they chose.
+            if let window, window.firstResponder === window { view?.focusEditor() }
         }
         applyNotice(editing.notice ?? openEditorRefusal())
     }

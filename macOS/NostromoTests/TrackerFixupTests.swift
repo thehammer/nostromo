@@ -118,6 +118,19 @@ final class TrackerFixupTests: XCTestCase {
         XCTAssertEqual(try h.row(plain).titleEditor?.typed, "renamed", "a timeout never destroys what was typed")
     }
 
+    /// Composer focused, edit, Return, then the user clicks back into the (read-only, pending) editor and the
+    /// refusal arrives: focus must end up in the editor or the composer, never on the bare window.
+    func testARefusalAfterClickingBackIntoThePendingEditorLeavesFocusInAnInput() throws {
+        let h = try TrackerEditHarness(self)
+        let composer = try saveTitleFromComposer(h)
+        let editor = try XCTUnwrap(try h.row(plain).titleEditor)
+        _ = h.window.makeFirstResponder(editor)
+        h.answer(try XCTUnwrap(h.sent.last).requestId, ok: false, error: ["code": "board_missing"])
+        let now = h.window.firstResponder
+        XCTAssertFalse(now === h.window, "focus must not be dropped onto the window")
+        XCTAssertTrue(now === composer || now === editor || now === editor.currentEditor(), "now \(String(describing: now))")
+    }
+
     func testARefusalWhileTheEditorStillHasFocusReturnsFocusToIt() throws {
         let h = try TrackerEditHarness(self)
         h.pane.beginEdit(item: plain, kind: .title)
@@ -177,6 +190,23 @@ final class TrackerFixupTests: XCTestCase {
         h.pressReturn(in: still)
         XCTAssertEqual(h.sent.count, 2, "what was typed since is a new edit")
         XCTAssertEqual(h.sent.last?.base, 8, "against the board the first save made")
+    }
+
+    func testUndoAfterALateOkRestoresTheTitleTheLateOkSaved() throws {
+        let h = try TrackerEditHarness(self)
+        h.pane.beginEdit(item: plain, kind: .title)
+        let editor = try XCTUnwrap(try h.row(plain).titleEditor)
+        h.type("Slow title", into: editor)
+        h.pressReturn(in: editor)
+        h.fire(5)
+        h.type("Slow title, and more", into: editor)
+        try h.echo(setText(plain, "Slow title"), resultFirst: false)   // the late ok
+        let still = try XCTUnwrap(try h.row(plain).titleEditor)
+        h.pressReturn(in: still)
+        try h.echo(setText(plain, "Slow title, and more"))
+        h.pane.performUndo()
+        XCTAssertEqual(h.sent.last?.ops, [.restoreText(id: plain, text: "Slow title")],
+                       "the second save's undo goes back to what the late ok saved, not past it")
     }
 
     func testAnUndoIsMadeAgainstTheVersionTheRowShowsNotTheNewestBoard() throws {
@@ -294,6 +324,7 @@ final class TrackerFixupTests: XCTestCase {
     /// A pane with `plain` (and `withNote`) showing version 7's content, held by a text selection while an
     /// agent changes both (version 8).
     private func heldHarness(_ id: String, expanded: Bool = false,
+                             agent: ((inout TrackerBoardScript) throws -> Void)? = nil,
                              configure: @escaping (inout TrackerBoardScript) throws -> Void = { _ in })
         throws -> TrackerEditHarness {
         let h = try TrackerEditHarness(self, configure: configure)
@@ -305,12 +336,12 @@ final class TrackerFixupTests: XCTestCase {
         rigSettle(0.02)
         XCTAssertNotNil(try h.row(id).selectedTextView, "setup: a selection holds the row")
         let old = try h.row(id).visibleText
-        try h.agentChange { script in
+        try h.agentChange(agent ?? { script in
             try script.updateItem(id) {
                 $0["text"] = "Rewritten by an agent"
                 $0["text_spans"] = [["kind": "text", "text": "Rewritten by an agent"]]
             }
-        }
+        })
         XCTAssertEqual(try h.row(id).visibleText, old, "setup: the held row still shows version 7's content")
         XCTAssertEqual(h.version, 8)
         return h
@@ -360,6 +391,46 @@ final class TrackerFixupTests: XCTestCase {
         editor.didChangeText()
         editor.commit()
         XCTAssertEqual(h.sent.last?.base, 8)
+    }
+
+    private let legacyRest = ": the vendor rotated it on Tuesday and every consumer must refresh its cached copy before the next "
+        + "deploy window opens, so this stays open."
+
+    /// The details editor's save and its undo are built from the row the user is editing (version 8's, after the
+    /// expand let go of the hold), not from the row as it was drawn (version 7's): otherwise an agent's rename
+    /// is silently reverted.
+    func testEditingDetailsOnAHeldLegacyRowKeepsTheAgentsRenameAndUndoesToIt() throws {
+        let renamed = "Agent renamed this one" + legacyRest
+        let h = try heldHarness(plain, agent: setText(plain, renamed), configure: setText(plain, "Rotate the signing key" + legacyRest))
+        h.pane.beginEdit(item: plain, kind: .details)
+        let editor = try XCTUnwrap(try h.row(plain).detailsEditor)
+        let rest = try XCTUnwrap(TrackerTitle.rawRest(text: renamed))
+        XCTAssertEqual(editor.string, rest, "setup: the editor opened on version 8's text")
+        editor.string = rest + " Also this."
+        editor.didChangeText()
+        editor.commit()
+        XCTAssertEqual(h.sent.last?.ops, [.edit(id: plain, title: "Agent renamed this one", text: nil, body: rest + " Also this.")],
+                       "the agent's title is kept, not reverted to version 7's")
+        XCTAssertEqual(h.sent.last?.base, 8)
+        try h.echo { _ in }
+        h.pane.performUndo()
+        XCTAssertEqual(h.sent.last?.ops, [.restoreText(id: plain, text: renamed), .edit(id: plain, title: nil, text: nil, body: "")],
+                       "undo puts back version 8's text, not version 7's")
+    }
+
+    func testReplacingAnAgentsNoteOnAHeldRowUndoesToTheAgentsNote() throws {
+        let h = try heldHarness(plain, agent: { try $0.updateItem(self.plain) { $0["note"] = "agent note" } })
+        h.pane.beginEdit(item: plain, kind: .details)
+        let editor = try XCTUnwrap(try h.row(plain).detailsEditor)
+        XCTAssertEqual(editor.string, "agent note", "setup: the editor opened on version 8's note")
+        editor.string = "mine"
+        editor.didChangeText()
+        editor.commit()
+        XCTAssertEqual(h.sent.last?.ops, [.edit(id: plain, title: nil, text: nil, body: "mine")])
+        try h.echo { _ in }
+        h.pane.performUndo()
+        XCTAssertEqual(h.sent.last?.ops, [.edit(id: plain, title: nil, text: nil, body: "agent note")],
+                       "undo gives the agent's note back, it does not send an empty body")
     }
 
     func testResolvingAConflictOnAHeldRowSendsTheVersionItShowed() throws {
