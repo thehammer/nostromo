@@ -142,19 +142,27 @@ fn delta_entry(change: &Change, approvals: &Approvals) -> Value {
             entry.insert("removed".to_string(), text);
         }
         ChangeKind::Conflict => {
-            let (name, _) = field("field").cloned().unwrap_or_default();
-            let (lost, kept) = field("value").cloned().unwrap_or_default();
-            let (lost_by, _) = field("lost_by").cloned().unwrap_or_default();
-            let mut conflict = json!({
-                "field": q(&name),
-                "kept": q(&kept),
-                "lost": q(&lost),
-                "lost_by": q(&lost_by),
-            });
-            // Older losing values of this item that a cap dropped.
-            if let Some((dropped, _)) = field("dropped_conflicts") {
-                conflict["dropped_conflicts"] = dropped.clone();
-            }
+            let dropped = field("dropped_conflicts").map(|(n, _)| n.clone());
+            let conflict = if field("value").is_none() {
+                // A bare notice that a cap dropped older losing values of the
+                // item.
+                json!({ "dropped_conflicts": dropped.unwrap_or_default() })
+            } else {
+                let (name, _) = field("field").cloned().unwrap_or_default();
+                let (lost, kept) = field("value").cloned().unwrap_or_default();
+                let (lost_by, _) = field("lost_by").cloned().unwrap_or_default();
+                let mut conflict = json!({
+                    "field": q(&name),
+                    "kept": q(&kept),
+                    "lost": q(&lost),
+                    "lost_by": q(&lost_by),
+                });
+                // Older losing values of this item that a cap dropped.
+                if let Some(dropped) = dropped {
+                    conflict["dropped_conflicts"] = dropped;
+                }
+                conflict
+            };
             entry.insert("conflict".to_string(), conflict);
         }
         ChangeKind::Moved => {

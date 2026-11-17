@@ -233,12 +233,12 @@ pub struct ViewTrimmed {
     pub plain_items: u32,
 }
 
-/// The most bytes a `tracker_board` frame is built to: under the wire limit
-/// ([`crate::ipc::protocol::MAX_FRAME_LEN`], 4 MiB) with room for the envelope.
 fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
+/// The most bytes a `tracker_board` frame is built to: under the wire limit
+/// ([`crate::ipc::protocol::MAX_FRAME_LEN`], 4 MiB) with room for the envelope.
 pub const FRAME_BUDGET: usize = 3_900_000;
 
 /// Slims `view` until it encodes within [`FRAME_BUDGET`], leaving the most

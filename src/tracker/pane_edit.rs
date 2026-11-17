@@ -80,6 +80,12 @@ enum Effect {
     },
     /// Settles the conflict with this stable id.
     ClearConflict(String),
+    /// Forgets this many dropped losing values of the item (what the user was
+    /// shown).
+    AckDropped {
+        id: String,
+        count: u32,
+    },
 }
 
 impl TrackerRegistry {
@@ -155,12 +161,23 @@ impl TrackerRegistry {
                 _ => None,
             })
             .collect();
+        // Settled before the batch's own conflicts are recorded (see
+        // `WriteCtx::settling`).
+        let settling: Vec<String> = ops
+            .iter()
+            .filter_map(|op| match op {
+                TrackerPaneOp::ResolveConflict { conflict_id, .. } => conflict_id.clone(),
+                _ => None,
+            })
+            .collect();
+        let dropped = entry.conflicts.dropped_by_item().clone();
         let ctx = WriteCtx {
             log: true,
             seen: Some(base_version),
             client: Some(client),
             detect: true,
             resolving: &resolving,
+            settling: &settling,
         };
         let mut origin: Vec<usize> = Vec::new();
         let mut created: Vec<String> = Vec::new();
@@ -171,6 +188,7 @@ impl TrackerRegistry {
             &mut |board, live, log| {
                 let inputs = PlanInputs {
                     kept: &kept,
+                    dropped: &dropped,
                     originals: &originals,
                     log,
                     base_version,
@@ -210,6 +228,7 @@ fn apply_effects(entry: &mut BoardEntry, effects: Vec<Effect>) {
         match effect {
             Effect::ClearBadge(item) => entry.approvals.approve(&item),
             Effect::ClearConflict(id) => entry.conflicts.clear(&id),
+            Effect::AckDropped { id, count } => entry.conflicts.ack_dropped(&id, count),
             Effect::ClearRemoved { id, block } => {
                 entry.conflicts.clear_removed_matching(&id, &block)
             }
@@ -236,6 +255,28 @@ fn check_badge_clearable(
         return Err(TrackerError::InvalidArgs {
             index: Some(index),
             reason: "the item changed since you saw it; look again before clearing".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// The user acknowledges drops they have seen: refuses when a cap dropped
+/// another of the item's losing values after the edit's base version, or when
+/// the history doesn't reach back to show.
+fn check_drops_seen(
+    log: &ChangeLog,
+    id: &str,
+    base_version: u64,
+    index: usize,
+) -> Result<(), TrackerError> {
+    let newer = log.entries.iter().any(|c| {
+        c.seq > base_version && c.item_id.as_deref() == Some(id) && c.kind == ChangeKind::Conflict
+    });
+    if newer || log.history_gap(base_version) {
+        return Err(TrackerError::InvalidArgs {
+            index: Some(index),
+            reason: "more were dropped since you saw it; look again before acknowledging"
+                .to_string(),
         });
     }
     Ok(())
@@ -276,6 +317,8 @@ fn bound_body(
 struct PlanInputs<'a> {
     /// The conflicts the board holds now.
     kept: &'a [Conflict],
+    /// The losing values a cap has dropped, per item.
+    dropped: &'a HashMap<String, u32>,
     /// The recorded original text of an item whose text was over the note cap.
     originals: &'a HashMap<String, String>,
     log: &'a ChangeLog,
@@ -296,6 +339,10 @@ fn plan_ops(
         effects: Vec::new(),
     };
     let mut taken: HashSet<String> = board.items.iter().map(|i| i.id.clone()).collect();
+    // What the batch settles so far: a conflict twice, or two losing values
+    // for one field, would write one and silently lose the other.
+    let mut settled: HashSet<&str> = HashSet::new();
+    let mut put_back: HashSet<(&str, &str)> = HashSet::new();
     let invalid = |index: usize, reason: &str| TrackerError::InvalidArgs {
         index: Some(index),
         reason: reason.to_string(),
@@ -443,6 +490,26 @@ fn plan_ops(
                         .push(Effect::ClearBadge(Box::new(item.clone())));
                 }
             }
+            TrackerPaneOp::AckDropped { id } => {
+                if board.item(id).is_none() {
+                    return Err(TrackerError::UnknownItem {
+                        index,
+                        id: id.clone(),
+                    });
+                }
+                let count = inputs.dropped.get(id).copied().unwrap_or(0);
+                if count == 0 {
+                    return Err(invalid(
+                        index,
+                        "nothing was dropped for that item (cleared elsewhere); look again",
+                    ));
+                }
+                check_drops_seen(log, id, base_version, index)?;
+                plan.effects.push(Effect::AckDropped {
+                    id: id.clone(),
+                    count,
+                });
+            }
             TrackerPaneOp::ResolveConflict {
                 id,
                 field,
@@ -468,6 +535,21 @@ fn plan_ops(
                         "that conflict is no longer kept (settled elsewhere or dropped); look again",
                     ));
                 };
+                if !settled.insert(conflict_id) {
+                    return Err(invalid(
+                        index,
+                        "the batch settles that conflict twice; settle each conflict once",
+                    ));
+                }
+                if *keep == ConflictKeep::Losing
+                    && field != conflicts::REMOVED
+                    && !put_back.insert((id.as_str(), field.as_str()))
+                {
+                    return Err(invalid(
+                        index,
+                        "the batch puts back two losing values of the same field; only one can be written, so keep one and settle the rest as current",
+                    ));
+                }
                 if *keep == ConflictKeep::Losing {
                     let (steps, new_id) =
                         losing_steps(chosen, board, &mut taken).map_err(|e| invalid(index, &e))?;

@@ -1394,6 +1394,14 @@ pub enum TrackerPaneOp {
     ClearBadge {
         id: String,
     },
+    /// The user acknowledges that older losing values of item `id` were
+    /// dropped by a cap (the item's `dropped_conflicts`): clears that count.
+    /// Refused when more were dropped since the edit's `base_version`, so the
+    /// user never hides a loss they haven't seen. Additive; pane-only like
+    /// the other ops of this type.
+    AckDropped {
+        id: String,
+    },
     /// Settles a conflict on `field` of item `id` (`removed` for a removed
     /// item): `keep` is `current` or `losing`. `conflict_id` (from the view)
     /// names the one losing value: positions shift as conflicts arrive, are
