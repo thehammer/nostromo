@@ -5,6 +5,7 @@ use serde_json::{json, Map, Value};
 
 use super::format::longest_run;
 use super::model::{Board, Change, ChangeKind};
+use super::sensitive::{Approvals, WITHHELD};
 
 /// Log lines in the compact full render.
 const LOG_LINES: usize = 10;
@@ -19,40 +20,61 @@ pub const TRUNCATED: &str = "…[truncated]";
 /// line and commands fenced; then the last 10 Log lines. No markers, times or
 /// prose. Every untrusted field is quoted.
 pub fn compact_full(board: &Board) -> String {
+    compact_full_with(board, &Approvals::default())
+}
+
+/// [`compact_full`] with the user's approvals: a value with a guard finding
+/// the user has not cleared reads as [`WITHHELD`] (PRD 43).
+pub fn compact_full_with(board: &Board, approvals: &Approvals) -> String {
     let mut out = String::new();
+    // Quotes `text`, or withholds it when it is sensitive text of `item_id`.
+    let q = |item_id: Option<&str>, text: &str| -> String {
+        if approvals.withholds_str(item_id, text) {
+            WITHHELD.to_string()
+        } else {
+            quote_untrusted(text)
+        }
+    };
     if let Some(title) = &board.title {
-        out.push_str(&format!("# {}\n", quote_untrusted(title)));
+        out.push_str(&format!("# {}\n", q(None, title)));
     }
     for section in &board.sections {
-        out.push_str(&format!("## {}\n", quote_untrusted(&section.title)));
+        out.push_str(&format!("## {}\n", q(None, &section.title)));
         for item in board.items.iter().filter(|i| i.section == section.id) {
+            let id = Some(item.id.as_str());
             let mut tag = item.status.wire().to_string();
             if let Some(owner) = &item.owner {
-                tag.push_str(&format!(" @{}", quote_untrusted(owner)));
+                tag.push_str(&format!(" @{}", q(id, owner)));
             }
             if let Some(env) = item.env {
                 tag.push_str(&format!(" {}", env.token()));
             }
-            out.push_str(&format!(
-                "- {} [{tag}] {}\n",
-                item.id,
-                quote_untrusted(&item.text)
-            ));
+            out.push_str(&format!("- {} [{tag}] {}\n", item.id, q(id, &item.text)));
             if let Some(command) = &item.command {
                 // Longer than any backtick run inside, so no command line closes it.
                 let mut body = String::new();
-                push_quoted_lines(&mut body, command);
+                push_field_lines(&mut body, approvals, id, command);
                 let fence = "`".repeat(longest_run(&body, '`').max(2) + 1);
                 out.push_str(&format!("  {fence}\n{body}  {fence}\n"));
             }
             if let Some(note) = &item.note {
-                push_quoted_lines(&mut out, note);
+                push_field_lines(&mut out, approvals, id, note);
             }
             if !item.links.is_empty() {
                 let links: Vec<String> = item
                     .links
                     .iter()
-                    .map(|l| quote_untrusted(&l.text))
+                    .map(|l| {
+                        let sensitive = approvals.withholds_str(id, &l.text)
+                            || l.url
+                                .as_deref()
+                                .is_some_and(|u| approvals.withholds_str(id, u));
+                        if sensitive {
+                            WITHHELD.to_string()
+                        } else {
+                            quote_untrusted(&l.text)
+                        }
+                    })
                     .collect();
                 out.push_str(&format!("  Links: {}\n", links.join(" · ")));
             }
@@ -62,11 +84,7 @@ pub fn compact_full(board: &Board) -> String {
         out.push_str("## Log\n");
         let skip = board.log.len().saturating_sub(LOG_LINES);
         for line in &board.log[skip..] {
-            out.push_str(&format!(
-                "- {} {}\n",
-                line.time,
-                quote_untrusted(&line.text)
-            ));
+            out.push_str(&format!("- {} {}\n", line.time, q(None, &line.text)));
         }
     }
     out
@@ -79,45 +97,75 @@ pub fn compact_full(board: &Board) -> String {
 /// `{"by","section_added":"T"}`, `{"by","section_renamed":["A","B"]}`,
 /// `{"by","section_removed":"T"}`.
 pub fn delta_entries(changes: &[Change]) -> Vec<Value> {
-    changes.iter().map(delta_entry).collect()
+    delta_entries_with(changes, &Approvals::default())
 }
 
-fn delta_entry(change: &Change) -> Value {
+/// [`delta_entries`] with the user's approvals: a value with a guard finding
+/// the user has not cleared reads as [`WITHHELD`], old values included. A
+/// conflict reads `{"by","id","conflict":{"field","kept","lost","lost_by"}}`.
+pub fn delta_entries_with(changes: &[Change], approvals: &Approvals) -> Vec<Value> {
+    changes.iter().map(|c| delta_entry(c, approvals)).collect()
+}
+
+fn delta_entry(change: &Change, approvals: &Approvals) -> Value {
     let mut entry = Map::new();
     entry.insert("by".to_string(), json!(quote_untrusted(&change.by.label())));
     if let Some(id) = &change.item_id {
         entry.insert("id".to_string(), json!(id));
     }
     let field = |name: &str| change.fields.get(name);
+    let item = change.item_id.as_deref();
+    // Quotes a logged value, or withholds it when it is sensitive text.
+    let q = |value: &Value| -> Value {
+        if approvals.withholds(item, value) {
+            json!(WITHHELD)
+        } else {
+            quote_value(value)
+        }
+    };
     match change.kind {
         ChangeKind::Changed => {
             for (name, (old, new)) in &change.fields {
-                entry.insert(name.clone(), json!([quote_value(old), quote_value(new)]));
+                entry.insert(name.clone(), json!([q(old), q(new)]));
             }
         }
         ChangeKind::Added => {
             let added: Map<String, Value> = change
                 .fields
                 .iter()
-                .map(|(name, (_, new))| (name.clone(), quote_value(new)))
+                .map(|(name, (_, new))| (name.clone(), q(new)))
                 .collect();
             entry.insert("added".to_string(), Value::Object(added));
         }
         ChangeKind::Removed => {
-            let text = field("text").map_or(Value::Null, |(old, _)| quote_value(old));
+            let text = field("text").map_or(Value::Null, |(old, _)| q(old));
             entry.insert("removed".to_string(), text);
+        }
+        ChangeKind::Conflict => {
+            let (name, _) = field("field").cloned().unwrap_or_default();
+            let (lost, kept) = field("value").cloned().unwrap_or_default();
+            let (lost_by, _) = field("lost_by").cloned().unwrap_or_default();
+            entry.insert(
+                "conflict".to_string(),
+                json!({
+                    "field": q(&name),
+                    "kept": q(&kept),
+                    "lost": q(&lost),
+                    "lost_by": q(&lost_by),
+                }),
+            );
         }
         ChangeKind::Moved => {
             let (old, new) = field("section").cloned().unwrap_or_default();
             entry.insert("moved".to_string(), json!([old, new]));
         }
         ChangeKind::Log => {
-            let text = field("text").map_or(Value::Null, |(_, new)| quote_value(new));
+            let text = field("text").map_or(Value::Null, |(_, new)| q(new));
             entry.insert("log".to_string(), text);
         }
         ChangeKind::Section => {
             let (old, new) = field("title").cloned().unwrap_or_default();
-            let (old, new) = (quote_value(&old), quote_value(&new));
+            let (old, new) = (q(&old), q(&new));
             match (old.is_null(), new.is_null()) {
                 (true, _) => entry.insert("section_added".to_string(), new),
                 (_, true) => entry.insert("section_removed".to_string(), old),
@@ -155,6 +203,16 @@ fn quote_value(value: &Value) -> Value {
 pub fn quote_untrusted(text: &str) -> String {
     let visible = make_visible(&strip_escapes(text));
     cap(&neutralise_wrapper_tags(&visible))
+}
+
+/// [`push_quoted_lines`], or one [`WITHHELD`] line when the field is sensitive
+/// text of `item_id` the user has not cleared.
+fn push_field_lines(out: &mut String, approvals: &Approvals, item_id: Option<&str>, field: &str) {
+    if approvals.withholds_str(item_id, field) {
+        out.push_str(&format!("  {WITHHELD}\n"));
+    } else {
+        push_quoted_lines(out, field);
+    }
 }
 
 /// A multi-line field, indented two spaces, each line quoted, the field as a

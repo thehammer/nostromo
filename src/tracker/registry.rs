@@ -30,14 +30,16 @@ use tokio::sync::broadcast;
 use super::bindings::{with_source_line, Binding, Desired, FILE_WRITE_INTERVAL};
 use super::changelog::{ChangeLog, Cursors, Since};
 use super::clock::{Clock, SystemClock};
-use super::diff::diff;
+use super::conflicts::{self, Conflict, Conflicts, Detect};
+use super::diff::{diff, field_value};
 use super::format::{parse, template, Malformed, ParsedBoard};
-use super::model::{fnv1a64, slug, Author, Board, Counts, Kind, Link, Stamp, Status};
-use super::ops::{apply_to_file, LinkInput, Op, OpError, Upsert, WriteError};
+use super::model::{fnv1a64, slug, Author, Board, ChangeKind, Counts, Kind, Link, Stamp, Status};
+use super::ops::{apply_steps_to_file, LinkInput, Op, OpError, PaneStep, Upsert, WriteError};
 use super::paths::{
     default_path, find_repo_root, is_valid_topic, probe_committable, resolve_board_path, RepoRoot,
 };
-use super::render::{compact_full, delta_entries};
+use super::render::{compact_full_with, delta_entries_with};
+use super::sensitive::Approvals;
 use super::view::{self, Banner, BoundView, Committable, TrackerBoardView, ViewFacts};
 use super::watch::{
     spawn_dir_watcher, write_atomic, BoardFs, FileSignature, RealBoardFs, WatchHost,
@@ -242,6 +244,11 @@ struct BoardEntry {
     committable: Option<Committable>,
     /// Items bound to a live source, by item id (T6).
     live: HashMap<String, LiveItem>,
+    /// Overwritten values kept for the user to settle; in memory only (lost
+    /// when the daemon restarts).
+    conflicts: Conflicts,
+    /// What the user cleared of sensitive-looking text (hashes, persisted).
+    approvals: Approvals,
 }
 
 /// One bound item's live state. The board in memory shows what the source
@@ -296,6 +303,8 @@ impl BoardEntry {
             last_good_at: None,
             committable: None,
             live: HashMap::new(),
+            conflicts: Conflicts::default(),
+            approvals: Approvals::default(),
         }
     }
 }
@@ -369,6 +378,11 @@ struct PersistedBoard {
     last_good_at: Option<DateTime<Utc>>,
     #[serde(default)]
     committable: Option<Committable>,
+    /// The user's clears of sensitive-looking text; absent in older state.
+    /// An older daemon ignores it (and this file's `conflict` log entries
+    /// make it ignore the whole file: see the PR notes on downgrades).
+    #[serde(default)]
+    approvals: Approvals,
 }
 
 impl TrackerRegistry {
@@ -432,7 +446,12 @@ impl TrackerRegistry {
             .map(|p| p.board.counts())
             .unwrap_or_default();
         let board = (inner.cursors.get(session, &key).is_none())
-            .then(|| entry.parsed.as_ref().map(|p| compact_full(&p.board)))
+            .then(|| {
+                entry
+                    .parsed
+                    .as_ref()
+                    .map(|p| compact_full_with(&p.board, &entry.approvals))
+            })
             .flatten();
         inner.boards.insert(path.clone(), entry);
         inner.cursors.set(session, &key, version);
@@ -511,8 +530,12 @@ impl TrackerRegistry {
             .cloned()
             .ok_or(TrackerError::NoTracker)?;
         let entry = inner.boards.get_mut(&path).ok_or(TrackerError::NoTracker)?;
-        let result = self.write_ops(entry, &path, ops, author);
         let cursor = inner.cursors.get(session, &key_of(&path));
+        // An agent has seen what its read cursor covers; nobody else writes here.
+        let seen = matches!(author, Author::Agent { .. })
+            .then_some(cursor)
+            .flatten();
+        let result = self.write_ops_logged(entry, &path, ops, author, true, seen);
         let user_changes = user_changes_of(entry, cursor, session);
         let version = entry.log.seq;
         // Even a refused write may have ingested an external edit.
@@ -549,11 +572,11 @@ impl TrackerRegistry {
         ) {
             (Some(board), Since::Full | Since::TooOld { .. }) => ReadOutcome::Full {
                 version,
-                board: compact_full(board),
+                board: compact_full_with(board, &entry.approvals),
             },
             (_, Since::Changes(changes)) => ReadOutcome::Delta {
                 version,
-                changes: delta_entries(&changes),
+                changes: delta_entries_with(&changes, &entry.approvals),
             },
             (None, _) => ReadOutcome::Delta {
                 version,
@@ -627,8 +650,40 @@ impl TrackerRegistry {
                 committable: entry.committable.clone(),
                 hidden_by_user: inner.hidden.contains(tag),
                 bound: self.bound_views(entry),
+                conflicts: view_conflicts(entry),
+                removed_conflicts: view_removed_conflicts(entry),
+                sensitive: parsed
+                    .board
+                    .items
+                    .iter()
+                    .filter_map(|item| {
+                        let classes = entry.approvals.badge(item);
+                        (!classes.is_empty()).then(|| (item.id.clone(), classes))
+                    })
+                    .collect(),
             },
         ))
+    }
+
+    /// The live conflicts of the board bound to `tag`, oldest first.
+    pub fn conflicts(&self, tag: &str) -> Vec<Conflict> {
+        let inner = self.lock();
+        inner
+            .bindings
+            .get(tag)
+            .and_then(|path| inner.boards.get(path))
+            .map(|entry| entry.conflicts.all().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Losing values a conflict cap has dropped on the board bound to `tag`.
+    pub fn conflicts_dropped(&self, tag: &str) -> u32 {
+        let inner = self.lock();
+        inner
+            .bindings
+            .get(tag)
+            .and_then(|path| inner.boards.get(path))
+            .map_or(0, |entry| entry.conflicts.dropped())
     }
 
     /// Link `index` of item `item_id` of the board bound to `tag`, with the
@@ -947,12 +1002,13 @@ impl TrackerRegistry {
         ops: &[Op],
         author: &Author,
     ) -> Result<(), TrackerError> {
-        self.write_ops_logged(entry, path, ops, author, true)
+        self.write_ops_logged(entry, path, ops, author, true, None)
     }
 
     /// [`Self::write_ops`]; `log: false` writes without appending the
     /// changes (a live item's state change was logged when it happened, and
-    /// the file only catches up).
+    /// the file only catches up). `seen` is what the writer had read (see
+    /// [`conflicts::Detect::seen_through`]).
     fn write_ops_logged(
         &self,
         entry: &mut BoardEntry,
@@ -960,23 +1016,62 @@ impl TrackerRegistry {
         ops: &[Op],
         author: &Author,
         log: bool,
+        seen: Option<u64>,
+    ) -> Result<(), TrackerError> {
+        let steps: Vec<PaneStep> = ops.iter().cloned().map(PaneStep::Op).collect();
+        let ctx = WriteCtx {
+            log,
+            seen,
+            detect: log,
+        };
+        self.write_steps(entry, path, &mut |_, _| Ok(steps.clone()), author, ctx)
+    }
+
+    /// The read-modify-write of one board over steps. `plan` turns what the
+    /// board says now (and its live items) into the steps; it runs again on
+    /// the re-read if the file changed under the write.
+    fn write_steps(
+        &self,
+        entry: &mut BoardEntry,
+        path: &Path,
+        plan: &mut Plan,
+        author: &Author,
+        ctx: WriteCtx,
     ) -> Result<(), TrackerError> {
         // The board may have been moved or swapped for a symlink since it was
         // opened: the path is checked again before anything is written.
         self.recheck_path(entry, path)?;
         let mut attempts = 0;
-        let (applied, now) = loop {
+        let (applied, now, found) = loop {
             let bytes = self.current_bytes(entry, path)?;
             let now = self.clock.now();
             let stamp = Stamp::new(now, self.offset_at(now));
-            let applied = apply_to_file(&bytes, ops, author, stamp)?;
+            let steps = match entry.parsed.as_ref() {
+                Some(parsed) => plan(&parsed.board, &entry.live)?,
+                None => Vec::new(),
+            };
+            let applied = apply_steps_to_file(&bytes, &steps, author, stamp)?;
             if matches!(author, Author::Agent { .. }) {
                 if let Some(old) = entry.parsed.as_ref().map(|p| &p.board) {
                     refuse_agent_ran_it(old, &applied.board)?;
                 }
             }
+            let found = match entry.parsed.as_ref() {
+                Some(old) if ctx.detect => conflicts::detect(
+                    &entry.log.entries,
+                    &applied.changes,
+                    &old.board,
+                    &|id| source_of(old, id),
+                    &Detect {
+                        writer: author,
+                        seen_through: ctx.seen,
+                        now,
+                    },
+                ),
+                _ => Vec::new(),
+            };
             if applied.bytes == bytes {
-                break (applied, now);
+                break (applied, now, found);
             }
             // The user may have saved while the ops were applied; replacing
             // the file now would lose that save. Look again: on a change, the
@@ -985,7 +1080,7 @@ impl TrackerRegistry {
             if self.fs.read(path).ok().as_deref() == Some(bytes.as_slice()) {
                 self.fs.write_atomic(path, &applied.bytes).map_err(io_err)?;
                 self.store_last_good(path, &applied.bytes);
-                break (applied, now);
+                break (applied, now, found);
             }
             attempts += 1;
             if attempts >= 2 {
@@ -997,8 +1092,10 @@ impl TrackerRegistry {
         entry.parsed = Some(applied.parsed);
         entry.banner = None;
         entry.last_good_at = Some(now);
-        if log {
-            entry.log.append(applied.changes);
+        if ctx.log {
+            let mut changes = applied.changes;
+            record_conflicts(entry, &mut changes, found, &applied.board);
+            entry.log.append(changes);
         }
         self.sync_live(entry);
         Ok(())
@@ -1075,7 +1172,20 @@ impl TrackerRegistry {
                 // edit: put it on the new board before diffing.
                 sync_live_items(&mut entry.live, &mut parsed, now);
                 if let Some(old) = &entry.parsed {
-                    let changes = diff(&old.board, &parsed.board, &Author::File, now);
+                    let mut changes = diff(&old.board, &parsed.board, &Author::File, now);
+                    let found = conflicts::detect(
+                        &entry.log.entries,
+                        &changes,
+                        &old.board,
+                        &|id| source_of(old, id),
+                        &Detect {
+                            writer: &Author::File,
+                            seen_through: None,
+                            now,
+                        },
+                    );
+                    let board = parsed.board.clone();
+                    record_conflicts(entry, &mut changes, found, &board);
                     entry.log.append(changes);
                 }
                 entry.parsed = Some(parsed);
@@ -1136,6 +1246,7 @@ impl TrackerRegistry {
                             log: entry.log.clone(),
                             last_good_at: entry.last_good_at,
                             committable: entry.committable.clone(),
+                            approvals: entry.approvals.clone(),
                         },
                     )
                 })
@@ -1183,6 +1294,7 @@ impl TrackerRegistry {
             entry.log = persisted.log;
             entry.last_good_at = persisted.last_good_at;
             entry.committable = persisted.committable;
+            entry.approvals = persisted.approvals;
             // The last-good copy is the baseline the file is diffed against.
             if let Some(good) = self
                 .last_good_file(&path)
@@ -1357,7 +1469,7 @@ impl TrackerRegistry {
                 ),
                 ..Upsert::default()
             });
-            let result = self.write_ops_logged(entry, path, &[op], &author, false);
+            let result = self.write_ops_logged(entry, path, &[op], &author, false, None);
             if let Some(live) = entry.live.get_mut(&id) {
                 live.last_write = Some(now);
             }
@@ -1664,6 +1776,95 @@ fn replace_banner(entry: &mut BoardEntry, banner: Banner) -> bool {
     true
 }
 
+/// Turns the board as it stands (and its live items) into a write's steps.
+type Plan<'a> =
+    dyn FnMut(&Board, &HashMap<String, LiveItem>) -> Result<Vec<PaneStep>, TrackerError> + 'a;
+
+/// How one write behaves (see [`TrackerRegistry::write_steps`]).
+#[derive(Clone, Copy)]
+struct WriteCtx {
+    /// Append the changes to the log.
+    log: bool,
+    /// What the writer had read (the pane's base version, an agent's cursor).
+    seen: Option<u64>,
+    /// Look for conflicts with other authors' changes.
+    detect: bool,
+}
+
+/// The pane's conflicts of each item still on the board.
+fn view_conflicts(entry: &BoardEntry) -> HashMap<String, Vec<view::ViewConflict>> {
+    let mut out: HashMap<String, Vec<view::ViewConflict>> = HashMap::new();
+    let Some(parsed) = entry.parsed.as_ref() else {
+        return out;
+    };
+    let mut ordinal: HashMap<(&str, &str), u32> = HashMap::new();
+    for c in entry.conflicts.all() {
+        if c.field == conflicts::REMOVED || parsed.board.item(&c.item_id).is_none() {
+            continue;
+        }
+        let index = ordinal
+            .entry((c.item_id.as_str(), c.field.as_str()))
+            .or_default();
+        out.entry(c.item_id.clone())
+            .or_default()
+            .push(view::ViewConflict {
+                field: c.field.clone(),
+                losing: match &c.losing {
+                    Value::String(s) => s.clone(),
+                    Value::Null => String::new(),
+                    other => other.to_string(),
+                },
+                losing_by: c.losing_author.label(),
+                winning_by: c.winning_author.label(),
+                at: c.at,
+                index: *index,
+            });
+        *index += 1;
+    }
+    out
+}
+
+/// The pane's removed-item conflicts.
+fn view_removed_conflicts(entry: &BoardEntry) -> Vec<view::ViewRemovedConflict> {
+    entry
+        .conflicts
+        .all()
+        .iter()
+        .filter(|c| c.field == conflicts::REMOVED)
+        .map(|c| view::ViewRemovedConflict {
+            item_id: c.item_id.clone(),
+            title: c.title.clone().unwrap_or_default(),
+            losing_by: c.losing_author.label(),
+            winning_by: c.winning_author.label(),
+            at: c.at,
+            source: c.losing.as_str().unwrap_or_default().to_string(),
+        })
+        .collect()
+}
+
+/// An item's exact markdown in a parsed board.
+fn source_of(parsed: &super::format::ParsedBoard, id: &str) -> Option<String> {
+    let span = parsed.item_span(id)?;
+    Some(parsed.source[span].to_string())
+}
+
+/// Keeps `found` on the entry and adds one log entry for each, after the
+/// write's own changes, so an agent reads it in its next delta.
+fn record_conflicts(
+    entry: &mut BoardEntry,
+    changes: &mut Vec<super::model::Change>,
+    found: Vec<Conflict>,
+    board: &Board,
+) {
+    for conflict in found {
+        let kept = board
+            .item(&conflict.item_id)
+            .map_or(Value::Null, |item| field_value(item, &conflict.field));
+        changes.push(conflicts::change_for(&conflict, &kept));
+        entry.conflicts.push(conflict);
+    }
+}
+
 /// Changes by the user (pane or file) after `cursor`, the session's own
 /// excluded; 0 without a cursor.
 fn user_changes_of(entry: &BoardEntry, cursor: Option<u64>, session: &str) -> u32 {
@@ -1673,6 +1874,7 @@ fn user_changes_of(entry: &BoardEntry, cursor: Option<u64>, session: &str) -> u3
     match entry.log.since(cursor, Some(session)) {
         Since::Changes(changes) => changes
             .iter()
+            .filter(|c| c.kind != ChangeKind::Conflict)
             .filter(|c| matches!(c.by, Author::Pane | Author::File))
             .count() as u32,
         Since::TooOld { count } => count.min(u64::from(u32::MAX)) as u32,
@@ -1713,6 +1915,10 @@ fn topic_from_path(path: &Path) -> Option<String> {
     let stem: String = stem.chars().take(48).collect();
     is_valid_topic(&stem).then_some(stem)
 }
+
+#[path = "pane_edit.rs"]
+mod pane_edit;
+pub use pane_edit::{PaneEditError, PaneEditOutcome};
 
 #[cfg(test)]
 #[path = "bind_existing_tests.rs"]

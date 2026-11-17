@@ -360,4 +360,44 @@ final class TrackerStoreTests: XCTestCase {
         XCTAssertTrue(source.contains("TrackerStore.shared.daemonDisconnected()"),
                       "a dropped connection must reach the tracker store (so it keeps boards instead of blanking)")
     }
+
+    // MARK: - Edit results (T3a plumbing: `tracker_edit` answers)
+
+    private func editResult(tag: String, requestId: String, ok: Bool = true) throws -> TrackerEditResultWire {
+        let json = #"{"tag":"\#(tag)","request_id":"\#(requestId)","ok":\#(ok),"version":5,"created":["new-1"]}"#
+        return try JSONDecoder().decode(TrackerEditResultWire.self, from: Data(json.utf8))
+    }
+
+    func testAnEditResultIsKeptPerFocusAndPublishedToTheEditors() throws {
+        let store = Fx.makeImmediateStore()
+        var bag = Set<AnyCancellable>()
+        var heard: [TrackerEditResultWire] = []
+        store.editResults.sink { heard.append($0) }.store(in: &bag)
+
+        let first = try editResult(tag: "kate-a", requestId: "r1")
+        let second = try editResult(tag: "kate-a", requestId: "r2", ok: false)
+        store.ingestEditResult(first)
+        store.ingestEditResult(second)
+
+        XCTAssertEqual(heard, [first, second], "every answer is published, uncoalesced")
+        XCTAssertEqual(store.lastEditResult(for: "kate-a"), second, "the latest is kept")
+        XCTAssertNil(store.lastEditResult(for: "kate-b"), "another focus has none")
+        XCTAssertEqual(first.created, ["new-1"])
+    }
+
+    func testForgettingAFocusDropsItsLastEditResult() throws {
+        let store = Fx.makeImmediateStore()
+        store.ingestEditResult(try editResult(tag: "kate-a", requestId: "r1"))
+        store.forget(tag: "kate-a")
+        XCTAssertNil(store.lastEditResult(for: "kate-a"))
+    }
+
+    func testAppStoreRoutesTheEditResultToTheSharedStore() throws {
+        let source = try appStoreSource()
+        let caseRange = try XCTUnwrap(source.range(of: "case .trackerEditResult(let result):"),
+                                      "AppStore.handle must name the edit result")
+        let rest = source[caseRange.upperBound...]
+        let body = rest.components(separatedBy: "\n        case ").first ?? ""
+        XCTAssertTrue(body.contains("TrackerStore.shared.ingestEditResult(result)"), "the case hands it to the store: \(body)")
+    }
 }

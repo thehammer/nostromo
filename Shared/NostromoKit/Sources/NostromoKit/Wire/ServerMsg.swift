@@ -152,6 +152,8 @@ public enum ServerMsg {
     /// Whether a focus has a tracker and its per-status counts. The only
     /// tracker frame a network peer receives (non-sensitive focuses).
     case trackerSummary(TrackerSummaryFrameWire)
+    /// The answer to this connection's `tracker_edit`. Local clients only.
+    case trackerEditResult(TrackerEditResultWire)
 
     case unknown
 }
@@ -1191,6 +1193,11 @@ extension ServerMsg {
         case "tracker_summary":
             if let m = try? dec.decode(TrackerSummaryFrameWire.self, from: data) {
                 return .trackerSummary(m)
+            }
+
+        case "tracker_edit_result":
+            if let m = try? dec.decode(TrackerEditResultWire.self, from: data) {
+                return .trackerEditResult(m)
             }
 
         default:

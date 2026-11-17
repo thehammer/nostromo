@@ -41,10 +41,10 @@ use super::{
     },
     protocol::{
         ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, ServerMsg,
-        SessionAction, Topic, FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_NOTIFY,
+        SessionAction, Topic, TrackerEditError, FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_NOTIFY,
         FEATURE_CONVERSATION_HISTORY, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN,
-        FEATURE_SLASH_COMMANDS, FEATURE_TERMINAL_STAGING_ONLY, MAX_FRAME_LEN, MIN_CLIENT_VERSION,
-        PROTOCOL_VERSION,
+        FEATURE_SLASH_COMMANDS, FEATURE_TERMINAL_STAGING_ONLY, FEATURE_TRACKER_EDIT, MAX_FRAME_LEN,
+        MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
     session_manager::{ModelRequestOutcome, ResendTrigger, SessionManager, SwitchRequest},
 };
@@ -570,6 +570,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
         FEATURE_FOCUS_ACTIVITY.to_string(),
         FEATURE_SLASH_COMMANDS.to_string(),
         FEATURE_CONVERSATION_HISTORY.to_string(),
+        FEATURE_TRACKER_EDIT.to_string(),
     ];
     if mgr.authored_prs().is_some() {
         features.push(FEATURE_AUTHORED_PRS.to_string());
@@ -1206,6 +1207,7 @@ where
                             | ClientMsg::ApprovalsLogEntry { operator_nonce: sent, .. }
                             | ClientMsg::ClaudeLoginAction { operator_nonce: sent, .. }
                             | ClientMsg::PaneAction { operator_nonce: sent, .. }
+                            | ClientMsg::TrackerEdit { operator_nonce: sent, .. }
                                 if trust == PeerTrust::OperatorApp =>
                             {
                                 Some(check_operator_answer(&origin, operator_nonce.as_deref(), sent.as_deref()).await)
@@ -2055,6 +2057,71 @@ fn handle_client_msg(
                         ok: false,
                         message: Some("unknown_action".to_string()),
                         open_url: None,
+                    },
+                };
+                let _ = tx.send(reply);
+            });
+        }
+
+        ClientMsg::TrackerEdit {
+            tag,
+            request_id,
+            base_version,
+            ops,
+            ..
+        } => {
+            // A network peer never gets here (`refuse_for_network`). Any other
+            // local process is refused too: it could otherwise write as
+            // `pane (you)`, get past the agent guard and tick "Ran it". Only the
+            // verified Mac app, with the connection's nonce from a process still
+            // verified (checked by the caller), edits. Nothing here touches a
+            // session: an edit never starts or queues an agent turn.
+            let refusal = if trust != PeerTrust::OperatorApp {
+                Some("not the verified Nostromo app".to_string())
+            } else {
+                match answer_check {
+                    Some(Ok(())) => None,
+                    Some(Err(why)) => Some(why),
+                    None => Some("TrackerEdit refused: not checked".to_string()),
+                }
+            };
+            if let Some(why) = refusal {
+                debug!(
+                    conn_key,
+                    ?trust,
+                    peer_pid = peer.map(|p| p.pid),
+                    "TrackerEdit refused: {why}"
+                );
+                let _ = targeted_tx.send(ServerMsg::TrackerEditResult {
+                    tag,
+                    request_id,
+                    ok: false,
+                    error: Some(TrackerEditError {
+                        code: "not_operator_app".to_string(),
+                        reason: None,
+                        index: None,
+                    }),
+                    version: 0,
+                    created: Vec::new(),
+                });
+                return;
+            }
+            let provider = session_mgr.lock().unwrap().pane_content_provider();
+            let tx = targeted_tx.clone();
+            tokio::spawn(async move {
+                let reply = match provider {
+                    Some(p) => p.tracker_edit(&tag, &request_id, base_version, ops).await,
+                    None => ServerMsg::TrackerEditResult {
+                        tag,
+                        request_id,
+                        ok: false,
+                        error: Some(TrackerEditError {
+                            code: "not_supported".to_string(),
+                            reason: None,
+                            index: None,
+                        }),
+                        version: 0,
+                        created: Vec::new(),
                     },
                 };
                 let _ = tx.send(reply);

@@ -530,6 +530,11 @@ pub enum ChangeKind {
     /// `fields["id"]` and `fields["title"]`: `(null, new)` added, `(old, null)`
     /// removed, `(old, new)` renamed.
     Section,
+    /// A write overwrote another author's change to the same field (or removed
+    /// their item), attributed to the writer. `fields["field"]` = `(name, null)`,
+    /// `fields["value"]` = `(overwritten value, kept value)` and
+    /// `fields["lost_by"]` = `(label, null)`. `item_id` names the item.
+    Conflict,
 }
 
 /// Longest string kept in a [`Change`]'s field values, in characters; a
@@ -579,7 +584,7 @@ impl Change {
 
 /// `value` with every string over [`MAX_LOGGED_CHARS`] and every array over
 /// [`MAX_LOGGED_ELEMENTS`] cut and marked [`LOGGED_TRUNCATED`].
-fn bounded(value: Value) -> Value {
+pub(crate) fn bounded(value: Value) -> Value {
     match value {
         Value::String(text) => Value::String(match text.char_indices().nth(MAX_LOGGED_CHARS) {
             Some((cut, _)) => format!("{}{LOGGED_TRUNCATED}", &text[..cut]),

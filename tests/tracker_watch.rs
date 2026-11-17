@@ -66,10 +66,11 @@ impl Rig {
         for dir in [&repo, &home] {
             std::fs::create_dir_all(dir).unwrap();
         }
+        let clock = Arc::new(FakeClock::at_secs(1_760_540_000));
         let reg = Arc::new(TrackerRegistry::new(RegistryParts::hermetic(
             base.join("state"),
             home,
-            Arc::new(FakeClock::at_secs(1_760_540_000)),
+            clock.clone(),
         )));
         let args = OpenArgs {
             topic: Some("watch".into()),
@@ -102,6 +103,10 @@ impl Rig {
             )
             .expect("seed");
         rig.sync_reader();
+        // The seed is a minute old: an editor save after it is not "within
+        // 10 s of the agent's write" (that is a conflict, tested in
+        // `tracker_two_way`).
+        clock.advance(chrono::Duration::seconds(60));
         rig.reg.flush(&rig.tx);
         rig.drain();
         rig
@@ -335,10 +340,14 @@ fn deleting_an_items_line_from_the_file_removes_it_from_the_view_and_reads_as_re
     assert!(item(&view, "beta").is_none(), "beta is gone from the pane");
     assert!(item(&view, "alpha").is_some() && item(&view, "gamma").is_some());
     let changes = rig.reader_changes();
-    assert_eq!(changes.len(), 1, "{changes:?}");
+    // The removal, and the conflict it makes: the file dropped an item an
+    // agent added (the stale-editor-copy signature, at any age), so the
+    // item's markdown is kept for the user to restore.
+    assert_eq!(changes.len(), 2, "{changes:?}");
     assert_all_by_file(&changes);
     assert_eq!(changes[0]["id"], json!("beta"));
     assert_eq!(changes[0]["removed"], json!("Beta task"));
+    assert_eq!(changes[1]["conflict"]["field"], json!("removed"));
 }
 
 #[test]

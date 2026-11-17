@@ -14,6 +14,10 @@
 
 import Foundation
 
+/// The daemon advertises this in `Welcome.features` when it takes `tracker_edit` (the pane edits
+/// the board as the user). The pane shows its edit controls only when it is present.
+public let trackerEditFeature = "tracker_edit_v1"
+
 // MARK: - Enums
 
 /// An item's status (`Status`, kebab-case on the wire).
@@ -200,6 +204,77 @@ public struct TrackerBoundWire: Decodable, Equatable {
     }
 }
 
+/// A value that lost to a later write by someone who couldn't have seen it (T3a). Only in
+/// `tracker_board`, which a network peer never receives.
+public struct TrackerConflictWire: Decodable, Equatable {
+    public let field: String
+    /// The losing value as text (JSON for a list), raw: it is the user's own.
+    public let losing: String
+    /// Who wrote it (`agent claudia`, `pane (you)`, `file (unknown editor)`).
+    public let losingBy: String
+    public let winningBy: String
+    public let at: Date?
+    /// Position among this item field's losing values, oldest first (`resolve_conflict.index`).
+    public let index: Int
+
+    enum CodingKeys: String, CodingKey {
+        case field, losing, at, index
+        case losingBy = "losing_by"
+        case winningBy = "winning_by"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        field = try c.decodeIfPresent(String.self, forKey: .field) ?? ""
+        losing = try c.decodeIfPresent(String.self, forKey: .losing) ?? ""
+        losingBy = try c.decodeIfPresent(String.self, forKey: .losingBy) ?? ""
+        winningBy = try c.decodeIfPresent(String.self, forKey: .winningBy) ?? ""
+        at = try? c.decodeIfPresent(Date.self, forKey: .at)
+        index = try c.decodeIfPresent(Int.self, forKey: .index) ?? 0
+    }
+}
+
+/// An item removed over someone's edit. `source` restores it byte for byte (`restore`).
+public struct TrackerRemovedConflictWire: Decodable, Equatable {
+    public let itemId: String
+    /// The removed item's text.
+    public let title: String
+    public let losingBy: String
+    public let winningBy: String
+    public let at: Date?
+    public let source: String
+
+    enum CodingKeys: String, CodingKey {
+        case title, at, source
+        case itemId = "item_id"
+        case losingBy = "losing_by"
+        case winningBy = "winning_by"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        itemId = try c.decodeIfPresent(String.self, forKey: .itemId) ?? ""
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        losingBy = try c.decodeIfPresent(String.self, forKey: .losingBy) ?? ""
+        winningBy = try c.decodeIfPresent(String.self, forKey: .winningBy) ?? ""
+        at = try? c.decodeIfPresent(Date.self, forKey: .at)
+        source = try c.decodeIfPresent(String.self, forKey: .source) ?? ""
+    }
+}
+
+/// Why an item is badged: the classes of sensitive-looking text it holds (`ssn`, `phone`, …),
+/// never the text. Agents are not shown such text until the user clears the badge.
+public struct TrackerSensitiveWire: Decodable, Equatable {
+    public let classes: [String]
+
+    enum CodingKeys: String, CodingKey { case classes }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        classes = try c.decodeIfPresent([String].self, forKey: .classes) ?? []
+    }
+}
+
 /// The banner over a board that isn't current. The view under it is the last
 /// good version.
 public enum TrackerBannerWire: Equatable {
@@ -249,6 +324,10 @@ public struct TrackerItemWire: Decodable, Equatable {
     public let id: String
     public let section: String
     public let textSpans: [MdSpan]
+    /// The task text as stored (raw markdown), to prefill an editor. Empty from an older daemon.
+    public let text: String
+    /// The note as stored (raw markdown). Nil without a note, and from an older daemon.
+    public let note: String?
     public let status: TrackerStatusWire
     public let owner: String?
     public let updatedAt: Date?
@@ -260,10 +339,15 @@ public struct TrackerItemWire: Decodable, Equatable {
     public let ran: Bool
     /// The live source this item follows and how fresh it is.
     public let bound: TrackerBoundWire?
+    /// Overwritten values the user hasn't settled (empty from an older daemon).
+    public let conflicts: [TrackerConflictWire]
+    /// Sensitive-looking text the user hasn't cleared.
+    public let sensitive: TrackerSensitiveWire?
     public let source: String
 
     enum CodingKeys: String, CodingKey {
         case id, section, status, owner, links, kind, command, env, ran, bound, source
+        case text, note, conflicts, sensitive
         case textSpans = "text_spans"
         case updatedAt = "updated_at"
         case noteBlocks = "note_blocks"
@@ -274,6 +358,8 @@ public struct TrackerItemWire: Decodable, Equatable {
         id = try c.decode(String.self, forKey: .id)
         section = try c.decodeIfPresent(String.self, forKey: .section) ?? ""
         textSpans = try c.decodeIfPresent([MdSpan].self, forKey: .textSpans) ?? []
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        note = try c.decodeIfPresent(String.self, forKey: .note)
         status = try c.decodeIfPresent(TrackerStatusWire.self, forKey: .status) ?? .unknown("")
         owner = try c.decodeIfPresent(String.self, forKey: .owner)
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt)
@@ -284,6 +370,8 @@ public struct TrackerItemWire: Decodable, Equatable {
         env = try c.decodeIfPresent(TrackerEnvWire.self, forKey: .env)
         ran = try c.decodeIfPresent(Bool.self, forKey: .ran) ?? false
         bound = try? c.decodeIfPresent(TrackerBoundWire.self, forKey: .bound)
+        conflicts = (try? c.decodeIfPresent([TrackerConflictWire].self, forKey: .conflicts)) ?? []
+        sensitive = try? c.decodeIfPresent(TrackerSensitiveWire.self, forKey: .sensitive)
         source = try c.decodeIfPresent(String.self, forKey: .source) ?? ""
     }
 }
@@ -362,9 +450,12 @@ public struct TrackerBoardViewWire: Decodable, Equatable {
     public let banner: TrackerBannerWire?
     public let committable: TrackerCommittableWire?
     public let hiddenByUser: Bool
+    /// Items removed over someone's edit (empty from an older daemon).
+    public let removedConflicts: [TrackerRemovedConflictWire]
 
     enum CodingKeys: String, CodingKey {
         case title, path, version, nodes, log, banner, committable
+        case removedConflicts = "removed_conflicts"
         case updatedAt = "updated_at"
         case hiddenByUser = "hidden_by_user"
     }
@@ -380,6 +471,7 @@ public struct TrackerBoardViewWire: Decodable, Equatable {
         banner = try c.decodeIfPresent(TrackerBannerWire.self, forKey: .banner)
         committable = try c.decodeIfPresent(TrackerCommittableWire.self, forKey: .committable)
         hiddenByUser = try c.decodeIfPresent(Bool.self, forKey: .hiddenByUser) ?? false
+        removedConflicts = (try? c.decodeIfPresent([TrackerRemovedConflictWire].self, forKey: .removedConflicts)) ?? []
     }
 }
 
@@ -400,5 +492,214 @@ public struct TrackerSummaryFrameWire: Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case tag, counts
         case hasTracker = "has_tracker"
+    }
+}
+
+// MARK: - Editing (`tracker_edit`, T3a)
+
+/// Which side of a conflict the user keeps.
+public enum TrackerConflictKeepWire: String, Codable, Equatable {
+    case current
+    case losing
+}
+
+/// One edit the user makes in the pane (`TrackerPaneOp` in `src/ipc/protocol.rs`). Encodes as
+/// `{"op": "<snake_case name>", …}` and leaves absent optionals out, so `body: ""` (clear the note)
+/// is sent and `body: nil` (leave it) is not.
+public enum TrackerPaneOpWire: Codable, Equatable {
+    /// The tick (`done`) and untick (the previous status, or `todo`).
+    case status(id: String, status: String)
+    /// At least one of `title` (one line, at most 80 characters), `text` (to undo a restructure)
+    /// and `body` (the note; empty clears it).
+    case edit(id: String, title: String?, text: String?, body: String?)
+    /// A new item; the daemon names it (`TrackerEditResultWire.created`).
+    case add(section: String, title: String, body: String?, before: String?, after: String?)
+    case move(id: String, section: String, before: String?, after: String?)
+    case remove(id: String)
+    /// An item back from its exact markdown (`TrackerItemWire.source`).
+    case restore(source: String, section: String, before: String?, after: String?)
+    /// Accept the item's current sensitive-looking text.
+    case clearBadge(id: String)
+    /// Settle a conflict: `field` is `removed` for a removed item.
+    case resolveConflict(id: String, field: String, keep: TrackerConflictKeepWire, index: Int?)
+
+    private enum K: String, CodingKey {
+        case op, id, status, title, text, body, section, before, after, source, field, keep, index
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: K.self)
+        switch self {
+        case .status(let id, let status):
+            try c.encode("status", forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(status, forKey: .status)
+        case .edit(let id, let title, let text, let body):
+            try c.encode("edit", forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encodeIfPresent(title, forKey: .title)
+            try c.encodeIfPresent(text, forKey: .text)
+            try c.encodeIfPresent(body, forKey: .body)
+        case .add(let section, let title, let body, let before, let after):
+            try c.encode("add", forKey: .op)
+            try c.encode(section, forKey: .section)
+            try c.encode(title, forKey: .title)
+            try c.encodeIfPresent(body, forKey: .body)
+            try c.encodeIfPresent(before, forKey: .before)
+            try c.encodeIfPresent(after, forKey: .after)
+        case .move(let id, let section, let before, let after):
+            try c.encode("move", forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(section, forKey: .section)
+            try c.encodeIfPresent(before, forKey: .before)
+            try c.encodeIfPresent(after, forKey: .after)
+        case .remove(let id):
+            try c.encode("remove", forKey: .op)
+            try c.encode(id, forKey: .id)
+        case .restore(let source, let section, let before, let after):
+            try c.encode("restore", forKey: .op)
+            try c.encode(source, forKey: .source)
+            try c.encode(section, forKey: .section)
+            try c.encodeIfPresent(before, forKey: .before)
+            try c.encodeIfPresent(after, forKey: .after)
+        case .clearBadge(let id):
+            try c.encode("clear_badge", forKey: .op)
+            try c.encode(id, forKey: .id)
+        case .resolveConflict(let id, let field, let keep, let index):
+            try c.encode("resolve_conflict", forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(field, forKey: .field)
+            try c.encode(keep, forKey: .keep)
+            try c.encodeIfPresent(index, forKey: .index)
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: K.self)
+        let op = try c.decode(String.self, forKey: .op)
+        switch op {
+        case "status":
+            self = .status(id: try c.decode(String.self, forKey: .id), status: try c.decode(String.self, forKey: .status))
+        case "edit":
+            self = .edit(id: try c.decode(String.self, forKey: .id),
+                         title: try c.decodeIfPresent(String.self, forKey: .title),
+                         text: try c.decodeIfPresent(String.self, forKey: .text),
+                         body: try c.decodeIfPresent(String.self, forKey: .body))
+        case "add":
+            self = .add(section: try c.decode(String.self, forKey: .section),
+                        title: try c.decode(String.self, forKey: .title),
+                        body: try c.decodeIfPresent(String.self, forKey: .body),
+                        before: try c.decodeIfPresent(String.self, forKey: .before),
+                        after: try c.decodeIfPresent(String.self, forKey: .after))
+        case "move":
+            self = .move(id: try c.decode(String.self, forKey: .id),
+                         section: try c.decode(String.self, forKey: .section),
+                         before: try c.decodeIfPresent(String.self, forKey: .before),
+                         after: try c.decodeIfPresent(String.self, forKey: .after))
+        case "remove":
+            self = .remove(id: try c.decode(String.self, forKey: .id))
+        case "restore":
+            self = .restore(source: try c.decode(String.self, forKey: .source),
+                            section: try c.decode(String.self, forKey: .section),
+                            before: try c.decodeIfPresent(String.self, forKey: .before),
+                            after: try c.decodeIfPresent(String.self, forKey: .after))
+        case "clear_badge":
+            self = .clearBadge(id: try c.decode(String.self, forKey: .id))
+        case "resolve_conflict":
+            self = .resolveConflict(id: try c.decode(String.self, forKey: .id),
+                                    field: try c.decode(String.self, forKey: .field),
+                                    keep: try c.decode(TrackerConflictKeepWire.self, forKey: .keep),
+                                    index: try c.decodeIfPresent(Int.self, forKey: .index))
+        default:
+            throw DecodingError.dataCorruptedError(forKey: .op, in: c, debugDescription: "unknown tracker op \(op)")
+        }
+    }
+}
+
+/// The `tracker_edit` frame. Applied only from the verified Mac app, with the connection's
+/// `operator_nonce`; refused for every other peer.
+public struct TrackerEditRequestWire: Encodable, Equatable {
+    public let tag: String
+    public let requestId: String
+    /// The board version the edit was made against (`TrackerBoardViewWire.version`).
+    public let baseVersion: UInt64
+    public let operatorNonce: String?
+    public let ops: [TrackerPaneOpWire]
+
+    public init(tag: String, requestId: String, baseVersion: UInt64, operatorNonce: String?, ops: [TrackerPaneOpWire]) {
+        self.tag = tag
+        self.requestId = requestId
+        self.baseVersion = baseVersion
+        self.operatorNonce = operatorNonce
+        self.ops = ops
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type, tag, ops
+        case requestId = "request_id"
+        case baseVersion = "base_version"
+        case operatorNonce = "operator_nonce"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode("tracker_edit", forKey: .type)
+        try c.encode(tag, forKey: .tag)
+        try c.encode(requestId, forKey: .requestId)
+        try c.encode(baseVersion, forKey: .baseVersion)
+        try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
+        try c.encode(ops, forKey: .ops)
+    }
+}
+
+/// Why a `tracker_edit` changed nothing.
+public struct TrackerEditErrorWire: Decodable, Equatable {
+    /// `invalid_args`, `unknown_item`, `invalid_status`, `board_too_large`, `no_tracker`,
+    /// `not_operator_app`, … (a code this client doesn't know is still shown as is).
+    public let code: String
+    public let reason: String?
+    /// The failing op's position, when the failure is one op's.
+    public let index: Int?
+
+    enum CodingKeys: String, CodingKey { case code, reason, index }
+
+    public init(code: String, reason: String? = nil, index: Int? = nil) {
+        self.code = code
+        self.reason = reason
+        self.index = index
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        code = try c.decodeIfPresent(String.self, forKey: .code) ?? ""
+        reason = try c.decodeIfPresent(String.self, forKey: .reason)
+        index = try c.decodeIfPresent(Int.self, forKey: .index)
+    }
+}
+
+/// `tracker_edit_result`: the answer to this connection's `tracker_edit`. Local only.
+public struct TrackerEditResultWire: Decodable, Equatable {
+    public let tag: String
+    public let requestId: String
+    public let ok: Bool
+    public let error: TrackerEditErrorWire?
+    /// The board version after the edit (0 on a refusal).
+    public let version: UInt64
+    /// The ids `add` generated, in op order.
+    public let created: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case tag, ok, error, version, created
+        case requestId = "request_id"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tag = try c.decodeIfPresent(String.self, forKey: .tag) ?? ""
+        requestId = try c.decodeIfPresent(String.self, forKey: .requestId) ?? ""
+        ok = try c.decodeIfPresent(Bool.self, forKey: .ok) ?? false
+        error = try? c.decodeIfPresent(TrackerEditErrorWire.self, forKey: .error)
+        version = try c.decodeIfPresent(UInt64.self, forKey: .version) ?? 0
+        created = try c.decodeIfPresent([String].self, forKey: .created) ?? []
     }
 }

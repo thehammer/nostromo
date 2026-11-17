@@ -258,7 +258,9 @@ fn an_edit_made_while_the_daemon_was_down_is_ingested_as_a_file_change() {
         let _ = reg.read(TAG_B, SESS_B).unwrap();
         path
     };
-    // The daemon is down; the user ticks alpha and rewrites gamma in an editor.
+    // The daemon is down for a while; the user ticks alpha and rewrites gamma
+    // in an editor (more than 10 s after the agent's writes: no conflict).
+    rig.clock.advance(chrono::Duration::seconds(60));
     let edited = text_of(&path)
         .replace("- [ ] Alpha task", "- [x] Alpha task")
         .replace(

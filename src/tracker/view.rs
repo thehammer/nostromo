@@ -61,6 +61,48 @@ pub struct ViewFacts {
     pub hidden_by_user: bool,
     /// Live items by item id (T6).
     pub bound: HashMap<String, BoundView>,
+    /// Overwritten values per item id, oldest first (T3a).
+    pub conflicts: HashMap<String, Vec<ViewConflict>>,
+    /// Items removed over someone's edit, newest last (T3a).
+    pub removed_conflicts: Vec<ViewRemovedConflict>,
+    /// Unapproved guard-finding classes per item id (T3a).
+    pub sensitive: HashMap<String, Vec<String>>,
+}
+
+/// A value that lost to a later write by someone who couldn't have seen it.
+/// The pane offers keeping either side. Never sent to a network peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewConflict {
+    pub field: String,
+    /// The losing value as text (JSON for a list), raw: it is the user's.
+    pub losing: String,
+    /// Who wrote it (`agent claudia`, `pane (you)`, `file (unknown editor)`).
+    pub losing_by: String,
+    pub winning_by: String,
+    pub at: DateTime<Utc>,
+    /// Position among this item field's losing values, oldest first
+    /// (`resolve_conflict.index`).
+    pub index: u32,
+}
+
+/// An item removed over someone's recent edit. `source` restores it, byte for
+/// byte (`restore`, or `resolve_conflict` with `keep: losing`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewRemovedConflict {
+    pub item_id: String,
+    /// The removed item's text.
+    pub title: String,
+    pub losing_by: String,
+    pub winning_by: String,
+    pub at: DateTime<Utc>,
+    pub source: String,
+}
+
+/// Why the pane badges an item: the classes of sensitive-looking text it
+/// holds (names only, never the text).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewSensitive {
+    pub classes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,6 +110,12 @@ pub struct ViewItem {
     pub id: String,
     pub section: String,
     pub text_spans: Vec<MdSpan>,
+    /// The task text as stored (raw markdown), for an editor to prefill.
+    #[serde(default)]
+    pub text: String,
+    /// The note as stored (raw markdown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     pub status: Status,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
@@ -85,6 +133,12 @@ pub struct ViewItem {
     /// The live source this item follows and how fresh it is (T6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound: Option<BoundView>,
+    /// Overwritten values the user hasn't settled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<ViewConflict>,
+    /// Sensitive-looking text the user hasn't cleared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitive: Option<ViewSensitive>,
     pub source: String,
 }
 
@@ -93,6 +147,7 @@ pub struct ViewItem {
 /// them).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // one item per node on the wire; boxing would only add indirection
 pub enum ViewNode {
     Title {
         text: String,
@@ -143,6 +198,9 @@ pub struct TrackerBoardView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committable: Option<Committable>,
     pub hidden_by_user: bool,
+    /// Items removed over someone's edit (T3a).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_conflicts: Vec<ViewRemovedConflict>,
 }
 
 /// Builds the pane's view of a parsed board.
@@ -212,6 +270,7 @@ pub fn build(parsed: &ParsedBoard, facts: &ViewFacts) -> TrackerBoardView {
         banner: facts.banner.clone(),
         committable: facts.committable.clone(),
         hidden_by_user: facts.hidden_by_user,
+        removed_conflicts: facts.removed_conflicts.clone(),
     }
 }
 
@@ -245,6 +304,8 @@ fn view_item(item: &Item, source: String, facts: &ViewFacts) -> ViewItem {
         id: item.id.clone(),
         section: item.section.clone(),
         text_spans: inline_spans(&item.text),
+        text: item.text.clone(),
+        note: item.note.clone(),
         status: item.status,
         owner: item.owner.clone(),
         updated_at: item.updated_at,
@@ -259,6 +320,10 @@ fn view_item(item: &Item, source: String, facts: &ViewFacts) -> ViewItem {
         env: item.env,
         ran: false,
         bound: facts.bound.get(&item.id).cloned(),
+        conflicts: facts.conflicts.get(&item.id).cloned().unwrap_or_default(),
+        sensitive: facts.sensitive.get(&item.id).map(|classes| ViewSensitive {
+            classes: classes.clone(),
+        }),
         source,
     }
 }

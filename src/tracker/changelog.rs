@@ -117,7 +117,12 @@ impl ChangeLog {
             .entries
             .iter()
             .filter(|c| c.seq > cursor)
-            .filter(|c| exclude_session.is_none() || c.by.session_id() != exclude_session)
+            // A conflict entry tells the writer too that it overwrote something.
+            .filter(|c| {
+                exclude_session.is_none()
+                    || c.kind == super::model::ChangeKind::Conflict
+                    || c.by.session_id() != exclude_session
+            })
             .cloned()
             .collect();
         Since::Changes(changes)

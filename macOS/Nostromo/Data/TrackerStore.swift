@@ -23,8 +23,14 @@ final class TrackerStore {
 
     let changes = PassthroughSubject<String, Never>()
 
+    /// Every `tracker_edit_result` as it arrives, for the editor that sent the edit (matched by
+    /// `requestId`). Not coalesced: each answer matters.
+    let editResults = PassthroughSubject<TrackerEditResultWire, Never>()
+
     private(set) var boards: [String: TrackerBoardViewWire] = [:]
     private(set) var summaries: [String: TrackerSummaryFrameWire] = [:]
+    /// The latest edit result per focus tag.
+    private(set) var lastEditResults: [String: TrackerEditResultWire] = [:]
 
     private let now: () -> Date
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
@@ -46,6 +52,16 @@ final class TrackerStore {
 
     func summary(for tag: String) -> TrackerSummaryFrameWire? {
         summaries[tag]
+    }
+
+    func lastEditResult(for tag: String) -> TrackerEditResultWire? {
+        lastEditResults[tag]
+    }
+
+    /// The daemon's answer to a `tracker_edit`: keep the latest per focus and tell the editors.
+    func ingestEditResult(_ result: TrackerEditResultWire) {
+        lastEditResults[result.tag] = result
+        editResults.send(result)
     }
 
     /// Take one decoded daemon frame; frames that are not tracker frames are ignored.
@@ -76,6 +92,7 @@ final class TrackerStore {
     func forget(tag: String) {
         boards.removeValue(forKey: tag)
         summaries.removeValue(forKey: tag)
+        lastEditResults.removeValue(forKey: tag)
         lastDelivery.removeValue(forKey: tag)
         pending.remove(tag)
     }
