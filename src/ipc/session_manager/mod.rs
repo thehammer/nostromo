@@ -3982,8 +3982,8 @@ fn write_user_message_framed(shared: &Shared, msg: &PendingMessage) -> Result<()
         "{NOSTROMO_NOTE_OPEN}{note}{NOSTROMO_NOTE_CLOSE}{}",
         msg.text
     );
-    // The tracker note is committed by the login cell once the frame's turn
-    // has run (not when it is written: the CLI may die before reading it).
+    // The tracker note is committed by the login cell when the frame binds to
+    // its turn (not when it is written: the CLI may die before reading it).
     let result = login::write_recorded(
         shared,
         &PendingMessage {

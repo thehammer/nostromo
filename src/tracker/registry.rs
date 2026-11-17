@@ -660,7 +660,8 @@ impl TrackerRegistry {
         })
     }
 
-    /// `note`'s message started its turn in `session`: it has now seen what the note showed.
+    /// `note`'s message bound to its turn (turn start) in `session`: it has now seen
+    /// what the note showed.
     /// The cursor moves to the note's version, never back (a `read` since the
     /// note was prepared keeps its later one), and not at all when the log was
     /// reset meanwhile.

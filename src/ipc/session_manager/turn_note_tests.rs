@@ -183,7 +183,14 @@ fn session(dir: &tempfile::TempDir, tag: &str, offer: &Arc<Offer>) -> (Reap, Sha
 /// The CLI read the last written frame and its turn ran to the end: the
 /// reader binds the message to the turn, then the turn completes.
 fn turn_runs(shared: &Shared) {
+    turn_runs_with(shared, || {});
+}
+
+/// [`turn_runs`], with `during` happening mid-turn: after the turn has started
+/// (the message is bound to it) and before it ends (the agent acting on it).
+fn turn_runs_with(shared: &Shared, during: impl FnOnce()) {
     login::on_turn_started(shared);
+    during();
     login::on_turn_end(shared, "t", None);
 }
 
@@ -425,14 +432,16 @@ async fn a_written_frame_whose_session_dies_before_its_turn_never_commits() {
 }
 
 #[tokio::test]
-async fn a_frame_held_for_a_failed_sign_in_commits_nothing_even_when_the_hold_is_discarded() {
+async fn a_frame_held_for_a_failed_sign_in_keeps_its_commit_and_is_resent_with_its_note() {
     use crate::ipc::auth_failure::{AuthSignal, TurnAuthOutcome};
     let dir = tempfile::tempdir().unwrap();
     let offer = Offer::owing("tracker note");
-    let (_reap, shared, _out) = session(&dir, "t", &offer);
+    let (_reap, shared, out) = session(&dir, "t", &offer);
     write_user_message(&shared, &PendingMessage::user("hello", &[])).unwrap();
+    let frame = wait_for_contents(&out, 1).await.remove(0);
 
     login::on_turn_started(&shared);
+    assert_eq!(offer.committed(), 1, "committed when the turn started");
     login::on_turn_end(
         &shared,
         "t",
@@ -441,11 +450,27 @@ async fn a_frame_held_for_a_failed_sign_in_commits_nothing_even_when_the_hold_is
             resendable: true,
         }),
     );
-    assert!(shared.login.paused(), "the message is held");
-    shared.login.clear(); // the hold is discarded, or the daemon restarts
 
-    assert_eq!(offer.committed(), 0);
-    assert_eq!(offer.still_owes().as_deref(), Some("tracker note"));
+    assert!(shared.login.paused(), "the message is held");
+    assert_eq!(offer.committed(), 1, "the failure does not undo it");
+    assert!(
+        frame.contains("tracker note"),
+        "the held frame the resend writes carries the note: {frame}"
+    );
+}
+
+#[tokio::test]
+async fn a_note_is_committed_when_its_turn_starts_not_when_it_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let offer = Offer::owing("tracker note");
+    let (_reap, shared, _out) = session(&dir, "t", &offer);
+    write_user_message(&shared, &PendingMessage::user("hello", &[])).unwrap();
+
+    turn_runs_with(&shared, || {
+        assert_eq!(offer.committed(), 1, "committed mid-turn");
+    });
+
+    assert_eq!(offer.committed(), 1, "and only once");
 }
 
 // ── whose note it is ──────────────────────────────────────────────────────────
@@ -767,6 +792,50 @@ mod end_to_end {
     }
 
     #[tokio::test]
+    async fn the_agent_writing_over_the_item_the_note_showed_mid_turn_is_no_conflict() {
+        let mut w = wired();
+        w.reap.0.send_user_message("t", "go on", &[]).expect("send");
+        wait_for_contents(&w.out, 1).await;
+        let shared = w.reap.0.sessions["t"].shared.clone();
+
+        let mut conflicted = true;
+        turn_runs_with(&shared, || conflicted = agent_writes_over_alpha(&w));
+
+        assert!(
+            !conflicted,
+            "the agent acted on the note it was shown: no conflict"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_edit_made_after_the_note_was_built_still_conflicts_with_the_agents_write() {
+        let mut w = wired();
+        w.reap.0.send_user_message("t", "go on", &[]).expect("send");
+        wait_for_contents(&w.out, 1).await;
+        let shared = w.reap.0.sessions["t"].shared.clone();
+
+        // The user edits alpha again after the note was built, before the turn
+        // starts: the note did not show it.
+        w.clock.advance(chrono::Duration::seconds(100));
+        let version = w.reg.board_view("t").unwrap().version;
+        w.reg
+            .apply_pane_ops(
+                "t",
+                version,
+                &[TrackerPaneOp::Status {
+                    id: "alpha".into(),
+                    status: "todo".into(),
+                }],
+            )
+            .expect("second pane edit");
+
+        let mut conflicted = false;
+        turn_runs_with(&shared, || conflicted = agent_writes_over_alpha(&w));
+
+        assert!(conflicted, "the agent never saw the second edit");
+    }
+
+    #[tokio::test]
     async fn once_the_frames_turn_has_run_the_agent_has_seen_the_edit() {
         let mut w = wired();
         w.reap.0.send_user_message("t", "go on", &[]).expect("send");
@@ -780,4 +849,34 @@ mod end_to_end {
             "the turn ran with the note: no conflict"
         );
     }
+}
+
+// ── a typed command takes no restart note ─────────────────────────────────────
+
+#[tokio::test]
+async fn a_typed_command_is_not_given_the_crash_restart_note_and_it_is_kept() {
+    use crate::approvals::audit::AuditLog;
+    use crate::approvals::broker::{ApprovalBroker, BrokerParts, RESTART_NOTES_FILE};
+    let dir = tempfile::tempdir().unwrap();
+    let audit_dir = dir.path().join("approvals");
+    std::fs::create_dir_all(&audit_dir).unwrap();
+    std::fs::write(audit_dir.join(RESTART_NOTES_FILE), r#"{"t":"Bash"}"#).unwrap();
+    let broker = ApprovalBroker::new(AuditLog::open(&audit_dir).unwrap(), BrokerParts::system());
+    let out = dir.path().join("stdin.log");
+    let mut mgr = SessionManager::with_store_path(dir.path().join("sessions.json"));
+    mgr.configure_approvals(broker.clone());
+    spawn_stub(&mut mgr, "t", &recording_stub(&out));
+    let mut reap = Reap(mgr);
+
+    reap.0.send_user_message("t", "/compact", &[]).unwrap();
+
+    assert_eq!(
+        wait_for_contents(&out, 1).await,
+        ["/compact"],
+        "the command starts the message, no restart note in front"
+    );
+    assert!(
+        broker.peek_restart_note("t").is_some(),
+        "the agent was not told, so the note is kept for its next message"
+    );
 }

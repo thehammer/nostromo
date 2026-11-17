@@ -8,9 +8,9 @@
 //! move the cursor; [`TrackerTurnNotes`] adapts them to the session manager.
 //!
 //! The cursor rule: the note counts as the agent having *seen* exactly the
-//! entries it shows. It advances only once the message carrying the note has started its turn
-//! (see the session manager), and only over
-//! the shown entries: an entry trimmed by the limits stays after the cursor, so
+//! entries it shows. It advances the moment the message carrying the note binds
+//! to its turn (turn start, not turn end: the agent acting on the note must not
+//! conflict with the change it showed), and only over the shown entries: an entry trimmed by the limits stays after the cursor, so
 //! it is offered again and the agent's overwrite of it is still a conflict. An
 //! entry whose text is withheld is counted ("N changes hidden"), not shown: the
 //! cursor moves past it so it is not repeated, but its change stays flagged

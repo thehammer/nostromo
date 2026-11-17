@@ -4,9 +4,9 @@
 //! tracker registry) what the agent has not yet been told, for the one session
 //! the daemon spawned for the tag (`SessionCtx::session_id`, never a
 //! client-supplied id). The answer rides in the same `<nostromo-note>` block as
-//! the model-switch note. The provider is told to `commit` only after the frame
-//! is on the child's stdin; a note that was built but not written is dropped,
-//! so the same changes go with the next message.
+//! the model-switch note. The provider is told to `commit` when the frame binds
+//! to its turn (turn start); a note that was built but never bound (write
+//! failed, session died) is dropped, so the same changes go with the next message.
 
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ use super::SessionManager;
 pub trait TurnNote: Send {
     /// The text to put in the `<nostromo-note>` block.
     fn text(&self) -> &str;
-    /// The frame carrying [`TurnNote::text`] was written: the agent has now
+    /// The frame carrying [`TurnNote::text`] bound to its turn: the agent has now
     /// seen exactly what the text shows.
     fn commit(self: Box<Self>);
 }
