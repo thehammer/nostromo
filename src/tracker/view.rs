@@ -67,12 +67,18 @@ pub struct ViewFacts {
     pub removed_conflicts: Vec<ViewRemovedConflict>,
     /// Unapproved guard-finding classes per item id (T3a).
     pub sensitive: HashMap<String, Vec<String>>,
+    /// Losing values a cap dropped, per item id, until its conflicts are settled.
+    pub dropped: HashMap<String, u32>,
 }
 
 /// A value that lost to a later write by someone who couldn't have seen it.
 /// The pane offers keeping either side. Never sent to a network peer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewConflict {
+    /// The conflict's stable id: what `resolve_conflict.conflict_id` names.
+    /// Positions shift when conflicts are settled or dropped; this does not.
+    #[serde(default)]
+    pub conflict_id: String,
     pub field: String,
     /// The losing value as text (JSON for a list), raw: it is the user's.
     pub losing: String,
@@ -80,8 +86,8 @@ pub struct ViewConflict {
     pub losing_by: String,
     pub winning_by: String,
     pub at: DateTime<Utc>,
-    /// Position among this item field's losing values, oldest first
-    /// (`resolve_conflict.index`).
+    /// Position among this item field's losing values, oldest first, as of
+    /// this view. Informational: `resolve_conflict` picks by `conflict_id`.
     pub index: u32,
 }
 
@@ -89,6 +95,9 @@ pub struct ViewConflict {
 /// byte (`restore`, or `resolve_conflict` with `keep: losing`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewRemovedConflict {
+    /// The conflict's stable id (`resolve_conflict.conflict_id`).
+    #[serde(default)]
+    pub conflict_id: String,
     pub item_id: String,
     /// The removed item's text.
     pub title: String,
@@ -136,6 +145,10 @@ pub struct ViewItem {
     /// Overwritten values the user hasn't settled.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<ViewConflict>,
+    /// Older overwritten values of this item a cap dropped: something was lost
+    /// that the pane can't show. 0 (and absent) when nothing was.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dropped_conflicts: u32,
     /// Sensitive-looking text the user hasn't cleared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sensitive: Option<ViewSensitive>,
@@ -222,12 +235,16 @@ pub struct ViewTrimmed {
 
 /// The most bytes a `tracker_board` frame is built to: under the wire limit
 /// ([`crate::ipc::protocol::MAX_FRAME_LEN`], 4 MiB) with room for the envelope.
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 pub const FRAME_BUDGET: usize = 3_900_000;
 
 /// Slims `view` until it encodes within [`FRAME_BUDGET`], leaving the most
 /// useful parts for last: first the conflicts' long values (largest first),
-/// then the raw `text`/`note` (also in each item's `source`), then the
-/// rendered markup of the items. Says what it left out in `view.trimmed`. A
+/// then the rendered markup of the items (the raw `text`/`note` stay), then
+/// the raw `text`/`note` (also in each item's `source`). Says what it left out in `view.trimmed`. A
 /// view that already fits is untouched.
 pub fn fit_to_frame(view: &mut TrackerBoardView) {
     let size = |v: &TrackerBoardView| serde_json::to_vec(v).map_or(0, |b| b.len());
@@ -431,6 +448,7 @@ fn view_item(item: &Item, source: String, facts: &ViewFacts) -> ViewItem {
         ran: false,
         bound: facts.bound.get(&item.id).cloned(),
         conflicts: facts.conflicts.get(&item.id).cloned().unwrap_or_default(),
+        dropped_conflicts: facts.dropped.get(&item.id).copied().unwrap_or(0),
         sensitive: facts.sensitive.get(&item.id).map(|classes| ViewSensitive {
             classes: classes.clone(),
         }),

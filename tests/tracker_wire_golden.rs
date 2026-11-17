@@ -49,6 +49,7 @@ fn board_frame() -> ServerMsg {
 fn conflicts_frame() -> ServerMsg {
     let at = chrono::DateTime::from_timestamp(1_760_540_500, 0).unwrap();
     let conflict = ViewConflict {
+        conflict_id: "7.0".into(),
         field: "status".into(),
         losing: "in-progress".into(),
         losing_by: "agent claudia".into(),
@@ -59,6 +60,7 @@ fn conflicts_frame() -> ServerMsg {
     board_frame_with(
         [("check-1000".to_string(), vec![conflict])].into(),
         vec![ViewRemovedConflict {
+            conflict_id: "7.1".into(),
             item_id: "gone-1".into(),
             title: "A removed task".into(),
             losing_by: "pane (you)".into(),
@@ -90,6 +92,7 @@ fn board_frame_with(
             conflicts,
             removed_conflicts,
             sensitive,
+            dropped: Default::default(),
         },
     );
     ServerMsg::TrackerBoard {
@@ -161,6 +164,11 @@ fn the_conflicts_frame_carries_the_additive_t3a_keys_and_decodes_back() {
             .clone()
     };
     assert_eq!(item("check-1000")["conflicts"][0]["losing"], "in-progress");
+    // Every conflict carries the stable id `resolve_conflict` names it by.
+    assert_eq!(item("check-1000")["conflicts"][0]["conflict_id"], "7.0");
+    assert_eq!(value["board"]["removed_conflicts"][0]["conflict_id"], "7.1");
+    // No item had a conflict dropped: the key is absent, not 0.
+    assert!(item("check-1000").get("dropped_conflicts").is_none());
     assert_eq!(item("verif-1037")["sensitive"]["classes"][0], "ssn");
     // Every item carries its raw text; only items with a note carry `note`.
     assert!(item("check-1000")["text"].is_string());

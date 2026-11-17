@@ -6,19 +6,29 @@ use nostromo::ipc::protocol::{ServerMsg, MAX_FRAME_LEN};
 use nostromo::tracker::view::{build, ViewConflict, ViewRemovedConflict};
 use nostromo::tracker::{parse, ViewFacts};
 
-/// The frame for `board_md` with `n` field conflicts (each a maximum-size
-/// 8,000-character value of 3-byte characters) and `n` removed items (each
-/// 9,000 bytes of characters JSON escapes), plus the view it carries.
-fn frame(board_md: &str, n: usize) -> (usize, nostromo::tracker::TrackerBoardView) {
+/// The board holds at most this many conflicts in all (field values and
+/// removed items together).
+const BOARD_CAP: usize = 50;
+
+/// The frame for `board_md` with `fields` field conflicts (each a maximum-size
+/// 8,000-character value of 3-byte characters) and `removed_n` removed items
+/// (each 9,000 bytes of characters JSON escapes), plus the view it carries.
+fn frame(
+    board_md: &str,
+    fields: usize,
+    removed_n: usize,
+) -> (usize, nostromo::tracker::TrackerBoardView) {
+    assert!(fields + removed_n <= BOARD_CAP, "more than the board keeps");
     let parsed = parse(board_md.as_bytes()).expect("parses");
     let at = chrono::DateTime::from_timestamp(1_760_540_500, 0).unwrap();
     let ids: Vec<String> = parsed.board.items.iter().map(|i| i.id.clone()).collect();
     let mut conflicts: std::collections::HashMap<String, Vec<ViewConflict>> = Default::default();
     let mut removed = Vec::new();
-    for (k, id) in ids.iter().take(n).enumerate() {
+    for (k, id) in ids.iter().take(fields).enumerate() {
         conflicts.insert(
             id.clone(),
             vec![ViewConflict {
+                conflict_id: format!("7.{k}"),
                 field: "note".into(),
                 losing: "漢".repeat(8_000),
                 losing_by: "agent claudia".into(),
@@ -27,7 +37,10 @@ fn frame(board_md: &str, n: usize) -> (usize, nostromo::tracker::TrackerBoardVie
                 index: 0,
             }],
         );
+    }
+    for k in 0..removed_n {
         removed.push(ViewRemovedConflict {
+            conflict_id: format!("8.{k}"),
             item_id: format!("gone-{k}"),
             title: "x".repeat(500),
             losing_by: "pane (you)".into(),
@@ -50,6 +63,7 @@ fn frame(board_md: &str, n: usize) -> (usize, nostromo::tracker::TrackerBoardVie
             conflicts,
             removed_conflicts: removed,
             sensitive: Default::default(),
+            dropped: Default::default(),
         },
     );
     let len = serde_json::to_vec(&ServerMsg::TrackerBoard {
@@ -77,8 +91,9 @@ const MARGIN: usize = 150_000;
 #[test]
 fn the_worst_case_frame_on_a_maximum_size_board_fits_the_wire_with_margin() {
     // Markup-heavy text is what makes the rendered spans, the raw text and the
-    // item's source add up the most; every conflict is at its caps (50 per
-    // board: 50 values of 8,000 characters, 50 removed items of 9 KB).
+    // item's source add up the most. Every conflict is at its caps: the board
+    // keeps 50 in all, so the worst frames hold 50 values of 8,000 characters,
+    // 50 removed items of 9 KB, or a mix of both.
     let shapes = [
         ("plain", "plain words ".repeat(40)),
         ("bold", "**b** ".repeat(80)),
@@ -88,18 +103,20 @@ fn the_worst_case_frame_on_a_maximum_size_board_fits_the_wire_with_margin() {
     for (name, text) in shapes {
         let md = board_of(&text, 500);
         assert!(md.len() <= 256 * 1024 + 1_024, "{name}: board {}", md.len());
-        let (len, _) = frame(&md, 25);
-        assert!(
-            len < MAX_FRAME_LEN - MARGIN,
-            "{name}: the frame is {len} bytes, the limit {MAX_FRAME_LEN}"
-        );
+        for (fields, removed) in [(BOARD_CAP, 0), (0, BOARD_CAP), (25, 25)] {
+            let (len, _) = frame(&md, fields, removed);
+            assert!(
+                len < MAX_FRAME_LEN - MARGIN,
+                "{name} with {fields} values and {removed} removed items: the frame is {len} bytes, the limit {MAX_FRAME_LEN}"
+            );
+        }
     }
 }
 
 #[test]
 fn a_view_that_had_to_be_slimmed_says_so() {
     let md = board_of(&"**b** ".repeat(80), 500);
-    let (_, view) = frame(&md, 25);
+    let (_, view) = frame(&md, 25, 25);
     let trimmed = view.trimmed.expect("the worst case is slimmed");
     assert!(trimmed.conflict_values > 0, "{trimmed:?}");
     assert!(
@@ -113,7 +130,7 @@ fn a_view_that_had_to_be_slimmed_says_so() {
 #[test]
 fn an_ordinary_board_with_conflicts_is_sent_whole() {
     let md = board_of("plain words", 20);
-    let (len, view) = frame(&md, 3);
+    let (len, view) = frame(&md, 3, 3);
     assert!(view.trimmed.is_none());
     assert!(len < 1_000_000);
     assert!(view

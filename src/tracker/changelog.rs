@@ -91,6 +91,17 @@ impl ChangeLog {
         }
     }
 
+    /// The log no longer shows what happened after `base`: `base` is ahead of
+    /// the log (it was reset) or older than the oldest entry kept. A writer
+    /// that last saw the board at `base` can't be shown what changed since.
+    pub fn history_gap(&self, base: u64) -> bool {
+        base > self.seq
+            || self
+                .entries
+                .front()
+                .is_some_and(|c| c.seq > base.saturating_add(1))
+    }
+
     /// Changes after `cursor`. `exclude_session` drops changes authored by
     /// that agent session (no self-echo).
     pub fn since(&self, cursor: Option<u64>, exclude_session: Option<&str>) -> Since {

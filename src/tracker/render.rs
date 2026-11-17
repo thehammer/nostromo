@@ -145,15 +145,17 @@ fn delta_entry(change: &Change, approvals: &Approvals) -> Value {
             let (name, _) = field("field").cloned().unwrap_or_default();
             let (lost, kept) = field("value").cloned().unwrap_or_default();
             let (lost_by, _) = field("lost_by").cloned().unwrap_or_default();
-            entry.insert(
-                "conflict".to_string(),
-                json!({
-                    "field": q(&name),
-                    "kept": q(&kept),
-                    "lost": q(&lost),
-                    "lost_by": q(&lost_by),
-                }),
-            );
+            let mut conflict = json!({
+                "field": q(&name),
+                "kept": q(&kept),
+                "lost": q(&lost),
+                "lost_by": q(&lost_by),
+            });
+            // Older losing values of this item that a cap dropped.
+            if let Some((dropped, _)) = field("dropped_conflicts") {
+                conflict["dropped_conflicts"] = dropped.clone();
+            }
+            entry.insert("conflict".to_string(), conflict);
         }
         ChangeKind::Moved => {
             let (old, new) = field("section").cloned().unwrap_or_default();

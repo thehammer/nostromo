@@ -1315,6 +1315,13 @@ pub const FEATURE_AUTHORED_PRS_NOTIFY: &str = "authored_prs_notify_v1";
 /// `tracker_edit_result`. The Mac shows its edit controls only when present.
 pub const FEATURE_TRACKER_EDIT: &str = "tracker_edit_v1";
 
+/// The optional capability advertised in `Welcome.features`: every conflict in
+/// `tracker_board` has a stable `conflict_id`, and `resolve_conflict` names the
+/// conflict it settles by it (a position is refused). A client without it can
+/// still show conflicts but its `resolve_conflict` is refused with a clear
+/// error rather than settling a different value than the one it showed.
+pub const FEATURE_TRACKER_CONFLICT_IDS: &str = "tracker_conflict_ids_v1";
+
 /// Ops in one `tracker_edit`.
 pub const MAX_TRACKER_EDIT_OPS: usize = 50;
 
@@ -1366,8 +1373,8 @@ pub enum TrackerPaneOp {
     },
     /// Puts an item's text back exactly as it was (undoing a restructure):
     /// unlike `edit`'s `text` it is not cut at 500 characters, so a long line
-    /// that came from the file returns whole. One line, at most 9,000
-    /// characters.
+    /// that came from the file returns whole. One line; over 8,000 characters
+    /// (the cap of a note) only the item's recorded original is accepted.
     RestoreText {
         id: String,
         text: String,
@@ -1388,12 +1395,18 @@ pub enum TrackerPaneOp {
         id: String,
     },
     /// Settles a conflict on `field` of item `id` (`removed` for a removed
-    /// item): `keep` is `current` or `losing`; `index` picks which losing
-    /// value (default: the newest).
+    /// item): `keep` is `current` or `losing`. `conflict_id` (from the view)
+    /// names the one losing value: positions shift as conflicts arrive, are
+    /// settled elsewhere or fall off the caps, so it is required, and a
+    /// conflict that no longer exists is refused with nothing written.
     ResolveConflict {
         id: String,
         field: String,
         keep: ConflictKeep,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conflict_id: Option<String>,
+        /// The pre-`conflict_id` pick by position. Still parsed so an old
+        /// client gets a clear refusal; never acted on.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         index: Option<u32>,
     },
@@ -6921,7 +6934,8 @@ mod work_wire_tests {
                     id: "a".into(),
                     field: "status".into(),
                     keep: ConflictKeep::Losing,
-                    index: Some(1),
+                    conflict_id: Some("7.3".into()),
+                    index: None,
                 },
             ],
         });
@@ -6930,6 +6944,8 @@ mod work_wire_tests {
         assert_eq!(v["ops"][0]["op"], "status");
         assert_eq!(v["ops"][4]["op"], "clear_badge");
         assert_eq!(v["ops"][5]["keep"], "losing");
+        assert_eq!(v["ops"][5]["conflict_id"], "7.3");
+        assert!(v["ops"][5].get("index").is_none());
         let json = round_trip_server(ServerMsg::TrackerEditResult {
             tag: "t".into(),
             request_id: "r1".into(),

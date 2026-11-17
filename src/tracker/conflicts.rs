@@ -12,7 +12,11 @@
 //! - (a) L's change is at most [`WINDOW_SECS`] before W's, or
 //! - (b) W could not have seen it:
 //!   - pane or agent: L's change has `seq` after what W had read
-//!     (`base_version` for the pane, the session's read cursor for an agent);
+//!     (`base_version` for the pane, the session's read cursor for an agent;
+//!     an agent that never read has seen nothing, cursor 0), or the log no
+//!     longer reaches back to what W had read and F has no visible history
+//!     (the value that was there fell off the log: its author is unknown, so
+//!     it is attributed `file (unknown editor)`);
 //!   - file: the save sets F back to a value F once had (a stale editor copy),
 //!     or drops an item L added or changed, at any age.
 //!
@@ -20,10 +24,12 @@
 //! side: a bound item follows its source by design. Two changes by one author
 //! never conflict. The write is honoured either way; the overwritten value is
 //! kept (at most [`MAX_PER_FIELD`] per item field and [`MAX_PER_BOARD`] per
-//! board, the oldest dropped) until the user resolves it or the daemon
-//! restarts.
+//! board, the oldest dropped, and counted per item so the pane and the agent
+//! can say something older was lost) until the user resolves it or the daemon
+//! restarts. Each kept value has a stable id ([`Conflict::id`]): it is how the
+//! user names the one they settle, since positions shift.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Value};
@@ -43,6 +49,9 @@ pub const REMOVED: &str = "removed";
 /// One overwritten value, kept.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Conflict {
+    /// Stable for the life of the conflict: `<version>.<n>` (the version it
+    /// became visible at, and a per-board counter). Empty until recorded.
+    pub id: String,
     pub item_id: String,
     /// The field, or [`REMOVED`].
     pub field: String,
@@ -69,9 +78,13 @@ pub struct Conflict {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Conflicts {
     list: Vec<Conflict>,
-    /// Losing values dropped by a cap since the board was loaded (a test
-    /// asserts it stays 0 in the concurrency fixture).
+    /// Losing values dropped by a cap since the board was loaded.
     dropped: u32,
+    /// The same, per item, until the user settles what is left of its
+    /// conflicts: the pane and the agent are told something older was lost.
+    dropped_by_item: HashMap<String, u32>,
+    /// Numbers the ids of this board's conflicts.
+    counter: u64,
 }
 
 impl Conflicts {
@@ -89,13 +102,25 @@ impl Conflicts {
             .map(|(i, _)| i)
             .collect();
         if same.len() > MAX_PER_FIELD {
-            self.list.remove(same[0]);
-            self.dropped += 1;
+            let gone = self.list.remove(same[0]);
+            self.count_dropped(gone.item_id);
         }
         if self.list.len() > MAX_PER_BOARD {
-            self.list.remove(0);
-            self.dropped += 1;
+            let gone = self.list.remove(0);
+            self.count_dropped(gone.item_id);
         }
+    }
+
+    fn count_dropped(&mut self, item_id: String) {
+        self.dropped += 1;
+        *self.dropped_by_item.entry(item_id).or_default() += 1;
+    }
+
+    /// The conflict with this stable id.
+    pub fn get(&self, id: &str) -> Option<&Conflict> {
+        (!id.is_empty())
+            .then(|| self.list.iter().find(|c| c.id == id))
+            .flatten()
     }
 
     /// All conflicts, oldest first.
@@ -121,19 +146,38 @@ impl Conflicts {
         });
     }
 
-    /// Settles `conflict` (one losing value) and nothing else: the others of
-    /// its field, and any recorded since the user looked, stay.
-    pub fn clear(&mut self, conflict: &Conflict) {
-        if let Some(pos) = self.list.iter().position(|c| c == conflict) {
-            self.list.remove(pos);
+    /// Settles the conflict with this id (one losing value) and nothing else:
+    /// the others of its field, and any recorded since the user looked, stay.
+    /// When an item has none left, its dropped count is forgotten too.
+    pub fn clear(&mut self, id: &str) {
+        let Some(pos) = self.list.iter().position(|c| c.id == id) else {
+            return;
+        };
+        let gone = self.list.remove(pos);
+        if !self.list.iter().any(|c| c.item_id == gone.item_id) {
+            self.dropped_by_item.remove(&gone.item_id);
         }
     }
 
-    /// Stamps the conflicts recorded without a version with `version`.
+    /// Stamps the conflicts recorded without a version with `version` and
+    /// gives each its id.
     pub fn stamp_unversioned(&mut self, version: u64) {
         for c in self.list.iter_mut().filter(|c| c.version == 0) {
             c.version = version;
+            c.id = format!("{version}.{}", self.counter);
+            self.counter += 1;
         }
+    }
+
+    /// How many losing values of `item_id` a cap has dropped, until the user
+    /// settles what is kept of it.
+    pub fn dropped_for(&self, item_id: &str) -> u32 {
+        self.dropped_by_item.get(item_id).copied().unwrap_or(0)
+    }
+
+    /// [`Self::dropped_for`] for every item with a count.
+    pub fn dropped_by_item(&self) -> &HashMap<String, u32> {
+        &self.dropped_by_item
     }
 
     /// How many losing values a cap has dropped.
@@ -151,9 +195,16 @@ impl Conflicts {
 pub struct Detect<'a> {
     pub writer: &'a Author,
     /// Pane: the `base_version` of the edit. Agent: the session's read
-    /// cursor (`None`: it never read, only rule (a) applies). Unused for a
-    /// file save.
+    /// cursor, `Some(0)` when it never read (it has seen nothing). `None`:
+    /// no notion of reading (a file save), only rule (a) applies.
     pub seen_through: Option<u64>,
+    /// The pane connection making the write (daemon-assigned); `None` for any
+    /// other author.
+    pub client: Option<&'a str>,
+    /// The log no longer reaches back to `seen_through` (see
+    /// [`super::changelog::ChangeLog::history_gap`]): a field with no logged
+    /// history may have been changed by something that fell off the log.
+    pub history_gap: bool,
     /// `(item, field)` pairs the writer is settling by putting a losing value
     /// back: a change to one of them that `seen_through` covers is the
     /// decision's own premise, not a competing edit. Anything after
@@ -183,23 +234,31 @@ pub fn detect(
         match change.kind {
             ChangeKind::Changed => {
                 for (field, (_, new)) in &change.fields {
-                    let Some(last) = latest(prior, id, Some(field)) else {
-                        continue;
+                    let last = latest(prior, id, Some(field));
+                    let losing_author = match last {
+                        Some(last) => {
+                            let settled = d.seen_through.is_some_and(|seen| last.seq <= seen)
+                                && d.resolving.iter().any(|(i, f)| i == id && f == field);
+                            if settled || !conflicts(last, d, || reverts(prior, id, field, new)) {
+                                continue;
+                            }
+                            last.by.clone()
+                        }
+                        // Nothing logged: with the history gone, the value
+                        // may be someone else's; keep it.
+                        None if gap_overwrite(d) => Author::File,
+                        None => continue,
                     };
-                    let settled = d.seen_through.is_some_and(|seen| last.seq <= seen)
-                        && d.resolving.iter().any(|(i, f)| i == id && f == field);
-                    if settled || !conflicts(last, d, || reverts(prior, id, field, new)) {
-                        continue;
-                    }
                     let losing = old
                         .item(id)
                         .map(|item| field_value(item, field))
                         .unwrap_or_else(|| change.fields[field].0.clone());
                     out.push(Conflict {
+                        id: String::new(),
                         item_id: id.to_string(),
                         field: field.clone(),
                         losing,
-                        losing_author: last.by.clone(),
+                        losing_author,
                         winning_author: d.writer.clone(),
                         at: d.now,
                         title: None,
@@ -215,12 +274,19 @@ pub fn detect(
                 // author's unseen (or recent) change to it is overwritten. A
                 // file that drops an item someone else touched is the
                 // stale-copy signature at any age.
-                let Some(last) = prior.iter().rev().find(|c| {
+                let found = prior.iter().rev().find(|c| {
                     c.item_id.as_deref() == Some(id)
                         && matches!(c.kind, ChangeKind::Changed | ChangeKind::Added)
                         && conflicts(c, d, || true)
-                }) else {
-                    continue;
+                });
+                let touched = prior.iter().any(|c| {
+                    c.item_id.as_deref() == Some(id)
+                        && matches!(c.kind, ChangeKind::Changed | ChangeKind::Added)
+                });
+                let losing_author = match found {
+                    Some(last) => last.by.clone(),
+                    None if !touched && gap_overwrite(d) => Author::File,
+                    None => continue,
                 };
                 let Some(source) = source_of(id) else {
                     continue;
@@ -228,10 +294,11 @@ pub fn detect(
                 let item = old.item(id);
                 let (prev, next) = neighbours(old, id);
                 out.push(Conflict {
+                    id: String::new(),
                     item_id: id.to_string(),
                     field: REMOVED.to_string(),
                     losing: json!(source),
-                    losing_author: last.by.clone(),
+                    losing_author,
                     winning_author: d.writer.clone(),
                     at: d.now,
                     title: item.map(|i| i.text.clone()),
@@ -264,8 +331,10 @@ fn neighbours(board: &Board, id: &str) -> (Option<String>, Option<String>) {
 }
 
 /// The log entry an agent reads for `conflict`: attributed to the winner.
-pub fn change_for(conflict: &Conflict, kept: &Value) -> Change {
-    Change::new(
+/// `dropped` is how many older losing values of the item a cap has dropped;
+/// the entry says so when it is not 0.
+pub fn change_for(conflict: &Conflict, kept: &Value, dropped: u32) -> Change {
+    let change = Change::new(
         &conflict.winning_author,
         Some(&conflict.item_id),
         ChangeKind::Conflict,
@@ -277,13 +346,18 @@ pub fn change_for(conflict: &Conflict, kept: &Value) -> Change {
         "lost_by",
         json!(conflict.losing_author.label()),
         Value::Null,
-    )
+    );
+    if dropped == 0 {
+        return change;
+    }
+    change.with_field("dropped_conflicts", json!(dropped), Value::Null)
 }
 
 /// Does `last` (the latest other-author change to what `d.writer` is writing)
 /// conflict with the write? `stale_file` is rule (b) for a file save.
 fn conflicts(last: &Change, d: &Detect<'_>, stale_file: impl FnOnce() -> bool) -> bool {
-    if &last.by == d.writer || matches!(last.by, Author::Source { .. }) {
+    let same_writer = &last.by == d.writer && last.client.as_deref() == d.client;
+    if same_writer || matches!(last.by, Author::Source { .. }) {
         return false;
     }
     if d.now - last.at <= Duration::seconds(WINDOW_SECS) {
@@ -293,6 +367,12 @@ fn conflicts(last: &Change, d: &Detect<'_>, stale_file: impl FnOnce() -> bool) -
         Author::File => stale_file(),
         _ => d.seen_through.is_some_and(|seen| last.seq > seen),
     }
+}
+
+/// A pane or agent write whose reading position fell off the log: what it
+/// overwrites with no logged history is not known to be its own.
+fn gap_overwrite(d: &Detect<'_>) -> bool {
+    d.history_gap && matches!(d.writer, Author::Pane | Author::Agent { .. })
 }
 
 /// The latest change to `field` of item `id` (any field when `None`), made
@@ -372,6 +452,8 @@ mod tests {
             &Detect {
                 writer,
                 seen_through: seen,
+                client: None,
+                history_gap: false,
                 resolving: &[],
                 now: at(secs),
             },
@@ -414,7 +496,12 @@ mod tests {
             1
         );
         assert!(run(prior.clone(), write.clone(), &ag, Some(3), 300).is_empty());
-        // Never read: only the ten-second rule applies.
+        // Never read (the daemon passes cursor 0): it has seen nothing.
+        assert_eq!(
+            run(prior.clone(), write.clone(), &ag, Some(0), 300).len(),
+            1
+        );
+        // No notion of reading: only the ten-second rule applies.
         assert!(run(prior, write, &ag, None, 300).is_empty());
     }
 
@@ -470,6 +557,7 @@ mod tests {
     fn the_caps_drop_the_oldest_and_count_it() {
         let mut conflicts = Conflicts::default();
         let make = |item: &str, field: &str, n: usize| Conflict {
+            id: String::new(),
             item_id: item.into(),
             field: field.into(),
             losing: json!(n),

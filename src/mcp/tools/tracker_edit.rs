@@ -13,6 +13,7 @@ pub async fn tracker_edit(
     state: &McpSharedState,
     tag: &str,
     request_id: &str,
+    client: &str,
     base_version: u64,
     ops: Vec<TrackerPaneOp>,
 ) -> ServerMsg {
@@ -36,8 +37,9 @@ pub async fn tracker_edit(
     };
     let registry = daemon.tracker.clone();
     let owned_tag = tag.to_string();
+    let owned_client = client.to_string();
     let applied = tokio::task::spawn_blocking(move || {
-        registry.apply_pane_ops(&owned_tag, base_version, &ops)
+        registry.apply_pane_ops_as(&owned_tag, &owned_client, base_version, &ops)
     })
     .await;
     // The edit is in the file; the pane sees it now, not on a debounce. A

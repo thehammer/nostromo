@@ -34,7 +34,9 @@ use super::conflicts::{self, Conflict, Conflicts, Detect};
 use super::diff::{diff, field_value};
 use super::format::{parse, template, Malformed, ParsedBoard};
 use super::model::{fnv1a64, slug, Author, Board, ChangeKind, Counts, Kind, Link, Stamp, Status};
-use super::ops::{apply_steps_to_file, LinkInput, Op, OpError, PaneStep, Upsert, WriteError};
+use super::ops::{
+    apply_steps_to_file, LinkInput, Op, OpError, PaneStep, Upsert, WriteError, MAX_NOTE_CHARS,
+};
 use super::paths::{
     default_path, find_repo_root, is_valid_topic, probe_committable, resolve_board_path, RepoRoot,
 };
@@ -249,6 +251,10 @@ struct BoardEntry {
     conflicts: Conflicts,
     /// What the user cleared of sensitive-looking text (hashes, persisted).
     approvals: Approvals,
+    /// The text an item had when a write or an external save changed it from
+    /// one over [`MAX_NOTE_CHARS`] (by item id; in memory only): the only
+    /// text over that length `restore_text` accepts back.
+    long_texts: HashMap<String, String>,
 }
 
 /// One bound item's live state. The board in memory shows what the source
@@ -305,6 +311,7 @@ impl BoardEntry {
             live: HashMap::new(),
             conflicts: Conflicts::default(),
             approvals: Approvals::default(),
+            long_texts: HashMap::new(),
         }
     }
 }
@@ -536,10 +543,10 @@ impl TrackerRegistry {
             .ok_or(TrackerError::NoTracker)?;
         let entry = inner.boards.get_mut(&path).ok_or(TrackerError::NoTracker)?;
         let cursor = inner.cursors.get(session, &key_of(&path));
-        // An agent has seen what its read cursor covers; nobody else writes here.
-        let seen = matches!(author, Author::Agent { .. })
-            .then_some(cursor)
-            .flatten();
+        // An agent has seen what its read cursor covers, and an agent with no
+        // cursor (a restarted or resumed session that never read) has seen
+        // nothing: every other author's change is news to it.
+        let seen = matches!(author, Author::Agent { .. }).then(|| cursor.unwrap_or(0));
         let result = self.write_ops_logged(entry, &path, ops, author, true, seen);
         let user_changes = user_changes_of(entry, cursor, session);
         let version = entry.log.seq;
@@ -657,6 +664,7 @@ impl TrackerRegistry {
                 bound: self.bound_views(entry),
                 conflicts: view_conflicts(entry),
                 removed_conflicts: view_removed_conflicts(entry),
+                dropped: entry.conflicts.dropped_by_item().clone(),
                 sensitive: parsed
                     .board
                     .items
@@ -1027,6 +1035,7 @@ impl TrackerRegistry {
         let ctx = WriteCtx {
             log,
             seen,
+            client: None,
             detect: log,
             resolving: &[],
         };
@@ -1056,7 +1065,10 @@ impl TrackerRegistry {
                 Some(parsed) => plan(&parsed.board, &entry.live, &entry.log)?,
                 None => Vec::new(),
             };
-            let applied = apply_steps_to_file(&bytes, &steps, author, stamp)?;
+            let mut applied = apply_steps_to_file(&bytes, &steps, author, stamp)?;
+            for change in &mut applied.changes {
+                change.client = ctx.client.map(str::to_string);
+            }
             if matches!(author, Author::Agent { .. }) {
                 if let Some(old) = entry.parsed.as_ref().map(|p| &p.board) {
                     refuse_agent_ran_it(old, &applied.board)?;
@@ -1071,6 +1083,8 @@ impl TrackerRegistry {
                     &Detect {
                         writer: author,
                         seen_through: ctx.seen,
+                        client: ctx.client,
+                        history_gap: ctx.seen.is_some_and(|seen| entry.log.history_gap(seen)),
                         resolving: ctx.resolving,
                         now,
                     },
@@ -1094,6 +1108,9 @@ impl TrackerRegistry {
                 return Err(TrackerError::Io(CONCURRENT_EDIT.to_string()));
             }
         };
+        if let Some(old) = entry.parsed.as_ref() {
+            remember_long_texts(&mut entry.long_texts, &old.board, &applied.board);
+        }
         entry.own_bytes = Some(applied.bytes.clone());
         entry.last_ingested = Some(applied.bytes);
         entry.parsed = Some(applied.parsed);
@@ -1189,11 +1206,14 @@ impl TrackerRegistry {
                         &Detect {
                             writer: &Author::File,
                             seen_through: None,
+                            client: None,
+                            history_gap: false,
                             resolving: &[],
                             now,
                         },
                     );
                     let board = parsed.board.clone();
+                    remember_long_texts(&mut entry.long_texts, &old.board, &board);
                     record_conflicts(entry, &mut changes, found, &board);
                     let version = entry.log.append(changes);
                     entry.conflicts.stamp_unversioned(version);
@@ -1797,6 +1817,8 @@ struct WriteCtx<'a> {
     log: bool,
     /// What the writer had read (the pane's base version, an agent's cursor).
     seen: Option<u64>,
+    /// The pane connection writing (assigned by the daemon).
+    client: Option<&'a str>,
     /// Look for conflicts with other authors' changes.
     detect: bool,
     /// The `(item, field)` pairs a pane edit settles (see [`Detect::resolving`]).
@@ -1820,6 +1842,7 @@ fn view_conflicts(entry: &BoardEntry) -> HashMap<String, Vec<view::ViewConflict>
         out.entry(c.item_id.clone())
             .or_default()
             .push(view::ViewConflict {
+                conflict_id: c.id.clone(),
                 field: c.field.clone(),
                 losing: match &c.losing {
                     Value::String(s) => s.clone(),
@@ -1844,6 +1867,7 @@ fn view_removed_conflicts(entry: &BoardEntry) -> Vec<view::ViewRemovedConflict> 
         .iter()
         .filter(|c| c.field == conflicts::REMOVED)
         .map(|c| view::ViewRemovedConflict {
+            conflict_id: c.id.clone(),
             item_id: c.item_id.clone(),
             title: c.title.clone().unwrap_or_default(),
             losing_by: c.losing_author.label(),
@@ -1860,6 +1884,20 @@ fn source_of(parsed: &super::format::ParsedBoard, id: &str) -> Option<String> {
     Some(parsed.source[span].to_string())
 }
 
+/// Keeps the text of every item of `old` that was over [`MAX_NOTE_CHARS`] and
+/// is not the same in `new` (changed, or gone).
+fn remember_long_texts(long: &mut HashMap<String, String>, old: &Board, new: &Board) {
+    for item in old
+        .items
+        .iter()
+        .filter(|i| i.text.chars().count() > MAX_NOTE_CHARS)
+    {
+        if new.item(&item.id).is_none_or(|n| n.text != item.text) {
+            long.insert(item.id.clone(), item.text.clone());
+        }
+    }
+}
+
 /// Keeps `found` on the entry and adds one log entry for each, after the
 /// write's own changes, so an agent reads it in its next delta.
 fn record_conflicts(
@@ -1872,8 +1910,12 @@ fn record_conflicts(
         let kept = board
             .item(&conflict.item_id)
             .map_or(Value::Null, |item| field_value(item, &conflict.field));
-        changes.push(conflicts::change_for(&conflict, &kept));
-        entry.conflicts.push(conflict);
+        let item_id = conflict.item_id.clone();
+        entry.conflicts.push(conflict.clone());
+        // An older value of this item may have just been dropped by a cap (or
+        // earlier): the agent is told something was lost that it can't see.
+        let dropped = entry.conflicts.dropped_for(&item_id);
+        changes.push(conflicts::change_for(&conflict, &kept, dropped));
     }
 }
 

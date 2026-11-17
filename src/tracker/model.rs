@@ -564,6 +564,11 @@ pub struct Change {
     pub kind: ChangeKind,
     pub fields: BTreeMap<String, (Value, Value)>,
     pub at: DateTime<Utc>,
+    /// The pane connection (window) that made the change, assigned by the
+    /// daemon, never by a client. Two windows are both `Author::Pane` but are
+    /// different writers for the conflict rule. `None` for every other author.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
 }
 
 impl Change {
@@ -576,6 +581,7 @@ impl Change {
             kind,
             fields: BTreeMap::new(),
             at,
+            client: None,
         }
     }
 

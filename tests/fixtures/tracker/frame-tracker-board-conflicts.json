@@ -70,6 +70,7 @@
         "ran": false,
         "conflicts": [
           {
+            "conflict_id": "7.0",
             "field": "status",
             "losing": "in-progress",
             "losing_by": "agent claudia",
@@ -1712,6 +1713,7 @@
     "hidden_by_user": false,
     "removed_conflicts": [
       {
+        "conflict_id": "7.1",
         "item_id": "gone-1",
         "title": "A removed task",
         "losing_by": "pane (you)",

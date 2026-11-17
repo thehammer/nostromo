@@ -74,6 +74,17 @@ fn pane_status(id: &str, status: &str) -> TrackerPaneOp {
     }
 }
 
+/// The pane settling the conflict `conflict_id` shows.
+fn resolve_op(id: &str, field: &str, keep: ConflictKeep, conflict_id: &str) -> TrackerPaneOp {
+    TrackerPaneOp::ResolveConflict {
+        id: id.into(),
+        field: field.into(),
+        keep,
+        conflict_id: Some(conflict_id.into()),
+        index: None,
+    }
+}
+
 fn pane_edit_body(id: &str, body: &str) -> TrackerPaneOp {
     TrackerPaneOp::Edit {
         id: id.into(),
@@ -152,6 +163,27 @@ impl Rig {
         ops: Vec<TrackerPaneOp>,
     ) -> Result<PaneEditOutcome, PaneEditError> {
         self.reg.apply_pane_ops(TAG_A, base, &ops)
+    }
+
+    /// One pane window (a daemon-assigned connection id) writing.
+    fn pane_as(
+        &self,
+        client: &str,
+        base: u64,
+        ops: Vec<TrackerPaneOp>,
+    ) -> Result<PaneEditOutcome, PaneEditError> {
+        self.reg.apply_pane_ops_as(TAG_A, client, base, &ops)
+    }
+
+    /// The stable id the pane's view shows for `id`'s conflict on `field`
+    /// whose losing value is `losing`.
+    fn conflict_id(&self, id: &str, field: &str, losing: &str) -> String {
+        self.item(id)
+            .conflicts
+            .into_iter()
+            .find(|c| c.field == field && c.losing == losing)
+            .unwrap_or_else(|| panic!("no conflict on {id}.{field} losing {losing:?}"))
+            .conflict_id
     }
 
     fn agent_a(&self, ops: &[Op]) -> Result<nostromo::tracker::WriteOutcome, TrackerError> {
@@ -690,6 +722,7 @@ async fn the_handler_flushes_the_board_and_never_takes_the_session_lock() {
             &handler_state,
             TAG_A,
             "req-1",
+            "conn-1",
             version,
             vec![
                 pane_status("alpha", "done"),
@@ -738,7 +771,15 @@ async fn the_handler_flushes_the_board_and_never_takes_the_session_lock() {
     // One frame per focus bound to the board (two here).
     assert_eq!(boards, 2, "the board frames are broadcast within the call");
     // A refused edit answers `ok: false` and still changes nothing.
-    let refused = tracker_edit(&state, TAG_A, "req-2", 0, vec![pane_status("nope", "done")]).await;
+    let refused = tracker_edit(
+        &state,
+        TAG_A,
+        "req-2",
+        "conn-1",
+        0,
+        vec![pane_status("nope", "done")],
+    )
+    .await;
     assert!(matches!(
         refused,
         ServerMsg::TrackerEditResult { ok: false, error: Some(e), .. } if e.code == "unknown_item" && e.index == Some(0)
@@ -943,13 +984,18 @@ fn removing_an_item_the_pane_just_edited_is_restorable_byte_for_byte() {
     assert_eq!(removed.winning_by, "agent cody-b");
     let delta = rig.delta(TAG_A, SESS_A);
     assert_eq!(conflict_entries(&delta).len(), 1, "{delta:?}");
-    rig.pane(vec![TrackerPaneOp::ResolveConflict {
-        id: "alpha".into(),
-        field: "removed".into(),
-        keep: ConflictKeep::Losing,
-        index: None,
-    }])
-    .unwrap();
+    let out = rig
+        .pane(vec![resolve_op(
+            "alpha",
+            "removed",
+            ConflictKeep::Losing,
+            &removed.conflict_id,
+        )])
+        .unwrap();
+    assert!(
+        out.created.is_empty(),
+        "the id was free: it comes back under it"
+    );
     assert_eq!(rig.text(), before_removal);
     assert!(rig
         .reg
@@ -966,12 +1012,8 @@ fn resolving_a_field_conflict_keeps_either_side_and_clears_it() {
     rig.agent_a(&[status_op("alpha", "in-progress")]).unwrap();
     rig.tick(2);
     rig.pane(vec![pane_status("alpha", "done")]).unwrap();
-    let resolve = |keep| TrackerPaneOp::ResolveConflict {
-        id: "alpha".into(),
-        field: "status".into(),
-        keep,
-        index: Some(0),
-    };
+    let cid = rig.conflict_id("alpha", "status", "in-progress");
+    let resolve = |keep| resolve_op("alpha", "status", keep, &cid);
     rig.pane(vec![resolve(ConflictKeep::Losing)]).unwrap();
     assert_eq!(rig.item("alpha").status, Status::InProgress);
     assert!(
@@ -1236,9 +1278,11 @@ fn the_first_open_of_a_board_counts_as_a_read() {
 /// P2: settling one conflict settles that one.
 #[test]
 fn resolving_one_conflict_leaves_the_one_the_user_never_saw() {
-    for pick in [None, Some(0)] {
+    // `index` is informational now: whatever it says, the id names the conflict.
+    for pick in [None, Some(0), Some(1)] {
         let rig = Rig::new();
         let seen = rig.first_status_conflict();
+        let first = rig.conflict_id("alpha", "status", "in-progress");
         // A second conflict, after what the pane showed: A (having read) sets
         // `blocked`, B overwrites it two seconds later.
         rig.tick(100);
@@ -1253,6 +1297,7 @@ fn resolving_one_conflict_leaves_the_one_the_user_never_saw() {
                 id: "alpha".into(),
                 field: "status".into(),
                 keep: ConflictKeep::Current,
+                conflict_id: Some(first.clone()),
                 index: pick,
             }],
         )
@@ -1280,12 +1325,13 @@ fn keeping_a_losing_value_settles_only_that_conflict() {
         rig.losers("alpha", "status"),
         vec!["in-progress", "blocked"]
     );
-    rig.pane(vec![TrackerPaneOp::ResolveConflict {
-        id: "alpha".into(),
-        field: "status".into(),
-        keep: ConflictKeep::Losing,
-        index: Some(0),
-    }])
+    let first = rig.conflict_id("alpha", "status", "in-progress");
+    rig.pane(vec![resolve_op(
+        "alpha",
+        "status",
+        ConflictKeep::Losing,
+        &first,
+    )])
     .unwrap();
     assert_eq!(rig.item("alpha").status, Status::InProgress);
     assert_eq!(rig.losers("alpha", "status"), vec!["blocked"]);
@@ -1297,18 +1343,14 @@ fn keeping_a_losing_value_settles_only_that_conflict() {
 fn keep_losing_from_a_stale_view_conflicts_with_a_newer_value() {
     let rig = Rig::new();
     let seen = rig.first_status_conflict();
+    let first = rig.conflict_id("alpha", "status", "in-progress");
     rig.tick(100);
     rig.reg.read(TAG_B, SESS_B).unwrap();
     rig.agent_b(&[status_op("alpha", "needs-you")]).unwrap();
     assert_eq!(rig.losers("alpha", "status"), vec!["in-progress"]);
     rig.pane_at(
         seen,
-        vec![TrackerPaneOp::ResolveConflict {
-            id: "alpha".into(),
-            field: "status".into(),
-            keep: ConflictKeep::Losing,
-            index: Some(0),
-        }],
+        vec![resolve_op("alpha", "status", ConflictKeep::Losing, &first)],
     )
     .unwrap();
     assert!(
@@ -1325,18 +1367,14 @@ fn keep_losing_from_a_stale_view_conflicts_with_a_newer_value() {
 fn a_batch_that_settles_a_conflict_still_detects_conflicts_for_its_other_ops() {
     let rig = Rig::new();
     let seen = rig.first_status_conflict();
+    let first = rig.conflict_id("alpha", "status", "in-progress");
     rig.tick(100);
     rig.reg.read(TAG_B, SESS_B).unwrap();
     rig.agent_b(&[status_op("beta", "in-progress")]).unwrap();
     rig.pane_at(
         seen,
         vec![
-            TrackerPaneOp::ResolveConflict {
-                id: "alpha".into(),
-                field: "status".into(),
-                keep: ConflictKeep::Losing,
-                index: Some(0),
-            },
+            resolve_op("alpha", "status", ConflictKeep::Losing, &first),
             pane_status("beta", "done"),
         ],
     )
@@ -1416,12 +1454,7 @@ fn any_refused_batch_leaves_the_file_byte_identical() {
             "a conflict that isn't there",
             vec![
                 pane_status("alpha", "done"),
-                TrackerPaneOp::ResolveConflict {
-                    id: "alpha".into(),
-                    field: "status".into(),
-                    keep: ConflictKeep::Current,
-                    index: None,
-                },
+                resolve_op("alpha", "status", ConflictKeep::Current, "999.0"),
             ],
         ),
         (
@@ -1565,4 +1598,805 @@ fn undoing_a_restructure_restores_a_text_over_five_hundred_characters() {
     }])
     .unwrap();
     assert_eq!(rig.item(&long_id).text, before);
+}
+
+// ---------------------------------------------------------------------------
+// Lost-edit regressions, second review (Perri's probes Q1-Q15)
+// ---------------------------------------------------------------------------
+
+fn note_op(id: &str, note: &str) -> Op {
+    Op::Upsert(Upsert {
+        id: Some(id.into()),
+        note: Some(note.into()),
+        ..Default::default()
+    })
+}
+
+/// Conflicts on `alpha`'s note losing `a<from>` .. `a<to>`: each round agent B
+/// (having read everything) writes `a<k>` and the pane, two seconds later and
+/// with a fresh view, overwrites it with `p<k>`. Rounds are far enough apart
+/// that only the overwrite of `a<k>` conflicts.
+fn lose_notes(rig: &Rig, from: usize, to: usize) {
+    for k in from..=to {
+        rig.tick(30);
+        rig.reg.read(TAG_B, SESS_B).unwrap();
+        rig.agent_b(&[note_op("alpha", &format!("a{k}"))]).unwrap();
+        rig.tick(2);
+        rig.pane(vec![pane_edit_body("alpha", &format!("p{k}"))])
+            .unwrap();
+    }
+}
+
+fn conflict_ids(rig: &Rig, id: &str) -> Vec<String> {
+    rig.item(id)
+        .conflicts
+        .into_iter()
+        .map(|c| c.conflict_id)
+        .collect()
+}
+
+/// Q1: an agent session that never opened or read the board has seen nothing,
+/// so it overwrites the user's change as news it could not have known.
+#[test]
+fn a_new_agent_session_that_never_read_conflicts_with_the_users_earlier_change() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.pane(vec![pane_status("alpha", "done")]).unwrap();
+    rig.tick(60);
+    // A new session on the same focus: no `open`, no `read`.
+    let fresh = "sess-b2";
+    rig.reg
+        .apply(
+            TAG_B,
+            fresh,
+            &[status_op("alpha", "in-progress")],
+            &agent(TAG_B, fresh),
+        )
+        .unwrap();
+    assert_eq!(rig.item("alpha").status, Status::InProgress);
+    let c = rig.item("alpha").conflicts;
+    assert_eq!(c.len(), 1, "{c:?}");
+    assert_eq!(
+        (
+            c[0].field.as_str(),
+            c[0].losing.as_str(),
+            c[0].losing_by.as_str()
+        ),
+        ("status", "done", PANE)
+    );
+    // The agents that are reading the board are told.
+    let delta = rig.delta(TAG_A, SESS_A);
+    let entries = conflict_entries(&delta);
+    assert_eq!(entries.len(), 1, "{delta:?}");
+    assert_eq!(entries[0]["conflict"]["lost"], "done");
+}
+
+/// Q1b: a resumed conversation is bound to the board with `bind_existing`,
+/// which reads nothing for the agent's real session.
+#[test]
+fn a_resumed_agent_bound_to_the_board_has_not_seen_the_users_earlier_change() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.pane(vec![pane_status("alpha", "done")]).unwrap();
+    rig.tick(60);
+    assert!(rig.reg.bind_existing("cody-resumed", &rig.path));
+    let real = "resumed-real-session";
+    rig.reg
+        .apply(
+            "cody-resumed",
+            real,
+            &[status_op("alpha", "in-progress")],
+            &agent("cody-resumed", real),
+        )
+        .unwrap();
+    let c = rig.item("alpha").conflicts;
+    assert_eq!(c.len(), 1, "{c:?}");
+    assert_eq!(
+        (c[0].losing.as_str(), c[0].losing_by.as_str()),
+        ("done", PANE)
+    );
+}
+
+/// Q2: the pane resolves the conflict it was shown even after the cap dropped
+/// it; what the stale view's position now points at is a different value.
+#[test]
+fn settling_a_conflict_the_cap_dropped_is_refused_and_touches_nothing_else() {
+    for keep in [ConflictKeep::Losing, ConflictKeep::Current] {
+        let rig = Rig::new();
+        lose_notes(&rig, 1, 5);
+        let shown = rig.item("alpha");
+        assert_eq!(shown.conflicts.len(), 5);
+        let (stale_base, a1) = (rig.version(), rig.conflict_id("alpha", "note", "a1"));
+        // A sixth arrives: the cap of five drops a1.
+        lose_notes(&rig, 6, 6);
+        assert_eq!(
+            rig.losers("alpha", "note"),
+            vec!["a2", "a3", "a4", "a5", "a6"]
+        );
+        let (text, version, ids) = (rig.text(), rig.version(), conflict_ids(&rig, "alpha"));
+
+        let err = rig
+            .pane_at(stale_base, vec![resolve_op("alpha", "note", keep, &a1)])
+            .expect_err("a1 is no longer kept");
+        assert_eq!(err.code, "invalid_args", "{keep:?}");
+        assert_eq!(err.index, Some(0));
+        let reason = err.reason.clone().unwrap_or_default();
+        assert!(reason.contains("conflict"), "{reason}");
+        assert_eq!(rig.text(), text, "{keep:?}: the file is byte-identical");
+        assert_eq!(rig.version(), version);
+        assert_eq!(conflict_ids(&rig, "alpha"), ids, "a2..a6 are untouched");
+    }
+}
+
+/// Q2b and Q2c: another pane window settled a1 first; this window, on its old
+/// view, picks a1 again. Whichever side it asks for, nothing is written and
+/// the neighbouring conflict a2 is not the one that goes.
+#[test]
+fn settling_a_conflict_another_window_already_settled_is_refused() {
+    for keep in [ConflictKeep::Losing, ConflictKeep::Current] {
+        let rig = Rig::new();
+        lose_notes(&rig, 1, 2);
+        let base = rig.version();
+        let a1 = rig.conflict_id("alpha", "note", "a1");
+        // Window B settles a1, keeping the current value.
+        rig.pane_as(
+            "win-b",
+            base,
+            vec![resolve_op("alpha", "note", ConflictKeep::Current, &a1)],
+        )
+        .unwrap();
+        assert_eq!(rig.losers("alpha", "note"), vec!["a2"]);
+        let (text, version) = (rig.text(), rig.version());
+
+        // Window A still shows a1 (position 0 of the field).
+        let err = rig
+            .pane_as("win-a", base, vec![resolve_op("alpha", "note", keep, &a1)])
+            .expect_err("a1 was settled elsewhere");
+        assert_eq!(err.code, "invalid_args", "{keep:?}");
+        assert_eq!(rig.text(), text, "{keep:?}");
+        assert_eq!(rig.version(), version);
+        assert_eq!(rig.item("alpha").note.as_deref(), Some("p2"), "{keep:?}");
+        assert_eq!(
+            rig.losers("alpha", "note"),
+            vec!["a2"],
+            "{keep:?}: a2's losing value was not deleted"
+        );
+    }
+}
+
+/// An id names its conflict for as long as it lives: settling or adding others
+/// does not move it, and no two are alike.
+#[test]
+fn a_conflicts_id_is_stable_while_others_are_settled_and_added() {
+    let rig = Rig::new();
+    lose_notes(&rig, 1, 3);
+    let ids = conflict_ids(&rig, "alpha");
+    assert_eq!(ids.len(), 3);
+    let (a1, a2, a3) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
+    assert!(ids.iter().all(|id| !id.is_empty()));
+    let mut distinct = ids.clone();
+    distinct.dedup();
+    assert_eq!(distinct.len(), 3, "{ids:?}");
+
+    rig.pane(vec![resolve_op(
+        "alpha",
+        "note",
+        ConflictKeep::Current,
+        &a2,
+    )])
+    .unwrap();
+    assert_eq!(conflict_ids(&rig, "alpha"), vec![a1.clone(), a3.clone()]);
+
+    lose_notes(&rig, 4, 4);
+    let after = conflict_ids(&rig, "alpha");
+    assert_eq!(&after[..2], &[a1.clone(), a3.clone()]);
+    assert_eq!(after.len(), 3);
+    assert!(!after[2].is_empty() && ![a1.clone(), a2, a3].contains(&after[2]));
+    // And the view's id still settles the very value it showed.
+    rig.pane(vec![resolve_op("alpha", "note", ConflictKeep::Losing, &a1)])
+        .unwrap();
+    assert_eq!(rig.item("alpha").note.as_deref(), Some("a1"));
+}
+
+/// `resolve_conflict` without a `conflict_id` (an old client's position
+/// alone) is refused with an error that says what is missing.
+#[test]
+fn resolving_without_a_conflict_id_is_refused_with_a_clear_error() {
+    let rig = Rig::new();
+    lose_notes(&rig, 1, 2);
+    let (text, version, ids) = (rig.text(), rig.version(), conflict_ids(&rig, "alpha"));
+    // As an old client writes it on the wire: a position, no id.
+    let old: TrackerPaneOp = serde_json::from_value(json!({
+        "op": "resolve_conflict", "id": "alpha", "field": "note",
+        "keep": "losing", "index": 0
+    }))
+    .expect("an old client's resolve_conflict still parses");
+    let err = rig.pane(vec![old]).expect_err("no conflict_id");
+    assert_eq!(err.code, "invalid_args");
+    assert_eq!(err.index, Some(0));
+    let reason = err.reason.clone().unwrap_or_default();
+    assert!(reason.contains("conflict_id"), "{reason}");
+    assert_eq!(rig.text(), text);
+    assert_eq!(rig.version(), version);
+    assert_eq!(conflict_ids(&rig, "alpha"), ids);
+}
+
+/// A conflict id only settles the item and field it belongs to.
+#[test]
+fn a_conflict_id_does_not_settle_another_item_or_field() {
+    let rig = Rig::new();
+    lose_notes(&rig, 1, 1);
+    let a1 = rig.conflict_id("alpha", "note", "a1");
+    let (text, version) = (rig.text(), rig.version());
+    for (item, field) in [("alpha", "status"), ("beta", "note")] {
+        let err = rig
+            .pane(vec![resolve_op(item, field, ConflictKeep::Losing, &a1)])
+            .expect_err("the id belongs to alpha's note");
+        assert_eq!(err.code, "invalid_args", "{item}.{field}");
+    }
+    assert_eq!(rig.text(), text);
+    assert_eq!(rig.version(), version);
+    assert_eq!(rig.losers("alpha", "note"), vec!["a1"]);
+}
+
+/// Q5: clearing the badge approves what the user saw badged, never what a
+/// later op of the same batch writes.
+#[test]
+fn a_batch_cannot_approve_text_it_writes_after_the_clear_badge() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.pane(vec![
+        TrackerPaneOp::ClearBadge { id: "alpha".into() },
+        pane_edit_body("alpha", &format!("resident SSN {SSN}")),
+    ])
+    .unwrap();
+    assert!(rig.text().contains(SSN), "the user's file keeps their text");
+    assert!(
+        rig.item("alpha").sensitive.is_some(),
+        "the view still badges what the batch wrote"
+    );
+    let shown = serde_json::to_string(&rig.delta(TAG_B, SESS_B)).unwrap();
+    assert!(!shown.contains(SSN), "{shown}");
+    assert!(shown.contains(WITHHELD), "{shown}");
+    assert!(!full_board(&rig, TAG_A, "x").contains(SSN));
+}
+
+/// Q5, with a badge already there: the clear covers the text the user saw, and
+/// the new finding the same batch brings stays withheld.
+#[test]
+fn clearing_a_badge_and_writing_new_sensitive_text_in_one_batch_withholds_the_new_text() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.pane(vec![pane_edit_body("alpha", &format!("SSN {SSN}"))])
+        .unwrap();
+    let other = "412-67-8901";
+    rig.pane(vec![
+        TrackerPaneOp::ClearBadge { id: "alpha".into() },
+        pane_edit_body("alpha", &format!("a different SSN {other}")),
+    ])
+    .unwrap();
+    assert!(rig.item("alpha").sensitive.is_some());
+    let shown = serde_json::to_string(&rig.delta(TAG_B, SESS_B)).unwrap();
+    assert!(!shown.contains(other), "{shown}");
+    assert!(!full_board(&rig, TAG_A, "x").contains(other));
+}
+
+/// Q5's other half: `clear_badge` on its own still approves.
+#[test]
+fn clear_badge_alone_still_approves_the_text_the_user_saw() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.pane(vec![pane_edit_body("alpha", &format!("SSN {SSN}"))])
+        .unwrap();
+    rig.pane(vec![TrackerPaneOp::ClearBadge { id: "alpha".into() }])
+        .unwrap();
+    assert!(rig.item("alpha").sensitive.is_none());
+    assert!(full_board(&rig, TAG_A, "x").contains(SSN));
+}
+
+/// A thousand and five other changes push the log past what a writer last
+/// saw.
+fn churn(rig: &Rig) {
+    for k in 0..1_005 {
+        let status = if k % 2 == 0 { "in-progress" } else { "blocked" };
+        rig.agent_a(&[status_op("beta", status)]).unwrap();
+    }
+}
+
+/// Q4: the user's `done` has fallen off the 1,000-entry log; a stale agent that
+/// overwrites it is still a conflict, and the user's value is kept.
+#[test]
+fn a_stale_agent_overwriting_a_value_that_fell_off_the_log_conflicts() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.pane(vec![pane_status("alpha", "done")]).unwrap();
+    churn(&rig);
+    rig.tick(100);
+    // Agent B's cursor is older than the oldest entry the log keeps.
+    rig.agent_b(&[status_op("alpha", "in-progress")]).unwrap();
+    let c = rig.item("alpha").conflicts;
+    assert_eq!(c.len(), 1, "{c:?}");
+    assert_eq!(c[0].field, "status");
+    assert_eq!(c[0].losing, "done");
+    assert_eq!(c[0].losing_by, "file (unknown editor)");
+    assert_eq!(rig.item("alpha").status, Status::InProgress);
+}
+
+/// Q4b: the mirror: a pane view older than the log's start overwrites the
+/// agent's value.
+#[test]
+fn a_stale_pane_view_overwriting_a_value_that_fell_off_the_log_conflicts() {
+    let rig = Rig::new();
+    rig.tick(100);
+    let stale_base = rig.version();
+    rig.agent_b(&[status_op("alpha", "in-progress")]).unwrap();
+    churn(&rig);
+    rig.tick(100);
+    rig.pane_at(stale_base, vec![pane_status("alpha", "done")])
+        .unwrap();
+    let c = rig.item("alpha").conflicts;
+    assert_eq!(c.len(), 1, "{c:?}");
+    assert_eq!(
+        (c[0].field.as_str(), c[0].losing.as_str()),
+        ("status", "in-progress")
+    );
+    assert_eq!(c[0].winning_by, PANE);
+}
+
+/// Q4c: removing an item whose history fell off the log is the same.
+#[test]
+fn a_stale_pane_view_removing_an_item_whose_history_fell_off_the_log_keeps_it() {
+    let rig = Rig::new();
+    let stale_base = rig.version();
+    churn(&rig);
+    rig.tick(100);
+    rig.pane_at(
+        stale_base,
+        vec![TrackerPaneOp::Remove { id: "gamma".into() }],
+    )
+    .unwrap();
+    assert!(!rig.has_item("gamma"));
+    let removed = rig.reg.board_view(TAG_A).unwrap().removed_conflicts;
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0].item_id, "gamma");
+}
+
+/// Q4's control: a writer that has seen the board, in the same circumstances,
+/// is not a conflict.
+#[test]
+fn a_fresh_writer_after_the_log_rolled_over_does_not_conflict() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.pane(vec![pane_status("alpha", "done")]).unwrap();
+    churn(&rig);
+    rig.tick(100);
+    rig.reg.read(TAG_B, SESS_B).unwrap();
+    rig.agent_b(&[status_op("alpha", "in-progress")]).unwrap();
+    rig.tick(100);
+    rig.pane(vec![pane_status("alpha", "blocked")]).unwrap();
+    rig.tick(100);
+    rig.pane(vec![TrackerPaneOp::Remove { id: "gamma".into() }])
+        .unwrap();
+    assert!(rig.item("alpha").conflicts.is_empty());
+    assert!(rig
+        .reg
+        .board_view(TAG_A)
+        .unwrap()
+        .removed_conflicts
+        .is_empty());
+}
+
+/// Q8: the agent re-added the removed item's id; putting the user's version
+/// back must not lose either, so it comes back under a new id.
+#[test]
+fn restoring_a_removed_item_whose_id_was_taken_again_puts_it_back_under_a_new_id() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.pane(vec![pane_edit_body("alpha", "details the pane typed")])
+        .unwrap();
+    let before_removal = rig.text();
+    rig.tick(3);
+    rig.agent_b(&[Op::Remove { id: "alpha".into() }]).unwrap();
+    rig.tick(1);
+    rig.agent_b(&[upsert("alpha", "now", "Alpha reborn")])
+        .unwrap();
+    let agents_block = |text: &str| {
+        let span = parse(text.as_bytes()).unwrap().item_span("alpha").unwrap();
+        text[span].to_string()
+    };
+    let agents_item = agents_block(&rig.text());
+    let removed = rig.reg.board_view(TAG_A).unwrap().removed_conflicts;
+    assert_eq!(removed.len(), 1);
+
+    let out = rig
+        .pane(vec![resolve_op(
+            "alpha",
+            "removed",
+            ConflictKeep::Losing,
+            &removed[0].conflict_id,
+        )])
+        .unwrap();
+    assert_eq!(out.created.len(), 1, "{:?}", out.created);
+    let new_id = out.created[0].clone();
+    assert_ne!(new_id, "alpha");
+    // The user's text, byte for byte, under the new id.
+    let old_block = {
+        let span = parse(before_removal.as_bytes())
+            .unwrap()
+            .item_span("alpha")
+            .unwrap();
+        before_removal[span].to_string()
+    };
+    let restored = old_block.replacen("<!-- #alpha ", &format!("<!-- #{new_id} "), 1);
+    assert!(rig.text().contains(&restored), "{}", rig.text());
+    let item = rig.item(&new_id);
+    assert_eq!(item.text, "Alpha task");
+    assert_eq!(item.note.as_deref(), Some("details the pane typed"));
+    // The agent's item is untouched.
+    assert_eq!(rig.item("alpha").text, "Alpha reborn");
+    assert_eq!(agents_block(&rig.text()), agents_item);
+    assert!(rig
+        .reg
+        .board_view(TAG_A)
+        .unwrap()
+        .removed_conflicts
+        .is_empty());
+}
+
+/// Q8: the new id is reported at the op that made it, in order with `add`'s.
+#[test]
+fn a_restored_items_new_id_is_listed_in_created_at_its_op() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.pane(vec![pane_edit_body("alpha", "typed")]).unwrap();
+    rig.tick(3);
+    rig.agent_b(&[Op::Remove { id: "alpha".into() }]).unwrap();
+    rig.agent_b(&[upsert("alpha", "now", "Alpha reborn")])
+        .unwrap();
+    let cid = rig.reg.board_view(TAG_A).unwrap().removed_conflicts[0]
+        .conflict_id
+        .clone();
+    let out = rig
+        .pane(vec![
+            TrackerPaneOp::Add {
+                section: "now".into(),
+                title: "Brand new".into(),
+                body: None,
+                before: None,
+                after: None,
+            },
+            resolve_op("alpha", "removed", ConflictKeep::Losing, &cid),
+        ])
+        .unwrap();
+    assert_eq!(out.created.len(), 2, "{:?}", out.created);
+    assert_eq!(rig.item(&out.created[0]).text, "Brand new");
+    assert_eq!(rig.item(&out.created[1]).text, "Alpha task");
+    assert_ne!(out.created[1], "alpha");
+}
+
+/// Q13: a batch with a failing op writes nothing, restore included.
+#[test]
+fn a_batch_restoring_a_removed_item_with_a_failing_op_writes_nothing() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.pane(vec![pane_edit_body("alpha", "typed")]).unwrap();
+    rig.tick(3);
+    rig.agent_b(&[Op::Remove { id: "alpha".into() }]).unwrap();
+    rig.agent_b(&[upsert("alpha", "now", "Alpha reborn")])
+        .unwrap();
+    let cid = rig.reg.board_view(TAG_A).unwrap().removed_conflicts[0]
+        .conflict_id
+        .clone();
+    let (text, version) = (rig.text(), rig.version());
+    let err = rig
+        .pane(vec![
+            resolve_op("alpha", "removed", ConflictKeep::Losing, &cid),
+            pane_status("nope", "done"),
+        ])
+        .expect_err("the second op fails");
+    assert_eq!((err.code.as_str(), err.index), ("unknown_item", Some(1)));
+    assert_eq!(rig.text(), text, "nothing was restored");
+    assert_eq!(rig.version(), version);
+    assert_eq!(
+        rig.reg.board_view(TAG_A).unwrap().removed_conflicts.len(),
+        1,
+        "the removed item is still kept"
+    );
+    // The same restore on its own still works afterwards.
+    rig.pane(vec![resolve_op(
+        "alpha",
+        "removed",
+        ConflictKeep::Losing,
+        &cid,
+    )])
+    .unwrap();
+}
+
+/// Q3: two pane windows are two writers: what one does after the other's view
+/// is a conflict, though both are `pane (you)` to an agent.
+#[test]
+fn a_second_pane_window_overwriting_what_it_never_saw_is_a_conflict() {
+    let rig = Rig::new();
+    rig.tick(100);
+    let base = rig.version();
+    rig.pane_as("win-a", base, vec![pane_status("alpha", "done")])
+        .unwrap();
+    rig.tick(60);
+    // Window B still shows the board as of `base`.
+    rig.pane_as("win-b", base, vec![pane_status("alpha", "todo")])
+        .unwrap();
+    let c = rig.item("alpha").conflicts;
+    assert_eq!(c.len(), 1, "{c:?}");
+    assert_eq!(
+        (
+            c[0].losing.as_str(),
+            c[0].losing_by.as_str(),
+            c[0].winning_by.as_str()
+        ),
+        ("done", PANE, PANE)
+    );
+    assert_eq!(rig.item("alpha").status, Status::Todo);
+}
+
+/// Q3, ten-second rule: window B has the fresh view but acts within ten
+/// seconds of window A's change.
+#[test]
+fn two_pane_windows_acting_within_ten_seconds_conflict_even_with_a_fresh_view() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.pane_as("win-a", rig.version(), vec![pane_status("alpha", "done")])
+        .unwrap();
+    rig.tick(3);
+    rig.pane_as("win-b", rig.version(), vec![pane_status("alpha", "todo")])
+        .unwrap();
+    assert_eq!(rig.losers("alpha", "status"), vec!["done"]);
+}
+
+/// Q3: one window never conflicts with itself, however old its view.
+#[test]
+fn one_pane_window_does_not_conflict_with_its_own_earlier_change() {
+    let rig = Rig::new();
+    rig.tick(100);
+    let base = rig.version();
+    rig.pane_as("win-a", base, vec![pane_status("alpha", "done")])
+        .unwrap();
+    rig.tick(3);
+    rig.pane_as("win-a", base, vec![pane_status("alpha", "blocked")])
+        .unwrap();
+    rig.tick(60);
+    rig.pane_as("win-a", base, vec![pane_status("alpha", "todo")])
+        .unwrap();
+    assert!(rig.item("alpha").conflicts.is_empty());
+    // The no-connection entry point is one window too.
+    rig.tick(60);
+    rig.pane(vec![pane_status("alpha", "done")]).unwrap();
+    rig.tick(60);
+    rig.pane_at(base, vec![pane_status("alpha", "todo")])
+        .unwrap();
+    assert!(rig.item("alpha").conflicts.is_empty());
+}
+
+/// Q3, mixed: an agent and two windows, each overwriting what it never saw.
+#[test]
+fn an_agent_and_two_pane_windows_each_conflict_with_what_they_never_saw() {
+    let rig = Rig::new();
+    rig.tick(100);
+    let base = rig.version();
+    rig.pane_as("win-a", base, vec![pane_status("alpha", "done")])
+        .unwrap();
+    let after_a = rig.version();
+    rig.tick(60);
+    rig.reg.read(TAG_B, SESS_B).unwrap();
+    rig.agent_b(&[status_op("alpha", "in-progress")]).unwrap();
+    rig.tick(60);
+    // Window B's view predates both of them.
+    rig.pane_as("win-b", base, vec![pane_status("alpha", "blocked")])
+        .unwrap();
+    rig.tick(60);
+    // Window A saw its own change only: B's `blocked` is news to it.
+    rig.pane_as("win-a", after_a, vec![pane_status("alpha", "needs-you")])
+        .unwrap();
+    let c = rig.item("alpha").conflicts;
+    let seen: Vec<(&str, &str)> = c
+        .iter()
+        .map(|c| (c.losing.as_str(), c.losing_by.as_str()))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![("in-progress", "agent cody-b"), ("blocked", PANE)],
+        "{c:?}"
+    );
+}
+
+/// Q15, item 7: seven overwritten values on one field and a cap of five: the
+/// pane and the agent are told two older ones were dropped.
+#[test]
+fn a_cap_that_dropped_conflicts_says_so_to_the_pane_and_the_agent() {
+    let rig = Rig::new();
+    lose_notes(&rig, 1, 7);
+    assert_eq!(
+        rig.losers("alpha", "note"),
+        vec!["a3", "a4", "a5", "a6", "a7"]
+    );
+    assert_eq!(rig.item("alpha").dropped_conflicts, 2);
+    let delta = rig.delta(TAG_A, SESS_A);
+    let entries = conflict_entries(&delta);
+    assert_eq!(entries.len(), 7, "{delta:?}");
+    // The first five lost nothing older; the sixth and seventh each dropped one.
+    for e in &entries[..5] {
+        assert!(e["conflict"].get("dropped_conflicts").is_none(), "{e}");
+    }
+    assert_eq!(entries[5]["conflict"]["dropped_conflicts"], 1);
+    assert_eq!(entries[6]["conflict"]["dropped_conflicts"], 2);
+    // The marker stays until what is left of the item's conflicts is settled.
+    let ids = conflict_ids(&rig, "alpha");
+    for (n, id) in ids.iter().enumerate() {
+        assert_eq!(rig.item("alpha").dropped_conflicts, 2, "after {n} settled");
+        rig.pane(vec![resolve_op("alpha", "note", ConflictKeep::Current, id)])
+            .unwrap();
+    }
+    assert!(rig.item("alpha").conflicts.is_empty());
+    assert_eq!(rig.item("alpha").dropped_conflicts, 0);
+    assert_eq!(
+        serde_json::to_value(rig.item("alpha"))
+            .unwrap()
+            .get("dropped_conflicts"),
+        None,
+        "absent, not 0"
+    );
+}
+
+/// Q15, the quiet case: nothing dropped says nothing.
+#[test]
+fn conflicts_within_the_cap_carry_no_dropped_marker() {
+    let rig = Rig::new();
+    lose_notes(&rig, 1, 5);
+    assert_eq!(rig.item("alpha").conflicts.len(), 5);
+    assert_eq!(rig.item("alpha").dropped_conflicts, 0);
+    assert!(serde_json::to_value(rig.item("alpha"))
+        .unwrap()
+        .get("dropped_conflicts")
+        .is_none());
+    let delta = rig.delta(TAG_A, SESS_A);
+    let entries = conflict_entries(&delta);
+    assert_eq!(entries.len(), 5, "{delta:?}");
+    assert!(entries
+        .iter()
+        .all(|e| e["conflict"].get("dropped_conflicts").is_none()));
+}
+
+/// An item with a line over the note cap, from a file save.
+fn add_long_item(rig: &Rig, chars: usize) -> (String, String) {
+    let original = format!(
+        "Legacy title. {}",
+        "and a long file line ".repeat(chars / 21)
+    );
+    assert!(original.chars().count() > 8_000);
+    rig.save(&rig.text().replace(
+        "- [ ] Beta task",
+        &format!("- [ ] {}\n- [ ] Beta task", original.trim()),
+    ));
+    let id = rig
+        .reg
+        .board_view(TAG_A)
+        .unwrap()
+        .nodes
+        .iter()
+        .find_map(|n| match n {
+            ViewNode::Item(i) if i.text.starts_with("Legacy title.") => Some(i.id.clone()),
+            _ => None,
+        })
+        .expect("the long item");
+    let text = rig.item(&id).text;
+    (id, text)
+}
+
+fn restructure(rig: &Rig, id: &str) {
+    rig.pane(vec![TrackerPaneOp::Edit {
+        id: id.into(),
+        title: Some("Legacy title.".into()),
+        text: None,
+        body: Some("the rest".into()),
+    }])
+    .unwrap();
+}
+
+/// restore_text is for putting a text back; past a note's 8,000 characters it
+/// takes nothing but the item's own original.
+#[test]
+fn restore_text_over_eight_thousand_characters_of_arbitrary_text_is_refused() {
+    let rig = Rig::new();
+    let (text, version) = (rig.text(), rig.version());
+    let err = rig
+        .pane(vec![TrackerPaneOp::RestoreText {
+            id: "alpha".into(),
+            text: "x".repeat(8_001),
+        }])
+        .expect_err("not an original");
+    assert_eq!(err.code, "invalid_args");
+    assert_eq!(err.index, Some(0));
+    assert_eq!(rig.text(), text);
+    assert_eq!(rig.version(), version);
+    // At the cap it is an ordinary text.
+    rig.pane(vec![TrackerPaneOp::RestoreText {
+        id: "alpha".into(),
+        text: "x".repeat(8_000),
+    }])
+    .unwrap();
+    assert_eq!(rig.item("alpha").text.chars().count(), 8_000);
+}
+
+#[test]
+fn undoing_a_restructure_restores_a_line_over_eight_thousand_characters_from_the_file() {
+    let rig = Rig::new();
+    let (id, original) = add_long_item(&rig, 8_500);
+    assert!(original.chars().count() > 8_000);
+    restructure(&rig, &id);
+    assert_eq!(rig.item(&id).text, "Legacy title.");
+    rig.pane(vec![
+        TrackerPaneOp::RestoreText {
+            id: id.clone(),
+            text: original.clone(),
+        },
+        pane_edit_body(&id, ""),
+    ])
+    .unwrap();
+    assert_eq!(rig.item(&id).text, original);
+}
+
+#[test]
+fn a_text_over_eight_thousand_characters_that_is_not_the_items_original_is_refused() {
+    let rig = Rig::new();
+    let (id, original) = add_long_item(&rig, 8_500);
+    restructure(&rig, &id);
+    let (text, version) = (rig.text(), rig.version());
+    for (item, wrong) in [
+        (id.clone(), format!("{original} and one thing more")),
+        (id.clone(), original[..original.len() - 1].to_string()),
+        // The original is this item's; another item can't take it.
+        ("alpha".to_string(), original.clone()),
+    ] {
+        let err = rig
+            .pane(vec![TrackerPaneOp::RestoreText {
+                id: item.clone(),
+                text: wrong,
+            }])
+            .expect_err("not the recorded original");
+        assert_eq!(err.code, "invalid_args", "{item}");
+    }
+    assert_eq!(rig.text(), text);
+    assert_eq!(rig.version(), version);
+}
+
+/// Q12b: only a `title` refuses bidi, zero-width and line-separator
+/// characters; the user's own `text`, `body` and `restore_text` keep them, as
+/// the file they came from may have them.
+#[test]
+fn text_and_restore_text_accept_bidi_zero_width_and_line_separator_characters() {
+    let rig = Rig::new();
+    let odd = "mixed \u{202E}bidi\u{202C} zero\u{200B}width and a\u{2028}separator";
+    let err = rig
+        .pane(vec![TrackerPaneOp::Edit {
+            id: "alpha".into(),
+            title: Some(odd.into()),
+            text: None,
+            body: None,
+        }])
+        .expect_err("a title refuses them");
+    assert_eq!(err.code, "invalid_args");
+    rig.pane(vec![TrackerPaneOp::Edit {
+        id: "alpha".into(),
+        title: None,
+        text: Some(odd.into()),
+        body: Some(odd.into()),
+    }])
+    .unwrap();
+    assert_eq!(rig.item("alpha").text, odd);
+    assert_eq!(rig.item("alpha").note.as_deref(), Some(odd));
+    rig.pane(vec![TrackerPaneOp::RestoreText {
+        id: "beta".into(),
+        text: odd.into(),
+    }])
+    .unwrap();
+    assert_eq!(rig.item("beta").text, odd);
 }

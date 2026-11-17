@@ -260,11 +260,19 @@ impl PaneContentProvider for McpPaneContentProvider {
         &self,
         tag: &str,
         request_id: &str,
+        client: &str,
         base_version: u64,
         ops: Vec<crate::ipc::protocol::TrackerPaneOp>,
     ) -> ServerMsg {
-        crate::mcp::tools::tracker_edit::tracker_edit(&self.0, tag, request_id, base_version, ops)
-            .await
+        crate::mcp::tools::tracker_edit::tracker_edit(
+            &self.0,
+            tag,
+            request_id,
+            client,
+            base_version,
+            ops,
+        )
+        .await
     }
 }
 

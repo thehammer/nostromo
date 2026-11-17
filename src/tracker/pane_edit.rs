@@ -4,7 +4,7 @@
 //!
 //! A child of `registry`: it uses the registry's private write path.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 
@@ -13,15 +13,22 @@ use crate::ipc::protocol::{ConflictKeep, TrackerPaneOp, MAX_TRACKER_EDIT_OPS};
 use crate::tracker::bindings::with_source_line;
 use crate::tracker::changelog::ChangeLog;
 use crate::tracker::conflicts::Conflict;
-use crate::tracker::model::{generate_id, Author, Board, ChangeKind};
-use crate::tracker::ops::{parse_restorable, LinkInput, Op, PaneStep, Restore, Upsert};
+use crate::tracker::model::{generate_id, Author, Board, ChangeKind, Item};
+use crate::tracker::ops::{
+    parse_restorable, LinkInput, Op, PaneStep, Restore, Upsert, MAX_NOTE_CHARS,
+};
+
+/// The pane connection [`TrackerRegistry::apply_pane_ops`] writes as: one
+/// window, for callers that have no connection of their own.
+pub const DEFAULT_CLIENT: &str = "pane";
 
 /// What a successful pane edit did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneEditOutcome {
     /// The board version after the edit.
     pub version: u64,
-    /// The ids `add` generated, in op order.
+    /// The ids `add` generated, in op order. A removed item put back under a
+    /// new id (its old id was taken again) is listed here too, at its op.
     pub created: Vec<String>,
 }
 
@@ -64,13 +71,15 @@ impl PaneEditError {
 /// What a pane op does besides writing the file.
 #[allow(clippy::enum_variant_names)]
 enum Effect {
-    ClearBadge(String),
+    /// Approves the item as it was when planned: the content the user saw
+    /// badged, never what a later op of the same batch makes of it.
+    ClearBadge(Box<Item>),
     ClearRemoved {
         id: String,
         block: String,
     },
-    /// Settles this one conflict.
-    ClearConflict(Box<Conflict>),
+    /// Settles the conflict with this stable id.
+    ClearConflict(String),
 }
 
 impl TrackerRegistry {
@@ -81,6 +90,20 @@ impl TrackerRegistry {
     pub fn apply_pane_ops(
         &self,
         tag: &str,
+        base_version: u64,
+        ops: &[TrackerPaneOp],
+    ) -> Result<PaneEditOutcome, PaneEditError> {
+        self.apply_pane_ops_as(tag, DEFAULT_CLIENT, base_version, ops)
+    }
+
+    /// [`Self::apply_pane_ops`] for the pane connection `client` (assigned by
+    /// the daemon, never by the app). Every window is `pane (you)` to an agent,
+    /// but a change by one window is news to another: it conflicts with a
+    /// write the other made after its view.
+    pub fn apply_pane_ops_as(
+        &self,
+        tag: &str,
+        client: &str,
         base_version: u64,
         ops: &[TrackerPaneOp],
     ) -> Result<PaneEditOutcome, PaneEditError> {
@@ -103,14 +126,19 @@ impl TrackerRegistry {
             .get_mut(&path)
             .ok_or_else(|| no_tracker(TrackerError::NoTracker))?;
 
-        // The conflicts the user could have seen: those recorded by the base
-        // version. A later one is news to them and is never settled by this edit.
-        let known: Vec<Conflict> = entry
-            .conflicts
-            .all()
+        // The conflicts a batch names, as they are now: the ids are stable, so
+        // a conflict settled elsewhere or dropped by a cap is simply not here.
+        let kept: Vec<Conflict> = entry.conflicts.all().to_vec();
+        // The recorded originals of the long texts a `restore_text` names.
+        let originals: HashMap<String, String> = ops
             .iter()
-            .filter(|c| c.version <= base_version)
-            .cloned()
+            .filter_map(|op| match op {
+                TrackerPaneOp::RestoreText { id, .. } => entry
+                    .long_texts
+                    .get(id)
+                    .map(|text| (id.clone(), text.clone())),
+                _ => None,
+            })
             .collect();
         // Putting a losing value back settles that field's decision; every
         // other op of the batch is still checked against what changed since
@@ -130,6 +158,7 @@ impl TrackerRegistry {
         let ctx = WriteCtx {
             log: true,
             seen: Some(base_version),
+            client: Some(client),
             detect: true,
             resolving: &resolving,
         };
@@ -140,7 +169,13 @@ impl TrackerRegistry {
             entry,
             &path,
             &mut |board, live, log| {
-                let plan = plan_ops(ops, board, &known, log, base_version, &|id, body| {
+                let inputs = PlanInputs {
+                    kept: &kept,
+                    originals: &originals,
+                    log,
+                    base_version,
+                };
+                let plan = plan_ops(ops, board, &inputs, &|id, body| {
                     bound_body(live, board, id, body)
                 })?;
                 origin = plan.origin;
@@ -173,17 +208,8 @@ impl TrackerRegistry {
 fn apply_effects(entry: &mut BoardEntry, effects: Vec<Effect>) {
     for effect in effects {
         match effect {
-            Effect::ClearBadge(id) => {
-                let item = entry
-                    .parsed
-                    .as_ref()
-                    .and_then(|p| p.board.item(&id))
-                    .cloned();
-                if let Some(item) = item {
-                    entry.approvals.approve(&item);
-                }
-            }
-            Effect::ClearConflict(conflict) => entry.conflicts.clear(&conflict),
+            Effect::ClearBadge(item) => entry.approvals.approve(&item),
+            Effect::ClearConflict(id) => entry.conflicts.clear(&id),
             Effect::ClearRemoved { id, block } => {
                 entry.conflicts.clear_removed_matching(&id, &block)
             }
@@ -206,12 +232,7 @@ fn check_badge_clearable(
             && c.item_id.as_deref() == Some(id)
             && matches!(c.kind, ChangeKind::Changed | ChangeKind::Added)
     });
-    let history_gap = base_version > log.seq
-        || log
-            .entries
-            .front()
-            .is_some_and(|c| c.seq > base_version.saturating_add(1));
-    if changed || history_gap {
+    if changed || log.history_gap(base_version) {
         return Err(TrackerError::InvalidArgs {
             index: Some(index),
             reason: "the item changed since you saw it; look again before clearing".to_string(),
@@ -251,14 +272,23 @@ fn bound_body(
     Some(with_source_line(note, prefix, &line))
 }
 
+/// What planning a batch reads besides the board.
+struct PlanInputs<'a> {
+    /// The conflicts the board holds now.
+    kept: &'a [Conflict],
+    /// The recorded original text of an item whose text was over the note cap.
+    originals: &'a HashMap<String, String>,
+    log: &'a ChangeLog,
+    base_version: u64,
+}
+
 fn plan_ops(
     ops: &[TrackerPaneOp],
     board: &Board,
-    known: &[Conflict],
-    log: &ChangeLog,
-    base_version: u64,
+    inputs: &PlanInputs<'_>,
     bound_body: &dyn Fn(&str, &str) -> Option<String>,
 ) -> Result<Plan, TrackerError> {
+    let (log, base_version) = (inputs.log, inputs.base_version);
     let mut plan = Plan {
         steps: Vec::new(),
         origin: Vec::new(),
@@ -356,13 +386,26 @@ fn plan_ops(
             TrackerPaneOp::Remove { id } => {
                 push(&mut plan, PaneStep::Op(Op::Remove { id: id.clone() }))
             }
-            TrackerPaneOp::RestoreText { id, text } => push(
-                &mut plan,
-                PaneStep::SetText {
-                    id: id.clone(),
-                    text: text.clone(),
-                },
-            ),
+            TrackerPaneOp::RestoreText { id, text } => {
+                // Past a note's cap this is only for putting back what the
+                // item had; anything else is an edit and takes the edit's caps.
+                let original = inputs.originals.get(id).is_some_and(|o| o == text);
+                if text.chars().count() > MAX_NOTE_CHARS && !original {
+                    return Err(invalid(
+                        index,
+                        &format!(
+                            "restore_text over {MAX_NOTE_CHARS} characters can only put back the item's recorded original"
+                        ),
+                    ));
+                }
+                push(
+                    &mut plan,
+                    PaneStep::SetText {
+                        id: id.clone(),
+                        text: text.clone(),
+                    },
+                )
+            }
             TrackerPaneOp::Restore {
                 source,
                 section,
@@ -395,40 +438,61 @@ fn plan_ops(
                     });
                 }
                 check_badge_clearable(log, id, base_version, index)?;
-                plan.effects.push(Effect::ClearBadge(id.clone()));
+                if let Some(item) = board.item(id) {
+                    plan.effects
+                        .push(Effect::ClearBadge(Box::new(item.clone())));
+                }
             }
             TrackerPaneOp::ResolveConflict {
                 id,
                 field,
                 keep,
-                index: pick,
+                conflict_id,
+                ..
             } => {
-                let list: Vec<&Conflict> = known
-                    .iter()
-                    .filter(|c| &c.item_id == id && &c.field == field)
-                    .collect();
-                let chosen = match pick {
-                    Some(i) => list.get(*i as usize),
-                    None => list.last(),
+                let Some(conflict_id) = conflict_id.as_deref() else {
+                    return Err(invalid(
+                        index,
+                        "resolve_conflict needs the conflict_id from the board view; a position no longer names a conflict",
+                    ));
                 };
+                // The conflict the user was shown, or nothing is written: it
+                // may be settled already, in another window, or dropped.
+                let chosen = inputs
+                    .kept
+                    .iter()
+                    .find(|c| c.id == conflict_id && &c.item_id == id && &c.field == field);
                 let Some(chosen) = chosen else {
-                    return Err(invalid(index, "no such conflict"));
+                    return Err(invalid(
+                        index,
+                        "that conflict is no longer kept (settled elsewhere or dropped); look again",
+                    ));
                 };
                 if *keep == ConflictKeep::Losing {
-                    for step in losing_steps(chosen, board).map_err(|e| invalid(index, &e))? {
+                    let (steps, new_id) =
+                        losing_steps(chosen, board, &mut taken).map_err(|e| invalid(index, &e))?;
+                    plan.created.extend(new_id);
+                    for step in steps {
                         push(&mut plan, step);
                     }
                 }
-                plan.effects
-                    .push(Effect::ClearConflict(Box::new((*chosen).clone())));
+                plan.effects.push(Effect::ClearConflict(chosen.id.clone()));
             }
         }
     }
     Ok(plan)
 }
 
-/// The steps that put a conflict's losing value back.
-fn losing_steps(c: &Conflict, board: &Board) -> Result<Vec<PaneStep>, String> {
+/// The steps that put a conflict's losing value back, and the new id of a
+/// removed item that came back under one (its old id was taken again since:
+/// an agent re-added it; the text is kept, so nothing is lost, but two items
+/// can't share an id). `taken` holds the ids of the board and the batch.
+fn losing_steps(
+    c: &Conflict,
+    board: &Board,
+    taken: &mut HashSet<String>,
+) -> Result<(Vec<PaneStep>, Option<String>), String> {
+    let mut new_id = None;
     let text = |v: &Value| match v {
         Value::String(s) => s.clone(),
         _ => String::new(),
@@ -439,12 +503,26 @@ fn losing_steps(c: &Conflict, board: &Board) -> Result<Vec<PaneStep>, String> {
             ..Upsert::default()
         };
         f(&mut u);
-        Ok(vec![PaneStep::Op(Op::Upsert(u))])
+        Ok((vec![PaneStep::Op(Op::Upsert(u))], None))
     };
     match c.field.as_str() {
         conflicts::REMOVED => {
             let source = c.losing.as_str().ok_or("the removed item's text is gone")?;
-            let (item, block) = parse_restorable(source)?;
+            let (mut item, mut block) = parse_restorable(source)?;
+            if taken.contains(&item.id) {
+                let fresh = generate_id(&item.text, taken);
+                let marker = format!("<!-- #{} ", item.id);
+                if !block.contains(&marker) {
+                    return Err("the removed item can't be put back under a new id".to_string());
+                }
+                block = block.replacen(&marker, &format!("<!-- #{fresh} "), 1);
+                (item, block) = parse_restorable(&block)?;
+                if item.id != fresh {
+                    return Err("the removed item can't be put back under a new id".to_string());
+                }
+                new_id = Some(fresh);
+            }
+            taken.insert(item.id.clone());
             let section = c
                 .section
                 .clone()
@@ -458,22 +536,31 @@ fn losing_steps(c: &Conflict, board: &Board) -> Result<Vec<PaneStep>, String> {
                 Some(prev) => (Some(prev), None),
                 None => (None, here(&c.next)),
             };
-            Ok(vec![PaneStep::Restore(Restore {
-                item,
-                block,
-                section,
-                before,
-                after,
-            })])
+            Ok((
+                vec![PaneStep::Restore(Restore {
+                    item,
+                    block,
+                    section,
+                    before,
+                    after,
+                })],
+                new_id,
+            ))
         }
-        "status" => Ok(vec![PaneStep::Op(Op::Status {
-            id: c.item_id.clone(),
-            status: text(&c.losing),
-        })]),
-        "text" => Ok(vec![PaneStep::SetText {
-            id: c.item_id.clone(),
-            text: text(&c.losing),
-        }]),
+        "status" => Ok((
+            vec![PaneStep::Op(Op::Status {
+                id: c.item_id.clone(),
+                status: text(&c.losing),
+            })],
+            None,
+        )),
+        "text" => Ok((
+            vec![PaneStep::SetText {
+                id: c.item_id.clone(),
+                text: text(&c.losing),
+            }],
+            None,
+        )),
         "note" => upsert(&|u| u.note = Some(text(&c.losing))),
         "owner" => upsert(&|u| u.owner = Some(text(&c.losing))),
         "env" => upsert(&|u| u.env = Some(text(&c.losing))),
