@@ -46,13 +46,17 @@ final class MotherViewSelectionTests: XCTestCase {
 
     private func descendants(of v: NSView) -> [NSView] { v.subviews + v.subviews.flatMap { descendants(of: $0) } }
 
+    /// Publishes `jobs` and waits until the view has applied them. The view hears about the publish
+    /// through a main-queue hop, so wait on the view's own state (the list, which `jobsDidChange`
+    /// updates in the same turn as the cached details) rather than on the store or a fixed delay.
     private func publish(_ jobs: [MotherJob]) {
         AppStore.shared.applyBrokerEventForTesting(.snapshot(jobs))
-        let deadline = Date().addingTimeInterval(3)
-        while AppStore.shared.motherJobs.map(\.id) != jobs.map(\.id), Date() < deadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        let expected = Set(jobs.map(\.id))
+        let deadline = Date().addingTimeInterval(10)
+        while view.listedJobIds != expected, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
         }
-        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(view.listedJobIds, expected, "the view applied the published jobs")
     }
 
     // MARK: - Shape
