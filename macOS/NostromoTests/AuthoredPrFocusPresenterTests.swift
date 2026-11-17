@@ -141,6 +141,7 @@ final class AuthoredPrFocusPresenterTests: MouseQueueTestCase {
         let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -30000, y: -30000), size: size),
                               styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
+        window.animationBehavior = .none   // a closing window with an animation parks a pool thread (see TestIsolationTests)
         repl.frame = NSRect(origin: .zero, size: size)
         window.contentView = repl
         window.orderFrontRegardless()

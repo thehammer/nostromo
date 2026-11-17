@@ -64,6 +64,7 @@ enum GestureFixtures {
         let w = NSWindow(contentRect: NSRect(origin: .zero, size: size),
                          styleMask: .borderless, backing: .buffered, defer: false)
         w.isReleasedWhenClosed = false
+        w.animationBehavior = .none   // a closing window with an animation parks a pool thread (see TestIsolationTests)
         w.setFrameOrigin(NSPoint(x: -30000, y: -30000))
         w.orderFrontRegardless()
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
@@ -480,6 +481,7 @@ final class HumanGestureTests: MouseQueueTestCase {
         let w = MenuLikeWindow(contentRect: NSRect(x: 0, y: 0, width: 80, height: 40),
                                styleMask: .borderless, backing: .buffered, defer: false)
         w.isReleasedWhenClosed = false
+        w.animationBehavior = .none   // a closing window with an animation parks a pool thread (see TestIsolationTests)
         w.setFrameOrigin(NSPoint(x: -30000, y: -30000))
         w.orderFrontRegardless()
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))

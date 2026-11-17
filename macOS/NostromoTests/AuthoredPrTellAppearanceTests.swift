@@ -419,6 +419,7 @@ final class AuthoredPrTellAppearanceTests: XCTestCase {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height + 20),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
+        window.animationBehavior = .none   // a closing window with an animation parks a pool thread (see TestIsolationTests)
         window.setFrameOrigin(NSPoint(x: -30000, y: -30000))
         windows.append(window)
         let host = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height + 20))
