@@ -1099,6 +1099,32 @@ fn a_badge_survives_a_board_edited_while_the_daemon_was_down() {
 }
 
 #[test]
+fn clearing_a_badge_is_refused_when_the_item_changed_after_what_the_user_saw() {
+    let rig = Rig::new();
+    rig.pane(vec![pane_edit_body("alpha", &format!("SSN {SSN}"))])
+        .unwrap();
+    let seen = rig.version();
+    rig.tick(100);
+    rig.agent_b(&[Op::Upsert(Upsert {
+        id: Some("alpha".into()),
+        owner: Some("someone".into()),
+        ..Default::default()
+    })])
+    .unwrap();
+    let err = rig
+        .pane_at(seen, vec![TrackerPaneOp::ClearBadge { id: "alpha".into() }])
+        .expect_err("changed since seen");
+    assert_eq!(err.code, "invalid_args");
+    assert!(
+        rig.item("alpha").sensitive.is_some(),
+        "nothing was approved"
+    );
+    rig.pane(vec![TrackerPaneOp::ClearBadge { id: "alpha".into() }])
+        .unwrap();
+    assert!(rig.item("alpha").sensitive.is_none());
+}
+
+#[test]
 fn editing_an_item_after_clearing_badges_a_new_finding() {
     let rig = Rig::new();
     rig.pane(vec![pane_edit_body("alpha", &format!("SSN {SSN}"))])

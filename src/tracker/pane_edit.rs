@@ -12,7 +12,7 @@ use super::{conflicts, BoardEntry, TrackerError, TrackerRegistry, WriteCtx};
 use crate::ipc::protocol::{ConflictKeep, TrackerPaneOp, MAX_TRACKER_EDIT_OPS};
 use crate::tracker::bindings::with_source_line;
 use crate::tracker::conflicts::Conflict;
-use crate::tracker::model::{generate_id, Author, Board};
+use crate::tracker::model::{generate_id, Author, Board, ChangeKind};
 use crate::tracker::ops::{parse_restorable, LinkInput, Op, PaneStep, Restore, Upsert};
 use crate::tracker::sensitive::has_finding;
 
@@ -135,13 +135,10 @@ impl TrackerRegistry {
         );
         // Even a refused edit may have ingested an external save.
         let outcome = match result {
-            Ok(()) => {
-                apply_effects(entry, effects);
-                Ok(PaneEditOutcome {
-                    version: entry.log.seq,
-                    created,
-                })
-            }
+            Ok(()) => apply_effects(entry, effects, base_version).map(|()| PaneEditOutcome {
+                version: entry.log.seq,
+                created,
+            }),
             Err(err) => Err(PaneEditError::from_tracker(err, &origin)),
         };
         inner.dirty.insert(path);
@@ -150,10 +147,27 @@ impl TrackerRegistry {
     }
 }
 
-fn apply_effects(entry: &mut BoardEntry, effects: Vec<Effect>) {
+fn apply_effects(
+    entry: &mut BoardEntry,
+    effects: Vec<Effect>,
+    base_version: u64,
+) -> Result<(), PaneEditError> {
     for effect in effects {
         match effect {
             Effect::ClearBadge(id) => {
+                // The user approves what they saw: if someone else changed the
+                // item after the edit's base version, approve nothing.
+                let changed = entry.log.entries.iter().any(|c| {
+                    c.seq > base_version
+                        && c.item_id.as_deref() == Some(id.as_str())
+                        && matches!(c.kind, ChangeKind::Changed | ChangeKind::Added)
+                        && c.by != Author::Pane
+                });
+                if changed {
+                    return Err(PaneEditError::invalid(
+                        "the item changed since you saw it; look again before clearing",
+                    ));
+                }
                 let item = entry
                     .parsed
                     .as_ref()
@@ -169,6 +183,7 @@ fn apply_effects(entry: &mut BoardEntry, effects: Vec<Effect>) {
             }
         }
     }
+    Ok(())
 }
 
 struct Plan {
