@@ -31,6 +31,10 @@ final class ClaudeSignInCardView: NSView {
     private let launcher: LoginTerminalLauncher
     private let permit: GesturePermit
     private let copyToPasteboard: (String) -> Void
+    private let after: (TimeInterval, @escaping () -> Void) -> Void
+
+    /// How long Open stays pressed after a pane was requested.
+    static let paneRepressDelay: TimeInterval = 2
 
     let titleLabel = NSTextField(labelWithString: "")
     let bodyLabel = NSTextField(wrappingLabelWithString: "")
@@ -49,7 +53,11 @@ final class ClaudeSignInCardView: NSView {
          copyToPasteboard: @escaping (String) -> Void = { text in
              NSPasteboard.general.clearContents()
              NSPasteboard.general.setString(text, forType: .string)
+         },
+         after: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
+             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
          }) {
+        self.after = after
         self.focusTag = tag
         self.claudeBin = claudeBin
         self.shownHold = session.holdId
@@ -221,12 +229,28 @@ final class ClaudeSignInCardView: NSView {
         guard !opening, isHuman(sender, "open-terminal"), let bin = claudeBin else { return }
         opening = true
         sender.isEnabled = false
+        // First choice: a terminal pane in Nostromo. Nothing is typed into it; the command is copied for a paste.
+        if launcher.openAppPane(tag: focusTag) {
+            copyToPasteboard(ClaudeLoginCardModel.manualCommand)
+            launchStatus = "Opened a terminal pane. The sign-in command is copied: paste it (⌘V), press Return, and finish signing in in the browser. \(model.afterSignIn)"
+            apply(model)
+            needsLayout = true
+            superview?.needsLayout = true
+            // The pane request is instant; hold the button briefly so a double press opens one pane.
+            after(Self.paneRepressDelay) { [weak self] in
+                self?.opening = false
+                self?.openButton.isEnabled = true
+            }
+            return
+        }
         launcher.open(claudeBin: bin) { [weak self] outcome in
             guard let self else { return }
             self.opening = false
             self.openButton.isEnabled = true
             let next = self.model.afterSignIn
             switch outcome {
+            case .appPane?:
+                break   // opened by `openAppPane`, never reported by `open`
             case .tmuxWindow?:
                 self.launchStatus = "Opened tmux window \"\(LoginTerminalLauncher.windowName)\". Finish signing in there. \(next)"
             case .terminalApp?:

@@ -356,17 +356,19 @@ private final class DeferredWork {
 private let claudeBinPath = "/opt/homebrew/bin/claude"
 
 private func inlineLauncher(_ process: FakeProcess,
-                            background: @escaping (@escaping () -> Void) -> Void = { $0() }) -> LoginTerminalLauncher {
+                            background: @escaping (@escaping () -> Void) -> Void = { $0() },
+                            paneOpener: @escaping (String) -> Bool = { _ in false }) -> LoginTerminalLauncher {
     LoginTerminalLauncher(process: process,
                           temporaryDirectory: NSTemporaryDirectory() + "claude-sign-in-test-\(UUID().uuidString)/",
-                          background: background, deliver: { $0() })
+                          background: background, deliver: { $0() }, paneOpener: paneOpener)
 }
 
 /// A card on its own (no overlay host): clicks reach the store and the launcher, and nothing re-renders
 /// it until the test calls `update`.
 private func makeCard(permit: ClaudeSignInCardView.GesturePermit?, bin: String?, watch: String = "keychain",
                       phase: String = "waiting", width: CGFloat = 500,
-                      background: @escaping (@escaping () -> Void) -> Void = { $0() }) throws
+                      background: @escaping (@escaping () -> Void) -> Void = { $0() },
+                      paneOpener: @escaping (String) -> Bool = { _ in false }) throws
     -> (card: ClaudeSignInCardView, log: SendLog, store: ClaudeLoginStore, process: FakeProcess, copies: Copies) {
     let log = SendLog(), process = FakeProcess(), copies = Copies()
     process.executables = Set([tmuxBin] + (bin.map { [$0] } ?? []))
@@ -375,7 +377,7 @@ private func makeCard(permit: ClaudeSignInCardView.GesturePermit?, bin: String?,
     store.handle(try LoginFixture.frame(tags: [("cody-1", "h1")], bin: bin, phase: phase, watch: watch))
     let card = ClaudeSignInCardView(tag: "cody-1", session: try XCTUnwrap(store.session(tag: "cody-1")),
                                     claudeBin: bin, watch: store.watch, store: store,
-                                    launcher: inlineLauncher(process, background: background), permit: permit,
+                                    launcher: inlineLauncher(process, background: background, paneOpener: paneOpener), permit: permit,
                                     copyToPasteboard: { copies.texts.append($0) })
     card.frame = NSRect(x: 0, y: 0, width: width, height: 160)
     card.layoutSubtreeIfNeeded()
@@ -388,14 +390,15 @@ private func cardFrame(_ hold: String = "h1", phase: String = "waiting", watch: 
 }
 
 /// A card inside its overlay host, which re-renders it whenever the store reports a change.
-private func makeHostedCard(phase: String = "waiting", watch: String = "keychain", bin: String? = claudeBinPath) throws
+private func makeHostedCard(phase: String = "waiting", watch: String = "keychain", bin: String? = claudeBinPath,
+                           paneOpener: @escaping (String) -> Bool = { _ in false }) throws
     -> (host: ClaudeSignInOverlayHost, card: ClaudeSignInCardView, log: SendLog, store: ClaudeLoginStore, process: FakeProcess) {
     let log = SendLog(), process = FakeProcess()
     process.executables = Set([tmuxBin] + (bin.map { [$0] } ?? []))
     process.clientsOutput = "main\n"
     let store = log.makeStore()
     store.handle(try cardFrame(phase: phase, watch: watch, bin: bin))
-    let host = ClaudeSignInOverlayHost(tag: "cody-1", store: store, launcher: inlineLauncher(process), permit: human)
+    let host = ClaudeSignInOverlayHost(tag: "cody-1", store: store, launcher: inlineLauncher(process, paneOpener: paneOpener), permit: human)
     host.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
     host.layoutSubtreeIfNeeded()
     return (host, try XCTUnwrap(host.card), log, store, process)
@@ -644,6 +647,68 @@ final class ClaudeSignInCardActionTests: XCTestCase {
 
         r.card.openButton.performClick(nil)
         XCTAssertEqual(work.pending.count, 1, "once the first launch is done a person may open another")
+    }
+}
+
+// MARK: - Opening a terminal pane inside Nostromo
+
+final class ClaudeSignInPaneTests: XCTestCase {
+
+    private final class Opened { var tags: [String] = [] }
+
+    func testOpeningAPaneCopiesTheCommandAndLeavesTmuxAndTerminalAlone() throws {
+        let opened = Opened()
+        let r = try makeCard(permit: human, bin: claudeBinPath, paneOpener: { opened.tags.append($0); return true })
+        r.card.openButton.performClick(nil)
+        XCTAssertEqual(opened.tags, ["cody-1"])
+        XCTAssertEqual(r.copies.texts, ["claude auth login"])
+        let status = r.card.statusLabel.stringValue
+        XCTAssertTrue(status.contains("Opened a terminal pane"), status)
+        XCTAssertTrue(status.contains("paste it (\u{2318}V)"), status)
+        XCTAssertTrue(status.contains("Nostromo sends your message once Claude is signed in."), status)
+        XCTAssertTrue(r.process.didNothing, "tmux and Terminal.app are untouched")
+    }
+
+    func testWhenNoPaneCanBeOpenedTheTmuxChainRunsAndNothingIsCopied() throws {
+        let r = try makeCard(permit: human, bin: claudeBinPath, paneOpener: { _ in false })
+        r.card.openButton.performClick(nil)
+        XCTAssertEqual(r.process.runs.filter { $0.args.first == "new-window" }.count, 1)
+        XCTAssertTrue(r.copies.texts.isEmpty)
+        XCTAssertTrue(r.card.statusLabel.stringValue.contains("Opened"), r.card.statusLabel.stringValue)
+        XCTAssertFalse(r.card.statusLabel.stringValue.contains("Opened a terminal pane"))
+    }
+
+    func testARefusedGestureOpensNoPaneAndCopiesNothing() throws {
+        let opened = Opened()
+        let refuse: ClaudeSignInCardView.GesturePermit = { _ in .refused(reason: .staleEvent) }
+        let r = try makeCard(permit: refuse, bin: claudeBinPath, paneOpener: { opened.tags.append($0); return true })
+        r.card.openButton.performClick(nil)
+        XCTAssertTrue(opened.tags.isEmpty)
+        XCTAssertTrue(r.copies.texts.isEmpty)
+        XCTAssertTrue(r.process.didNothing)
+    }
+
+    func testPressingOpenTwiceOpensOnePaneAndCopiesOnce() throws {
+        let opened = Opened()
+        let r = try makeCard(permit: human, bin: claudeBinPath, paneOpener: { opened.tags.append($0); return true })
+        r.card.openButton.performClick(nil)
+        r.card.openButton.performClick(nil)
+        XCTAssertEqual(opened.tags.count, 1)
+        XCTAssertEqual(r.copies.texts.count, 1)
+    }
+
+    /// The pane is opened without typing into it: the app-side opener only ever asks for a local terminal.
+    func testTheAppPaneOpenerOnlyOpensALocalTerminalAndSendsNoInput() throws {
+        let lines = try DecisionCoordinatorTests.codeLines(ofSourceAt: "UI/MainLayout.swift")
+        let start = try XCTUnwrap(lines.firstIndex { $0.contains("func openSignInTerminalPane") })
+        var body: [String] = []
+        for line in lines[start...] {
+            if !body.isEmpty, line.hasPrefix("    }") || line.hasPrefix("    static func") || line.hasPrefix("    func") { break }
+            body.append(line)
+        }
+        let text = body.joined(separator: "\n")
+        XCTAssertEqual(text.components(separatedBy: "transport(").count - 1, 1, text)
+        XCTAssertEqual(text.components(separatedBy: "transport(.openLocal").count - 1, 1, text)
     }
 }
 
