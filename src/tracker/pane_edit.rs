@@ -163,7 +163,15 @@ fn apply_effects(
                         && matches!(c.kind, ChangeKind::Changed | ChangeKind::Added)
                         && c.by != Author::Pane
                 });
-                if changed {
+                // History that doesn't reach back to the base version can't show
+                // what changed: refuse rather than approve blind.
+                let history_gap = base_version > entry.log.seq
+                    || entry
+                        .log
+                        .entries
+                        .front()
+                        .is_some_and(|c| c.seq > base_version.saturating_add(1));
+                if changed || history_gap {
                     return Err(PaneEditError::invalid(
                         "the item changed since you saw it; look again before clearing",
                     ));
