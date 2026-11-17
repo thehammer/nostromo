@@ -347,6 +347,49 @@ final class TrackerEditingAppearanceTests: XCTestCase {
         }
     }
 
+    // MARK: Dropped-conflict marker and the dimmed pending editor (ink)
+
+    func testTheOlderConflictsWereDroppedMarkersInkIsInsideItsFillAndItsLabelIsNotClipped() throws {
+        for width in Self.widths {
+            let h = try harness(width: width) { script in
+                try script.updateItem("verif-1037") { $0["dropped_conflicts"] = 3 }
+            }
+            let (row, rowRect) = try reveal(h, id)
+            let s = try shot(h)
+            let mark = try XCTUnwrap(row.badges.first { $0.accessibilityLabel() == "Older conflicts were dropped" },
+                                     "width \(width): the marker is drawn")
+            let rect = paneRect(mark, h)
+            XCTAssertGreaterThan(rect.width, 20, "width \(width): the marker has room for its words")
+            assertInside(s.inkBox(in: rect, against: fill(s, rect)), rect, scale: s.scale, "width \(width): the marker's words")
+            assertInside(s.inkBox(in: rect, against: fill(s, rect)), rowRect, scale: s.scale, "width \(width): the marker is inside the row")
+        }
+    }
+
+    func testAPendingEditorIsDimmedButItsTextStaysReadable() throws {
+        for width in Self.widths {
+            let h = try harness(width: width) { script in
+                try script.updateItem("verif-1037") {
+                    $0["text"] = "HHHH gypsy jug"
+                    $0["text_spans"] = [["kind": "text", "text": "HHHH gypsy jug"]]
+                }
+            }
+            let (row, _) = try reveal(h, id)
+            h.pane.beginEdit(item: id, kind: .title)
+            h.rig.host.layoutSubtreeIfNeeded()
+            let editor = try XCTUnwrap(row.titleEditor)
+            let editorRect = paneRect(editor, h)
+            let live = try shot(h)
+            let bg = live.color(at: NSPoint(x: editorRect.maxX - 2, y: editorRect.midY))
+            XCTAssertNotNil(live.inkBox(in: editorRect, against: bg), "width \(width): the live editor shows its text")
+            h.pressReturn(in: editor)          // the save is now pending: the editor is dimmed
+            XCTAssertEqual(editor.alphaValue, 0.5, accuracy: 0.01)
+            let dimmed = try shot(h)
+            XCTAssertNotNil(dimmed.changedBox(from: live, in: editorRect), "width \(width): the pending editor looks different")
+            XCTAssertNotNil(dimmed.inkBox(in: editorRect, against: bg, threshold: 30),
+                            "width \(width): the dimmed text is still there to read")
+        }
+    }
+
     // MARK: Contrast (contract §10)
 
     func testTheEditingColoursMeetTheContrastTheContractAsksFor() {

@@ -208,6 +208,10 @@ struct TrackerBoardScript {
         board["removed_conflicts"] = entries
     }
 
+    mutating func setEpoch(_ epoch: String) {
+        board["epoch"] = epoch
+    }
+
     mutating func setVersion(_ version: Int) {
         board["version"] = version
     }

@@ -70,11 +70,13 @@ final class TrackerRowView: NSView {
         max(120, width * 0.4)
     }
 
-    /// With editing, the tick owns the status-mark column plus up to 4 pt of left padding.
-    static let tickRect = NSRect(x: hPad - 4, y: 0, width: markWidth + 4, height: vPad + foldButtonSize.height)
-    /// With editing, the disclosure owns the fold column: it starts where the tick ends and stops where the
-    /// title starts, so no click on the title can toggle the fold.
-    static let disclosureRect = NSRect(x: hPad + markWidth, y: 0, width: foldColumnWidth, height: vPad + foldButtonSize.height)
+    /// With editing, the tick owns the row's left edge up to 4 pt short of the fold column, so it and the
+    /// disclosure are both at least 20 pt wide without either reaching the title.
+    static let tickRect = NSRect(x: 0, y: 0, width: hPad + markWidth - 4, height: vPad + foldButtonSize.height)
+    /// With editing, the disclosure starts where the tick ends and stops exactly where the title starts, so
+    /// no click on the title can toggle the fold.
+    static let disclosureRect = NSRect(x: tickRect.maxX, y: 0, width: textX - tickRect.maxX,
+                                       height: vPad + foldButtonSize.height)
 
     /// Where a click toggles the item's fold (when it has one). Without a tick: the status-mark column
     /// and the fold column on the item's first line, ending exactly where the title starts. With a tick:

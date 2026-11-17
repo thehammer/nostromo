@@ -430,7 +430,7 @@ final class TrackerGateHarness {
                                openLinkInDaemon: { tag, item, index in links.daemonOpens.append(.init(tag: tag, item: item, index: index)) },
                                openURL: { links.urlOpens.append($0) },
                                schedule: { _, _ in }, timeZone: TimeZone(identifier: "UTC")!, tickInterval: nil,
-                               editSupported: { editing }, editSender: { _, _, _, _ in true },
+                               editSupported: { editing }, editSender: { _, _, _, _, _ in true },
                                editSchedule: { _, _ in })
     }
 

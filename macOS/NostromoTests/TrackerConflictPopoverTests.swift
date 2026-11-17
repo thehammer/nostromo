@@ -50,7 +50,7 @@ final class TrackerConflictPopoverTests: XCTestCase {
         let mark = try XCTUnwrap(try h.row(target).conflictButton)
         XCTAssertEqual(mark.title, "⇄ conflict")
         XCTAssertEqual(mark.accessibilityLabel(),
-                       "Conflict on status: agent claudia set “todo”, overwritten by you and 1 more")
+                       "Conflict on status: agent claudia set todo, then you set in progress, and 1 more")
         XCTAssertNil(try h.row(badged).conflictButton, "only items with a conflict have the mark")
     }
 
@@ -246,7 +246,7 @@ final class TrackerConflictPopoverTests: XCTestCase {
         h.rig.scroll(to: 420)
         let before = h.pane.anchorSnapshot(windowIndex: 0)
         h.pane.resolve(TrackerConflictEntry(itemId: target, field: "status", conflictId: "7.1", sentence: "", losingValue: "todo",
-                                            currentValue: "in-progress", inverse: nil), .current)
+                                            currentValue: "in-progress", inverse: []), .current)
         try h.echo { try $0.updateItem(self.target) { $0["conflicts"] = [] } }
         h.pane.clearBadge(item: badged)
         try h.echo { try $0.updateItem(self.badged) { $0["sensitive"] = nil } }

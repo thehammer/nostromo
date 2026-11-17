@@ -92,6 +92,8 @@ final class TrackerConflictPopover: NSObject, NSPopoverDelegate {
     private(set) var valueViews: [TrackerPopoverValueView] = []
     private(set) var messageLabels: [NSTextField] = []
     var isShown: Bool { popover.isShown }
+    /// The laid-out content (tests measure it).
+    var contentView: NSView? { popover.contentViewController?.view }
     private let popover = NSPopover()
     private var returnFocusTo: NSResponder?
     private var fromKeyboard = false

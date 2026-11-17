@@ -652,9 +652,14 @@ final class TrackerPaneView: NSView {
         rowBases = next
     }
 
-    /// The daemon says the view is out of date: show the board as it is now (nothing held back stays held,
-    /// except under a text selection).
+    /// The daemon says the view is out of date: show the board as it is now. Nothing stays held back: the
+    /// reader asked to look again, so a text selection is let go too (the row it held shows the new content).
     func lookAgain() {
+        for view in rowViews.values {
+            for textView in view.allTextViews where textView.hasSelection {
+                textView.setSelectedRange(NSRange(location: 0, length: 0))
+            }
+        }
         deferral.releaseAll()
         render()
     }

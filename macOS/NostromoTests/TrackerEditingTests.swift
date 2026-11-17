@@ -29,6 +29,7 @@ final class TrackerEditHarness {
     struct Sent {
         let requestId: String
         let base: UInt64
+        let epoch: String?
         let ops: [TrackerPaneOpWire]
     }
 
@@ -69,8 +70,8 @@ final class TrackerEditHarness {
             tag: tag, store: store, now: { clock.date }, reduceMotion: { false }, pasteboard: pasteboard,
             schedule: { scheduler.schedule($0, $1) }, timeZone: Fx.utc, tickInterval: nil,
             editSupported: { box.supported },
-            editSender: { _, requestId, base, _, ops in
-                box.sent.append(Sent(requestId: requestId, base: base, ops: ops))
+            editSender: { _, requestId, base, epoch, ops in
+                box.sent.append(Sent(requestId: requestId, base: base, epoch: epoch, ops: ops))
                 return true
             },
             editSchedule: { edits.schedule($0, $1) })
@@ -101,7 +102,7 @@ final class TrackerEditHarness {
     }
 
     /// The daemon applies the last edit: the board moves to the next version with `change`, then the result.
-    func echo(_ change: (inout TrackerBoardScript) throws -> Void, resultFirst: Bool = false,
+    func echo(_ change: (inout TrackerBoardScript) throws -> Void, resultFirst: Bool = false, created: [String] = [],
               file: StaticString = #filePath, line: UInt = #line) throws {
         guard let last = sent.last else {
             XCTFail("nothing was sent", file: file, line: line)
@@ -111,11 +112,11 @@ final class TrackerEditHarness {
         try change(&script)
         script.setVersion(version)
         if resultFirst {
-            answer(last.requestId, ok: true, version: UInt64(version))
+            answer(last.requestId, ok: true, version: UInt64(version), created: created)
             rig.push(script, file: file, line: line)
         } else {
             rig.push(script, file: file, line: line)
-            answer(last.requestId, ok: true, version: UInt64(version))
+            answer(last.requestId, ok: true, version: UInt64(version), created: created)
         }
         rig.settle()
     }
@@ -129,8 +130,9 @@ final class TrackerEditHarness {
         rig.push(script, file: file, line: line)
     }
 
-    func answer(_ requestId: String, ok: Bool, version: UInt64 = 0, error: [String: Any]? = nil) {
+    func answer(_ requestId: String, ok: Bool, version: UInt64 = 0, error: [String: Any]? = nil, created: [String] = []) {
         var object: [String: Any] = ["tag": rig.tag, "request_id": requestId, "ok": ok, "version": version]
+        if !created.isEmpty { object["created"] = created }
         if let error { object["error"] = error }
         // swiftlint:disable:next force_try
         let data = try! JSONSerialization.data(withJSONObject: object)
@@ -547,7 +549,7 @@ final class TrackerEditingTests: XCTestCase {
         h.pressReturn(in: editor)
         XCTAssertTrue(h.edits.delays.contains(5))
         h.fire(5)
-        XCTAssertEqual(h.pane.notice.text, "Not saved: the daemon didn't answer in time.")
+        XCTAssertEqual(h.pane.notice.text, "Not saved yet: the daemon didn't answer in time.")
         XCTAssertTrue(editor.isEditable)
     }
 
@@ -617,7 +619,7 @@ final class TrackerEditingTests: XCTestCase {
         h.pressReturn(in: editor)
         try h.echo { try $0.setText(self.plain, "A new title") }
         h.pane.performUndo()
-        XCTAssertEqual(h.sent.last?.ops, [.edit(id: plain, title: nil, text: "Review queue job 8812", body: nil)])
+        XCTAssertEqual(h.sent.last?.ops, [.restoreText(id: plain, text: "Review queue job 8812")])
         XCTAssertEqual(h.pane.editing.undoManager.redoMenuItemTitle, "Redo Title Edit")
     }
 
