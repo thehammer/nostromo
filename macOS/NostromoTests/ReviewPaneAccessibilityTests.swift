@@ -475,7 +475,8 @@ final class MainMenuKeyEquivalentsUnchangedTests: XCTestCase {
     }
 
     /// The side pane adds no shortcut anywhere (criterion 41): the main menu's set is the one main had,
-    /// plus ⌘0 Show My PRs, which came from main (#465), not from the pane.
+    /// plus ⌘0 Show My PRs, which came from main (#465), not from the pane, and the File menu's
+    /// ⌘N New Focus… and ⇧⌘N Resume Conversation… (session history 4, approved 2026-11-16).
     func testTheMainMenuHasExactlyTheKeyEquivalentsItHadBeforeTheSidePane() {
         let actual = equivalents(MainMenu.make(target: nil)).sorted()
         XCTAssertEqual(actual, [
@@ -485,6 +486,7 @@ final class MainMenuKeyEquivalentsUnchangedTests: XCTestCase {
             "1048576|c|Copy",
             "1048576|f|Find…",
             "1048576|g|Find Next",
+            "1048576|n|New Focus…",
             "1048576|q|Quit Nostromo",
             "1048576|t|New Terminal",
             "1048576|v|Paste",
@@ -496,6 +498,7 @@ final class MainMenuKeyEquivalentsUnchangedTests: XCTestCase {
             "1179648|j|Focus Staged Commands",
             "1179648|k|Copy code-pane diagnostics",
             "1179648|m|Model…",
+            "1179648|n|Resume Conversation…",
             "1179648|p|Copy pane diagnostics",
             "1179648|t|New Remote Shell…",
             "1179648|w|Close Terminal Pane",

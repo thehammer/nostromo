@@ -2697,6 +2697,7 @@ fn handle_client_msg(
             place,
             no_codebase_folder,
             confirm_active_elsewhere,
+            agent,
         } => {
             let mut reply = session_mgr.lock().unwrap().resume_conversation_with(
                 &id,
@@ -2705,6 +2706,7 @@ fn handle_client_msg(
                     place: place.as_deref(),
                     no_codebase_folder: no_codebase_folder.as_deref(),
                     confirm_active_elsewhere,
+                    agent: agent.as_deref(),
                 },
             );
             if let ServerMsg::ConversationResumeResult { request_id: r, .. } = &mut reply {
@@ -2743,10 +2745,20 @@ fn handle_client_msg(
 
         ClientMsg::ConversationHistorySettingsSet {
             first_prompts_enabled,
+            include_outside,
             ..
         } => {
-            let history = session_mgr.lock().unwrap().conversations();
-            history.set_first_prompts_enabled(first_prompts_enabled, crate::conversations::now_ms());
+            let mut mgr = session_mgr.lock().unwrap();
+            if let Some(enabled) = first_prompts_enabled {
+                mgr.conversations()
+                    .set_first_prompts_enabled(enabled, crate::conversations::now_ms());
+                if !enabled {
+                    mgr.withhold_outside_first_prompts();
+                }
+            }
+            if let Some(on) = include_outside {
+                mgr.set_include_outside(on);
+            }
         }
 
         // ── The author's PR list: who is looking, and a reconcile (the verified

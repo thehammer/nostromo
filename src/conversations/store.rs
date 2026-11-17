@@ -135,6 +135,9 @@ struct FileData {
     backfilled: bool,
     #[serde(default = "yes")]
     first_prompts_enabled: bool,
+    /// List conversations started outside Nostromo too (off until the user asks).
+    #[serde(default)]
+    include_outside: bool,
     #[serde(default)]
     entries: Vec<ConversationEntry>,
 }
@@ -148,6 +151,7 @@ impl Default for FileData {
         Self {
             backfilled: false,
             first_prompts_enabled: true,
+            include_outside: false,
             entries: Vec::new(),
         }
     }
@@ -191,6 +195,7 @@ pub struct FileVerdict {
 pub struct Snapshot {
     pub entries: Vec<ConversationEntry>,
     pub first_prompts_enabled: bool,
+    pub include_outside: bool,
     pub degraded_kept: Option<u32>,
     pub revision: u64,
     pub removed_pending: usize,
@@ -299,6 +304,46 @@ impl ConversationHistory {
 
     pub fn first_prompts_enabled(&self) -> bool {
         lock(&self.inner).data.first_prompts_enabled
+    }
+
+    /// Is "include conversations started outside Nostromo" on?
+    pub fn include_outside(&self) -> bool {
+        lock(&self.inner).data.include_outside
+    }
+
+    /// Turn the outside switch on or off (persisted).
+    pub fn set_include_outside(&self, on: bool, now: i64) {
+        let mut s = lock(&self.inner);
+        s.data.include_outside = on;
+        self.commit(s, now, Write::Now);
+    }
+
+    /// Every session id the history holds, visible or not.
+    pub fn known_sids(&self) -> HashSet<String> {
+        lock(&self.inner)
+            .data
+            .entries
+            .iter()
+            .map(|e| e.sid.clone())
+            .collect()
+    }
+
+    /// Take a conversation found outside Nostromo into the history (a resume
+    /// of it is starting). Does nothing when `sid` is already held.
+    pub fn adopt(&self, mut e: ConversationEntry, now: i64) {
+        let mut s = lock(&self.inner);
+        if s.data.entries.iter().any(|x| x.sid == e.sid) {
+            return;
+        }
+        e.make_visible();
+        s.data.entries.push(e);
+        self.commit(s, now, Write::Now);
+    }
+
+    /// Bump the revision without a write (something the list shows changed
+    /// elsewhere, such as the outside index becoming ready).
+    pub fn touch(&self) {
+        lock(&self.inner).revision += 1;
     }
 
     /// A spawn: creates the entry hidden, or refreshes `tag`/`project_path`.
@@ -576,6 +621,7 @@ impl ConversationHistory {
                 .cloned()
                 .collect(),
             first_prompts_enabled: s.data.first_prompts_enabled,
+            include_outside: s.data.include_outside,
             degraded_kept: s.degraded,
             revision: s.revision,
             removed_pending: s
@@ -643,7 +689,7 @@ impl ConversationHistory {
         let mut s = lock(&self.inner);
         let e = s.data.entries.iter_mut().find(|e| e.sid == sid)?;
         let old = std::mem::replace(&mut e.tag, new_tag.to_owned());
-        e.resumed_from_tag = Some(old.clone());
+        e.resumed_from_tag = Some(old.clone()).filter(|t| !t.is_empty());
         e.resume_pending = true;
         self.commit(s, now, Write::Now);
         Some(old)

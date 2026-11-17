@@ -27,6 +27,8 @@ import AppKit
     func openSecondWindowQA(_ sender: Any?)
     func showApprovalsLog(_ sender: Any?)
     func showApprovalRules(_ sender: Any?)
+    func newFocus(_ sender: Any?)
+    func resumeConversation(_ sender: Any?)
 }
 
 enum MainMenu {
@@ -46,6 +48,26 @@ enum MainMenu {
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         ))
+
+        // File menu (the Mac home of "New"): ⌘N opens the New Focus sheet, ⇧⌘N the same sheet on its Resume
+        // tab with the cursor in search. Both go through the menu, so a terminal pane holding the keyboard
+        // does not swallow them (the terminal view does not claim ⌘ keys; ⌘T works the same way).
+        let fileMenuItem = NSMenuItem()
+        mainMenu.addItem(fileMenuItem)
+        let fileMenu = NSMenu(title: "File")
+        fileMenuItem.submenu = fileMenu
+        let newFocusItem = NSMenuItem(title: "New Focus\u{2026}", action: #selector(MainMenuActions.newFocus(_:)),
+                                      keyEquivalent: "n")
+        // ⌘N exactly: a shifted event must not match it (⇧⌘N is the Resume item below). Shifted shortcuts here
+        // are a lowercase key with [.command, .shift], the same form as ⇧⌘T.
+        newFocusItem.keyEquivalentModifierMask = [.command]
+        newFocusItem.target = target
+        fileMenu.addItem(newFocusItem)
+        let resumeItem = NSMenuItem(title: "Resume Conversation\u{2026}",
+                                    action: #selector(MainMenuActions.resumeConversation(_:)), keyEquivalent: "n")
+        resumeItem.keyEquivalentModifierMask = [.command, .shift]
+        resumeItem.target = target
+        fileMenu.addItem(resumeItem)
 
         // Edit menu — required for Cmd+C/V/A/X to route correctly to NSTextView
         let editMenuItem = NSMenuItem()
@@ -247,5 +269,28 @@ enum MainMenu {
         NSApplication.shared.windowsMenu = windowMenu
 
         return mainMenu
+    }
+}
+
+
+/// When File ▸ New Focus… (⌘N) and Resume Conversation… (⇧⌘N) are enabled, and which window they act on.
+/// Separate from `AppDelegate` so the real `validate` runs in the tests (the delegate is not in the test target).
+enum FileMenuShortcuts {
+    static func handles(_ item: NSMenuItem) -> Bool {
+        item.action == #selector(MainMenuActions.newFocus(_:)) || item.action == #selector(MainMenuActions.resumeConversation(_:))
+    }
+
+    /// The main window the shortcuts act on: the key window, or the window the key window is a sheet of
+    /// (so ⇧⌘N works while the sheet is open).
+    static func layout(keyWindow: NSWindow?) -> MainLayout? {
+        (keyWindow?.contentView as? MainLayout) ?? (keyWindow?.sheetParent?.contentView as? MainLayout)
+    }
+
+    /// Both need a main window and a connected daemon; Resume also needs one that keeps the history
+    /// (New Focus works with an older daemon).
+    static func validate(_ item: NSMenuItem, keyWindow: NSWindow?, daemonConnected: Bool,
+                         daemonKeepsHistory: Bool) -> Bool {
+        guard layout(keyWindow: keyWindow) != nil, daemonConnected else { return false }
+        return item.action == #selector(MainMenuActions.resumeConversation(_:)) ? daemonKeepsHistory : true
     }
 }

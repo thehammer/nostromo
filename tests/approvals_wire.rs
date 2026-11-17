@@ -5455,6 +5455,7 @@ fn every_conversation_verb() -> Vec<ClientMsg> {
             place: Some("/elsewhere".into()),
             no_codebase_folder: Some("/space".into()),
             confirm_active_elsewhere: true,
+            agent: Some("cody".into()),
         },
         ClientMsg::ConversationHistoryRename {
             request_id: "r".into(),
@@ -5477,7 +5478,8 @@ fn every_conversation_verb() -> Vec<ClientMsg> {
         },
         ClientMsg::ConversationHistorySettingsSet {
             request_id: "r".into(),
-            first_prompts_enabled: false,
+            first_prompts_enabled: Some(false),
+            include_outside: Some(true),
         },
     ]
 }

@@ -7,13 +7,14 @@ protocol ConversationHistorySending: AnyObject {
     var daemonAdvertisesConversationHistory: Bool { get }
     func conversationHistoryGet(requestId: String)
     func conversationResume(requestId: String, id: String, newTag: String, place: String?,
-                            noCodebaseFolder: String?, confirmActiveElsewhere: Bool)
+                            noCodebaseFolder: String?, confirmActiveElsewhere: Bool, agent: String?)
     func conversationHistoryRename(requestId: String, id: String, title: String?)
     func conversationResumeRelease(tag: String)
     func conversationHistoryRemove(requestId: String, id: String)
     func conversationHistoryRestore(requestId: String, id: String)
     func conversationHistoryPurgeRemoved(requestId: String)
     func conversationHistorySettingsSet(requestId: String, firstPromptsEnabled: Bool)
+    func conversationHistoryIncludeOutsideSet(requestId: String, includeOutside: Bool)
 }
 extension NostromodClient: ConversationHistorySending {}
 
@@ -54,7 +55,7 @@ final class ConversationHistoryStore {
 
     /// request id → what it was for.
     private var pending: [String: (sid: String, focusId: String, tag: String, startedAt: Date, place: String?,
-                                  noCodebaseFolder: String?, confirm: Bool)] = [:]
+                                  noCodebaseFolder: String?, confirm: Bool, agent: String?)] = [:]
     /// Rows with a resume awaiting its reply: further gestures on them are ignored.
     private var inFlight: Set<String> = []
     /// Tags a `ready` reply reserved → the conversation they hold (for a later failure).
@@ -99,6 +100,10 @@ final class ConversationHistoryStore {
     func setFirstPrompts(enabled: Bool) {
         sender?.conversationHistorySettingsSet(requestId: makeRequestId(), firstPromptsEnabled: enabled)
     }
+    /// Turn "Include conversations started outside Nostromo" on or off (the daemon keeps it; off deletes its index).
+    func setIncludeOutside(_ on: Bool) {
+        sender?.conversationHistoryIncludeOutsideSet(requestId: makeRequestId(), includeOutside: on)
+    }
 
     /// Give a conversation a name of the user's own (the same 60-character rule as a focus label); nil or
     /// blank clears it. The row shows it when the daemon's next listing arrives.
@@ -114,12 +119,13 @@ final class ConversationHistoryStore {
     /// `place` is the main checkout to resume in when the worktree is gone; `confirmActiveElsewhere` is
     /// the user's "Resume anyway".
     /// `noCodebaseFolder` is a new empty folder to resume in with no codebase (the original is gone).
+    /// `agent` is the one to continue a terminal conversation with when Claude's recorded one is not an agent here.
     func resume(_ sid: String, place: String? = nil, noCodebaseFolder: String? = nil,
-                confirmActiveElsewhere: Bool = false) {
+                confirmActiveElsewhere: Bool = false, agent: String? = nil) {
         guard let sender, sender.daemonAdvertisesConversationHistory, !inFlight.contains(sid) else { return }
         inFlight.insert(sid)
         send(sid: sid, startedAt: now(), place: place, noCodebaseFolder: noCodebaseFolder,
-             confirm: confirmActiveElsewhere)
+             confirm: confirmActiveElsewhere, agent: agent)
     }
 
     /// The sheet closed (Cancel, or any way out): stop retrying and forget every request in flight, and
@@ -150,14 +156,16 @@ final class ConversationHistoryStore {
         noCodebaseSweeper(wire, Set(pending.values.compactMap(\.noCodebaseFolder)))
     }
 
-    private func send(sid: String, startedAt: Date, place: String?, noCodebaseFolder: String?, confirm: Bool) {
+    private func send(sid: String, startedAt: Date, place: String?, noCodebaseFolder: String?, confirm: Bool,
+                      agent: String?) {
         let focusId = makeFocusId()
         // Exactly as `Focus.sessionTag` derives it for a focus this app mints.
-        let tag = "\(entry(sid)?.agent ?? "")-\(focusId.prefix(8))"
+        let recorded = entry(sid)?.agent ?? ""
+        let tag = "\(recorded.isEmpty ? (agent ?? "") : recorded)-\(focusId.prefix(8))"
         let requestId = makeRequestId()
-        pending[requestId] = (sid, focusId, tag, startedAt, place, noCodebaseFolder, confirm)
+        pending[requestId] = (sid, focusId, tag, startedAt, place, noCodebaseFolder, confirm, agent)
         sender?.conversationResume(requestId: requestId, id: sid, newTag: tag, place: place,
-                                   noCodebaseFolder: noCodebaseFolder, confirmActiveElsewhere: confirm)
+                                   noCodebaseFolder: noCodebaseFolder, confirmActiveElsewhere: confirm, agent: agent)
     }
 
     // MARK: Frames
@@ -223,7 +231,7 @@ final class ConversationHistoryStore {
                     schedule(Self.startRetryInterval) { [weak self] in
                         guard let self, self.inFlight.contains(p.sid) else { return }
                         self.send(sid: p.sid, startedAt: p.startedAt, place: p.place,
-                                  noCodebaseFolder: p.noCodebaseFolder, confirm: p.confirm)
+                                  noCodebaseFolder: p.noCodebaseFolder, confirm: p.confirm, agent: p.agent)
                     }
                 }
             } else {

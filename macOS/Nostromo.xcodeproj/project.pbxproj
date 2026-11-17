@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		ZZ0000000000000000SH0405 /* OutsideConversationsAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SH0404 /* OutsideConversationsAppearanceTests.swift */; };
+		ZZ0000000000000000SH0403 /* OutsideConversationsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SH0402 /* OutsideConversationsTests.swift */; };
+		ZZ0000000000000000SH0401 /* NewFocusShortcutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SH0400 /* NewFocusShortcutTests.swift */; };
 		RT0000000000000000000002 /* ReviewNavigationPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000001 /* ReviewNavigationPolicyTests.swift */; };
 		RT0000000000000000000004 /* ReviewPaneHostsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000003 /* ReviewPaneHostsTests.swift */; };
 		RT0000000000000000000006 /* ReviewPaneModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000005 /* ReviewPaneModelTests.swift */; };
@@ -855,6 +858,9 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		ZZ0000000000000000SH0404 /* OutsideConversationsAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutsideConversationsAppearanceTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000SH0402 /* OutsideConversationsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutsideConversationsTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000SH0400 /* NewFocusShortcutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewFocusShortcutTests.swift; sourceTree = "<group>"; };
 		RT0000000000000000000001 /* ReviewNavigationPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewNavigationPolicyTests.swift; sourceTree = "<group>"; };
 		RT0000000000000000000003 /* ReviewPaneHostsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPaneHostsTests.swift; sourceTree = "<group>"; };
 		RT0000000000000000000005 /* ReviewPaneModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPaneModelTests.swift; sourceTree = "<group>"; };
@@ -2041,6 +2047,9 @@
 				ZZ0000000000000000NCG02 /* NoCodebaseCreateTests.swift */,
 				ZZ0000000000000000NCG01 /* NoCodebaseFolderTests.swift */,
 				ZZ0000000000000000CH0700 /* ResumeTabTests.swift */,
+				ZZ0000000000000000SH0404 /* OutsideConversationsAppearanceTests.swift */,
+				ZZ0000000000000000SH0402 /* OutsideConversationsTests.swift */,
+				ZZ0000000000000000SH0400 /* NewFocusShortcutTests.swift */,
 				ZZ0000000000000000CH0710 /* FolderGoneChoiceTests.swift */,
 				ZZ0000000000000000CH0720 /* RenameEntryTests.swift */,
 				ZZ0000000000000000CH0600 /* ConversationHistoryModelTests.swift */,
@@ -3091,6 +3100,9 @@
 				ZZ0000000000000000NCH02 /* NoCodebaseCreateTests.swift in Sources */,
 				ZZ0000000000000000NCH01 /* NoCodebaseFolderTests.swift in Sources */,
 				ZZ0000000000000000CH0701 /* ResumeTabTests.swift in Sources */,
+				ZZ0000000000000000SH0405 /* OutsideConversationsAppearanceTests.swift in Sources */,
+				ZZ0000000000000000SH0403 /* OutsideConversationsTests.swift in Sources */,
+				ZZ0000000000000000SH0401 /* NewFocusShortcutTests.swift in Sources */,
 				ZZ0000000000000000CH0711 /* FolderGoneChoiceTests.swift in Sources */,
 				ZZ0000000000000000CH0721 /* RenameEntryTests.swift in Sources */,
 				ZZ0000000000000000CH0601 /* ConversationHistoryModelTests.swift in Sources */,

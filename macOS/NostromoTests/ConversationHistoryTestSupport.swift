@@ -14,10 +14,13 @@ final class RecordingHistorySender: ConversationHistorySending {
     private(set) var restores: [String] = []
     private(set) var purges = 0
     private(set) var settings: [Bool] = []
+    private(set) var includeOutsideSettings: [Bool] = []
+    private(set) var resumeAgents: [String?] = []
 
     func conversationHistoryGet(requestId: String) { gets += 1 }
     func conversationResume(requestId: String, id: String, newTag: String, place: String?,
-                            noCodebaseFolder: String?, confirmActiveElsewhere: Bool) {
+                            noCodebaseFolder: String?, confirmActiveElsewhere: Bool, agent: String?) {
+        resumeAgents.append(agent)
         resumes.append((requestId, id, newTag)); resumePlaces.append(place); resumeConfirms.append(confirmActiveElsewhere)
         resumeNoCodebaseFolders.append(noCodebaseFolder)
     }
@@ -27,6 +30,7 @@ final class RecordingHistorySender: ConversationHistorySending {
     func conversationHistoryRestore(requestId: String, id: String) { restores.append(id) }
     func conversationHistoryPurgeRemoved(requestId: String) { purges += 1 }
     func conversationHistorySettingsSet(requestId: String, firstPromptsEnabled: Bool) { settings.append(firstPromptsEnabled) }
+    func conversationHistoryIncludeOutsideSet(requestId: String, includeOutside: Bool) { includeOutsideSettings.append(includeOutside) }
 }
 
 enum HistoryFixtures {
@@ -48,22 +52,26 @@ enum HistoryFixtures {
                       project: String? = "nostromo", branch: String? = nil, prs: [Int] = [],
                       prompt: String? = nil, status: ConversationStatusWire = .available,
                       sensitive: Bool = false, mainCheckout: String? = nil,
-                      noCodebase: Bool = false) -> ConversationEntryWire {
+                      noCodebase: Bool = false, origin: String? = nil) -> ConversationEntryWire {
         ConversationEntryWire(id: id, title: title, agent: agent, lastActiveMs: ms(daysAgo: daysAgo), status: status,
                               projectName: project, projectPath: project.map { "/tmp/\($0)" }, branch: branch,
                               prNumbers: prs, firstPrompt: prompt, sensitive: sensitive,
-                              transcriptPath: "/tmp/\(id).jsonl", mainCheckout: mainCheckout, noCodebase: noCodebase)
+                              transcriptPath: "/tmp/\(id).jsonl", mainCheckout: mainCheckout, noCodebase: noCodebase,
+                              origin: origin)
     }
 
     /// `referenced` is the daemon's `referenced_space_folders` (nil: a daemon that does not say).
     static func history(_ entries: [ConversationEntryWire], prompts: Bool = true, degraded: Int? = nil,
-                        referenced: [String]? = nil, spacesRoot: String? = nil) -> ConversationHistoryWire {
+                        referenced: [String]? = nil, spacesRoot: String? = nil,
+                        includeOutside: Bool = false, outsideReady: Bool = false) -> ConversationHistoryWire {
         let json: [String: Any] = ["request_id": "r", "entries": [], "first_prompts_enabled": prompts, "revision": 1]
         var wire = try! JSONDecoder().decode(ConversationHistoryWire.self, from: JSONSerialization.data(withJSONObject: json))
         wire.entries = entries
         wire.degradedKept = degraded
         wire.referencedSpaceFolders = referenced
         wire.spacesRoot = spacesRoot
+        wire.includeOutside = includeOutside
+        wire.outsideReady = outsideReady
         return wire
     }
 }
