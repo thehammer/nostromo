@@ -99,6 +99,10 @@ public enum AuthoredPrAnswer<Value: Equatable>: Equatable {
     case unreachable
 }
 
+// Sendable whenever its payload is, so `AuthoredPrAnswerFrame` (which is `Sendable`) is too:
+// without this the Mac build warns, and Swift 6 language mode would make it an error.
+extension AuthoredPrAnswer: Sendable where Value: Sendable {}
+
 public struct AuthoredPrLastTold: Equatable, Sendable {
     public var name: String
     public var at: Date?
