@@ -54,6 +54,7 @@ pub struct ViewFacts {
     /// Title fallback when the file has no `# ` line.
     pub topic: String,
     pub version: u64,
+    pub epoch: String,
     /// The board's updated time when it has no items.
     pub file_mtime: Option<DateTime<Utc>>,
     pub banner: Option<Banner>,
@@ -201,6 +202,11 @@ pub struct TrackerBoardView {
     pub title: String,
     pub path: String,
     pub version: u64,
+    /// Which run of the board `version` counts in (random; changes when the
+    /// daemon's state for the board is lost). The pane sends it back as
+    /// `tracker_edit.base_epoch`. Additive: absent from an older daemon.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub epoch: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<DateTime<Utc>>,
     pub nodes: Vec<ViewNode>,
@@ -381,6 +387,7 @@ pub fn build(parsed: &ParsedBoard, facts: &ViewFacts) -> TrackerBoardView {
         title: board.title.clone().unwrap_or_else(|| facts.topic.clone()),
         path: facts.path.clone(),
         version: facts.version,
+        epoch: facts.epoch.clone(),
         updated_at: board.updated_at().or(facts.file_mtime),
         nodes,
         log: board

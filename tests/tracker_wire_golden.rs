@@ -84,6 +84,8 @@ fn board_frame_with(
             path: "/repo/.claude/wip/sentry-triage/index.md".into(),
             topic: "sentry-triage".into(),
             version: 7,
+            // Empty: an older daemon's frame, no `epoch` key (the golden is unchanged).
+            epoch: String::new(),
             file_mtime: None,
             banner: None,
             committable: None,

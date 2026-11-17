@@ -48,6 +48,10 @@
 //! Also generated: a state-loss restart in the middle of a run (a new registry
 //! over the same files with `state.json` gone: versions and counters start
 //! over, every window's view and every conflict id it holds is from before);
+//! the oracle keeps what it knows of the values still in the file at the
+//! restart, and right after it a window with the old view overwrites one of
+//! them: the new log knows nothing of that value, so it must be kept (the view
+//! carries the board's epoch, as the Mac's does, and the window sends it back);
 //! a batch that settles one conflict twice, or puts back two losing values of
 //! one field, which must be refused; any `resolve_conflict` naming an id the
 //! board no longer keeps, which must be refused; and in two runs, a
@@ -55,8 +59,9 @@
 //! once next to one real conflict: the real one must outlive the guesses the
 //! stale view makes.
 //!
-//! Failing interleavings print their seed and every step. `TRACKER_FUZZ_SEED`
-//! reruns one seed. Hermetic: `FakeClock`, temp dirs, no network.
+//! Failing interleavings print their seed and every step (a panic in one is
+//! reported with its seed too). `TRACKER_FUZZ_SEED` reruns one seed;
+//! `TRACKER_FUZZ_COUNT` runs more. Hermetic: `FakeClock`, temp dirs, no network.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -107,7 +112,10 @@ impl Rng {
         self.next() % 100 < percent
     }
 
+    /// A random element. Callers never pick from an empty list (a step with
+    /// no item to act on does nothing instead).
     fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+        assert!(!items.is_empty(), "pick from an empty list");
         &items[self.below(items.len())]
     }
 }
@@ -191,6 +199,13 @@ struct Write {
     /// The version once the write was in.
     applied: u64,
     step: usize,
+    /// The writer's base is from this run of the daemon: an agent that opened
+    /// or read the board since the restart, a window that looked since. Only
+    /// such a writer has seen a value written before the restart.
+    fresh: bool,
+    /// Written before a state-loss restart (still in the file at the restart,
+    /// which the new log knows nothing about).
+    pre_restart: bool,
 }
 
 /// The writes `who` made, from what the file said before and after.
@@ -212,6 +227,8 @@ fn writes_between(
             base,
             applied,
             step,
+            fresh: true,
+            pre_restart: false,
         });
     };
     for (id, fields) in after {
@@ -281,6 +298,8 @@ impl Shown {
 #[derive(Debug, Clone, Default)]
 struct PaneView {
     version: u64,
+    /// The board's epoch the view carried (a real pane sends it back).
+    epoch: String,
     shown: Vec<Shown>,
 }
 
@@ -519,8 +538,18 @@ impl World {
                 .expect("re-open after the restart");
             self.cursor[i] = Some(self.version());
         }
-        // What was kept in memory is gone, and so are the oracle's premises.
-        self.writes.clear();
+        // What the daemon kept in memory is gone, and so are the conflicts it
+        // held (and the premises that rested on them). What the oracle
+        // remembers of the values still in the file is not: those are the old
+        // values a stale window may now overwrite, and the new daemon's log
+        // knows nothing about them.
+        let in_file = items_of(&self.bytes());
+        self.writes.retain(|e| {
+            e.field != "removed" && in_file.get(&e.item).is_some_and(|f| f[e.field] == e.value)
+        });
+        for e in &mut self.writes {
+            e.pre_restart = true;
+        }
         self.excused.clear();
         self.restored_elsewhere.clear();
         self.history.clear();
@@ -535,6 +564,59 @@ impl World {
         self.view_stale = [true; 2];
         self.steps
             .push("*** the daemon restarts with its state lost ***".to_string());
+    }
+
+    /// Right after a restart, a window still showing the old run's view
+    /// overwrites a value somebody else wrote before it: the new log has no
+    /// entry for that value (its field is "unlogged"), and the view's version
+    /// is meaningless to the new log. The oracle counts the window to have seen
+    /// nothing, so the value must be kept as a conflict. (Random steps hit this
+    /// only now and then: this one makes every restart run do it.)
+    fn stale_window_overwrites_an_old_value(&mut self, step: usize) {
+        let Some((item, field)) = self
+            .writes
+            .iter()
+            .filter(|e| e.pre_restart && !matches!(e.who, Who::Pane(_)))
+            .find(|e| e.field == "note" || e.field == "status")
+            .map(|e| (e.item.clone(), e.field))
+        else {
+            return;
+        };
+        let current = items_of(&self.bytes());
+        let current = current[&item][field].clone().unwrap_or_default();
+        let op = if field == "note" {
+            TrackerPaneOp::Edit {
+                id: item.clone(),
+                title: None,
+                text: None,
+                body: Some(self.unique("probe-note-")),
+            }
+        } else {
+            TrackerPaneOp::Status {
+                id: item.clone(),
+                status: if current == "blocked" {
+                    "needs-you"
+                } else {
+                    "blocked"
+                }
+                .into(),
+            }
+        };
+        let w = self.rng.below(2);
+        let (before, base, epoch) = (
+            self.bytes(),
+            self.views[w].version,
+            self.views[w].epoch.clone(),
+        );
+        let ops = vec![op];
+        let r = self
+            .reg
+            .apply_pane_ops_in(TAG[0], WINDOW[w], base, Some(&epoch), &ops);
+        self.steps.push(format!(
+            "window {w} (old view v{base}) overwrites a value from before the restart: {ops:?} -> {}",
+            r.is_ok()
+        ));
+        self.settle(Who::Pane(w), 0, &before, &[item], false, step);
     }
 
     fn version(&self) -> u64 {
@@ -628,6 +710,7 @@ impl World {
         ));
         self.views[w] = PaneView {
             version: view.version,
+            epoch: view.epoch.clone(),
             shown,
         };
         self.view_stale[w] = false;
@@ -692,6 +775,16 @@ impl World {
         if !mid.is_empty() {
             between = self.injected_bytes(&mid, before);
         }
+        // Whether the writer's base is from this run (see `Write::fresh`).
+        let fresh = match who {
+            // Every agent was handed the board at the restart. (A session that
+            // starts later and never reads has seen nothing, and the daemon
+            // has no log of what the file held at the restart to tell it: a
+            // known gap, not generated as a loss here; see the PR.)
+            Who::Agent(..) => true,
+            Who::Pane(w) => !self.view_stale[w],
+            Who::File => true,
+        };
         self.writes.extend(mid);
         let mut ids: Vec<String> = touched.to_vec();
         let new_writes = writes_between(
@@ -703,7 +796,8 @@ impl World {
             step,
         );
         ids.extend(new_writes.iter().map(|w| w.item.clone()));
-        self.writes.extend(new_writes);
+        self.writes
+            .extend(new_writes.into_iter().map(|w| Write { fresh, ..w }));
         if !injected {
             let (b, a) = (
                 String::from_utf8(before.to_vec()).unwrap(),
@@ -765,6 +859,12 @@ impl World {
             return;
         }
         let ids = self.item_ids();
+        if ids.is_empty() {
+            self.steps.push(format!(
+                "agent {i} has nothing to act on (the board has no items)"
+            ));
+            return;
+        }
         let mut touched = Vec::new();
         let hot = self.hot.clone().filter(|h| ids.contains(h));
         let op = match (&hot, self.rng.chance(60)) {
@@ -890,6 +990,12 @@ impl World {
             self.look(w);
         }
         let ids = self.item_ids();
+        if ids.is_empty() {
+            self.steps.push(format!(
+                "window {w} has nothing to act on (the board has no items)"
+            ));
+            return;
+        }
         let mut touched = Vec::new();
         let base = self.views[w].version;
         // What the oracle counts the window to have seen: nothing, when its
@@ -1104,7 +1210,10 @@ impl World {
         let before = self.bytes();
         let version_before = self.version();
         let conflicts_before = self.conflict_ids_now();
-        let result = self.reg.apply_pane_ops_as(TAG[0], WINDOW[w], base, &ops);
+        let epoch = self.views[w].epoch.clone();
+        let result = self
+            .reg
+            .apply_pane_ops_in(TAG[0], WINDOW[w], base, Some(&epoch), &ops);
         let unknown_id = ops.iter().any(|op| match op {
             TrackerPaneOp::ResolveConflict {
                 conflict_id: Some(id),
@@ -1200,6 +1309,10 @@ impl World {
             )
         } else {
             let ids = self.item_ids();
+            if ids.is_empty() {
+                self.steps.push("file save: no items to change".to_string());
+                return;
+            }
             let mut ops = Vec::new();
             for _ in 0..1 + self.rng.below(2) {
                 let id = self.rng.pick(&ids).clone();
@@ -1412,7 +1525,10 @@ impl World {
             body: Some(self.unique("real-pane-note-")),
         }];
         let (before, base) = (self.bytes(), self.views[0].version);
-        let r = self.reg.apply_pane_ops_as(TAG[0], WINDOW[0], base, &ops);
+        let epoch = self.views[0].epoch.clone();
+        let r = self
+            .reg
+            .apply_pane_ops_in(TAG[0], WINDOW[0], base, Some(&epoch), &ops);
         self.steps
             .push(format!("window 0 (base {base}) {ops:?} -> {}", r.is_ok()));
         self.settle(Who::Pane(0), base, &before, &["item-2".into()], false, step);
@@ -1428,7 +1544,10 @@ impl World {
             .collect();
         let (before, base) = (self.bytes(), self.views[1].version);
         let ids: Vec<String> = (0..BULK).map(|n| format!("bulk-{n}")).collect();
-        let r = self.reg.apply_pane_ops_as(TAG[0], WINDOW[1], base, &ops);
+        let epoch = self.views[1].epoch.clone();
+        let r = self
+            .reg
+            .apply_pane_ops_in(TAG[0], WINDOW[1], base, Some(&epoch), &ops);
         self.steps.push(format!(
             "window 1 (stale base {base}) changes {BULK} items -> {}",
             r.is_ok()
@@ -1456,6 +1575,7 @@ impl World {
             self.steps.push(format!("[{step}] +{secs}s"));
             if self.restart_at == Some(step) {
                 self.restart();
+                self.stale_window_overwrites_an_old_value(step);
             }
             if self.gap_run && step == 1 {
                 self.bulk_step(step);
@@ -1524,7 +1644,15 @@ impl World {
             let superseded = self.writes[index + 1..].iter().any(|w| {
                 w.item == e.item
                     && (w.field == e.field || w.field == "removed")
-                    && (w.who == e.who || w.base >= e.applied)
+                    && (w.who == e.who
+                        // A value from before a restart was seen only by a
+                        // writer whose base is from after it; any other
+                        // base is a version of another log.
+                        || if e.pre_restart {
+                            w.fresh
+                        } else {
+                            w.base >= e.applied
+                        })
             });
             // A cap dropped it, and the view said so: the accepted loss.
             let said_dropped =
@@ -1587,9 +1715,24 @@ fn four_hundred_interleavings_lose_no_edit() {
             (0..count).map(|n| SEED_BASE + n).collect()
         }
     };
+    // A panic inside an interleaving (a bug in the fixture, or in the daemon)
+    // is a failure of that seed, reported with it, not an abort of the run.
     let failed: Vec<(u64, String)> = seeds
         .iter()
-        .filter_map(|s| one(*s).err().map(|e| (*s, e)))
+        .filter_map(|s| {
+            let seed = *s;
+            match std::panic::catch_unwind(|| one(seed)) {
+                Ok(result) => result.err().map(|e| (seed, e)),
+                Err(payload) => {
+                    let why = payload
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "a panic".to_string());
+                    Some((seed, format!("seed {seed:#x} panicked: {why}")))
+                }
+            }
+        })
         .collect();
     if let Some((_, first)) = failed.first() {
         let list: Vec<String> = failed.iter().map(|(s, _)| format!("{s:#x}")).collect();

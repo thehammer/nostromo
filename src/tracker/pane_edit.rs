@@ -39,6 +39,9 @@ pub struct PaneEditError {
     pub reason: Option<String>,
     /// The failing op's position.
     pub index: Option<usize>,
+    /// The view the edit was made from is out of date: look again and retry.
+    /// `code` stays `invalid_args` for an older client.
+    pub stale: bool,
 }
 
 impl PaneEditError {
@@ -47,6 +50,7 @@ impl PaneEditError {
             code: "invalid_args".to_string(),
             reason: Some(reason.to_string()),
             index: None,
+            stale: false,
         }
     }
 
@@ -56,7 +60,9 @@ impl PaneEditError {
         let (index, reason) = match &err {
             TrackerError::UnknownItem { index, id } => (Some(op(*index)), Some(id.clone())),
             TrackerError::InvalidStatus { index, value } => (Some(op(*index)), Some(value.clone())),
-            TrackerError::InvalidArgs { index, reason } => (index.map(op), Some(reason.clone())),
+            TrackerError::InvalidArgs { index, reason } | TrackerError::Stale { index, reason } => {
+                (index.map(op), Some(reason.clone()))
+            }
             TrackerError::Io(why) => (None, Some(why.clone())),
             other => (None, Some(other.to_string())),
         };
@@ -64,6 +70,7 @@ impl PaneEditError {
             code: err.code().to_string(),
             reason,
             index,
+            stale: matches!(err, TrackerError::Stale { .. }),
         }
     }
 }
@@ -111,6 +118,22 @@ impl TrackerRegistry {
         tag: &str,
         client: &str,
         base_version: u64,
+        ops: &[TrackerPaneOp],
+    ) -> Result<PaneEditOutcome, PaneEditError> {
+        self.apply_pane_ops_in(tag, client, base_version, None, ops)
+    }
+
+    /// [`Self::apply_pane_ops_as`] for a view of the board's run `base_epoch`
+    /// (the view's `epoch`): when it is not this board's current one, the
+    /// `base_version` counts another log (the daemon's state was lost or rolled
+    /// back) and the edit has seen nothing of this one. `None` (an older pane)
+    /// trusts `base_version`.
+    pub fn apply_pane_ops_in(
+        &self,
+        tag: &str,
+        client: &str,
+        base_version: u64,
+        base_epoch: Option<&str>,
         ops: &[TrackerPaneOp],
     ) -> Result<PaneEditOutcome, PaneEditError> {
         if ops.is_empty() || ops.len() > MAX_TRACKER_EDIT_OPS {
@@ -171,9 +194,11 @@ impl TrackerRegistry {
             })
             .collect();
         let dropped = entry.conflicts.dropped_by_item().clone();
+        let foreign_base = base_epoch.is_some_and(|e| e != entry.conflicts.epoch());
         let ctx = WriteCtx {
             log: true,
             seen: Some(base_version),
+            foreign_base,
             client: Some(client),
             detect: true,
             resolving: &resolving,
@@ -191,7 +216,9 @@ impl TrackerRegistry {
                     dropped: &dropped,
                     originals: &originals,
                     log,
-                    base_version,
+                    // A view of another run saw none of this log: every check
+                    // that asks "changed since you saw it" must refuse.
+                    base_version: if foreign_base { u64::MAX } else { base_version },
                 };
                 let plan = plan_ops(ops, board, &inputs, &|id, body| {
                     bound_body(live, board, id, body)
@@ -252,7 +279,7 @@ fn check_badge_clearable(
             && matches!(c.kind, ChangeKind::Changed | ChangeKind::Added)
     });
     if changed || log.history_gap(base_version) {
-        return Err(TrackerError::InvalidArgs {
+        return Err(TrackerError::Stale {
             index: Some(index),
             reason: "the item changed since you saw it; look again before clearing".to_string(),
         });
@@ -273,7 +300,7 @@ fn check_drops_seen(
         c.seq > base_version && c.item_id.as_deref() == Some(id) && c.kind == ChangeKind::Conflict
     });
     if newer || log.history_gap(base_version) {
-        return Err(TrackerError::InvalidArgs {
+        return Err(TrackerError::Stale {
             index: Some(index),
             reason: "more were dropped since you saw it; look again before acknowledging"
                 .to_string(),
@@ -344,6 +371,10 @@ fn plan_ops(
     let mut settled: HashSet<&str> = HashSet::new();
     let mut put_back: HashSet<(&str, &str)> = HashSet::new();
     let invalid = |index: usize, reason: &str| TrackerError::InvalidArgs {
+        index: Some(index),
+        reason: reason.to_string(),
+    };
+    let stale = |index: usize, reason: &str| TrackerError::Stale {
         index: Some(index),
         reason: reason.to_string(),
     };
@@ -499,7 +530,7 @@ fn plan_ops(
                 }
                 let count = inputs.dropped.get(id).copied().unwrap_or(0);
                 if count == 0 {
-                    return Err(invalid(
+                    return Err(stale(
                         index,
                         "nothing was dropped for that item (cleared elsewhere); look again",
                     ));
@@ -530,7 +561,7 @@ fn plan_ops(
                     .iter()
                     .find(|c| c.id == conflict_id && &c.item_id == id && &c.field == field);
                 let Some(chosen) = chosen else {
-                    return Err(invalid(
+                    return Err(stale(
                         index,
                         "that conflict is no longer kept (settled elsewhere or dropped); look again",
                     ));

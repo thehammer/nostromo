@@ -228,6 +228,21 @@ impl Rig {
         self.reg.apply_pane_ops(TAG_A, base, &ops)
     }
 
+    /// An edit from a view of board run `epoch` at version `base`.
+    fn pane_in(
+        &self,
+        base: u64,
+        epoch: &str,
+        ops: Vec<TrackerPaneOp>,
+    ) -> Result<nostromo::tracker::PaneEditOutcome, PaneEditError> {
+        self.reg
+            .apply_pane_ops_in(TAG_A, "pane", base, Some(epoch), &ops)
+    }
+
+    fn epoch(&self) -> String {
+        self.reg.board_view(TAG_A).expect("a board").epoch
+    }
+
     fn agent_a(&self, ops: &[Op]) -> Result<nostromo::tracker::WriteOutcome, TrackerError> {
         self.reg.apply(TAG_A, SESS_A, ops, &agent(TAG_A, SESS_A))
     }
@@ -1067,4 +1082,235 @@ fn settling_the_oldest_of_a_full_field_while_overflowing_adds_nothing_to_an_earl
             "{keep:?}: a2 was settled, not dropped"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// R11 (M1): the overwritten value is kept when its field has no entry in the
+// log the pane's position is compared with
+// ---------------------------------------------------------------------------
+
+/// The daemon lost its state after agent B set alpha's note. The pane's view
+/// is from before that note, at a version beyond the new, empty log: it cannot
+/// have seen the note, so its overwrite is a conflict and the note is kept.
+#[test]
+fn a_lost_state_keeps_the_agents_note_a_stale_pane_overwrites() {
+    let mut rig = Rig::new();
+    rig.tick(100);
+    // Some history, so the pane's view is at a version well past a fresh log.
+    for k in 0..10 {
+        rig.agent_a(&[upsert(&format!("filler-{k}"), "now", "Filler")])
+            .unwrap();
+    }
+    let pane_view = rig.version();
+    rig.tick(100);
+    rig.agent_b(&[note_op("alpha", "the agent's note")])
+        .unwrap();
+
+    rig.restart_losing_state();
+    assert!(rig.version() < pane_view, "the new log is behind the view");
+    rig.tick(100);
+    rig.pane_at(pane_view, vec![pane_edit_body("alpha", "the user's note")])
+        .unwrap();
+
+    assert_eq!(rig.item("alpha").note.as_deref(), Some("the user's note"));
+    assert_eq!(
+        rig.losers("alpha", "note"),
+        vec!["the agent's note"],
+        "the agent's note is kept, not silently lost"
+    );
+}
+
+/// The agent's note rolled off the log (the state was rolled back) but is
+/// still in the file; a pane whose position is beyond the log overwrites it.
+#[test]
+fn a_rolled_back_state_keeps_the_agents_note_a_stale_pane_overwrites() {
+    let mut rig = Rig::new();
+    rig.tick(100);
+    let kept_through = rig.version();
+    rig.agent_b(&[note_op("alpha", "the agent's note")])
+        .unwrap();
+    for k in 0..4 {
+        rig.agent_a(&[upsert(&format!("filler-{k}"), "now", "Filler")])
+            .unwrap();
+    }
+    let pane_view = rig.version();
+    rig.roll_log_back_to(kept_through);
+    rig.restart();
+    assert_eq!(rig.version(), kept_through, "the log really went back");
+    assert!(pane_view > kept_through);
+
+    rig.tick(100);
+    rig.pane_at(pane_view, vec![pane_edit_body("alpha", "the user's note")])
+        .unwrap();
+
+    assert_eq!(rig.item("alpha").note.as_deref(), Some("the user's note"));
+    assert_eq!(rig.losers("alpha", "note"), vec!["the agent's note"]);
+}
+
+// ---------------------------------------------------------------------------
+// R11 (residual): a base version from another run of the board
+// ---------------------------------------------------------------------------
+
+/// After a state loss the new log grows past the pane's stale base. An agent
+/// change of the new run, at a version at or below that base, would count as
+/// seen. The view's epoch says the base is of another run: nothing was seen.
+#[test]
+fn a_base_version_from_another_run_of_the_board_has_seen_nothing() {
+    let mut rig = Rig::new();
+    rig.tick(100);
+    for k in 0..6 {
+        rig.agent_a(&[upsert(&format!("filler-{k}"), "now", "Filler")])
+            .unwrap();
+    }
+    let (old_view, old_epoch) = (rig.version(), rig.epoch());
+    assert!(!old_epoch.is_empty(), "the view carries the board's epoch");
+
+    rig.restart_losing_state();
+    assert_ne!(rig.epoch(), old_epoch, "a new run has its own epoch");
+    rig.tick(100);
+    rig.agent_b(&[note_op("alpha", "the agent's note")])
+        .unwrap();
+    let note_version = rig.version();
+    // The new run's log grows past the pane's stale base.
+    let mut k = 0;
+    while rig.version() <= old_view + 2 {
+        rig.agent_a(&[upsert(&format!("later-{k}"), "now", "Later")])
+            .unwrap();
+        k += 1;
+    }
+    assert!(
+        note_version <= old_view,
+        "the note sits at or below the base"
+    );
+    rig.tick(100);
+
+    rig.pane_in(
+        old_view,
+        &old_epoch,
+        vec![pane_edit_body("alpha", "the user's note")],
+    )
+    .unwrap();
+
+    assert_eq!(rig.item("alpha").note.as_deref(), Some("the user's note"));
+    assert_eq!(rig.losers("alpha", "note"), vec!["the agent's note"]);
+}
+
+/// A view of the current run is trusted as before: an agent change at or below
+/// its base was seen, and overwriting it is no conflict.
+#[test]
+fn a_base_version_of_the_current_run_is_trusted() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.agent_b(&[note_op("alpha", "the agent's note")])
+        .unwrap();
+    rig.tick(100);
+    rig.pane_in(
+        rig.version(),
+        &rig.epoch(),
+        vec![pane_edit_body("alpha", "the user's note")],
+    )
+    .unwrap();
+    assert!(rig.losers("alpha", "note").is_empty());
+}
+
+/// A pane that sends no epoch (an older one) is judged by its base version as
+/// before.
+#[test]
+fn an_edit_without_a_base_epoch_trusts_its_base_version() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.agent_b(&[note_op("alpha", "the agent's note")])
+        .unwrap();
+    rig.tick(100);
+    rig.pane(vec![pane_edit_body("alpha", "the user's note")])
+        .unwrap();
+    assert!(rig.losers("alpha", "note").is_empty());
+}
+
+/// An approval or an acknowledgement from a view of another run can't be
+/// shown what changed since: refused as stale.
+#[test]
+fn an_acknowledgement_from_a_view_of_another_run_is_refused_as_stale() {
+    let rig = Rig::new();
+    lose_notes(&rig, 1, 6);
+    let before = rig.snapshot();
+    let err = rig
+        .pane_in(rig.version(), "another-run", vec![ack_op("alpha")])
+        .expect_err("a view of another run");
+    assert!(err.stale, "{err:?}");
+    assert_eq!(rig.snapshot(), before);
+    assert_eq!(rig.item("alpha").dropped_conflicts, 1);
+}
+
+// ---------------------------------------------------------------------------
+// "Look again" has a result code of its own: `stale`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_look_again_refusal_is_marked_stale_and_keeps_invalid_args() {
+    // An id from before the state was lost (a conflict that no longer exists).
+    let mut rig = Rig::new();
+    rig.first_status_conflict();
+    let old_id = rig.conflict_id("alpha", "status", "in-progress");
+    rig.restart_losing_state();
+    let err = rig
+        .pane(vec![resolve_op(
+            "alpha",
+            "status",
+            ConflictKeep::Current,
+            &old_id,
+        )])
+        .expect_err("an old-run conflict id");
+    assert_eq!((err.code.as_str(), err.stale), ("invalid_args", true));
+
+    // A conflict id that never existed.
+    let rig = Rig::new();
+    rig.first_status_conflict();
+    let err = rig
+        .pane(vec![resolve_op(
+            "alpha",
+            "status",
+            ConflictKeep::Losing,
+            "nope.1.0",
+        )])
+        .expect_err("an unknown conflict id");
+    assert_eq!((err.code.as_str(), err.stale), ("invalid_args", true));
+
+    // Nothing to acknowledge.
+    let rig = Rig::new();
+    let err = rig
+        .pane(vec![ack_op("beta")])
+        .expect_err("nothing was dropped");
+    assert_eq!((err.code.as_str(), err.stale), ("invalid_args", true));
+
+    // More dropped since the view.
+    let rig = Rig::new();
+    lose_notes(&rig, 1, 5);
+    let seen = rig.version();
+    lose_notes(&rig, 6, 6);
+    let err = rig
+        .pane_at(seen, vec![ack_op("alpha")])
+        .expect_err("more dropped since the view");
+    assert_eq!((err.code.as_str(), err.stale), ("invalid_args", true));
+}
+
+/// A refusal that look-again would not fix is not stale.
+#[test]
+fn a_refusal_that_looking_again_would_not_fix_is_not_stale() {
+    let rig = Rig::new();
+    rig.first_status_conflict();
+    let err = rig
+        .pane(vec![TrackerPaneOp::ResolveConflict {
+            id: "alpha".into(),
+            field: "status".into(),
+            keep: ConflictKeep::Current,
+            conflict_id: None,
+            index: Some(0),
+        }])
+        .expect_err("a position names nothing");
+    assert_eq!((err.code.as_str(), err.stale), ("invalid_args", false));
+    let err = rig
+        .pane(vec![pane_status("nope", "done")])
+        .expect_err("unknown item");
+    assert!(!err.stale);
 }

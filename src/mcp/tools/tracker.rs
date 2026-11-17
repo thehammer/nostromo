@@ -199,7 +199,8 @@ impl Failure {
                         put("index", json!(index));
                         put("value", json!(value));
                     }
-                    TrackerError::InvalidArgs { index, reason } => {
+                    TrackerError::InvalidArgs { index, reason }
+                    | TrackerError::Stale { index, reason } => {
                         if let Some(index) = index {
                             put("index", json!(index));
                         }

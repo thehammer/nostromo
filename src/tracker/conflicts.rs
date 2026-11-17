@@ -168,6 +168,13 @@ impl Conflicts {
         }
     }
 
+    /// This board's epoch for this run: the pane sends the one it saw as
+    /// `base_epoch`, so a `base_version` from another run (the state was lost
+    /// or rolled back) is known not to be about this log.
+    pub fn epoch(&self) -> &str {
+        &self.epoch
+    }
+
     /// The conflict with this stable id.
     pub fn get(&self, id: &str) -> Option<&Conflict> {
         (!id.is_empty())

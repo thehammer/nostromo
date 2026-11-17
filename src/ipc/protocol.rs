@@ -1322,6 +1322,13 @@ pub const FEATURE_TRACKER_EDIT: &str = "tracker_edit_v1";
 /// error rather than settling a different value than the one it showed.
 pub const FEATURE_TRACKER_CONFLICT_IDS: &str = "tracker_conflict_ids_v1";
 
+/// The optional capability advertised in `Welcome.features`: this daemon
+/// decodes the pane op `ack_dropped` (forget the dropped-conflict count the
+/// user was shown). A daemon with `tracker_conflict_ids_v1` can lack it (ids
+/// shipped first), so it has its own flag: a pane that sends `ack_dropped`
+/// without it gets an undecodable frame.
+pub const FEATURE_TRACKER_ACK_DROPPED: &str = "tracker_ack_dropped_v1";
+
 /// Ops in one `tracker_edit`.
 pub const MAX_TRACKER_EDIT_OPS: usize = 50;
 
@@ -1440,6 +1447,12 @@ pub struct TrackerEditError {
     /// The failing op's position, when the failure is one op's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<u32>,
+    /// The pane's view is out of date (a conflict that is gone, drops it has
+    /// not seen, an item changed since): re-read the board and let the user
+    /// try again. Set together with `invalid_args`, which an older client
+    /// still reads; absent (false) otherwise.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
 }
 
 /// One slash command a session's CLI reports (`ServerMsg::SessionCommands`).
@@ -1833,6 +1846,12 @@ pub enum ClientMsg {
         tag: String,
         request_id: String,
         base_version: u64,
+        /// The `epoch` of the board view `base_version` is from. When it is
+        /// not the board's current one (the daemon lost or rolled back its
+        /// state), the edit is treated as having seen nothing. Absent (an older
+        /// pane): `base_version` is trusted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_epoch: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         operator_nonce: Option<String>,
         ops: Vec<TrackerPaneOp>,
@@ -6912,6 +6931,7 @@ mod work_wire_tests {
             tag: "t".into(),
             request_id: "r1".into(),
             base_version: 7,
+            base_epoch: None,
             operator_nonce: Some("n".into()),
             ops: vec![
                 TrackerPaneOp::Status {
@@ -6962,6 +6982,7 @@ mod work_wire_tests {
                 code: "invalid_args".into(),
                 reason: Some("why".into()),
                 index: Some(2),
+                stale: false,
             }),
             version: 9,
             created: vec!["x-1".into()],
@@ -6970,6 +6991,63 @@ mod work_wire_tests {
         assert_eq!(v["type"], "tracker_edit_result");
         assert_eq!(v["error"]["index"], 2);
         assert_eq!(FEATURE_TRACKER_EDIT, "tracker_edit_v1");
+    }
+
+    #[test]
+    fn ack_dropped_has_a_pinned_wire_name_and_a_capability() {
+        let op: TrackerPaneOp = serde_json::from_str(r#"{"op":"ack_dropped","id":"a-1"}"#).unwrap();
+        assert_eq!(op, TrackerPaneOp::AckDropped { id: "a-1".into() });
+        let back = serde_json::to_value(&op).unwrap();
+        assert_eq!(back, serde_json::json!({"op": "ack_dropped", "id": "a-1"}));
+        // Inside a whole frame, as the Mac sends it.
+        let msg: ClientMsg = serde_json::from_str(
+            r#"{"type":"tracker_edit","tag":"t","request_id":"r","base_version":3,"base_epoch":"e1","ops":[{"op":"ack_dropped","id":"a-1"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            msg,
+            ClientMsg::TrackerEdit { ref base_epoch, ref ops, .. }
+                if base_epoch.as_deref() == Some("e1")
+                    && ops == &vec![TrackerPaneOp::AckDropped { id: "a-1".into() }]
+        ));
+        assert_eq!(FEATURE_TRACKER_ACK_DROPPED, "tracker_ack_dropped_v1");
+    }
+
+    #[test]
+    fn an_old_tracker_edit_without_base_epoch_still_decodes() {
+        let msg: ClientMsg = serde_json::from_str(
+            r#"{"type":"tracker_edit","tag":"t","request_id":"r","base_version":3,"ops":[{"op":"remove","id":"a"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            msg,
+            ClientMsg::TrackerEdit {
+                base_epoch: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_stale_flag_is_only_on_the_wire_when_set() {
+        let plain = serde_json::to_value(TrackerEditError {
+            code: "invalid_args".into(),
+            reason: None,
+            index: None,
+            stale: false,
+        })
+        .unwrap();
+        assert!(plain.get("stale").is_none());
+        let stale = serde_json::to_value(TrackerEditError {
+            code: "invalid_args".into(),
+            reason: None,
+            index: None,
+            stale: true,
+        })
+        .unwrap();
+        assert_eq!(stale["stale"], true);
+        let old: TrackerEditError = serde_json::from_str(r#"{"code":"invalid_args"}"#).unwrap();
+        assert!(!old.stale);
     }
 
     #[test]
