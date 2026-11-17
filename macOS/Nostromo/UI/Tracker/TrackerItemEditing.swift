@@ -44,7 +44,11 @@ final class TrackerItemEditing {
     private static let rememberedTimeouts = 32
 
     /// Undo and redo of pane edits. Never the window's: the composer's typing undo is not touched.
-    let undoManager: UndoManager = {
+    var undoManager: UndoManager {
+        dropVoidEntries()
+        return manager
+    }
+    private let manager: UndoManager = {
         let manager = UndoManager()
         manager.groupsByEvent = false
         return manager
@@ -61,7 +65,8 @@ final class TrackerItemEditing {
     private let tag: String
     private let send: Sender
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
-    private let currentBase: () -> TrackerBase
+    /// The board version the pane shows for these items (what an undo is made against, not the newest board).
+    private let shownBase: ([String]) -> TrackerBase
     private let itemExists: (String) -> Bool
     private typealias Entry = (ids: [String], completion: (Outcome) -> Void)
     private var pending: [String: Entry] = [:]
@@ -84,12 +89,12 @@ final class TrackerItemEditing {
          results: AnyPublisher<TrackerEditResultWire, Never>,
          send: @escaping Sender,
          schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void,
-         currentBase: @escaping () -> TrackerBase,
+         shownBase: @escaping ([String]) -> TrackerBase,
          itemExists: @escaping (String) -> Bool) {
         self.tag = tag
         self.send = send
         self.schedule = schedule
-        self.currentBase = currentBase
+        self.shownBase = shownBase
         self.itemExists = itemExists
         subscription = results
             .filter { $0.tag == tag }
@@ -184,24 +189,24 @@ final class TrackerItemEditing {
                          base: TrackerBase, completion: ((Outcome) -> Void)? = nil) {
         let ids = Set(ops.compactMap(Self.itemId)).union(inverse.compactMap(Self.itemId))
         let token = UndoToken()
-        undoManager.beginUndoGrouping()
-        undoManager.registerUndo(withTarget: self) { me in
+        manager.beginUndoGrouping()
+        manager.registerUndo(withTarget: self) { me in
             // This entry is being run: it is no longer on the stack it was on.
-            if me.undoManager.isUndoing { me.undoStack.removeAll { $0 === token } } else { me.redoStack.removeAll { $0 === token } }
+            if me.manager.isUndoing { me.undoStack.removeAll { $0 === token } } else { me.redoStack.removeAll { $0 === token } }
             guard !token.isVoid else { return }
             guard ids.allSatisfy(me.itemExists) else {
                 me.showNotice("Couldn't undo: the item was removed.")
                 return
             }
-            me.perform(inverse, inverse: ops, name: name, base: me.currentBase())
+            me.perform(inverse, inverse: ops, name: name, base: me.shownBase(Array(ids)))
         }
-        undoManager.setActionName(name)
-        undoManager.endUndoGrouping()
+        manager.setActionName(name)
+        manager.endUndoGrouping()
         // Registered while undoing, it is a redo; a fresh edit also clears the redo stack.
-        if undoManager.isUndoing {
+        if manager.isUndoing {
             redoStack.append(token)
         } else {
-            if !undoManager.isRedoing { redoStack.removeAll() }
+            if !manager.isRedoing { redoStack.removeAll() }
             undoStack.append(token)
         }
         submit(ops, base: base) { [weak self] outcome in
@@ -210,17 +215,21 @@ final class TrackerItemEditing {
         }
     }
 
-    /// Take one registered undo (or redo) back, leaving every other as it is. It is popped when it is the
-    /// newest of its stack; otherwise it stays as an entry that does nothing when run.
+    /// Take one registered undo (or redo) back, leaving every other as it is. It is voided; when it is not
+    /// the newest of its stack it stays until it surfaces, and `dropVoidEntries` then removes it, so no
+    /// menu item ever offers an undo that does nothing.
     private func retract(_ token: UndoToken) {
         token.isVoid = true
-        undoManager.disableUndoRegistration()
-        defer { undoManager.enableUndoRegistration() }
-        if undoStack.last === token {
-            undoManager.undo()
-        } else if redoStack.last === token {
-            undoManager.redo()
-        }
+        dropVoidEntries()
+    }
+
+    /// Run (without registering anything) every voided entry on top of the undo and redo stacks.
+    private func dropVoidEntries() {
+        guard !manager.isUndoing, !manager.isRedoing else { return }
+        manager.disableUndoRegistration()
+        defer { manager.enableUndoRegistration() }
+        while let last = undoStack.last, last.isVoid, manager.canUndo { manager.undo() }
+        while let last = redoStack.last, last.isVoid, manager.canRedo { manager.redo() }
     }
 
     func submit(_ ops: [TrackerPaneOpWire], base: TrackerBase, completion: @escaping (Outcome) -> Void) {
@@ -625,13 +634,17 @@ struct TrackerEditSession {
 
     let kind: TrackerEditKind
     /// The board the row was drawn from when the editor opened.
-    let base: TrackerBase
+    var base: TrackerBase
     /// What the editor opened with: a change is a difference from this.
-    let original: String
-    let row: TrackerItemRow
+    var original: String
+    var row: TrackerItemRow
     weak var priorResponder: NSResponder?
     let priorRole: TrackerControlRole?
     var phase: Phase = .editing
+    /// The text last sent: a late answer to it must not close an editor the user has typed in since.
+    var sentText: String?
+    /// Why the last save was refused (or timed out): shown while the editor stays open.
+    var refusal: String?
 
     init(kind: TrackerEditKind, base: TrackerBase, original: String, row: TrackerItemRow,
          priorResponder: NSResponder?, priorRole: TrackerControlRole?) {

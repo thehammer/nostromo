@@ -375,14 +375,15 @@ public struct TrackerItemRow: Equatable {
     public var boundTooltip: String? {
         bound.map { "Status follows \(TrackerConflictText.sourceLabel($0.source))" }
     }
-    /// What VoiceOver reads on the conflict mark: the first conflict (who set what, and who then set what
-    /// over it), and how many more. Two writers that are both this pane are told apart as "another window".
+    /// What VoiceOver reads on the conflict mark: the first conflict (who set what, who then changed it, and
+    /// what it reads now: the board does not say what the winner set, so the current value is not called theirs),
+    /// and how many more. Two writers that are both this pane are told apart as "another window".
     public var conflictSummary: String? {
         guard let first = conflicts.first else { return nil }
         let (loser, winner) = TrackerConflictText.actors(first)
         let current = first.field == "status" ? status.wireName : (first.field == "note" ? (editNote ?? "") : editText)
         var text = "Conflict on \(first.field): \(loser) set \(TrackerConflictText.plain(first.losing, field: first.field)), "
-            + "then \(winner) set \(TrackerConflictText.plain(current, field: first.field))"
+            + "then \(winner) changed it; it now reads \(TrackerConflictText.plain(current, field: first.field))"
         if conflicts.count > 1 { text += ", and \(conflicts.count - 1) more" }
         return text
     }

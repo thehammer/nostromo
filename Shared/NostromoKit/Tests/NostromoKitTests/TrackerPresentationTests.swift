@@ -1014,7 +1014,7 @@ final class TrackerPresentationTests: XCTestCase {
         let check = try XCTUnwrap(TFx.itemRow("check-1000", in: p))
         XCTAssertEqual(check.conflicts.map(\.field), ["status"])
         XCTAssertEqual(check.conflicts.first?.conflictId, "7.0")
-        XCTAssertEqual(check.conflictSummary, "Conflict on status: agent claudia set in progress, then you set in progress")
+        XCTAssertEqual(check.conflictSummary, "Conflict on status: agent claudia set in progress, then you changed it; it now reads in progress")
         XCTAssertFalse(check.editText.isEmpty, "raw text for the editor")
         let verif = try XCTUnwrap(TFx.itemRow("verif-1037", in: p))
         XCTAssertEqual(verif.sensitive?.classes, ["ssn"])

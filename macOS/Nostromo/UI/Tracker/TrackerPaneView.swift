@@ -194,9 +194,9 @@ final class TrackerPaneView: NSView {
         super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 400))
         editing = TrackerItemEditing(
             tag: tag, results: store.editResults.eraseToAnyPublisher(), send: editSender, schedule: editSchedule,
-            currentBase: { [weak self] in self?.boardBase() ?? TrackerBase(version: 0, epoch: nil) },
+            shownBase: { [weak self] ids in self?.shownBase(forItems: ids) ?? TrackerBase(version: 0, epoch: nil) },
             itemExists: { [weak self] id in self?.wireItem(id) != nil })
-        editing.onNotice = { [weak self] text in self?.applyNotice(text) }
+        editing.onNotice = { [weak self] text in self?.applyNotice(text ?? self?.openEditorRefusal()) }
         editing.onLookAgain = { [weak self] in self?.lookAgain() }
         editing.onConfirmed = { [weak self] ids, version in
             for id in ids { self?.ownEdits[id] = version }
@@ -636,17 +636,29 @@ final class TrackerPaneView: NSView {
         rowBases[TrackerRow.itemKey(id)] ?? boardBase()
     }
 
-    /// A row that shows what the target says is as new as the board; a held row keeps its older base.
+    /// The version of the board the rows for `ids` show (the oldest, when they differ); the newest board for
+    /// rows not on screen. An undo is made against what the user sees, not against a board they have not seen.
+    private func shownBase(forItems ids: [String]) -> TrackerBase {
+        let bases = ids.compactMap { rowBases[TrackerRow.itemKey($0)] }
+        return bases.min { $0.version < $1.version } ?? boardBase()
+    }
+
+    /// A row shows the board's current content unless the selection hold or an open editor keeps it
+    /// back: only those keep an older base. A row the move-deferral merely keeps in place (a ticked item
+    /// on its way to Done) already shows the new content, so it takes the board's current version.
     private func noteRowBases(target: TrackerPresentation) {
         let now = boardBase()
         let targets = Dictionary(target.rows.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+        let held = heldKeys()
         var next: [String: TrackerBase] = [:]
         for row in displayedRows where row.item != nil {
-            if let wanted = targets[row.key], wanted == row || row.differsOnlyInTime(from: wanted)
-                || row.differsOnlyInFold(from: wanted) {
-                next[row.key] = now
-            } else {
+            let showsTheBoard = targets[row.key].map {
+                $0 == row || row.differsOnlyInTime(from: $0) || row.differsOnlyInFold(from: $0)
+            } ?? false   // no row for it in the board's view (folded away or gone): what it shows is older
+            if held.contains(row.key), !showsTheBoard {
                 next[row.key] = rowBases[row.key] ?? now
+            } else {
+                next[row.key] = now
             }
         }
         rowBases = next
@@ -793,7 +805,10 @@ final class TrackerPaneView: NSView {
             }
         }
         session.phase = .saving
+        session.sentText = text
+        session.refusal = nil
         editSessions[id] = session
+        applyNotice(editing.notice ?? openEditorRefusal())
         view?.setEditorPending(true)
         restorePriorFocus(session)
         let done: (TrackerItemEditing.Outcome) -> Void = { [weak self] outcome in self?.editFinished(id, outcome) }
@@ -816,15 +831,35 @@ final class TrackerPaneView: NSView {
         guard var session = editSessions[id] else { return }
         switch outcome {
         case .saved(let version, _):
-            session.phase = .awaiting(version)
-            editSessions[id] = session
-            if closeSettledSessions() { render() }
-        case .failed, .timedOut:
-            // The typed text is still in the editor: it opens up again, without taking focus.
+            session.refusal = nil
+            let view = rowViews[TrackerRow.itemKey(id)]
+            if let sent = session.sentText, let typedNow = view?.editorText, typedNow != sent {
+                // A late answer to a send that timed out, and the user has typed since: their newer text stays
+                // in the editor as a fresh edit from what was saved.
+                session.phase = .editing
+                session.original = sent
+                session.base = TrackerBase(version: version, epoch: boardBase().epoch)
+                session.sentText = nil
+                editSessions[id] = session   // the editor is already open and editable: nothing to reopen
+            } else {
+                session.phase = .awaiting(version)
+                editSessions[id] = session
+                if closeSettledSessions() { render() }
+            }
+        case .failed(let message), .timedOut(let message):
+            // The typed text is still in the editor: it opens up again, without taking focus, and the
+            // reason stays on screen for as long as the editor is open.
             session.phase = .editing
+            session.refusal = message
             editSessions[id] = session
             rowViews[TrackerRow.itemKey(id)]?.setEditorPending(false)
         }
+        applyNotice(editing.notice ?? openEditorRefusal())
+    }
+
+    /// Why an editor that is open again could not save: kept on screen after the notice's own time is up.
+    private func openEditorRefusal() -> String? {
+        editSessions.sorted { $0.key < $1.key }.first { $0.value.phase == .editing && $0.value.refusal != nil }?.value.refusal
     }
 
     /// Close the editors whose save the board now shows (the board's version reached the result's).
@@ -845,6 +880,7 @@ final class TrackerPaneView: NSView {
     private func closeSession(_ id: String) {
         editSessions.removeValue(forKey: id)
         rowViews[TrackerRow.itemKey(id)]?.endEditor()
+        applyNotice(editing.notice ?? openEditorRefusal())
     }
 
     /// Focus goes back to whatever had it before the editor opened, unless the user has put it somewhere else.

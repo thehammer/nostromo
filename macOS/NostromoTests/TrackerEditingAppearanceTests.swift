@@ -377,6 +377,8 @@ final class TrackerEditingAppearanceTests: XCTestCase {
             h.pane.beginEdit(item: id, kind: .title)
             h.rig.host.layoutSubtreeIfNeeded()
             let editor = try XCTUnwrap(row.titleEditor)
+            // Change the text: an unchanged title closes without a save, and only a save dims the editor.
+            h.type("HHHH gypsy jug, renamed", into: editor)
             let editorRect = paneRect(editor, h)
             let live = try shot(h)
             let bg = live.color(at: NSPoint(x: editorRect.maxX - 2, y: editorRect.midY))

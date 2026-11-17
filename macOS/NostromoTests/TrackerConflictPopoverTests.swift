@@ -50,7 +50,7 @@ final class TrackerConflictPopoverTests: XCTestCase {
         let mark = try XCTUnwrap(try h.row(target).conflictButton)
         XCTAssertEqual(mark.title, "⇄ conflict")
         XCTAssertEqual(mark.accessibilityLabel(),
-                       "Conflict on status: agent claudia set todo, then you set in progress, and 1 more")
+                       "Conflict on status: agent claudia set todo, then you changed it; it now reads in progress, and 1 more")
         XCTAssertNil(try h.row(badged).conflictButton, "only items with a conflict have the mark")
     }
 
@@ -72,8 +72,10 @@ final class TrackerConflictPopoverTests: XCTestCase {
         let h = try harness(conflicts: [conflict(field: "note", losing: long)])
         try XCTUnwrap(try h.row(target).conflictButton).performClick(nil)
         let popover = try XCTUnwrap(h.pane.activePopover)
-        XCTAssertEqual(popover.valueViews.first?.string.count, 500)
-        XCTAssertTrue(popover.valueViews.first?.string.hasPrefix("**bold** [link]") ?? false, "plain text, not rendered")
+        // Two value boxes: the value in place first, the losing value (the long one) second.
+        XCTAssertEqual(popover.valueViews.count, 2)
+        XCTAssertEqual(popover.valueViews.last?.string.count, 500)
+        XCTAssertTrue(popover.valueViews.last?.string.hasPrefix("**bold** [link]") ?? false, "plain text, not rendered")
         popover.close()
     }
 

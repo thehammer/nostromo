@@ -948,12 +948,15 @@ final class TrackerRowView: NSView {
 
     /// A save is pending (read-only, dimmed, showing the text saved) or it failed (editable again).
     func setEditorPending(_ pending: Bool) {
+        // Asked before the change: making a field editable again ends the field editor that had focus.
+        let ownedFocus = editorOwnsFocus
         titleEditor?.setPending(pending)
         detailsEditor?.setPending(pending)
         guard !pending else { return }
         // Editable again, but focus is not taken: after a save it went back to where it was (the composer),
         // and a refusal or a timeout that comes later must not pull what the user types into the tracker.
-        if editorOwnsFocus { focusEditor() }
+        // An editor that still had focus keeps it.
+        if ownedFocus { focusEditor() }
         titleEditor?.reopen()
         detailsEditor?.reopen()
     }

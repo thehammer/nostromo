@@ -538,6 +538,19 @@ final class TrackerEditingTests: XCTestCase {
         XCTAssertEqual(editor.typed, "keep my words")
         XCTAssertEqual(h.pane.notice.text, "Not saved: the board file can't be read (line 42).")
         h.fire(6)
+        // The editor is still open: the reason stays up for as long as it is (it used to vanish after 6 s and
+        // leave an open editor nobody could explain). It goes when the editor does.
+        XCTAssertEqual(h.pane.notice.text, "Not saved: the board file can't be read (line 42).")
+        h.pressEscape(in: editor)
+        XCTAssertNil(h.pane.notice.text)
+    }
+
+    func testARefusalWithNoEditorOpenGoesAfterSixSeconds() throws {
+        let h = try TrackerEditHarness(self)
+        try XCTUnwrap(try h.row(plain).tickButton).performClick(nil)
+        h.answer(try XCTUnwrap(h.sent.last).requestId, ok: false, error: ["code": "board_missing"])
+        XCTAssertEqual(h.pane.notice.text, "Not saved: the board file is gone.")
+        h.fire(6)
         XCTAssertNil(h.pane.notice.text, "the notice goes after 6 s")
     }
 

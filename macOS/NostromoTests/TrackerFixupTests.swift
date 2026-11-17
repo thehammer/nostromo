@@ -122,13 +122,84 @@ final class TrackerFixupTests: XCTestCase {
         let h = try TrackerEditHarness(self)
         h.pane.beginEdit(item: plain, kind: .title)
         let editor = try XCTUnwrap(try h.row(plain).titleEditor)
-        h.window.makeFirstResponder(editor)
+        // beginEdit already gave the editor focus. (A second makeFirstResponder(editor) here resigns and
+        // re-takes it, and the resign saves the unchanged text, which closes the editor before anything is typed.)
+        XCTAssertTrue(h.window.firstResponder === editor.currentEditor(), "setup: the editor has focus")
         h.type("kept", into: editor)
         h.pressReturn(in: editor)
-        h.window.makeFirstResponder(editor)   // the user clicked back into it while the save was pending
+        // The save is pending and the editor, read-only, still has the focus it had (nothing took it elsewhere).
+        XCTAssertTrue(h.window.firstResponder === editor.currentEditor(), "setup: the pending editor has focus")
         h.answer(try XCTUnwrap(h.sent.last).requestId, ok: false, error: ["code": "board_missing"])
         XCTAssertTrue(h.window.firstResponder === editor.currentEditor() || h.window.firstResponder === editor,
                       "an editor that owns focus keeps it")
+    }
+
+    // MARK: - Round 3: refusals, late answers, undo
+
+    func testARefusedOlderEditLeavesNoDeadUndoEntryBehindANewerOne() throws {
+        let h = try TrackerEditHarness(self)
+        try XCTUnwrap(try h.row(plain).tickButton).performClick(nil)       // B, older
+        let refused = try XCTUnwrap(h.sent.last).requestId
+        try XCTUnwrap(try h.row(withNote).tickButton).performClick(nil)    // A, newer
+        h.answer(refused, ok: false, error: ["code": "board_missing"])
+        XCTAssertTrue(h.pane.editing.undoManager.canUndo, "A can be undone")
+        h.pane.performUndo()
+        XCTAssertEqual(h.sent.last?.ops, [.status(id: withNote, status: "in-progress")], "the undo is A's")
+        XCTAssertFalse(h.pane.editing.undoManager.canUndo, "B's refused entry is gone, not an \"Undo Tick\" that sends nothing")
+    }
+
+    func testTheRefusalStaysOnScreenWhileTheEditorItHeldIsOpen() throws {
+        let h = try TrackerEditHarness(self)
+        h.pane.beginEdit(item: plain, kind: .title)
+        let editor = try XCTUnwrap(try h.row(plain).titleEditor)
+        h.type("kept", into: editor)
+        h.pressReturn(in: editor)
+        h.answer(try XCTUnwrap(h.sent.last).requestId, ok: false, error: ["code": "board_missing"])
+        h.fire(6)
+        XCTAssertEqual(h.pane.notice.text, "Not saved: the board file is gone.", "still there, and the editor is still open")
+        XCTAssertNotNil(try h.row(plain).titleEditor)
+        h.pressEscape(in: editor)
+        XCTAssertNil(h.pane.notice.text)
+    }
+
+    func testALateOkAfterATimeoutKeepsWhatWasTypedSince() throws {
+        let h = try TrackerEditHarness(self)
+        h.pane.beginEdit(item: plain, kind: .title)
+        let editor = try XCTUnwrap(try h.row(plain).titleEditor)
+        h.type("Slow title", into: editor)
+        h.pressReturn(in: editor)
+        h.fire(5)                                                    // no answer: the editor opens up again
+        h.type("Slow title, and more", into: editor)
+        try h.echo({ try $0.setText(self.plain, "Slow title") }, resultFirst: false)   // the late ok
+        let still = try XCTUnwrap(try h.row(plain).titleEditor, "the late ok must not close an editor with newer typing")
+        XCTAssertEqual(still.typed, "Slow title, and more")
+        XCTAssertTrue(still.isEditable)
+        h.pressReturn(in: still)
+        XCTAssertEqual(h.sent.count, 2, "what was typed since is a new edit")
+        XCTAssertEqual(h.sent.last?.base, 8, "against the board the first save made")
+    }
+
+    func testAnUndoIsMadeAgainstTheVersionTheRowShowsNotTheNewestBoard() throws {
+        let h = try TrackerEditHarness(self)
+        try XCTUnwrap(try h.row(plain).tickButton).performClick(nil)
+        try h.echo { try $0.setStatus(self.plain, "done") }          // the row shows version 8
+        let textView = try XCTUnwrap(try h.row(plain).textViews.first)
+        XCTAssertTrue(h.window.makeFirstResponder(textView))
+        textView.setSelectedRange(NSRange(location: 0, length: 4))
+        rigSettle(0.02)
+        XCTAssertNotNil(try h.row(plain).selectedTextView, "setup: a selection holds the row")
+        let shown = try h.row(plain).visibleText
+        try h.agentChange { script in
+            try script.updateItem(self.plain) {
+                $0["text"] = "Rewritten by an agent"
+                $0["text_spans"] = [["kind": "text", "text": "Rewritten by an agent"]]
+            }
+        }
+        XCTAssertEqual(h.version, 9)
+        XCTAssertEqual(try h.row(plain).visibleText, shown, "setup: the selection holds the row at version 8's content")
+        h.pane.performUndo()
+        XCTAssertEqual(h.sent.last?.ops, [.status(id: plain, status: "todo")])
+        XCTAssertEqual(h.sent.last?.base, 8, "not 9: the user never saw version 9's text")
     }
 
     // MARK: - 4. The text-conflict popover stays inside itself
@@ -222,9 +293,11 @@ final class TrackerFixupTests: XCTestCase {
 
     /// A pane with `plain` (and `withNote`) showing version 7's content, held by a text selection while an
     /// agent changes both (version 8).
-    private func heldHarness(_ id: String, configure: @escaping (inout TrackerBoardScript) throws -> Void = { _ in })
+    private func heldHarness(_ id: String, expanded: Bool = false,
+                             configure: @escaping (inout TrackerBoardScript) throws -> Void = { _ in })
         throws -> TrackerEditHarness {
         let h = try TrackerEditHarness(self, configure: configure)
+        if expanded { h.pane.toggleNote(item: id) }   // opening a row's details lets go of a selection in it
         let row = try h.row(id)
         let textView = try XCTUnwrap(row.textViews.first)
         XCTAssertTrue(h.window.makeFirstResponder(textView))
@@ -264,14 +337,29 @@ final class TrackerFixupTests: XCTestCase {
         XCTAssertEqual(h.sent.last?.base, 7)
     }
 
+    /// The row is open already, so opening the editor does not touch the selection that holds it: the row still
+    /// shows version 7 and the edit is made against 7.
     func testADetailsEditOfAHeldRowSendsTheVersionItShowed() throws {
-        let h = try heldHarness(plain)
+        let h = try heldHarness(plain, expanded: true)
         h.pane.beginEdit(item: plain, kind: .details)
         let editor = try XCTUnwrap(try h.row(plain).detailsEditor)
         editor.string = "A note"
         editor.didChangeText()
         editor.commit()
         XCTAssertEqual(h.sent.last?.base, 7)
+    }
+
+    /// A collapsed held row: opening its details expands it, which lets go of the selection, so the row (and the
+    /// editor's text, taken from it) is now version 8's. Version 8 is then what the user is editing, and what is sent.
+    func testOpeningDetailsOnACollapsedHeldRowShowsAndEditsTheNewestVersion() throws {
+        let h = try heldHarness(plain)
+        h.pane.beginEdit(item: plain, kind: .details)
+        XCTAssertTrue(try h.row(plain).visibleText.contains("Rewritten by an agent"), "the expand refreshed the row")
+        let editor = try XCTUnwrap(try h.row(plain).detailsEditor)
+        editor.string = "A note"
+        editor.didChangeText()
+        editor.commit()
+        XCTAssertEqual(h.sent.last?.base, 8)
     }
 
     func testResolvingAConflictOnAHeldRowSendsTheVersionItShowed() throws {
@@ -409,11 +497,13 @@ final class TrackerFixupTests: XCTestCase {
                 $0["conflicts"] = [["conflict_id": "7.1", "field": "status", "losing": "in-progress", "losing_by": "agent claudia",
                                     "winning_by": "pane (you)", "at": TrackerPaneFx.iso(TrackerPaneFx.now.timeIntervalSince1970 - 4),
                                     "index": 0]]
-                $0["status"] = "done"
+                // "blocked", not "done": a done item folds into the Done group and has no row to read.
+                $0["status"] = "blocked"
             }
         }
         let mark = try XCTUnwrap(try h.row(withNote).conflictButton)
-        XCTAssertEqual(mark.accessibilityLabel(), "Conflict on status: agent claudia set in progress, then you set done")
+        XCTAssertEqual(mark.accessibilityLabel(),
+                       "Conflict on status: agent claudia set in progress, then you changed it; it now reads blocked")
     }
 
     func testTwoWindowsAreToldApartAsAnotherWindow() throws {
