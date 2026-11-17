@@ -1,6 +1,5 @@
 import AppKit
 import ObjectiveC
-import XCTest
 
 /// The test bundle's principal class (`INFOPLIST_KEY_NSPrincipalClass` on the NostromoTests target). XCTest
 /// instantiates it once, before any test runs.
@@ -59,36 +58,5 @@ final class TestBundleSetup: NSObject {
     override init() {
         Self.install()
         super.init()
-        XCTestObservationCenter.shared.addTestObserver(DiagObserver.shared)  // DIAG-TEMP
-    }
-}
-
-
-// DIAG-TEMP: remove before merge.
-final class DiagObserver: NSObject, XCTestObservation {
-    static let shared = DiagObserver()
-    var recent: [String] = []
-    func testSuiteWillStart(_ suite: XCTestSuite) {
-        if suite.name.hasSuffix("Tests") || suite.name.contains("Test") { recent.append(suite.name); if recent.count > 6 { recent.removeFirst() } }
-    }
-    func testCaseWillStart(_ testCase: XCTestCase) {
-        guard NSStringFromClass(type(of: testCase)).hasSuffix("NoCodebaseCreateTests"),
-              testCase.name.contains("testAFolderIsOnlyMadeForNoCodebase") else { return }
-        let pid = ProcessInfo.processInfo.processIdentifier
-        let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
-        p.arguments = ["\(pid)", "1", "-mayDie"]
-        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
-        try? p.run()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
-        let text = String(data: data, encoding: .utf8) ?? ""
-        print("error: DIAG recent suites: \(recent)")
-        print("error: DIAG threads=\(text.components(separatedBy: "Thread_").count - 1)")
-        for tok in ["_runBlocking", "NSAnimation", "semaphore_wait", "psynch_cvwait", "psynch_mutexwait", "dispatch_sync", "dispatch_group_wait", "waitUntilExit", "kevent", "_dispatch_worker_thread"] {
-            print("error: DIAG \(tok)=\(text.components(separatedBy: tok).count - 1)")
-        }
-        var shown = 0
-        for line in text.split(separator: "\n") where line.contains("NostromoTests") || line.contains("Nostromo.") || line.contains("NSAnimation") {
-            print("error: DIAG | \(line.trimmingCharacters(in: .whitespaces).prefix(160))"); shown += 1; if shown > 80 { break }
-        }
     }
 }
