@@ -21,6 +21,7 @@ pub mod clock;
 pub mod conflicts;
 pub mod diff;
 pub mod format;
+pub mod inject;
 pub mod model;
 pub mod ops;
 pub mod paths;
@@ -40,6 +41,7 @@ pub use format::{
     parse, splice, template, validate_command_text, CommandTextError, Malformed, MalformedReason,
     ParsedBoard, Unwritable,
 };
+pub use inject::{PreparedNote, TrackerTurnNotes};
 pub use model::{
     Author, Board, Change, ChangeKind, Counts, Env, Item, Kind, Link, LinkKind, LogLine, Section,
     Stamp, Status,

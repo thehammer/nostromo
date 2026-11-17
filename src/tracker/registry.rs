@@ -33,6 +33,7 @@ use super::clock::{Clock, SystemClock};
 use super::conflicts::{self, Conflict, Conflicts, Detect};
 use super::diff::{diff, field_value};
 use super::format::{parse, template, Malformed, ParsedBoard};
+use super::inject::{render_note, too_old_note, PreparedNote};
 use super::model::{fnv1a64, slug, Author, Board, ChangeKind, Counts, Kind, Link, Stamp, Status};
 use super::ops::{
     apply_steps_to_file, LinkInput, Op, OpError, PaneStep, Upsert, WriteError, MAX_NOTE_CHARS,
@@ -601,6 +602,63 @@ impl TrackerRegistry {
         }
         self.persist(inner);
         Ok(outcome)
+    }
+
+    /// The note `session` of `tag` is owed before its next message: what a
+    /// `read` would return as a delta, framed (see [`super::inject`]). `None`
+    /// when the session has no cursor on the board (it never opened or read
+    /// it), nothing changed, or the board's log was reset. Moves no cursor:
+    /// [`TrackerRegistry::commit_turn_note`] does, once the note is delivered.
+    pub fn prepare_turn_note(&self, tag: &str, session: &str) -> Option<PreparedNote> {
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        let path = inner.bindings.get(tag)?.clone();
+        let cursor = inner.cursors.get(session, &key_of(&path))?;
+        let entry = inner.boards.get_mut(&path)?;
+        self.recheck_path(entry, &path).ok()?;
+        // As a read: what the file says now, even if the watcher hasn't fired.
+        let ingested = self.ingest_from_disk(entry, &path);
+        let version = entry.log.seq;
+        let title = entry
+            .parsed
+            .as_ref()
+            .and_then(|p| p.board.title.clone())
+            .unwrap_or_else(|| entry.topic.clone());
+        let note = match entry.log.since(Some(cursor), Some(session)) {
+            Since::Changes(changes) => render_note(&title, &changes, &entry.approvals, version)
+                .map(|(text, covers)| (text, covers.unwrap_or(cursor))),
+            Since::TooOld { count } => Some((too_old_note(count), cursor)),
+            Since::Full => None,
+        };
+        if ingested {
+            inner.dirty.insert(path.clone());
+            self.persist(inner);
+        }
+        note.map(|(text, advance_to)| PreparedNote {
+            text,
+            board_path: path,
+            advance_to,
+        })
+    }
+
+    /// `note` was written to `session`: it has now seen what the note showed.
+    /// The cursor moves to the note's version, never back (a `read` since the
+    /// note was prepared keeps its later one), and not at all when the log was
+    /// reset meanwhile.
+    pub fn commit_turn_note(&self, note: &PreparedNote, session: &str) {
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        let key = key_of(&note.board_path);
+        let Some(current) = inner.cursors.get(session, &key) else {
+            return;
+        };
+        let Some(entry) = inner.boards.get(&note.board_path) else {
+            return;
+        };
+        if note.advance_to > current && note.advance_to <= entry.log.seq {
+            inner.cursors.set(session, &key, note.advance_to);
+            self.persist(inner);
+        }
     }
 
     /// Re-reads `path` after a file signal. `true` when what a client sees
