@@ -119,6 +119,14 @@ pub enum TrackerError {
         index: Option<usize>,
         reason: String,
     },
+    /// The user's view is out of date: look again, then retry. Code
+    /// `invalid_args` (what an older client knows); the wire also says
+    /// `stale: true`.
+    #[error("stale: {reason}")]
+    Stale {
+        index: Option<usize>,
+        reason: String,
+    },
     #[error("the board file is unreadable at line {line}: {reason}")]
     BoardUnreadable { line: usize, reason: String },
     #[error("the board file is missing")]
@@ -141,7 +149,7 @@ impl TrackerError {
             TrackerError::NoTracker => "no_tracker",
             TrackerError::UnknownItem { .. } => "unknown_item",
             TrackerError::InvalidStatus { .. } => "invalid_status",
-            TrackerError::InvalidArgs { .. } => "invalid_args",
+            TrackerError::InvalidArgs { .. } | TrackerError::Stale { .. } => "invalid_args",
             TrackerError::BoardUnreadable { .. } => "board_unreadable",
             TrackerError::BoardMissing => "board_missing",
             TrackerError::BoardTooLarge { .. } => "board_too_large",
@@ -653,6 +661,7 @@ impl TrackerRegistry {
                 path: path.display().to_string(),
                 topic: entry.topic.clone(),
                 version: entry.log.seq,
+                epoch: entry.conflicts.epoch().to_string(),
                 file_mtime: self
                     .fs
                     .signature(path)
@@ -1035,9 +1044,11 @@ impl TrackerRegistry {
         let ctx = WriteCtx {
             log,
             seen,
+            foreign_base: false,
             client: None,
             detect: log,
             resolving: &[],
+            settling: &[],
         };
         self.write_steps(entry, path, &mut |_, _, _| Ok(steps.clone()), author, ctx)
     }
@@ -1074,6 +1085,24 @@ impl TrackerRegistry {
                     refuse_agent_ran_it(old, &applied.board)?;
                 }
             }
+            // A reading position ahead of the log (the state was rolled back or
+            // lost) says nothing about what the writer saw: it has seen nothing,
+            // so every other author's change in the log is news to it. (Counting
+            // them all as seen would silently lose the writer's overwrites.) A
+            // position from another run of the board (`foreign_base`) is the
+            // same. Either way the log can't show what happened, so a field
+            // with no logged history may have been overwritten unseen: the gap
+            // is judged from the position the writer had, never the clamped one.
+            let seen = ctx.seen.map(|s| {
+                if ctx.foreign_base || s > entry.log.seq {
+                    0
+                } else {
+                    s
+                }
+            });
+            let history_gap = ctx
+                .seen
+                .is_some_and(|s| ctx.foreign_base || entry.log.history_gap(s));
             let found = match entry.parsed.as_ref() {
                 Some(old) if ctx.detect => conflicts::detect(
                     &entry.log.entries,
@@ -1082,9 +1111,9 @@ impl TrackerRegistry {
                     &|id| source_of(old, id),
                     &Detect {
                         writer: author,
-                        seen_through: ctx.seen,
+                        seen_through: seen,
                         client: ctx.client,
-                        history_gap: ctx.seen.is_some_and(|seen| entry.log.history_gap(seen)),
+                        history_gap,
                         resolving: ctx.resolving,
                         now,
                     },
@@ -1118,7 +1147,7 @@ impl TrackerRegistry {
         entry.last_good_at = Some(now);
         if ctx.log {
             let mut changes = applied.changes;
-            record_conflicts(entry, &mut changes, found, &applied.board);
+            record_conflicts(entry, &mut changes, found, &applied.board, ctx.settling);
             let version = entry.log.append(changes);
             entry.conflicts.stamp_unversioned(version);
         }
@@ -1214,7 +1243,7 @@ impl TrackerRegistry {
                     );
                     let board = parsed.board.clone();
                     remember_long_texts(&mut entry.long_texts, &old.board, &board);
-                    record_conflicts(entry, &mut changes, found, &board);
+                    record_conflicts(entry, &mut changes, found, &board, &[]);
                     let version = entry.log.append(changes);
                     entry.conflicts.stamp_unversioned(version);
                 }
@@ -1817,12 +1846,19 @@ struct WriteCtx<'a> {
     log: bool,
     /// What the writer had read (the pane's base version, an agent's cursor).
     seen: Option<u64>,
+    /// `seen` was taken against another run of the board (its epoch differs):
+    /// the writer has seen nothing of this log.
+    foreign_base: bool,
     /// The pane connection writing (assigned by the daemon).
     client: Option<&'a str>,
     /// Look for conflicts with other authors' changes.
     detect: bool,
     /// The `(item, field)` pairs a pane edit settles (see [`Detect::resolving`]).
     resolving: &'a [(String, String)],
+    /// The ids of the conflicts the batch settles: removed before the batch's
+    /// own conflicts are recorded, so a cap never counts a settled value as
+    /// lost.
+    settling: &'a [String],
 }
 
 /// The pane's conflicts of each item still on the board.
@@ -1899,23 +1935,42 @@ fn remember_long_texts(long: &mut HashMap<String, String>, old: &Board, new: &Bo
 }
 
 /// Keeps `found` on the entry and adds one log entry for each, after the
-/// write's own changes, so an agent reads it in its next delta.
+/// write's own changes, so an agent reads it in its next delta. `settling` are
+/// conflicts the write settles: they go first, so the caps never drop (and
+/// count as lost) a value the user just settled.
 fn record_conflicts(
     entry: &mut BoardEntry,
     changes: &mut Vec<super::model::Change>,
     found: Vec<Conflict>,
     board: &Board,
+    settling: &[String],
 ) {
+    for id in settling {
+        entry.conflicts.clear(id);
+    }
+    let mut elsewhere: Vec<(String, Conflict)> = Vec::new();
     for conflict in found {
         let kept = board
             .item(&conflict.item_id)
             .map_or(Value::Null, |item| field_value(item, &conflict.field));
         let item_id = conflict.item_id.clone();
-        entry.conflicts.push(conflict.clone());
+        let dropped = entry.conflicts.push(conflict.clone());
         // An older value of this item may have just been dropped by a cap (or
         // earlier): the agent is told something was lost that it can't see.
-        let dropped = entry.conflicts.dropped_for(&item_id);
-        changes.push(conflicts::change_for(&conflict, &kept, dropped));
+        let count = entry.conflicts.dropped_for(&item_id);
+        changes.push(conflicts::change_for(&conflict, &kept, count));
+        // A cap may also have dropped another item's value: that item's agent
+        // reader hears of it too, or it would never know.
+        for gone in dropped.into_iter().filter(|g| g.item_id != item_id) {
+            elsewhere.push((gone.item_id, conflict.clone()));
+        }
+    }
+    let mut told: HashSet<String> = HashSet::new();
+    for (item_id, by) in elsewhere {
+        if told.insert(item_id.clone()) {
+            let count = entry.conflicts.dropped_for(&item_id);
+            changes.push(conflicts::change_for_dropped(&item_id, &by, count));
+        }
     }
 }
 

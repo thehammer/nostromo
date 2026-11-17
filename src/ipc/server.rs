@@ -43,8 +43,9 @@ use super::{
         ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, ServerMsg,
         SessionAction, Topic, TrackerEditError, FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_NOTIFY,
         FEATURE_CONVERSATION_HISTORY, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN,
-        FEATURE_SLASH_COMMANDS, FEATURE_TERMINAL_STAGING_ONLY, FEATURE_TRACKER_CONFLICT_IDS,
-        FEATURE_TRACKER_EDIT, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
+        FEATURE_SLASH_COMMANDS, FEATURE_TERMINAL_STAGING_ONLY, FEATURE_TRACKER_ACK_DROPPED,
+        FEATURE_TRACKER_CONFLICT_IDS, FEATURE_TRACKER_EDIT, MAX_FRAME_LEN, MIN_CLIENT_VERSION,
+        PROTOCOL_VERSION,
     },
     session_manager::{ModelRequestOutcome, ResendTrigger, SessionManager, SwitchRequest},
 };
@@ -572,6 +573,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
         FEATURE_CONVERSATION_HISTORY.to_string(),
         FEATURE_TRACKER_EDIT.to_string(),
         FEATURE_TRACKER_CONFLICT_IDS.to_string(),
+        FEATURE_TRACKER_ACK_DROPPED.to_string(),
     ];
     if mgr.authored_prs().is_some() {
         features.push(FEATURE_AUTHORED_PRS.to_string());
@@ -2068,6 +2070,7 @@ fn handle_client_msg(
             tag,
             request_id,
             base_version,
+            base_epoch,
             ops,
             ..
         } => {
@@ -2101,6 +2104,7 @@ fn handle_client_msg(
                         code: "not_operator_app".to_string(),
                         reason: None,
                         index: None,
+                        stale: false,
                     }),
                     version: 0,
                     created: Vec::new(),
@@ -2114,7 +2118,8 @@ fn handle_client_msg(
             let client = conn_key.to_string();
             tokio::spawn(async move {
                 let reply = match provider {
-                    Some(p) => p.tracker_edit(&tag, &request_id, &client, base_version, ops).await,
+                    Some(p) => p.tracker_edit(&tag, &request_id, &client, base_version, base_epoch, ops)
+                        .await,
                     None => ServerMsg::TrackerEditResult {
                         tag,
                         request_id,
@@ -2123,6 +2128,7 @@ fn handle_client_msg(
                             code: "not_supported".to_string(),
                             reason: None,
                             index: None,
+                            stale: false,
                         }),
                         version: 0,
                         created: Vec::new(),
