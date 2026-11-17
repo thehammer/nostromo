@@ -48,6 +48,7 @@ final class TestIsolationTests: XCTestCase {
             ("NSWindow(contentViewController: hosting)", NSWindow(contentViewController: hosting)),
             ("NSWindow subclass", ProbeWindow(contentRect: rect, styleMask: [.titled], backing: .buffered, defer: true)),
         ]
+        windows.forEach { $0.1.isReleasedWhenClosed = false }  // ARC owns them; a release-on-close would double-free
         defer { windows.forEach { $0.1.contentView = nil; $0.1.close() } }
         for (route, window) in windows {
             XCTAssertEqual(window.animationBehavior, .none, "\(route) must default to no animation")
