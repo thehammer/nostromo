@@ -209,6 +209,33 @@ final class TrackerFixupTests: XCTestCase {
                        "the second save's undo goes back to what the late ok saved, not past it")
     }
 
+    func testUndoAfterALateOkThatArrivesBeforeItsBoardRestoresTheTitleTheLateOkSaved() throws {
+        let h = try TrackerEditHarness(self)
+        h.pane.beginEdit(item: plain, kind: .title)
+        let editor = try XCTUnwrap(try h.row(plain).titleEditor)
+        h.type("Slow title", into: editor)
+        h.pressReturn(in: editor)
+        h.fire(5)
+        h.type("Slow title, and more", into: editor)
+        try h.echo(setText(plain, "Slow title"), resultFirst: true)   // the late ok, before its board
+        let still = try XCTUnwrap(try h.row(plain).titleEditor)
+        h.pressReturn(in: still)
+        try h.echo(setText(plain, "Slow title, and more"))
+        h.pane.performUndo()
+        XCTAssertEqual(h.sent.last?.ops, [.restoreText(id: plain, text: "Slow title")],
+                       "the second save's undo goes back to what the late ok saved, whichever of ok and board came first")
+    }
+
+    func testALateRefusalAfterTheUserClickedElsewhereDoesNotTakeFocus() throws {
+        let h = try TrackerEditHarness(self)
+        _ = try saveTitleFromComposer(h)                 // the editor did not hold focus when the save started
+        let editor = try XCTUnwrap(try h.row(plain).titleEditor)
+        XCTAssertTrue(h.window.makeFirstResponder(nil))   // the user moves on: the window itself holds focus
+        XCTAssertTrue(h.window.firstResponder === h.window, "setup: the window holds focus")
+        h.answer(try XCTUnwrap(h.sent.last).requestId, ok: false, error: ["code": "board_missing"])
+        XCTAssertTrue(h.window.firstResponder === h.window, "a refusal never pulls focus into the editor (delegate: \(String(describing: (h.window.firstResponder as? NSTextView)?.delegate)), editor: \(editor), composer: \(h.rig.composer))")
+    }
+
     func testAnUndoIsMadeAgainstTheVersionTheRowShowsNotTheNewestBoard() throws {
         let h = try TrackerEditHarness(self)
         try XCTUnwrap(try h.row(plain).tickButton).performClick(nil)

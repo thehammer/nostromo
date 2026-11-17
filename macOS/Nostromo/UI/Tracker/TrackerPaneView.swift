@@ -319,7 +319,20 @@ final class TrackerPaneView: NSView {
         commit(TrackerPresenter.present(board: board, now: now(), filter: filter, folds: folds, sources: sources,
                                         timeZone: timeZone),
                highlight: true)
+        refreshRowsOfLateOks()
         followIfReady()
+    }
+
+    /// A late ok that beat its board: once the board shows the saved version, the session's row is that item.
+    private func refreshRowsOfLateOks() {
+        guard let version = board?.version else { return }
+        for (id, var session) in editSessions {
+            if let needed = session.rowRefreshVersion, version >= needed, let saved = newestItem(id) {
+                session.row = saved
+                session.rowRefreshVersion = nil
+                editSessions[id] = session
+            }
+        }
     }
 
     /// A click on a strip entry: go to what it names. A user act; nothing here answers anything.
@@ -512,6 +525,7 @@ final class TrackerPaneView: NSView {
         view.onBeginEdit = { [weak self] id, kind in self?.beginEdit(item: id, kind: kind) }
         view.onCommitEdit = { [weak self] id, kind, text in self?.commitEdit(item: id, kind: kind, text: text) }
         view.onCancelEdit = { [weak self] id, kind in self?.cancelEdit(item: id, kind: kind) }
+        view.onFocusPendingEditor = { [weak self] id in self?.editSessions[id]?.editorWantsFocus = true }
         view.onShowConflict = { [weak self] id, anchor, fromKeyboard in
             self?.showConflicts(item: id, anchor: anchor, fromKeyboard: fromKeyboard)
         }
@@ -818,6 +832,10 @@ final class TrackerPaneView: NSView {
         applyNotice(editing.notice ?? openEditorRefusal())
         view?.setEditorPending(true)
         restorePriorFocus(session)
+        // Whether the pending editor itself holds focus now (focus did not go back to what had it before); a
+        // later try to focus it while it is pending sets this too.
+        session.editorWantsFocus = view?.editorOwnsFocus ?? false
+        editSessions[id] = session
         let done: (TrackerItemEditing.Outcome) -> Void = { [weak self] outcome in self?.editFinished(id, outcome) }
         switch kind {
         case .title: editing.saveTitle(session.row, typed: text, base: session.base, completion: done)
@@ -847,7 +865,14 @@ final class TrackerPaneView: NSView {
                 session.original = sent
                 session.base = TrackerBase(version: version, epoch: boardBase().epoch)
                 session.sentText = nil
-                if let saved = newestItem(id) { session.row = saved }   // the next save and its undo start from what was saved
+                // The next save and its undo start from what was saved. If the board has not reached that
+                // version yet (the ok beat its board), the row is refreshed when it does.
+                if (board?.version ?? 0) >= version, let saved = newestItem(id) {
+                    session.row = saved
+                    session.rowRefreshVersion = nil
+                } else {
+                    session.rowRefreshVersion = version
+                }
                 editSessions[id] = session   // the editor is already open and editable: nothing to reopen
             } else {
                 session.phase = .awaiting(version)
@@ -862,9 +887,9 @@ final class TrackerPaneView: NSView {
             editSessions[id] = session
             let view = rowViews[TrackerRow.itemKey(id)]
             view?.setEditorPending(false)
-            // The user clicked back into the read-only editor while it was pending: making it editable ends the
-            // field editor that had focus, and the window is left holding it. Back to the editor they chose.
-            if let window, window.firstResponder === window { view?.focusEditor() }
+            // A backstop: if the editor had focus when the save started and the window is left holding it,
+            // focus goes back to the editor. Never when the user had focus elsewhere.
+            if session.editorWantsFocus, let window, window.firstResponder === window { view?.focusEditor() }
         }
         applyNotice(editing.notice ?? openEditorRefusal())
     }

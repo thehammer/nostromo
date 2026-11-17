@@ -117,6 +117,8 @@ final class TrackerRowView: NSView {
     var onBeginEdit: ((String, TrackerEditKind) -> Void)?
     /// An editor's text was committed by Return, ⌘Return or losing focus (item id, which, the text).
     var onCommitEdit: ((String, TrackerEditKind, String) -> Void)?
+    /// The user tried to focus an editor whose save is pending (item id).
+    var onFocusPendingEditor: ((String) -> Void)?
     /// Esc in an editor.
     var onCancelEdit: ((String, TrackerEditKind) -> Void)?
     /// The conflict mark or the sensitive badge asked for its popover (item id, anchor, from the keyboard).
@@ -912,11 +914,13 @@ final class TrackerRowView: NSView {
             let editor = TrackerTitleEditor(text: text)
             editor.onCommit = { [weak self] typed in self?.editorFinished(.title, typed) }
             editor.onCancel = { [weak self] in self?.editorCancelled(.title) }
+            editor.onFocusWhilePending = { [weak self] in if let id = self?.row.item?.id { self?.onFocusPendingEditor?(id) } }
             titleEditor = editor
         case .details:
             let editor = TrackerDetailsEditor.make(text: text)
             editor.onCommit = { [weak self] typed in self?.editorFinished(.details, typed) }
             editor.onCancel = { [weak self] in self?.editorCancelled(.details) }
+            editor.onFocusWhilePending = { [weak self] in if let id = self?.row.item?.id { self?.onFocusPendingEditor?(id) } }
             editor.onResize = { [weak self] in
                 self?.measured = nil
                 self?.needsLayout = true
@@ -962,7 +966,7 @@ final class TrackerRowView: NSView {
     }
 
     /// The open editor (or its field editor) is the window's first responder.
-    private var editorOwnsFocus: Bool {
+    var editorOwnsFocus: Bool {
         guard let responder = window?.firstResponder else { return false }
         if let titleEditor, responder === titleEditor || (responder as? NSTextView)?.delegate === titleEditor { return true }
         if let detailsEditor, responder === detailsEditor { return true }

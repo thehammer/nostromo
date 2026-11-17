@@ -445,6 +445,14 @@ final class TrackerTitleEditor: NSTextField, NSTextFieldDelegate {
 
     func arm() { isArmed = true }
 
+    /// The user tried to put focus in this editor while its save was pending (read-only).
+    var onFocusWhilePending: (() -> Void)?
+
+    override var acceptsFirstResponder: Bool {
+        if !isEditable { onFocusWhilePending?() }
+        return super.acceptsFirstResponder
+    }
+
     init(text: String) {
         original = text
         super.init(frame: .zero)
@@ -520,8 +528,15 @@ final class TrackerDetailsEditor: NSTextView {
     var onCommit: ((String) -> Void)?
     var onCancel: (() -> Void)?
     var onResize: (() -> Void)?
+    /// The user tried to put focus in this editor while its save was pending (read-only).
+    var onFocusWhilePending: (() -> Void)?
     private(set) var isFinished = false
     private(set) var original = ""
+
+    override var acceptsFirstResponder: Bool {
+        if !isEditable { onFocusWhilePending?() }
+        return super.acceptsFirstResponder
+    }
 
     static func make(text: String) -> TrackerDetailsEditor {
         let view = TrackerDetailsEditor(usingTextLayoutManager: false)
@@ -645,6 +660,11 @@ struct TrackerEditSession {
     var sentText: String?
     /// Why the last save was refused (or timed out): shown while the editor stays open.
     var refusal: String?
+    /// The pending editor holds focus, or the user tried to focus it while it was pending: only then may a
+    /// late refusal put focus back in it.
+    var editorWantsFocus = false
+    /// A late ok arrived before the board that shows its save: the row refreshes from that board.
+    var rowRefreshVersion: UInt64?
 
     init(kind: TrackerEditKind, base: TrackerBase, original: String, row: TrackerItemRow,
          priorResponder: NSResponder?, priorRole: TrackerControlRole?) {
