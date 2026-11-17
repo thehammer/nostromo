@@ -1727,10 +1727,14 @@ impl SessionManager {
             // agent hears about it once, ahead of what it was sent. Only a message
             // written now carries it (a queued one can still be dropped by an
             // interrupt), and it is forgotten only once the write has succeeded.
-            let note = self
-                .approvals
-                .as_ref()
-                .and_then(|b| b.peek_restart_note(tag));
+            // (Not before a typed slash command: it must start the message.)
+            let note = if local_command::split_typed_command(&message.text).is_some() {
+                None
+            } else {
+                self.approvals
+                    .as_ref()
+                    .and_then(|b| b.peek_restart_note(tag))
+            };
             let outgoing = match &note {
                 Some(note) => PendingMessage {
                     text: format!("{note}\n\n{}", message.text),
@@ -3953,10 +3957,17 @@ fn write_user_message(shared: &Shared, msg: &PendingMessage) -> Result<()> {
 }
 
 fn write_user_message_framed(shared: &Shared, msg: &PendingMessage) -> Result<()> {
+    // The CLI runs a slash command only when it STARTS the message: a note in
+    // front would hand `/compact` to the model as text. No note goes with a
+    // typed command (the model note stays queued, the tracker's is not even
+    // prepared); both wait for the next ordinary message.
+    if local_command::split_typed_command(&msg.text).is_some() {
+        return login::write_recorded(shared, msg, None);
+    }
     let model_note = lock_recover(&shared.note_prefix).take();
     let tracker_note = tracker_note_for(shared);
     if model_note.is_none() && tracker_note.is_none() {
-        return login::write_recorded(shared, msg);
+        return login::write_recorded(shared, msg, None);
     }
     // One block: the model note first, a blank line, then the tracker's.
     let note = [
@@ -3971,6 +3982,8 @@ fn write_user_message_framed(shared: &Shared, msg: &PendingMessage) -> Result<()
         "{NOSTROMO_NOTE_OPEN}{note}{NOSTROMO_NOTE_CLOSE}{}",
         msg.text
     );
+    // The tracker note is committed by the login cell once the frame's turn
+    // has run (not when it is written: the CLI may die before reading it).
     let result = login::write_recorded(
         shared,
         &PendingMessage {
@@ -3979,19 +3992,13 @@ fn write_user_message_framed(shared: &Shared, msg: &PendingMessage) -> Result<()
             origin: msg.origin.clone(),
             on_delivered: None,
         },
+        tracker_note,
     );
-    match result {
-        Ok(()) => {
-            if let Some(note) = tracker_note {
-                note.commit();
-            }
-        }
-        Err(_) => {
-            // Not delivered: the model note goes with the next message, and the
-            // tracker note is dropped uncommitted so its changes do too.
-            if let Some(note) = model_note {
-                *lock_recover(&shared.note_prefix) = Some(note);
-            }
+    if result.is_err() {
+        // Not delivered: the model note goes with the next message, and the
+        // tracker note was dropped uncommitted so its changes do too.
+        if let Some(note) = model_note {
+            *lock_recover(&shared.note_prefix) = Some(note);
         }
     }
     result

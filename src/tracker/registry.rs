@@ -548,7 +548,15 @@ impl TrackerRegistry {
         // cursor (a restarted or resumed session that never read) has seen
         // nothing: every other author's change is news to it.
         let seen = matches!(author, Author::Agent { .. }).then(|| cursor.unwrap_or(0));
-        let result = self.write_ops_logged(entry, &path, ops, author, true, seen);
+        let unseen = inner.cursors.unseen(session, &key_of(&path));
+        let result = self.write_ops_logged(
+            entry,
+            &path,
+            ops,
+            author,
+            true,
+            seen.map(|s| (s, unseen.as_slice())),
+        );
         let user_changes = user_changes_of(entry, cursor, session);
         let version = entry.log.seq;
         // Even a refused write may have ingested an external edit.
@@ -626,22 +634,25 @@ impl TrackerRegistry {
             .unwrap_or_else(|| entry.topic.clone());
         let note = match entry.log.since(Some(cursor), Some(session)) {
             Since::Changes(changes) => render_note(&title, &changes, &entry.approvals, version)
-                .map(|(text, covers)| (text, covers.unwrap_or(cursor))),
-            Since::TooOld { count } => Some((too_old_note(count), cursor)),
+                .map(|r| (r.text, r.covers.unwrap_or(cursor), r.hidden)),
+            Since::TooOld { count } => Some((too_old_note(count), cursor, Vec::new())),
             Since::Full => None,
         };
+        // Only a board change the watcher has not seen yet is ingested here;
+        // it is saved with the next state write (the commit), not now: this
+        // runs under the session manager's lock.
         if ingested {
             inner.dirty.insert(path.clone());
-            self.persist(inner);
         }
-        note.map(|(text, advance_to)| PreparedNote {
+        note.map(|(text, advance_to, hidden)| PreparedNote {
             text,
             board_path: path,
             advance_to,
+            hidden,
         })
     }
 
-    /// `note` was written to `session`: it has now seen what the note showed.
+    /// `note`'s message started its turn in `session`: it has now seen what the note showed.
     /// The cursor moves to the note's version, never back (a `read` since the
     /// note was prepared keeps its later one), and not at all when the log was
     /// reset meanwhile.
@@ -656,7 +667,9 @@ impl TrackerRegistry {
             return;
         };
         if note.advance_to > current && note.advance_to <= entry.log.seq {
-            inner.cursors.set(session, &key, note.advance_to);
+            inner
+                .cursors
+                .advance_hiding(session, &key, note.advance_to, &note.hidden);
             self.persist(inner);
         }
     }
@@ -1079,7 +1092,8 @@ impl TrackerRegistry {
     /// [`Self::write_ops`]; `log: false` writes without appending the
     /// changes (a live item's state change was logged when it happened, and
     /// the file only catches up). `seen` is what the writer had read (see
-    /// [`conflicts::Detect::seen_through`]).
+    /// [`conflicts::Detect::seen_through`]) and the changes among them it was
+    /// only told were hidden ([`conflicts::Detect::unseen`]).
     fn write_ops_logged(
         &self,
         entry: &mut BoardEntry,
@@ -1087,12 +1101,17 @@ impl TrackerRegistry {
         ops: &[Op],
         author: &Author,
         log: bool,
-        seen: Option<u64>,
+        seen: Option<(u64, &[u64])>,
     ) -> Result<(), TrackerError> {
+        let (seen, unseen) = match seen {
+            Some((seen, unseen)) => (Some(seen), unseen),
+            None => (None, &[][..]),
+        };
         let steps: Vec<PaneStep> = ops.iter().cloned().map(PaneStep::Op).collect();
         let ctx = WriteCtx {
             log,
             seen,
+            unseen,
             client: None,
             detect: log,
             resolving: &[],
@@ -1141,6 +1160,7 @@ impl TrackerRegistry {
                     &Detect {
                         writer: author,
                         seen_through: ctx.seen,
+                        unseen: ctx.unseen,
                         client: ctx.client,
                         history_gap: ctx.seen.is_some_and(|seen| entry.log.history_gap(seen)),
                         resolving: ctx.resolving,
@@ -1264,6 +1284,7 @@ impl TrackerRegistry {
                         &Detect {
                             writer: &Author::File,
                             seen_through: None,
+                            unseen: &[],
                             client: None,
                             history_gap: false,
                             resolving: &[],
@@ -1875,6 +1896,8 @@ struct WriteCtx<'a> {
     log: bool,
     /// What the writer had read (the pane's base version, an agent's cursor).
     seen: Option<u64>,
+    /// Changes `seen` covers that the writer was only told were hidden.
+    unseen: &'a [u64],
     /// The pane connection writing (assigned by the daemon).
     client: Option<&'a str>,
     /// Look for conflicts with other authors' changes.
