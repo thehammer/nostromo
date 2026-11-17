@@ -59,6 +59,10 @@ pub struct Conflict {
     /// section, to put it back in place.
     pub prev: Option<String>,
     pub next: Option<String>,
+    /// The board version at which this conflict became visible (the seq of
+    /// its log entry); 0 until recorded. A pane that saw version `v` has seen
+    /// the conflicts with `version <= v`, and no others.
+    pub version: u64,
 }
 
 /// A board's live conflicts, oldest first.
@@ -117,10 +121,19 @@ impl Conflicts {
         });
     }
 
-    /// Settles every conflict over `field` of `item_id`.
-    pub fn clear_field(&mut self, item_id: &str, field: &str) {
-        self.list
-            .retain(|c| !(c.item_id == item_id && c.field == field));
+    /// Settles `conflict` (one losing value) and nothing else: the others of
+    /// its field, and any recorded since the user looked, stay.
+    pub fn clear(&mut self, conflict: &Conflict) {
+        if let Some(pos) = self.list.iter().position(|c| c == conflict) {
+            self.list.remove(pos);
+        }
+    }
+
+    /// Stamps the conflicts recorded without a version with `version`.
+    pub fn stamp_unversioned(&mut self, version: u64) {
+        for c in self.list.iter_mut().filter(|c| c.version == 0) {
+            c.version = version;
+        }
     }
 
     /// How many losing values a cap has dropped.
@@ -141,6 +154,11 @@ pub struct Detect<'a> {
     /// cursor (`None`: it never read, only rule (a) applies). Unused for a
     /// file save.
     pub seen_through: Option<u64>,
+    /// `(item, field)` pairs the writer is settling by putting a losing value
+    /// back: a change to one of them that `seen_through` covers is the
+    /// decision's own premise, not a competing edit. Anything after
+    /// `seen_through` still conflicts.
+    pub resolving: &'a [(String, String)],
     pub now: DateTime<Utc>,
 }
 
@@ -168,7 +186,9 @@ pub fn detect(
                     let Some(last) = latest(prior, id, Some(field)) else {
                         continue;
                     };
-                    if !conflicts(last, d, || reverts(prior, id, field, new)) {
+                    let settled = d.seen_through.is_some_and(|seen| last.seq <= seen)
+                        && d.resolving.iter().any(|(i, f)| i == id && f == field);
+                    if settled || !conflicts(last, d, || reverts(prior, id, field, new)) {
                         continue;
                     }
                     let losing = old
@@ -186,6 +206,7 @@ pub fn detect(
                         section: None,
                         prev: None,
                         next: None,
+                        version: 0,
                     });
                 }
             }
@@ -217,6 +238,7 @@ pub fn detect(
                     section: item.map(|i| i.section.clone()),
                     prev,
                     next,
+                    version: 0,
                 });
             }
             _ => {}
@@ -350,6 +372,7 @@ mod tests {
             &Detect {
                 writer,
                 seen_through: seen,
+                resolving: &[],
                 now: at(secs),
             },
         )
@@ -457,6 +480,7 @@ mod tests {
             section: None,
             prev: None,
             next: None,
+            version: 0,
         };
         for n in 0..(MAX_PER_FIELD + 2) {
             conflicts.push(make("a", "status", n));

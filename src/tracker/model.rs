@@ -13,6 +13,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::sensitive::{has_finding, WITHHELD};
+
 /// An item's state. Wire names are kebab-case (`in-progress`); file words are
 /// spaced (`in progress`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -404,7 +406,12 @@ pub fn slug(text: &str) -> String {
 /// `item`) + `-` + 4 base36 chars of an FNV-1a hash of the text. Rehashes
 /// with a salt until the id is not in `taken`. Deterministic.
 pub fn generate_id(text: &str, taken: &HashSet<String>) -> String {
-    let first = text.split_whitespace().next().map(slug).unwrap_or_default();
+    // The id is read by agents: text the guard flags must not show in it.
+    let first = if crate::tracker::sensitive::has_finding(text) {
+        String::new()
+    } else {
+        text.split_whitespace().next().map(slug).unwrap_or_default()
+    };
     let mut word: String = first
         .split('-')
         .next()
@@ -587,7 +594,17 @@ impl Change {
 pub(crate) fn bounded(value: Value) -> Value {
     match value {
         Value::String(text) => Value::String(match text.char_indices().nth(MAX_LOGGED_CHARS) {
-            Some((cut, _)) => format!("{}{LOGGED_TRUNCATED}", &text[..cut]),
+            Some((cut, _)) => {
+                let shortened = format!("{}{LOGGED_TRUNCATED}", &text[..cut]);
+                // A secret straddling the cut loses its pattern in the
+                // shortened text: decide on the whole value, and keep nothing
+                // of a value that has a finding the cut hides.
+                if has_finding(&text) && !has_finding(&shortened) {
+                    WITHHELD.to_string()
+                } else {
+                    shortened
+                }
+            }
             None => text,
         }),
         Value::Array(items) => {

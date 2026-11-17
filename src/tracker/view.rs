@@ -201,6 +201,113 @@ pub struct TrackerBoardView {
     /// Items removed over someone's edit (T3a).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed_conflicts: Vec<ViewRemovedConflict>,
+    /// Set when the frame would not fit the wire limit and was slimmed (see
+    /// [`fit_to_frame`]); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trimmed: Option<ViewTrimmed>,
+}
+
+/// What [`fit_to_frame`] left out of an over-large view.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewTrimmed {
+    /// Losing values and removed items' markdown replaced by a note saying how
+    /// long they were (they are still kept, and settled by `resolve_conflict`).
+    pub conflict_values: u32,
+    /// The raw `text` and `note` of every item were left out: take them from
+    /// `source`.
+    pub raw_fields: bool,
+    /// Items whose rendered spans and blocks were flattened to plain text.
+    pub plain_items: u32,
+}
+
+/// The most bytes a `tracker_board` frame is built to: under the wire limit
+/// ([`crate::ipc::protocol::MAX_FRAME_LEN`], 4 MiB) with room for the envelope.
+pub const FRAME_BUDGET: usize = 3_900_000;
+
+/// Slims `view` until it encodes within [`FRAME_BUDGET`], leaving the most
+/// useful parts for last: first the conflicts' long values (largest first),
+/// then the raw `text`/`note` (also in each item's `source`), then the
+/// rendered markup of the items. Says what it left out in `view.trimmed`. A
+/// view that already fits is untouched.
+pub fn fit_to_frame(view: &mut TrackerBoardView) {
+    let size = |v: &TrackerBoardView| serde_json::to_vec(v).map_or(0, |b| b.len());
+    let mut over = size(view).saturating_sub(FRAME_BUDGET);
+    if over == 0 {
+        return;
+    }
+    let mut trimmed = ViewTrimmed::default();
+    let note = |chars: usize| format!("[{chars} characters, too large to show here]");
+    let cost = |s: &str| serde_json::to_string(s).map_or(0, |j| j.len());
+
+    // 1. Conflict values, largest first.
+    enum Slot {
+        Losing(usize, usize),
+        Removed(usize),
+    }
+    let mut slots: Vec<(usize, Slot)> = Vec::new();
+    for (n, node) in view.nodes.iter().enumerate() {
+        if let ViewNode::Item(item) = node {
+            for (c, conflict) in item.conflicts.iter().enumerate() {
+                slots.push((cost(&conflict.losing), Slot::Losing(n, c)));
+            }
+        }
+    }
+    for (r, removed) in view.removed_conflicts.iter().enumerate() {
+        slots.push((cost(&removed.source), Slot::Removed(r)));
+    }
+    slots.sort_by_key(|slot| std::cmp::Reverse(slot.0));
+    for (bytes, slot) in slots {
+        if over == 0 {
+            break;
+        }
+        let target = match slot {
+            Slot::Losing(n, c) => match &mut view.nodes[n] {
+                ViewNode::Item(item) => &mut item.conflicts[c].losing,
+                _ => continue,
+            },
+            Slot::Removed(r) => &mut view.removed_conflicts[r].source,
+        };
+        let marker = note(target.chars().count());
+        let saved = bytes.saturating_sub(cost(&marker));
+        *target = marker;
+        over = over.saturating_sub(saved);
+        trimmed.conflict_values += 1;
+    }
+
+    // 2. Rendered markup, flattened to plain text (the raw text is kept).
+    if over > 0 {
+        for node in &mut view.nodes {
+            if let ViewNode::Item(item) = node {
+                if item.text_spans.len() > 1 || !item.note_blocks.is_empty() {
+                    item.text_spans = vec![MdSpan::Text {
+                        text: item.text.clone(),
+                    }];
+                    item.note_blocks = item
+                        .note
+                        .iter()
+                        .map(|note| MdBlock::Paragraph {
+                            spans: vec![MdSpan::Text { text: note.clone() }],
+                        })
+                        .collect();
+                    trimmed.plain_items += 1;
+                }
+            }
+        }
+        view.trimmed = Some(trimmed.clone());
+        over = size(view).saturating_sub(FRAME_BUDGET);
+    }
+
+    // 3. Raw text and note (each item's `source` still holds them).
+    if over > 0 {
+        for node in &mut view.nodes {
+            if let ViewNode::Item(item) = node {
+                item.text.clear();
+                item.note = None;
+            }
+        }
+        trimmed.raw_fields = true;
+    }
+    view.trimmed = Some(trimmed);
 }
 
 /// Builds the pane's view of a parsed board.
@@ -253,7 +360,7 @@ pub fn build(parsed: &ParsedBoard, facts: &ViewFacts) -> TrackerBoardView {
         };
         nodes.push(node);
     }
-    TrackerBoardView {
+    let mut view = TrackerBoardView {
         title: board.title.clone().unwrap_or_else(|| facts.topic.clone()),
         path: facts.path.clone(),
         version: facts.version,
@@ -271,7 +378,10 @@ pub fn build(parsed: &ParsedBoard, facts: &ViewFacts) -> TrackerBoardView {
         committable: facts.committable.clone(),
         hidden_by_user: facts.hidden_by_user,
         removed_conflicts: facts.removed_conflicts.clone(),
-    }
+        trimmed: None,
+    };
+    fit_to_frame(&mut view);
+    view
 }
 
 impl ViewNode {

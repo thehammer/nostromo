@@ -167,6 +167,12 @@ pub fn apply_batch(
 pub enum PaneStep {
     Op(Op),
     Restore(Restore),
+    /// An item's text put back as it was, past the 500-character cap of an
+    /// edit (the text came from the file, which has no such cap).
+    SetText {
+        id: String,
+        text: String,
+    },
 }
 
 /// An item put back from its exact markdown.
@@ -240,6 +246,7 @@ pub fn apply_steps(
         match step {
             PaneStep::Op(op) => apply.op(op)?,
             PaneStep::Restore(restore) => apply.restore(restore)?,
+            PaneStep::SetText { id, text } => apply.set_text(id, text)?,
         }
         apply.check_size()?;
     }
@@ -309,6 +316,13 @@ impl Apply<'_> {
 
     /// Inserts the restored item, untouched (its `updated_at` stays what its
     /// marker says), at the given place of `section`.
+    fn set_text(&mut self, id: &str, text: &str) -> Result<(), OpError> {
+        let text = self.single_line("text", text, MAX_RESTORE_BYTES)?;
+        let pos = self.find(id)?;
+        self.edit(pos, |item| set(&mut item.text, text));
+        Ok(())
+    }
+
     fn restore(&mut self, restore: &Restore) -> Result<(), OpError> {
         if self.board.items.iter().any(|i| i.id == restore.item.id) {
             return Err(self.invalid(format!("item {} already exists", restore.item.id)));
@@ -850,6 +864,7 @@ fn step_item_id(step: &PaneStep) -> Option<&str> {
     match step {
         PaneStep::Op(op) => op_item_id(op),
         PaneStep::Restore(r) => Some(&r.item.id),
+        PaneStep::SetText { id, .. } => Some(id),
     }
 }
 

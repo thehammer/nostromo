@@ -2,7 +2,7 @@
 //! and anything saving the file) interleave on one board, and no value any of
 //! them wrote is silently lost.
 //!
-//! A seeded generator produces 200 interleavings of 10-30 steps: agent ops
+//! A seeded generator produces 400 interleavings of 10-30 steps: agent ops
 //! (some with a stale read cursor), pane ops (some with a stale base
 //! version), file saves from the current bytes or from a stale copy taken 1-40
 //! steps earlier, saves injected between the daemon's read and its commit,
@@ -28,6 +28,13 @@
 //! typed over an agent's in a stale buffer, with nothing else different, is
 //! indistinguishable from typing it over a fresh one, so it is not generated.)
 //!
+//! The pane's `resolve_conflict` (either side, a stale or a fresh view),
+//! `clear_badge` (alone and after a write in the same batch), a restructure
+//! and its undo, and an agent re-opening the board are generated too. A
+//! conflict the pane settled with "keep current" is excused (it saw it); any
+//! other conflict that disappears is a lost edit. A refused pane batch must
+//! leave the file byte-identical.
+//!
 //! Failing interleavings print their seed and every step. `TRACKER_FUZZ_SEED`
 //! reruns one seed. Hermetic: `FakeClock`, temp dirs, no network.
 
@@ -36,8 +43,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::Duration as ChronoDuration;
-use nostromo::ipc::protocol::TrackerPaneOp;
+use nostromo::ipc::protocol::{ConflictKeep, TrackerPaneOp};
 use nostromo::tracker::watch::{BoardFs, FileSignature, RealBoardFs};
+use nostromo::tracker::Conflict;
 use nostromo::tracker::{
     apply_to_file, parse, Author, Clock, FakeClock, Op, OpenArgs, ReadOutcome, RegistryParts,
     Stamp, TrackerRegistry, Upsert,
@@ -47,7 +55,7 @@ use tempfile::TempDir;
 
 const TAG: [&str; 2] = ["cody-a", "cody-b"];
 const SESS: [&str; 2] = ["sess-a", "sess-b"];
-const INTERLEAVINGS: u64 = 200;
+const INTERLEAVINGS: u64 = 400;
 const SEED_BASE: u64 = 0x7a11_0000;
 const FIELDS: [&str; 4] = ["text", "status", "owner", "note"];
 const STATUSES: [&str; 5] = ["todo", "in-progress", "blocked", "needs-you", "done"];
@@ -234,6 +242,11 @@ struct World {
     /// Items the pane removed, by id: the exact markdown and where it sat.
     removed: Vec<(String, String, String)>,
     counter: usize,
+    /// Conflicts the pane settled by keeping the current value, having seen them.
+    excused: Vec<Conflict>,
+    /// What a restructure replaced, to undo: (id, text, note).
+    restructured: Vec<(String, String, Option<String>)>,
+    open_args: OpenArgs,
     /// Injected saves, recorded when they run.
     injected: Arc<Mutex<Vec<Write>>>,
     failures: Vec<String>,
@@ -278,6 +291,7 @@ impl World {
             ..Default::default()
         };
         let path = reg.open(TAG[0], SESS[0], &args).unwrap().path;
+        let args_kept = args.clone();
         reg.open(TAG[1], SESS[1], &args).unwrap();
         let seed_ops: Vec<Op> = (0..6)
             .map(|n| {
@@ -303,6 +317,9 @@ impl World {
             cursor: [0, 0],
             removed: Vec::new(),
             counter: 0,
+            excused: Vec::new(),
+            restructured: Vec::new(),
+            open_args: args_kept,
             injected: Arc::new(Mutex::new(Vec::new())),
             failures: Vec::new(),
         };
@@ -463,8 +480,24 @@ impl World {
         }
     }
 
+    /// An agent opens the board again: it reads nothing, so its cursor (what
+    /// it has seen) does not move.
+    fn reopen(&mut self, i: usize) {
+        self.reg
+            .open(TAG[i], SESS[i], &self.open_args)
+            .expect("re-open");
+        self.steps.push(format!(
+            "agent {i} re-opens (cursor stays {})",
+            self.cursor[i]
+        ));
+    }
+
     fn agent_step(&mut self, step: usize) {
         let i = self.rng.below(2);
+        if self.rng.chance(10) {
+            self.reopen(i);
+            return;
+        }
         let ids = self.item_ids();
         let mut touched = Vec::new();
         let op = match self.rng.below(7) {
@@ -553,14 +586,32 @@ impl World {
     fn pane_step(&mut self, step: usize) {
         let ids = self.item_ids();
         let mut touched = Vec::new();
-        let op = match self.rng.below(7) {
+        let base = if self.rng.chance(30) {
+            let s = self.stale();
+            self.history[s].0
+        } else {
+            self.version()
+        };
+        // What a conflict settled by this batch was, to excuse it afterwards.
+        let mut settles: Option<(Conflict, ConflictKeep)> = None;
+        // With conflicts on the board the pane often settles one (the rest of
+        // the time it does what it does).
+        let arm = if self.reg.conflicts_dropped(TAG[0]) == 0
+            && !self.reg.conflicts(TAG[0]).is_empty()
+            && self.rng.chance(35)
+        {
+            7
+        } else {
+            self.rng.below(12)
+        };
+        let ops: Vec<TrackerPaneOp> = match arm {
             0 => {
                 let id = self.rng.pick(&ids).clone();
                 touched.push(id.clone());
-                TrackerPaneOp::Status {
+                vec![TrackerPaneOp::Status {
                     id,
                     status: self.rng.pick(&STATUSES).to_string(),
-                }
+                }]
             }
             1 | 2 => {
                 let id = self.rng.pick(&ids).clone();
@@ -575,29 +626,29 @@ impl World {
                     };
                     (None, Some(body))
                 };
-                TrackerPaneOp::Edit {
+                vec![TrackerPaneOp::Edit {
                     id,
                     title,
                     text: None,
                     body,
-                }
+                }]
             }
-            3 => TrackerPaneOp::Add {
+            3 => vec![TrackerPaneOp::Add {
                 section: if self.rng.chance(50) { "now" } else { "next" }.into(),
                 title: self.unique("Pane added "),
                 body: None,
                 before: None,
                 after: None,
-            },
+            }],
             4 => {
                 let id = self.rng.pick(&ids).clone();
                 touched.push(id.clone());
-                TrackerPaneOp::Move {
+                vec![TrackerPaneOp::Move {
                     id,
                     section: if self.rng.chance(50) { "now" } else { "next" }.into(),
                     before: None,
                     after: None,
-                }
+                }]
             }
             5 => {
                 let id = self.rng.pick(&ids).clone();
@@ -611,46 +662,154 @@ impl World {
                         }
                     }
                 }
-                TrackerPaneOp::Remove { id }
+                vec![TrackerPaneOp::Remove { id }]
             }
-            _ => match self.removed.pop() {
+            6 => match self.removed.pop() {
                 Some((id, section, source)) => {
                     touched.push(id);
-                    TrackerPaneOp::Restore {
+                    vec![TrackerPaneOp::Restore {
                         source,
                         section,
                         before: None,
                         after: None,
-                    }
+                    }]
                 }
-                None => TrackerPaneOp::Status {
+                None => vec![TrackerPaneOp::Status {
                     id: self.rng.pick(&ids).clone(),
                     status: "in-progress".into(),
-                },
+                }],
             },
-        };
-        let base = if self.rng.chance(30) {
-            let s = self.stale();
-            self.history[s].0
-        } else {
-            self.version()
+            7 | 8 => {
+                // Settle a conflict the view at `base` could show.
+                let visible: Vec<Conflict> = self
+                    .reg
+                    .conflicts(TAG[0])
+                    .into_iter()
+                    .filter(|c| c.version <= base)
+                    .collect();
+                if visible.is_empty() {
+                    vec![TrackerPaneOp::Status {
+                        id: self.rng.pick(&ids).clone(),
+                        status: "needs-you".into(),
+                    }]
+                } else {
+                    let c = self.rng.pick(&visible).clone();
+                    let same: Vec<&Conflict> = visible
+                        .iter()
+                        .filter(|o| o.item_id == c.item_id && o.field == c.field)
+                        .collect();
+                    // The pane's index is the ordinal in what it saw; no
+                    // index means the newest it saw.
+                    let (index, chosen) = if self.rng.chance(50) {
+                        let n = same.iter().position(|o| **o == c).unwrap();
+                        (Some(n as u32), c.clone())
+                    } else {
+                        (None, (*same.last().unwrap()).clone())
+                    };
+                    let keep = if self.rng.chance(50) {
+                        ConflictKeep::Current
+                    } else {
+                        ConflictKeep::Losing
+                    };
+                    touched.push(chosen.item_id.clone());
+                    settles = Some((chosen.clone(), keep));
+                    vec![TrackerPaneOp::ResolveConflict {
+                        id: chosen.item_id,
+                        field: chosen.field,
+                        keep,
+                        index,
+                    }]
+                }
+            }
+            9 => {
+                // A write, then clearing the badge: refused as a whole when
+                // the item changed after the base.
+                let id = self.rng.pick(&ids).clone();
+                touched.push(id.clone());
+                let mut batch = Vec::new();
+                if self.rng.chance(70) {
+                    batch.push(TrackerPaneOp::Status {
+                        id: id.clone(),
+                        status: self.rng.pick(&STATUSES).to_string(),
+                    });
+                }
+                batch.push(TrackerPaneOp::ClearBadge { id });
+                batch
+            }
+            10 => {
+                // A restructure: a short title, the rest into the note.
+                let id = self.rng.pick(&ids).clone();
+                touched.push(id.clone());
+                let view = self.reg.board_view(TAG[0]).unwrap();
+                for node in view.nodes {
+                    if let nostromo::tracker::view::ViewNode::Item(item) = node {
+                        if item.id == id {
+                            self.restructured.push((id.clone(), item.text, item.note));
+                        }
+                    }
+                }
+                let title = self.unique("Short ");
+                vec![TrackerPaneOp::Edit {
+                    id,
+                    title: Some(title),
+                    text: None,
+                    body: Some(self.unique("moved-text-")),
+                }]
+            }
+            _ => match self.restructured.pop() {
+                // The undo: the text back whole, then the note.
+                Some((id, text, note)) => {
+                    touched.push(id.clone());
+                    vec![
+                        TrackerPaneOp::RestoreText {
+                            id: id.clone(),
+                            text,
+                        },
+                        TrackerPaneOp::Edit {
+                            id,
+                            title: None,
+                            text: None,
+                            body: Some(note.unwrap_or_default()),
+                        },
+                    ]
+                }
+                None => vec![TrackerPaneOp::Status {
+                    id: self.rng.pick(&ids).clone(),
+                    status: "done".into(),
+                }],
+            },
         };
         let injected = self.maybe_inject();
         let before = self.bytes();
-        let result = self
-            .reg
-            .apply_pane_ops(TAG[0], base, std::slice::from_ref(&op));
+        let version_before = self.version();
+        let result = self.reg.apply_pane_ops(TAG[0], base, &ops);
         if let Ok(done) = &result {
             touched.extend(done.created.clone());
+            if let Some((conflict, ConflictKeep::Current)) = settles {
+                self.excused.push(conflict);
+            }
         }
         self.steps.push(format!(
-            "pane (base {base}) {op:?} -> {}",
+            "pane (base {base}) {ops:?} -> {}",
             match &result {
                 Ok(o) => format!("ok v{}", o.version),
                 Err(e) => format!("{} {:?}", e.code, e.reason),
             }
         ));
         *self.fs.hook.lock().unwrap() = None;
+        // A refused batch writes nothing and bumps nothing.
+        if result.is_err() && !injected {
+            if self.bytes() != before {
+                self.failures.push(format!(
+                    "step {step}: a refused pane batch changed the file"
+                ));
+            }
+            if self.version() != version_before {
+                self.failures.push(format!(
+                    "step {step}: a refused pane batch moved the version"
+                ));
+            }
+        }
         self.settle(Who::Pane, base, &before, &touched, injected, step);
     }
 
@@ -754,6 +913,7 @@ impl World {
         // The items' bytes a `removed` conflict kept, parsed.
         let kept: Vec<(String, Items)> = conflicts
             .iter()
+            .chain(self.excused.iter())
             .filter(|c| c.field == "removed")
             .filter_map(|c| {
                 let source = c.losing.as_str()?;
@@ -769,6 +929,8 @@ impl World {
                 .get(&e.item)
                 .is_some_and(|f| f[e.field] == e.value);
             let lost_to_conflict = conflicts.iter().any(|c| {
+                c.item_id == e.item && c.field == e.field && value_of(&c.losing) == e.value
+            }) || self.excused.iter().any(|c| {
                 c.item_id == e.item && c.field == e.field && value_of(&c.losing) == e.value
             }) || kept
                 .iter()
@@ -805,12 +967,19 @@ fn one(seed: u64) -> Result<(), String> {
 }
 
 #[test]
-fn two_hundred_interleavings_lose_no_edit() {
+fn four_hundred_interleavings_lose_no_edit() {
     let seeds: Vec<u64> = match std::env::var("TRACKER_FUZZ_SEED") {
         Ok(s) => vec![u64::from_str_radix(s.trim_start_matches("0x"), 16)
             .or_else(|_| s.parse())
             .expect("TRACKER_FUZZ_SEED is a number")],
-        Err(_) => (0..INTERLEAVINGS).map(|n| SEED_BASE + n).collect(),
+        Err(_) => {
+            // `TRACKER_FUZZ_COUNT` runs more interleavings (to hunt, not to gate).
+            let count = std::env::var("TRACKER_FUZZ_COUNT")
+                .ok()
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(INTERLEAVINGS);
+            (0..count).map(|n| SEED_BASE + n).collect()
+        }
     };
     let failed: Vec<(u64, String)> = seeds
         .iter()

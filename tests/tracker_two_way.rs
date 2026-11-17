@@ -172,6 +172,37 @@ impl Rig {
         self.reg.ingest_file_change(&self.path);
     }
 
+    /// Agent B opens the board again (a fresh `open` of a board it has read).
+    fn reopen_b(&self) {
+        let args = OpenArgs {
+            topic: Some("two-way".into()),
+            cwd: self.base.join("repo"),
+            ..Default::default()
+        };
+        self.reg.open(TAG_B, SESS_B, &args).expect("re-open b");
+    }
+
+    /// The (losing value, who lost it) of each of `id`'s conflicts on `field`.
+    fn losers(&self, id: &str, field: &str) -> Vec<String> {
+        self.item(id)
+            .conflicts
+            .into_iter()
+            .filter(|c| c.field == field)
+            .map(|c| c.losing)
+            .collect()
+    }
+
+    /// A status conflict on `alpha`: agent A's `in-progress` lost to the
+    /// pane's `done` two seconds later. Returns the version the pane saw.
+    fn first_status_conflict(&self) -> u64 {
+        self.tick(100);
+        self.agent_a(&[status_op("alpha", "in-progress")]).unwrap();
+        self.tick(2);
+        self.pane(vec![pane_status("alpha", "done")]).unwrap();
+        assert_eq!(self.losers("alpha", "status"), vec!["in-progress"]);
+        self.version()
+    }
+
     fn tick(&self, secs: i64) {
         self.clock.advance(ChronoDuration::seconds(secs));
     }
@@ -1151,4 +1182,387 @@ fn an_added_item_with_a_finding_in_its_title_gets_a_neutral_id() {
         .unwrap();
     assert!(!out.created[0].contains("219"), "{}", out.created[0]);
     assert!(rig.item(&out.created[0]).sensitive.is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Lost-edit regressions (Perri's probes P1-P6, T3a review)
+// ---------------------------------------------------------------------------
+
+/// P1: re-opening the board reads nothing, so it must not mark the changes
+/// made before it as seen.
+#[test]
+fn an_agent_reopening_the_board_has_not_seen_the_users_edit() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.pane(vec![pane_status("alpha", "done")]).unwrap();
+    rig.tick(60);
+    rig.reopen_b();
+    rig.tick(60);
+    rig.agent_b(&[status_op("alpha", "in-progress")]).unwrap();
+    assert_eq!(
+        rig.losers("alpha", "status"),
+        vec!["done"],
+        "the user's `done` is kept: B never read it"
+    );
+}
+
+/// P1, the other half: the first open does hand over the board, so it counts
+/// as a read.
+#[test]
+fn the_first_open_of_a_board_counts_as_a_read() {
+    let rig = Rig::new();
+    let args = OpenArgs {
+        topic: Some("two-way".into()),
+        cwd: rig.base.join("repo"),
+        ..Default::default()
+    };
+    rig.tick(100);
+    rig.pane(vec![pane_status("alpha", "done")]).unwrap();
+    rig.tick(60);
+    let opened = rig.reg.open("cody-c", "sess-c", &args).unwrap();
+    assert!(opened.board.is_some());
+    rig.tick(60);
+    rig.reg
+        .apply(
+            "cody-c",
+            "sess-c",
+            &[status_op("alpha", "in-progress")],
+            &agent("cody-c", "sess-c"),
+        )
+        .unwrap();
+    assert!(rig.losers("alpha", "status").is_empty());
+}
+
+/// P2: settling one conflict settles that one.
+#[test]
+fn resolving_one_conflict_leaves_the_one_the_user_never_saw() {
+    for pick in [None, Some(0)] {
+        let rig = Rig::new();
+        let seen = rig.first_status_conflict();
+        // A second conflict, after what the pane showed: A (having read) sets
+        // `blocked`, B overwrites it two seconds later.
+        rig.tick(100);
+        rig.reg.read(TAG_A, SESS_A).unwrap();
+        rig.agent_a(&[status_op("alpha", "blocked")]).unwrap();
+        rig.tick(2);
+        rig.agent_b(&[status_op("alpha", "needs-you")]).unwrap();
+        assert_eq!(rig.losers("alpha", "status").len(), 2);
+        rig.pane_at(
+            seen,
+            vec![TrackerPaneOp::ResolveConflict {
+                id: "alpha".into(),
+                field: "status".into(),
+                keep: ConflictKeep::Current,
+                index: pick,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            rig.losers("alpha", "status"),
+            vec!["blocked"],
+            "pick {pick:?}: only the settled conflict went"
+        );
+    }
+}
+
+/// P2, keeping the losing value: the other losing values stay too.
+#[test]
+fn keeping_a_losing_value_settles_only_that_conflict() {
+    let rig = Rig::new();
+    rig.first_status_conflict();
+    rig.tick(100);
+    // A second status conflict the pane has also seen.
+    rig.reg.read(TAG_A, SESS_A).unwrap();
+    rig.agent_a(&[status_op("alpha", "blocked")]).unwrap();
+    rig.tick(2);
+    rig.pane(vec![pane_status("alpha", "done")]).unwrap();
+    assert_eq!(
+        rig.losers("alpha", "status"),
+        vec!["in-progress", "blocked"]
+    );
+    rig.pane(vec![TrackerPaneOp::ResolveConflict {
+        id: "alpha".into(),
+        field: "status".into(),
+        keep: ConflictKeep::Losing,
+        index: Some(0),
+    }])
+    .unwrap();
+    assert_eq!(rig.item("alpha").status, Status::InProgress);
+    assert_eq!(rig.losers("alpha", "status"), vec!["blocked"]);
+}
+
+/// P3: putting a losing value back from a stale view is still a write over
+/// whatever came after that view.
+#[test]
+fn keep_losing_from_a_stale_view_conflicts_with_a_newer_value() {
+    let rig = Rig::new();
+    let seen = rig.first_status_conflict();
+    rig.tick(100);
+    rig.reg.read(TAG_B, SESS_B).unwrap();
+    rig.agent_b(&[status_op("alpha", "needs-you")]).unwrap();
+    assert_eq!(rig.losers("alpha", "status"), vec!["in-progress"]);
+    rig.pane_at(
+        seen,
+        vec![TrackerPaneOp::ResolveConflict {
+            id: "alpha".into(),
+            field: "status".into(),
+            keep: ConflictKeep::Losing,
+            index: Some(0),
+        }],
+    )
+    .unwrap();
+    assert!(
+        rig.losers("alpha", "status")
+            .contains(&"needs-you".to_string()),
+        "B's newer value is kept: {:?}",
+        rig.losers("alpha", "status")
+    );
+}
+
+/// P3, mixed batch: the other ops of a batch that settles a conflict are
+/// checked like any pane edit.
+#[test]
+fn a_batch_that_settles_a_conflict_still_detects_conflicts_for_its_other_ops() {
+    let rig = Rig::new();
+    let seen = rig.first_status_conflict();
+    rig.tick(100);
+    rig.reg.read(TAG_B, SESS_B).unwrap();
+    rig.agent_b(&[status_op("beta", "in-progress")]).unwrap();
+    rig.pane_at(
+        seen,
+        vec![
+            TrackerPaneOp::ResolveConflict {
+                id: "alpha".into(),
+                field: "status".into(),
+                keep: ConflictKeep::Losing,
+                index: Some(0),
+            },
+            pane_status("beta", "done"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(rig.item("beta").status, Status::Done);
+    assert_eq!(rig.losers("beta", "status"), vec!["in-progress"]);
+    assert!(
+        rig.losers("alpha", "status").is_empty(),
+        "the settled field is no new conflict"
+    );
+}
+
+/// P6: a refused batch writes nothing.
+#[test]
+fn a_refused_clear_badge_writes_nothing_of_its_batch() {
+    let rig = Rig::new();
+    let seen = rig.version();
+    rig.tick(100);
+    rig.agent_b(&[Op::Upsert(Upsert {
+        id: Some("alpha".into()),
+        owner: Some("someone".into()),
+        ..Default::default()
+    })])
+    .unwrap();
+    let (text, version) = (rig.text(), rig.version());
+    let err = rig
+        .pane_at(
+            seen,
+            vec![
+                pane_status("alpha", "done"),
+                TrackerPaneOp::ClearBadge { id: "alpha".into() },
+            ],
+        )
+        .expect_err("alpha changed since the base");
+    assert_eq!(err.code, "invalid_args");
+    assert_eq!(err.index, Some(1));
+    assert_eq!(rig.text(), text, "the file is byte-identical");
+    assert_eq!(rig.version(), version, "and the version did not move");
+}
+
+/// P6 as a property: whatever refuses a batch, the file stays as it was.
+#[test]
+fn any_refused_batch_leaves_the_file_byte_identical() {
+    let seen_then_changed = |rig: &Rig| {
+        let seen = rig.version();
+        rig.tick(100);
+        rig.agent_b(&[status_op("beta", "blocked")]).unwrap();
+        seen
+    };
+    let batches: Vec<(&str, Vec<TrackerPaneOp>)> = vec![
+        (
+            "unknown item after a good op",
+            vec![pane_status("alpha", "done"), pane_status("nope", "done")],
+        ),
+        (
+            "bad status after a good op",
+            vec![
+                pane_status("alpha", "done"),
+                pane_status("beta", "sideways"),
+            ],
+        ),
+        (
+            "clear_badge of an unknown item",
+            vec![
+                pane_status("alpha", "done"),
+                TrackerPaneOp::ClearBadge { id: "nope".into() },
+            ],
+        ),
+        (
+            "clear_badge of an item changed since the base",
+            vec![
+                pane_status("alpha", "done"),
+                TrackerPaneOp::ClearBadge { id: "beta".into() },
+            ],
+        ),
+        (
+            "a conflict that isn't there",
+            vec![
+                pane_status("alpha", "done"),
+                TrackerPaneOp::ResolveConflict {
+                    id: "alpha".into(),
+                    field: "status".into(),
+                    keep: ConflictKeep::Current,
+                    index: None,
+                },
+            ],
+        ),
+        (
+            "a restore that isn't one item",
+            vec![
+                pane_status("alpha", "done"),
+                TrackerPaneOp::Restore {
+                    source: "not an item".into(),
+                    section: "now".into(),
+                    before: None,
+                    after: None,
+                },
+            ],
+        ),
+        (
+            "an empty edit",
+            vec![
+                pane_status("alpha", "done"),
+                TrackerPaneOp::Edit {
+                    id: "beta".into(),
+                    title: None,
+                    text: None,
+                    body: None,
+                },
+            ],
+        ),
+    ];
+    for (why, ops) in batches {
+        let rig = Rig::new();
+        let seen = seen_then_changed(&rig);
+        let (text, version) = (rig.text(), rig.version());
+        let result = rig.pane_at(seen, ops);
+        assert!(result.is_err(), "{why}: expected a refusal");
+        assert_eq!(rig.text(), text, "{why}: the file changed");
+        assert_eq!(rig.version(), version, "{why}: the version moved");
+    }
+}
+
+/// Another pane window's change after the base blocks a clear_badge too.
+#[test]
+fn clear_badge_is_refused_after_another_pane_window_changed_the_item() {
+    let rig = Rig::new();
+    rig.pane(vec![pane_edit_body("alpha", &format!("SSN {SSN}"))])
+        .unwrap();
+    let seen = rig.version();
+    // A second window (same author kind) edits the item after our base.
+    rig.tick(100);
+    rig.pane(vec![pane_edit_body(
+        "alpha",
+        &format!("SSN {SSN} and more"),
+    )])
+    .unwrap();
+    let err = rig
+        .pane_at(seen, vec![TrackerPaneOp::ClearBadge { id: "alpha".into() }])
+        .expect_err("changed since seen");
+    assert_eq!(err.code, "invalid_args");
+    assert!(rig.item("alpha").sensitive.is_some());
+}
+
+/// P4: a secret straddling the 200-character cut of the change log.
+#[test]
+fn a_secret_straddling_the_log_cut_is_withheld() {
+    let rig = Rig::new();
+    rig.tick(100);
+    let key = "AKIAIOSFODNN7EXAMPLE";
+    rig.pane(vec![pane_edit_body(
+        "alpha",
+        &format!("{}{key}", "x".repeat(193)),
+    )])
+    .unwrap();
+    let shown = serde_json::to_string(&rig.delta(TAG_B, SESS_B)).unwrap();
+    assert!(!shown.contains("AKIA"), "{shown}");
+    assert!(shown.contains(WITHHELD), "{shown}");
+}
+
+/// P5: an id generated for an item a file save adds.
+#[test]
+fn a_file_added_item_with_a_finding_gets_a_neutral_id() {
+    let rig = Rig::new();
+    rig.save(&rig.text().replace(
+        "- [ ] Beta task",
+        "- [ ] 4111111111111111 card on file\n- [ ] Beta task",
+    ));
+    let shown = serde_json::to_string(&rig.delta(TAG_B, SESS_B)).unwrap();
+    assert!(!shown.contains("4111"), "{shown}");
+    let board = rig.reg.board_view(TAG_A).unwrap();
+    let ids: Vec<String> = board
+        .nodes
+        .iter()
+        .filter_map(|n| match n {
+            ViewNode::Item(i) => Some(i.id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(ids.iter().all(|id| !id.contains("4111")), "{ids:?}");
+    assert!(ids.iter().any(|id| id.starts_with("item-")), "{ids:?}");
+}
+
+/// T3b's Undo: text that came from the file can be longer than an edit takes.
+#[test]
+fn undoing_a_restructure_restores_a_text_over_five_hundred_characters() {
+    let rig = Rig::new();
+    let original = format!("Legacy title. {}", "and a long file line ".repeat(48));
+    assert!(original.chars().count() > 900);
+    rig.save(&rig.text().replace(
+        "- [ ] Beta task",
+        &format!("- [ ] {}\n- [ ] Beta task", original.trim()),
+    ));
+    let long_id = rig
+        .reg
+        .board_view(TAG_A)
+        .unwrap()
+        .nodes
+        .iter()
+        .find_map(|n| match n {
+            ViewNode::Item(i) if i.text.starts_with("Legacy title.") => Some(i.id.clone()),
+            _ => None,
+        })
+        .expect("the long item");
+    let before = rig.item(&long_id).text;
+    rig.pane(vec![TrackerPaneOp::Edit {
+        id: long_id.clone(),
+        title: Some("Legacy title.".into()),
+        text: None,
+        body: Some("the rest".into()),
+    }])
+    .unwrap();
+    // The capped edit can't undo it...
+    assert!(rig
+        .pane(vec![TrackerPaneOp::Edit {
+            id: long_id.clone(),
+            title: None,
+            text: Some(before.clone()),
+            body: None,
+        }])
+        .is_err());
+    // ...the restore can, whole.
+    rig.pane(vec![TrackerPaneOp::RestoreText {
+        id: long_id.clone(),
+        text: before.clone(),
+    }])
+    .unwrap();
+    assert_eq!(rig.item(&long_id).text, before);
 }

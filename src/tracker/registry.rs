@@ -454,7 +454,12 @@ impl TrackerRegistry {
             })
             .flatten();
         inner.boards.insert(path.clone(), entry);
-        inner.cursors.set(session, &key, version);
+        // The cursor is what the session has read. Opening hands over the
+        // board only the first time; a re-open reads nothing, so it must not
+        // move a cursor (the agent would count changes it never saw as seen).
+        if board.is_some() {
+            inner.cursors.set(session, &key, version);
+        }
         inner.bindings.insert(tag.to_string(), path.clone());
         let hidden_by_user = inner.hidden.contains(tag) && !args.show;
         if args.show {
@@ -1023,8 +1028,9 @@ impl TrackerRegistry {
             log,
             seen,
             detect: log,
+            resolving: &[],
         };
-        self.write_steps(entry, path, &mut |_, _| Ok(steps.clone()), author, ctx)
+        self.write_steps(entry, path, &mut |_, _, _| Ok(steps.clone()), author, ctx)
     }
 
     /// The read-modify-write of one board over steps. `plan` turns what the
@@ -1047,7 +1053,7 @@ impl TrackerRegistry {
             let now = self.clock.now();
             let stamp = Stamp::new(now, self.offset_at(now));
             let steps = match entry.parsed.as_ref() {
-                Some(parsed) => plan(&parsed.board, &entry.live)?,
+                Some(parsed) => plan(&parsed.board, &entry.live, &entry.log)?,
                 None => Vec::new(),
             };
             let applied = apply_steps_to_file(&bytes, &steps, author, stamp)?;
@@ -1065,6 +1071,7 @@ impl TrackerRegistry {
                     &Detect {
                         writer: author,
                         seen_through: ctx.seen,
+                        resolving: ctx.resolving,
                         now,
                     },
                 ),
@@ -1095,7 +1102,8 @@ impl TrackerRegistry {
         if ctx.log {
             let mut changes = applied.changes;
             record_conflicts(entry, &mut changes, found, &applied.board);
-            entry.log.append(changes);
+            let version = entry.log.append(changes);
+            entry.conflicts.stamp_unversioned(version);
         }
         self.sync_live(entry);
         Ok(())
@@ -1181,12 +1189,14 @@ impl TrackerRegistry {
                         &Detect {
                             writer: &Author::File,
                             seen_through: None,
+                            resolving: &[],
                             now,
                         },
                     );
                     let board = parsed.board.clone();
                     record_conflicts(entry, &mut changes, found, &board);
-                    entry.log.append(changes);
+                    let version = entry.log.append(changes);
+                    entry.conflicts.stamp_unversioned(version);
                 }
                 entry.parsed = Some(parsed);
                 entry.last_ingested = Some(bytes);
@@ -1777,18 +1787,20 @@ fn replace_banner(entry: &mut BoardEntry, banner: Banner) -> bool {
 }
 
 /// Turns the board as it stands (and its live items) into a write's steps.
-type Plan<'a> =
-    dyn FnMut(&Board, &HashMap<String, LiveItem>) -> Result<Vec<PaneStep>, TrackerError> + 'a;
+type Plan<'a> = dyn FnMut(&Board, &HashMap<String, LiveItem>, &ChangeLog) -> Result<Vec<PaneStep>, TrackerError>
+    + 'a;
 
 /// How one write behaves (see [`TrackerRegistry::write_steps`]).
 #[derive(Clone, Copy)]
-struct WriteCtx {
+struct WriteCtx<'a> {
     /// Append the changes to the log.
     log: bool,
     /// What the writer had read (the pane's base version, an agent's cursor).
     seen: Option<u64>,
     /// Look for conflicts with other authors' changes.
     detect: bool,
+    /// The `(item, field)` pairs a pane edit settles (see [`Detect::resolving`]).
+    resolving: &'a [(String, String)],
 }
 
 /// The pane's conflicts of each item still on the board.

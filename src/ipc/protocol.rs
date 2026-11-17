@@ -1331,7 +1331,7 @@ pub enum TrackerPaneOp {
         status: String,
     },
     /// Sets the given fields (at least one). `title` is one line of at most 80
-    /// characters; `text` (at most 500) is for undoing a restructure; `body`
+    /// characters; `text` (at most 500) is for a short rewrite (`restore_text` undoes a restructure); `body`
     /// is the note (`""` clears it).
     Edit {
         id: String,
@@ -1363,6 +1363,14 @@ pub enum TrackerPaneOp {
     },
     Remove {
         id: String,
+    },
+    /// Puts an item's text back exactly as it was (undoing a restructure):
+    /// unlike `edit`'s `text` it is not cut at 500 characters, so a long line
+    /// that came from the file returns whole. One line, at most 9,000
+    /// characters.
+    RestoreText {
+        id: String,
+        text: String,
     },
     /// Puts an item back from its exact markdown (`ViewItem.source`),
     /// byte for byte.

@@ -11,10 +11,10 @@ use serde_json::{json, Value};
 use super::{conflicts, BoardEntry, TrackerError, TrackerRegistry, WriteCtx};
 use crate::ipc::protocol::{ConflictKeep, TrackerPaneOp, MAX_TRACKER_EDIT_OPS};
 use crate::tracker::bindings::with_source_line;
+use crate::tracker::changelog::ChangeLog;
 use crate::tracker::conflicts::Conflict;
 use crate::tracker::model::{generate_id, Author, Board, ChangeKind};
 use crate::tracker::ops::{parse_restorable, LinkInput, Op, PaneStep, Restore, Upsert};
-use crate::tracker::sensitive::has_finding;
 
 /// What a successful pane edit did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,8 +65,12 @@ impl PaneEditError {
 #[allow(clippy::enum_variant_names)]
 enum Effect {
     ClearBadge(String),
-    ClearRemoved { id: String, block: String },
-    ClearConflicts { id: String, field: String },
+    ClearRemoved {
+        id: String,
+        block: String,
+    },
+    /// Settles this one conflict.
+    ClearConflict(Box<Conflict>),
 }
 
 impl TrackerRegistry {
@@ -99,21 +103,35 @@ impl TrackerRegistry {
             .get_mut(&path)
             .ok_or_else(|| no_tracker(TrackerError::NoTracker))?;
 
-        let known: Vec<Conflict> = entry.conflicts.all().to_vec();
-        // Settling a conflict is a decision, not a competing edit.
-        let resolving = ops.iter().any(|op| {
-            matches!(
-                op,
+        // The conflicts the user could have seen: those recorded by the base
+        // version. A later one is news to them and is never settled by this edit.
+        let known: Vec<Conflict> = entry
+            .conflicts
+            .all()
+            .iter()
+            .filter(|c| c.version <= base_version)
+            .cloned()
+            .collect();
+        // Putting a losing value back settles that field's decision; every
+        // other op of the batch is still checked against what changed since
+        // the user's view.
+        let resolving: Vec<(String, String)> = ops
+            .iter()
+            .filter_map(|op| match op {
                 TrackerPaneOp::ResolveConflict {
+                    id,
+                    field,
                     keep: ConflictKeep::Losing,
                     ..
-                }
-            )
-        });
+                } => Some((id.clone(), field.clone())),
+                _ => None,
+            })
+            .collect();
         let ctx = WriteCtx {
             log: true,
             seen: Some(base_version),
-            detect: !resolving,
+            detect: true,
+            resolving: &resolving,
         };
         let mut origin: Vec<usize> = Vec::new();
         let mut created: Vec<String> = Vec::new();
@@ -121,8 +139,8 @@ impl TrackerRegistry {
         let result = self.write_steps(
             entry,
             &path,
-            &mut |board, live| {
-                let plan = plan_ops(ops, board, &known, &|id, body| {
+            &mut |board, live, log| {
+                let plan = plan_ops(ops, board, &known, log, base_version, &|id, body| {
                     bound_body(live, board, id, body)
                 })?;
                 origin = plan.origin;
@@ -135,10 +153,13 @@ impl TrackerRegistry {
         );
         // Even a refused edit may have ingested an external save.
         let outcome = match result {
-            Ok(()) => apply_effects(entry, effects, base_version).map(|()| PaneEditOutcome {
-                version: entry.log.seq,
-                created,
-            }),
+            Ok(()) => {
+                apply_effects(entry, effects);
+                Ok(PaneEditOutcome {
+                    version: entry.log.seq,
+                    created,
+                })
+            }
             Err(err) => Err(PaneEditError::from_tracker(err, &origin)),
         };
         inner.dirty.insert(path);
@@ -147,35 +168,12 @@ impl TrackerRegistry {
     }
 }
 
-fn apply_effects(
-    entry: &mut BoardEntry,
-    effects: Vec<Effect>,
-    base_version: u64,
-) -> Result<(), PaneEditError> {
+/// Runs the effects of a batch that was written. Every refusal was decided
+/// while planning, before anything was written, so this cannot fail.
+fn apply_effects(entry: &mut BoardEntry, effects: Vec<Effect>) {
     for effect in effects {
         match effect {
             Effect::ClearBadge(id) => {
-                // The user approves what they saw: if someone else changed the
-                // item after the edit's base version, approve nothing.
-                let changed = entry.log.entries.iter().any(|c| {
-                    c.seq > base_version
-                        && c.item_id.as_deref() == Some(id.as_str())
-                        && matches!(c.kind, ChangeKind::Changed | ChangeKind::Added)
-                        && c.by != Author::Pane
-                });
-                // History that doesn't reach back to the base version can't show
-                // what changed: refuse rather than approve blind.
-                let history_gap = base_version > entry.log.seq
-                    || entry
-                        .log
-                        .entries
-                        .front()
-                        .is_some_and(|c| c.seq > base_version.saturating_add(1));
-                if changed || history_gap {
-                    return Err(PaneEditError::invalid(
-                        "the item changed since you saw it; look again before clearing",
-                    ));
-                }
                 let item = entry
                     .parsed
                     .as_ref()
@@ -185,11 +183,39 @@ fn apply_effects(
                     entry.approvals.approve(&item);
                 }
             }
-            Effect::ClearConflicts { id, field } => entry.conflicts.clear_field(&id, &field),
+            Effect::ClearConflict(conflict) => entry.conflicts.clear(&conflict),
             Effect::ClearRemoved { id, block } => {
                 entry.conflicts.clear_removed_matching(&id, &block)
             }
         }
+    }
+}
+
+/// The user approves what they saw: refuses when anyone changed the item
+/// after the edit's base version (another pane window included: the writer's
+/// kind says nothing about whose view it was), or when the history doesn't
+/// reach back to the base version to show what changed.
+fn check_badge_clearable(
+    log: &ChangeLog,
+    id: &str,
+    base_version: u64,
+    index: usize,
+) -> Result<(), TrackerError> {
+    let changed = log.entries.iter().any(|c| {
+        c.seq > base_version
+            && c.item_id.as_deref() == Some(id)
+            && matches!(c.kind, ChangeKind::Changed | ChangeKind::Added)
+    });
+    let history_gap = base_version > log.seq
+        || log
+            .entries
+            .front()
+            .is_some_and(|c| c.seq > base_version.saturating_add(1));
+    if changed || history_gap {
+        return Err(TrackerError::InvalidArgs {
+            index: Some(index),
+            reason: "the item changed since you saw it; look again before clearing".to_string(),
+        });
     }
     Ok(())
 }
@@ -229,6 +255,8 @@ fn plan_ops(
     ops: &[TrackerPaneOp],
     board: &Board,
     known: &[Conflict],
+    log: &ChangeLog,
+    base_version: u64,
     bound_body: &dyn Fn(&str, &str) -> Option<String>,
 ) -> Result<Plan, TrackerError> {
     let mut plan = Plan {
@@ -285,10 +313,8 @@ fn plan_ops(
                 before,
                 after,
             } => {
-                // An id is made from the title; a title with sensitive text
-                // must not leak into the id agents read.
-                let seed = if has_finding(title) { "item" } else { title };
-                let id = generate_id(seed, &taken);
+                // `generate_id` keeps sensitive text out of the id.
+                let id = generate_id(title, &taken);
                 taken.insert(id.clone());
                 plan.created.push(id.clone());
                 push(
@@ -330,6 +356,13 @@ fn plan_ops(
             TrackerPaneOp::Remove { id } => {
                 push(&mut plan, PaneStep::Op(Op::Remove { id: id.clone() }))
             }
+            TrackerPaneOp::RestoreText { id, text } => push(
+                &mut plan,
+                PaneStep::SetText {
+                    id: id.clone(),
+                    text: text.clone(),
+                },
+            ),
             TrackerPaneOp::Restore {
                 source,
                 section,
@@ -361,6 +394,7 @@ fn plan_ops(
                         id: id.clone(),
                     });
                 }
+                check_badge_clearable(log, id, base_version, index)?;
                 plan.effects.push(Effect::ClearBadge(id.clone()));
             }
             TrackerPaneOp::ResolveConflict {
@@ -385,10 +419,8 @@ fn plan_ops(
                         push(&mut plan, step);
                     }
                 }
-                plan.effects.push(Effect::ClearConflicts {
-                    id: id.clone(),
-                    field: field.clone(),
-                });
+                plan.effects
+                    .push(Effect::ClearConflict(Box::new((*chosen).clone())));
             }
         }
     }
@@ -438,7 +470,10 @@ fn losing_steps(c: &Conflict, board: &Board) -> Result<Vec<PaneStep>, String> {
             id: c.item_id.clone(),
             status: text(&c.losing),
         })]),
-        "text" => upsert(&|u| u.text = Some(text(&c.losing))),
+        "text" => Ok(vec![PaneStep::SetText {
+            id: c.item_id.clone(),
+            text: text(&c.losing),
+        }]),
         "note" => upsert(&|u| u.note = Some(text(&c.losing))),
         "owner" => upsert(&|u| u.owner = Some(text(&c.losing))),
         "env" => upsert(&|u| u.env = Some(text(&c.losing))),
