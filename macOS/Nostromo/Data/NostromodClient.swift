@@ -1437,6 +1437,13 @@ class NostromodClient {
         advertisedFeatures = features
     }
 
+    /// Whether the connection's last `welcome` advertised both `tracker_edit_v1` and
+    /// `tracker_conflict_ids_v1`: the tracker pane edits the board only against such a daemon.
+    var daemonAdvertisesTrackerEdit: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return trackerEditSupported(features: advertisedFeatures)
+    }
+
     /// Whether the connection's last `welcome` advertised `slash_commands_v1`.
     var daemonAdvertisesSlashCommands: Bool {
         sendLock.lock(); defer { sendLock.unlock() }

@@ -445,7 +445,8 @@ final class DynamicFocusView: NSView {
             return hud
         } else if paneId == "tracker" {
             // Native agent tracker: renders the focus's `tracker_board` from `TrackerStore`.
-            let tracker = TrackerPaneView(tag: focus.sessionTag)
+            let tracker = TrackerPaneView(tag: focus.sessionTag,
+                                          editSupported: { AppStore.shared.client.daemonAdvertisesTrackerEdit })
             tracker.replProvider = { [weak self] in self?.leafViews["repl"] as? ReplView }
             leafViews[paneId] = tracker
             return tracker

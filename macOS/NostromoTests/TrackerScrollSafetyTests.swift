@@ -413,7 +413,8 @@ final class TrackerGateHarness {
     private let client = NostromodClient(socketPath: "/dev/null")
     private var added = 0
 
-    init(_ testCase: XCTestCase) throws {
+    /// `editing`: the pane acts as if the daemon takes pane edits (T3b); the frames go nowhere.
+    init(_ testCase: XCTestCase, editing: Bool = false) throws {
         board = try TrackerGateBoard.base()
         // Relative times: board-60's last item is 4 m old at this `now`.
         let paneClock = TrackerGateClock(start: 1_760_548_000)
@@ -428,7 +429,9 @@ final class TrackerGateHarness {
                                reduceMotion: { true }, pasteboard: rigPrivatePasteboard(testCase),
                                openLinkInDaemon: { tag, item, index in links.daemonOpens.append(.init(tag: tag, item: item, index: index)) },
                                openURL: { links.urlOpens.append($0) },
-                               schedule: { _, _ in }, timeZone: TimeZone(identifier: "UTC")!, tickInterval: nil)
+                               schedule: { _, _ in }, timeZone: TimeZone(identifier: "UTC")!, tickInterval: nil,
+                               editSupported: { editing }, editSender: { _, _, _, _ in true },
+                               editSchedule: { _, _ in })
     }
 
     // MARK: Layout and delivery

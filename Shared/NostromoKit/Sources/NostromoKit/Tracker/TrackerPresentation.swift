@@ -281,6 +281,8 @@ public struct TrackerHeader: Equatable {
     public let updatedText: String
     /// "This file can be committed to <remote>", or nil when the board is not committable.
     public let committableText: String?
+    /// Unsettled conflicts on the board: overwritten values and removed items.
+    public let conflictCount: Int
 }
 
 public struct TrackerBannerRow: Equatable {
@@ -321,9 +323,9 @@ public struct TrackerItemRow: Equatable {
     /// The text as plain characters (what Copy-as-text and `tracker show` report).
     public let text: String
     public let owner: String?
-    public let updatedAt: Date?
+    public internal(set) var updatedAt: Date?
     /// "now", "4 m", "2 h", "Oct 14" (empty without a time).
-    public let relativeTime: String
+    public internal(set) var relativeTime: String
     public let noteBlocks: [MdBlock]
     /// The note's first line as plain text (nil without a note). A collapsed item no longer shows
     /// it (the fold holds it); `tracker show` still reports it.
@@ -335,7 +337,7 @@ public struct TrackerItemRow: Equatable {
     /// There is something under the fold: text after the title, or a note.
     public let isFoldable: Bool
     /// Foldable and the user opened it.
-    public let isExpanded: Bool
+    public internal(set) var isExpanded: Bool
     /// Link texts (what `tracker show` reports).
     public let linkTexts: [String]
     /// The links, rendered as chips.
@@ -352,9 +354,39 @@ public struct TrackerItemRow: Equatable {
     public let kind: TrackerItemKindWire
     /// The item's exact markdown in the file.
     public let source: String
+    /// The task text as stored, raw markdown (what an editor opens with).
+    public let editText: String
+    /// The note as stored, raw markdown.
+    public let editNote: String?
+    /// Overwritten values the user hasn't settled.
+    public let conflicts: [TrackerConflictWire]
+    /// Older overwritten values a cap dropped.
+    public let droppedConflicts: Int
+    /// Sensitive-looking text the user hasn't cleared.
+    public let sensitive: TrackerSensitiveWire?
 
     public var isDone: Bool { status == .done }
     public var isNeedsYou: Bool { status == .needsYou }
+    /// The tick and the status menu apply: not a command (T4's "Ran it") and not a bound item
+    /// (its status follows its source).
+    public var isTickable: Bool { kind == .item && bound == nil }
+    public var isStatusEditable: Bool { isTickable }
+    /// "Status follows Mother job" for a bound item, nil otherwise.
+    public var boundTooltip: String? {
+        bound.map { "Status follows \(TrackerConflictText.sourceLabel($0.source))" }
+    }
+    /// What VoiceOver reads on the conflict mark: the first conflict, and how many more.
+    public var conflictSummary: String? {
+        guard let first = conflicts.first else { return nil }
+        var text = "Conflict on \(first.field): \(TrackerConflictText.actor(first.losingBy)) set "
+            + "\(TrackerConflictText.display(first.losing, field: first.field)), overwritten by \(TrackerConflictText.actor(first.winningBy))"
+        if conflicts.count > 1 { text += " and \(conflicts.count - 1) more" }
+        return text
+    }
+    /// "Possible sensitive data (phone number). Not shown to the agent."
+    public var sensitiveLabel: String? {
+        sensitive.map { "Possible sensitive data (\(TrackerConflictText.classList($0.classes))). Not shown to the agent." }
+    }
 }
 
 public struct TrackerDoneGroupRow: Equatable {
@@ -457,21 +489,16 @@ extension TrackerRow {
 
 extension TrackerItemRow {
     func withExpanded(_ expanded: Bool) -> TrackerItemRow {
-        TrackerItemRow(id: id, sectionId: sectionId, sectionTitle: sectionTitle, status: status, mark: mark,
-                       textSpans: textSpans, text: text, owner: owner, updatedAt: updatedAt, relativeTime: relativeTime,
-                       noteBlocks: noteBlocks, noteFirstLine: noteFirstLine, title: title, bodyLead: bodyLead,
-                       isFoldable: isFoldable, isExpanded: expanded, linkTexts: linkTexts, links: links, bound: bound,
-                       staleFootnote: staleFootnote, env: env, envBadge: envBadge,
-                       isHazard: isHazard, kind: kind, source: source)
+        var copy = self
+        copy.isExpanded = expanded
+        return copy
     }
 
     func withTime(_ relative: String, _ updated: Date?) -> TrackerItemRow {
-        TrackerItemRow(id: id, sectionId: sectionId, sectionTitle: sectionTitle, status: status, mark: mark,
-                       textSpans: textSpans, text: text, owner: owner, updatedAt: updated, relativeTime: relative,
-                       noteBlocks: noteBlocks, noteFirstLine: noteFirstLine, title: title, bodyLead: bodyLead,
-                       isFoldable: isFoldable, isExpanded: isExpanded, linkTexts: linkTexts, links: links, bound: bound,
-                       staleFootnote: staleFootnote, env: env, envBadge: envBadge,
-                       isHazard: isHazard, kind: kind, source: source)
+        var copy = self
+        copy.relativeTime = relative
+        copy.updatedAt = updated
+        return copy
     }
 }
 
@@ -516,6 +543,10 @@ public enum TrackerPresenter {
             updatedText: TrackerRelativeTime.header(board.updatedAt, now: now, timeZone: timeZone),
             committableText: board.committable.map { c in
                 c.remote.map { "This file can be committed to \($0)" } ?? "This file can be committed"
+            },
+            conflictCount: board.removedConflicts.count + board.nodes.reduce(0) { total, node in
+                if case .item(let item) = node { return total + item.conflicts.count }
+                return total
             })
 
         return TrackerPresentation(
@@ -682,7 +713,7 @@ public enum TrackerPresenter {
         }
     }
 
-    static func itemRow(_ wire: TrackerItemWire, sectionTitle: String, folds: TrackerFoldState,
+    public static func itemRow(_ wire: TrackerItemWire, sectionTitle: String, folds: TrackerFoldState,
                         now: Date, timeZone: TimeZone) -> TrackerItemRow {
         let lines = TrackerText.lines(wire.noteBlocks)
         let plain = TrackerText.plain(wire.textSpans)
@@ -713,7 +744,12 @@ public enum TrackerPresenter {
             envBadge: wire.env.flatMap(TrackerEnvBadge.text),
             isHazard: wire.env.map(TrackerEnvBadge.isHazard) ?? false,
             kind: wire.kind,
-            source: wire.source)
+            source: wire.source,
+            editText: wire.text,
+            editNote: wire.note,
+            conflicts: wire.conflicts,
+            droppedConflicts: wire.droppedConflicts,
+            sensitive: wire.sensitive)
     }
 }
 
@@ -911,5 +947,75 @@ public enum TrackerMarkdown {
         case .unknown:
             return unknownNodePlaceholder
         }
+    }
+}
+
+// MARK: - Conflict and badge wording
+
+/// The plain words the pane uses for conflicts and sensitive badges. Values are shown as text, never
+/// markdown; labels the daemon sends (`pane (you)`, `file (unknown editor)`, `source …`) become sentences.
+public enum TrackerConflictText {
+    /// Longest value shown in a conflict (the popover scrolls past it).
+    public static let maxValueChars = 500
+
+    public static func actor(_ by: String) -> String {
+        if by.hasPrefix("pane") { return "you" }
+        if by.hasPrefix("file") { return "a file edit" }
+        if by.hasPrefix("source") {
+            return sourceLabel(String(by.dropFirst("source".count)).trimmingCharacters(in: CharacterSet(charactersIn: " :")))
+        }
+        return by
+    }
+
+    /// "Mother job" or "PR CI" for a bound source; the source's own name otherwise.
+    public static func sourceLabel(_ source: String) -> String {
+        switch source.lowercased() {
+        case "pr.ci": return "PR CI"
+        case "mother.job": return "Mother job"
+        default: return source.isEmpty ? "its source" : source
+        }
+    }
+
+    /// A value as one quoted piece of plain text, cut at `maxValueChars`.
+    public static func display(_ value: String, field: String) -> String {
+        display(field == "status" ? value.replacingOccurrences(of: "-", with: " ") : value)
+    }
+
+    public static func display(_ value: String) -> String {
+        let shown = value.count > maxValueChars ? String(value.prefix(maxValueChars)) + "…" : value
+        return "“\(shown)”"
+    }
+
+    public static func classList(_ classes: [String]) -> String {
+        let names = classes.map { name -> String in
+            switch name {
+            case "phone": return "phone number"
+            case "ssn": return "social security number"
+            case "email": return "email address"
+            default: return name.replacingOccurrences(of: "_", with: " ")
+            }
+        }
+        return names.isEmpty ? "sensitive data" : names.joined(separator: ", ")
+    }
+
+    /// "4 s", "3 m", "2 h", from the pane's own clock.
+    public static func ago(_ date: Date?, now: Date) -> String {
+        guard let date else { return "a moment" }
+        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        if seconds < 60 { return "\(seconds) s" }
+        if seconds < 3600 { return "\(seconds / 60) m" }
+        return "\(seconds / 3600) h"
+    }
+
+    /// "agent claudia set status to “in progress”, then you set it to “done”, 4 s ago."
+    public static func sentence(_ conflict: TrackerConflictWire, current: String, now: Date) -> String {
+        "\(actor(conflict.losingBy)) set \(conflict.field) to \(display(conflict.losing, field: conflict.field)), then "
+            + "\(actor(conflict.winningBy)) set it to \(display(current, field: conflict.field)), \(ago(conflict.at, now: now)) ago."
+    }
+
+    /// "agent claudia removed “<title>” 3 s after you changed it."
+    public static func sentence(_ removed: TrackerRemovedConflictWire, now: Date) -> String {
+        "\(actor(removed.winningBy)) removed \(display(removed.title)) \(ago(removed.at, now: now)) after "
+            + "\(actor(removed.losingBy)) changed it."
     }
 }

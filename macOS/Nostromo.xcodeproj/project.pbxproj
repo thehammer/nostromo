@@ -741,6 +741,8 @@
 		ZZ0000000000000000TK1901 /* TrackerAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1900 /* TrackerAppearanceTests.swift */; };
 		ZZ0000000000000000TK2001 /* AppControlTrackerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2000 /* AppControlTrackerTests.swift */; };
 		ZZ0000000000000000TK2101 /* TrackerEditingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2100 /* TrackerEditingTests.swift */; };
+		ZZ0000000000000000TK2121 /* TrackerEditingAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2120 /* TrackerEditingAppearanceTests.swift */; };
+		ZZ0000000000000000TK2111 /* TrackerConflictPopoverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2110 /* TrackerConflictPopoverTests.swift */; };
 		ZZ0000000000000000TK2201 /* TrackerCommandBlockTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2200 /* TrackerCommandBlockTests.swift */; };
 		ZZ0000000000000000TK2301 /* TrackerWaitingStripTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2300 /* TrackerWaitingStripTests.swift */; };
 		ZZ0000000000000000TK2401 /* TrackerLinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2400 /* TrackerLinkTests.swift */; };
@@ -1365,6 +1367,8 @@
 		ZZ0000000000000000TK1900 /* TrackerAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerAppearanceTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2000 /* AppControlTrackerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppControlTrackerTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2100 /* TrackerEditingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerEditingTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK2120 /* TrackerEditingAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerEditingAppearanceTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK2110 /* TrackerConflictPopoverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerConflictPopoverTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2200 /* TrackerCommandBlockTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerCommandBlockTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2300 /* TrackerWaitingStripTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerWaitingStripTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2400 /* TrackerLinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerLinkTests.swift; sourceTree = "<group>"; };
@@ -2071,6 +2075,8 @@
 				ZZ0000000000000000TK1900 /* TrackerAppearanceTests.swift */,
 				ZZ0000000000000000TK2000 /* AppControlTrackerTests.swift */,
 				ZZ0000000000000000TK2100 /* TrackerEditingTests.swift */,
+				ZZ0000000000000000TK2120 /* TrackerEditingAppearanceTests.swift */,
+				ZZ0000000000000000TK2110 /* TrackerConflictPopoverTests.swift */,
 				ZZ0000000000000000TK2200 /* TrackerCommandBlockTests.swift */,
 				ZZ0000000000000000TK2300 /* TrackerWaitingStripTests.swift */,
 				ZZ0000000000000000TK2400 /* TrackerLinkTests.swift */,
@@ -3138,6 +3144,8 @@
 				ZZ0000000000000000TK1901 /* TrackerAppearanceTests.swift in Sources */,
 				ZZ0000000000000000TK2001 /* AppControlTrackerTests.swift in Sources */,
 				ZZ0000000000000000TK2101 /* TrackerEditingTests.swift in Sources */,
+				ZZ0000000000000000TK2121 /* TrackerEditingAppearanceTests.swift in Sources */,
+				ZZ0000000000000000TK2111 /* TrackerConflictPopoverTests.swift in Sources */,
 				ZZ0000000000000000TK2201 /* TrackerCommandBlockTests.swift in Sources */,
 				ZZ0000000000000000TK2301 /* TrackerWaitingStripTests.swift in Sources */,
 				ZZ0000000000000000TK2401 /* TrackerLinkTests.swift in Sources */,

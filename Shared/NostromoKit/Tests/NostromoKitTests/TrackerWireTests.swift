@@ -155,11 +155,13 @@ final class TrackerWireTests: XCTestCase {
         XCTAssertEqual(conflict.losingBy, "agent claudia")
         XCTAssertEqual(conflict.winningBy, "pane (you)")
         XCTAssertEqual(conflict.index, 0)
+        XCTAssertEqual(conflict.conflictId, "7.0")
         XCTAssertNotNil(conflict.at)
         XCTAssertEqual(byId["verif-1037"]?.sensitive?.classes, ["ssn"])
         let removed = try XCTUnwrap(view.removedConflicts.first)
         XCTAssertEqual(removed.itemId, "gone-1")
         XCTAssertEqual(removed.title, "A removed task")
+        XCTAssertEqual(removed.conflictId, "7.1")
         XCTAssertTrue(removed.source.hasPrefix("- [ ] A removed task"))
         XCTAssertEqual(items(view).count, 60, "the rest of the board is the golden board")
     }
@@ -176,7 +178,28 @@ final class TrackerWireTests: XCTestCase {
         XCTAssertNil(item.note)
         XCTAssertTrue(item.conflicts.isEmpty)
         XCTAssertNil(item.sensitive)
+        XCTAssertEqual(item.droppedConflicts, 0)
         XCTAssertTrue(view.removedConflicts.isEmpty)
+    }
+
+    func testAConflictWithoutAnIdFromAnOlderDaemonDecodesWithAnEmptyId() throws {
+        let json = Data(#"{"field":"status","losing":"todo","losing_by":"agent a","winning_by":"pane (you)","index":2}"#.utf8)
+        let conflict = try JSONDecoder().decode(TrackerConflictWire.self, from: json)
+        XCTAssertEqual(conflict.conflictId, "")
+    }
+
+    func testTheEditControlsNeedBothFeatures() {
+        XCTAssertFalse(trackerEditSupported(features: nil))
+        XCTAssertFalse(trackerEditSupported(features: ["tracker_edit_v1"]))
+        XCTAssertFalse(trackerEditSupported(features: ["tracker_conflict_ids_v1"]))
+        XCTAssertTrue(trackerEditSupported(features: ["tracker_edit_v1", "tracker_conflict_ids_v1"]))
+    }
+
+    func testResolveConflictSendsTheOpaqueIdAndNoPosition() throws {
+        let op = TrackerPaneOpWire.resolveConflict(id: "a", field: "note", keep: .current, conflictId: "1700.7.2")
+        let json = String(decoding: try JSONEncoder().encode(op), as: UTF8.self)
+        XCTAssertTrue(json.contains(#""conflict_id":"1700.7.2""#))
+        XCTAssertFalse(json.contains("index"))
     }
 
     func testTheTrackerEditRequestEncodesToTheFixedJSON() throws {
@@ -188,7 +211,7 @@ final class TrackerWireTests: XCTestCase {
                 .add(section: "now", title: "x", body: nil, before: "a", after: nil),
                 .restore(source: "- [ ] x\n", section: "now", before: nil, after: "a"),
                 .clearBadge(id: "a"),
-                .resolveConflict(id: "a", field: "status", keep: .losing, index: 1),
+                .resolveConflict(id: "a", field: "status", keep: .losing, conflictId: "7.3"),
             ])
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
@@ -200,7 +223,7 @@ final class TrackerWireTests: XCTestCase {
         {"before":"a","op":"add","section":"now","title":"x"},\
         {"after":"a","op":"restore","section":"now","source":"- [ ] x\\n"},\
         {"id":"a","op":"clear_badge"},\
-        {"field":"status","id":"a","index":1,"keep":"losing","op":"resolve_conflict"}],\
+        {"conflict_id":"7.3","field":"status","id":"a","keep":"losing","op":"resolve_conflict"}],\
         "request_id":"r1","tag":"t","type":"tracker_edit"}
         """)
     }
@@ -209,7 +232,7 @@ final class TrackerWireTests: XCTestCase {
         let ops: [TrackerPaneOpWire] = [
             .status(id: "a", status: "todo"), .edit(id: "a", title: nil, text: "t", body: nil),
             .move(id: "a", section: "next", before: nil, after: "b"), .remove(id: "a"),
-            .resolveConflict(id: "a", field: "removed", keep: .current, index: nil),
+            .resolveConflict(id: "a", field: "removed", keep: .current, conflictId: "8.1"),
         ]
         let data = try JSONEncoder().encode(ops)
         XCTAssertEqual(try JSONDecoder().decode([TrackerPaneOpWire].self, from: data), ops)
