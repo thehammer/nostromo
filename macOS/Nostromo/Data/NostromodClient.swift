@@ -1253,11 +1253,11 @@ class NostromodClient {
     }
 
     func conversationResume(requestId: String, id: String, newTag: String, place: String?,
-                            noCodebaseFolder: String?, confirmActiveElsewhere: Bool) {
+                            noCodebaseFolder: String?, confirmActiveElsewhere: Bool, agent: String?) {
         guard daemonAdvertisesConversationHistory else { return }
         send(ClientConversationResume(requestId: requestId, id: id, newTag: newTag, place: place,
                                       noCodebaseFolder: noCodebaseFolder,
-                                      confirmActiveElsewhere: confirmActiveElsewhere),
+                                      confirmActiveElsewhere: confirmActiveElsewhere, agent: agent),
              type: "conversation_resume")
     }
 
@@ -1292,6 +1292,12 @@ class NostromodClient {
     func conversationHistorySettingsSet(requestId: String, firstPromptsEnabled: Bool) {
         guard daemonAdvertisesConversationHistory else { return }
         send(ClientConversationHistorySettingsSet(requestId: requestId, firstPromptsEnabled: firstPromptsEnabled),
+             type: "conversation_history_settings_set")
+    }
+
+    func conversationHistoryIncludeOutsideSet(requestId: String, includeOutside: Bool) {
+        guard daemonAdvertisesConversationHistory else { return }
+        send(ClientConversationHistorySettingsSet(requestId: requestId, includeOutside: includeOutside),
              type: "conversation_history_settings_set")
     }
 

@@ -2262,6 +2262,7 @@ mod tests {
                 place: Some("/x".into()),
                 no_codebase_folder: Some("/y".into()),
                 confirm_active_elsewhere: true,
+                agent: None,
             },
             ClientMsg::ConversationHistoryRename {
                 request_id: "r".into(),
@@ -2282,7 +2283,8 @@ mod tests {
             },
             ClientMsg::ConversationHistorySettingsSet {
                 request_id: "r".into(),
-                first_prompts_enabled: false,
+                first_prompts_enabled: Some(false),
+                include_outside: Some(true),
             },
             ClientMsg::TerminalOpenLocal {
                 tag: "x1".into(),
@@ -4646,6 +4648,8 @@ mod tests {
                 request_id: "r".into(),
                 entries: vec![],
                 first_prompts_enabled: true,
+                include_outside: false,
+                outside_ready: false,
                 degraded_kept: None,
                 revision: 1,
                 referenced_space_folders: vec![],

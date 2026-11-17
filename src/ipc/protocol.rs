@@ -1285,6 +1285,9 @@ pub struct ConversationEntryWire {
     /// "No codebase"). Carried by a sensitive entry too: it is no content.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_codebase: bool,
+    /// `terminal` for a conversation started outside Nostromo; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// The outcome of `conversation_resume`.
@@ -2262,6 +2265,10 @@ pub enum ClientMsg {
         /// in another Claude window.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         confirm_active_elsewhere: bool,
+        /// The agent to continue a terminal conversation with, when its
+        /// recorded agent is not one Nostromo has. Ignored for any other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
     },
     /// Give conversation `id` a title of the user's own (`None` clears it).
     ConversationHistoryRename {
@@ -2292,7 +2299,12 @@ pub enum ClientMsg {
     /// Turn stored first prompts on or off (off purges the stored ones at once).
     ConversationHistorySettingsSet {
         request_id: String,
-        first_prompts_enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_prompts_enabled: Option<bool>,
+        /// List conversations started outside Nostromo (in a terminal). Off by
+        /// default; turning it off deletes the index file at once.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_outside: Option<bool>,
     },
     /// Who is looking at the author's PR list: `visible`, `hidden` or `idle`
     /// (an unknown value counts as `hidden`). Honoured only from the verified
@@ -3299,6 +3311,13 @@ pub enum ServerMsg {
         request_id: String,
         entries: Vec<ConversationEntryWire>,
         first_prompts_enabled: bool,
+        /// The "include conversations started outside Nostromo" switch.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        include_outside: bool,
+        /// With the switch on: the terminal-conversation index has been built
+        /// (until then the app says it is looking).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        outside_ready: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         degraded_kept: Option<u32>,
         revision: u64,
@@ -9417,8 +9436,11 @@ mod slash_commands_wire_tests {
             assert_eq!(serde_json::to_string(&parsed).unwrap(), m);
         }
         let reply = ServerMsg::ConversationHistory {
+            include_outside: false,
+            outside_ready: false,
             request_id: "r".into(),
             entries: vec![ConversationEntryWire {
+                origin: None,
                 id: "s1".into(),
                 title: "T".into(),
                 label: None,
@@ -9699,6 +9721,7 @@ mod no_codebase_wire_tests {
 
     fn history_entry(no_codebase: bool) -> ConversationEntryWire {
         ConversationEntryWire {
+            origin: None,
             id: "s1".into(),
             title: "T".into(),
             label: None,
@@ -9763,6 +9786,8 @@ mod no_codebase_wire_tests {
     #[test]
     fn the_history_always_says_which_space_folders_it_references() {
         let reply = |folders: Vec<String>| ServerMsg::ConversationHistory {
+            include_outside: false,
+            outside_ready: false,
             request_id: "r".into(),
             entries: vec![],
             first_prompts_enabled: true,
@@ -9789,8 +9814,47 @@ mod no_codebase_wire_tests {
     }
 
     #[test]
+    fn outside_conversation_fields_are_additive_on_the_wire() {
+        let old = r#"{"type":"conversation_history_settings_set","request_id":"r","first_prompts_enabled":false}"#;
+        let parsed: ClientMsg = serde_json::from_str(old).unwrap();
+        assert!(matches!(
+            parsed,
+            ClientMsg::ConversationHistorySettingsSet {
+                first_prompts_enabled: Some(false),
+                include_outside: None,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), old);
+        let on = r#"{"type":"conversation_history_settings_set","request_id":"r","include_outside":true}"#;
+        let parsed: ClientMsg = serde_json::from_str(on).unwrap();
+        assert!(matches!(
+            parsed,
+            ClientMsg::ConversationHistorySettingsSet {
+                first_prompts_enabled: None,
+                include_outside: Some(true),
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), on);
+        // An older daemon's reply has neither field: switch off, not ready.
+        let reply = r#"{"type":"conversation_history","request_id":"r","entries":[],"first_prompts_enabled":true,"revision":1}"#;
+        let ServerMsg::ConversationHistory {
+            include_outside,
+            outside_ready,
+            ..
+        } = serde_json::from_str(reply).unwrap()
+        else {
+            panic!("not a history")
+        };
+        assert!(!include_outside && !outside_ready);
+    }
+
+    #[test]
     fn the_history_carries_the_daemons_spaces_root_and_an_older_daemon_omits_it() {
         let with = ServerMsg::ConversationHistory {
+            include_outside: false,
+            outside_ready: false,
             request_id: "r".into(),
             entries: vec![],
             first_prompts_enabled: true,

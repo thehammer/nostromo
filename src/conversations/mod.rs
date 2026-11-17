@@ -12,8 +12,12 @@
 pub mod backfill;
 pub mod first_prompt;
 pub mod list;
+pub mod outside;
 pub mod store;
 pub mod transcript;
+
+#[cfg(test)]
+mod outside_tests;
 
 pub use first_prompt::{FirstPrompt, Reason};
 pub use store::{ConversationEntry, ConversationHistory};

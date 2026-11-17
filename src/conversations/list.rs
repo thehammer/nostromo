@@ -166,6 +166,7 @@ fn to_wire(
         transcript_path: None,
         main_checkout: None,
         no_codebase: e.no_codebase,
+        origin: None,
     };
     // Where a gone worktree may resume is no conversation content: a sensitive
     // entry carries it too, or it could never be resumed.

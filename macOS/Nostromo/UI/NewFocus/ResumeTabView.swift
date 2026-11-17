@@ -240,6 +240,10 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
     private let banner = NSTextField(labelWithString: "")
     private let message = NSTextField(labelWithString: "")
     let promptsCheckbox = NSButton(checkboxWithTitle: "Show first prompts", target: nil, action: nil)
+    static let outsideTitle = "Include conversations started outside Nostromo"
+    static let lookingText = "Looking for terminal conversations\u{2026}"
+    /// Off by default: conversations typed into `claude` in a terminal are listed only when the user asks.
+    let outsideCheckbox = NSButton(checkboxWithTitle: ResumeTabView.outsideTitle, target: nil, action: nil)
 
     private(set) var model: ConversationHistoryModel
     private var items: [Item] = []
@@ -253,6 +257,7 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
     var onCancel: (() -> Void)?
     var onSelectionChange: (() -> Void)?
     var onFirstPromptsToggled: ((Bool) -> Void)?
+    var onIncludeOutsideToggled: ((Bool) -> Void)?
 
     init(model: ConversationHistoryModel = ConversationHistoryModel()) {
         self.model = model
@@ -292,7 +297,11 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
         promptsCheckbox.target = self
         promptsCheckbox.action = #selector(promptsToggled)
         promptsCheckbox.state = .on
-        for v in [searchField, banner, message, scroll, promptsCheckbox] as [NSView] {
+        outsideCheckbox.target = self
+        outsideCheckbox.action = #selector(outsideToggled)
+        outsideCheckbox.state = .off
+        outsideCheckbox.setAccessibilityLabel(Self.outsideTitle)
+        for v in [searchField, banner, message, scroll, promptsCheckbox, outsideCheckbox] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -312,6 +321,9 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
             message.bottomAnchor.constraint(equalTo: promptsCheckbox.topAnchor, constant: -6),
             promptsCheckbox.leadingAnchor.constraint(equalTo: searchField.leadingAnchor),
             promptsCheckbox.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -48),
+            outsideCheckbox.leadingAnchor.constraint(equalTo: promptsCheckbox.trailingAnchor, constant: 20),
+            outsideCheckbox.firstBaselineAnchor.constraint(equalTo: promptsCheckbox.firstBaselineAnchor),
+            outsideCheckbox.trailingAnchor.constraint(lessThanOrEqualTo: searchField.trailingAnchor),
         ])
     }
 
@@ -322,10 +334,14 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
         self.supported = supported
         model.entries = history?.entries ?? []
         promptsCheckbox.state = (history?.firstPromptsEnabled ?? true) ? .on : .off
+        outsideCheckbox.state = (history?.includeOutside ?? false) ? .on : .off
         if !supported {
             showBanner("Needs a newer Nostromo daemon: run make install-daemon.")
         } else if let kept = history?.degradedKept {
             showBanner("History couldn\u{2019}t be read (\(kept) entries kept)")
+        } else if let history, history.includeOutside, !history.outsideReady {
+            // The list never waits for the index: what is known shows now, the rest follows.
+            showBanner(Self.lookingText)
         } else {
             showBanner(nil)
         }
@@ -555,5 +571,6 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
     @objc private func menuRemove(_ i: EntryItem) { if let e = i.entry { onRemove?(e) } }
     @objc private func menuShow(_ i: EntryItem) { if let e = i.entry { onShowTranscript?(e) } }
 
+    @objc private func outsideToggled() { onIncludeOutsideToggled?(outsideCheckbox.state == .on) }
     @objc private func promptsToggled() { onFirstPromptsToggled?(promptsCheckbox.state == .on) }
 }

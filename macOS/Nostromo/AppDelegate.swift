@@ -344,6 +344,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
                                    clientRequestId: requestId))
     }
 
+    /// The main window ⌘N / ⇧⌘N act on (see `FileMenuShortcuts`).
+    private func shortcutLayout() -> MainLayout? {
+        FileMenuShortcuts.layout(keyWindow: NSApp.keyWindow)
+    }
+
+    /// File > New Focus… (⌘N).
+    @objc func newFocus(_ sender: Any?) {
+        guard let layout = shortcutLayout() else { NSSound.beep(); return }
+        layout.presentCreateFocusSheet(tab: .new)
+    }
+
+    /// File > Resume Conversation… (⇧⌘N): the Resume tab, search focused.
+    @objc func resumeConversation(_ sender: Any?) {
+        guard let layout = shortcutLayout() else { NSSound.beep(); return }
+        layout.presentCreateFocusSheet(tab: .resume)
+    }
+
     /// Terminal > New Remote Shell… (⇧⌘T): pick a target for the key window's focus. Submit asks the
     /// daemon for the same "Connect to …" sheet an agent's request shows, minus the requester; nothing
     /// connects until Connect is clicked there, so the picker itself is not gated.
@@ -541,6 +558,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
             return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) != nil
         }
         if menuItem.action == #selector(openSecondWindowQA(_:)) { return isQAInstance }
+        if FileMenuShortcuts.handles(menuItem) {
+            let client = AppStore.shared.client
+            return FileMenuShortcuts.validate(menuItem, keyWindow: NSApp.keyWindow,
+                                              daemonConnected: client.connected.value,
+                                              daemonKeepsHistory: client.daemonAdvertisesConversationHistory)
+        }
         if menuItem.action == #selector(newTerminal(_:)) { return NSApp.keyWindow?.contentView is MainLayout }
         if menuItem.action == #selector(newRemoteShell(_:)) { return NSApp.keyWindow?.contentView is MainLayout }
         if menuItem.action == ModelShortcut.action { return !ModelShortcut.bars(in: NSApp.keyWindow).isEmpty }

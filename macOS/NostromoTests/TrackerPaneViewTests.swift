@@ -1140,6 +1140,7 @@ final class TrackerPaneViewTests: MouseQueueTestCase {
         "⌘t", "⇧⌘t", "⇧⌘w", "⌘f", "⌘g", "⌃⌥⌘n", "⇧⌘j",
         "⌥⌘\u{F702}", "⌥⌘\u{F703}",
         "⌘0",   // View ▸ Show My PRs (the Mother pane's Overview of my open PRs)
+        "⌘n", "⇧⌘n",   // File ▸ New Focus… and Resume Conversation… (session history 4, approved 2026-11-16)
     ]
 
     private func groups(_ pattern: String, in text: String, options: NSRegularExpression.Options = []) throws -> [[String]] {

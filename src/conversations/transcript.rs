@@ -114,6 +114,28 @@ pub struct Facts {
     pub first_user: Option<String>,
     pub last_ts_ms: Option<i64>,
     pub model: Option<String>,
+    /// `entrypoint` of the first record carrying one (`cli` for a person typing
+    /// into `claude`; `sdk-cli` for `claude -p`, stream-json and every Mother job).
+    pub entrypoint: Option<String>,
+    /// A record in a subagent's own thread (`isSidechain`) was seen.
+    pub sidechain: bool,
+    /// The `agentName` of the first `agent-name` record.
+    pub agent_name: Option<String>,
+}
+
+thread_local! {
+    /// Bytes this thread has read from transcripts through [`read_head`] and
+    /// [`read_tail`] (a test seam for the bounded-read rules).
+    static BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Bytes read from transcripts by this thread so far.
+pub fn bytes_read_on_this_thread() -> u64 {
+    BYTES_READ.with(|b| b.get())
+}
+
+fn note_read(n: usize) {
+    BYTES_READ.with(|b| b.set(b.get() + n as u64));
 }
 
 /// Read what was appended to `path` after `from` (at most [`TAIL_MAX_BYTES`];
@@ -144,6 +166,7 @@ pub fn read_tail(path: &Path, from: u64) -> std::io::Result<(Vec<u8>, u64)> {
         .map_or(skipped, |i| i + 1);
     let end = end.max(skipped);
     let consumed = start + end as u64;
+    note_read(buf.len());
     Ok((buf[skipped..end].to_vec(), consumed))
 }
 
@@ -153,6 +176,7 @@ pub fn read_head(path: &Path) -> std::io::Result<Vec<u8>> {
     let len = file.metadata()?.len();
     let mut buf = Vec::new();
     file.take(HEAD_BYTES).read_to_end(&mut buf)?;
+    note_read(buf.len());
     if len > HEAD_BYTES {
         if let Some(i) = buf.iter().rposition(|b| *b == b'\n') {
             buf.truncate(i + 1);
@@ -173,6 +197,15 @@ pub fn scan(bytes: &[u8]) -> Facts {
             continue;
         };
         let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
+        if f.entrypoint.is_none() {
+            f.entrypoint = v
+                .get("entrypoint")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+        if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            f.sidechain = true;
+        }
         match kind {
             "last-prompt" => {}
             "custom-title" => {
@@ -181,6 +214,13 @@ pub fn scan(bytes: &[u8]) -> Facts {
                 }
             }
             "agent-name" => {
+                if f.agent_name.is_none() {
+                    f.agent_name = v
+                        .get("agentName")
+                        .and_then(Value::as_str)
+                        .map(|t| one_line(t, MAX_TITLE_CHARS))
+                        .filter(|t| !t.is_empty());
+                }
                 if f.title.is_none() {
                     f.title = v
                         .get("agentName")

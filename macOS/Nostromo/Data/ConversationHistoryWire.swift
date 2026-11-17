@@ -66,6 +66,10 @@ struct ConversationEntryWire: Equatable, Decodable, Identifiable {
     var mainCheckout: String?
     /// The conversation runs in a private no-codebase folder (its project reads "No codebase").
     var noCodebase: Bool
+    /// `terminal`: started outside Nostromo (in a terminal), found by the opt-in index.
+    var origin: String?
+
+    var isTerminal: Bool { origin == "terminal" }
 
     var lastActive: Date { Date(timeIntervalSince1970: TimeInterval(lastActiveMs) / 1000) }
 
@@ -75,7 +79,7 @@ struct ConversationEntryWire: Equatable, Decodable, Identifiable {
         case firstPrompt = "first_prompt", firstPromptWithheld = "first_prompt_withheld"
         case lastActiveMs = "last_active_ms", resumedFromTag = "resumed_from_tag"
         case transcriptPath = "transcript_path", mainCheckout = "main_checkout"
-        case noCodebase = "no_codebase"
+        case noCodebase = "no_codebase", origin
     }
 
     init(from decoder: Decoder) throws {
@@ -99,6 +103,7 @@ struct ConversationEntryWire: Equatable, Decodable, Identifiable {
         transcriptPath = try c.decodeIfPresent(String.self, forKey: .transcriptPath)
         mainCheckout = try c.decodeIfPresent(String.self, forKey: .mainCheckout)
         noCodebase = try c.decodeIfPresent(Bool.self, forKey: .noCodebase) ?? false
+        origin = try c.decodeIfPresent(String.self, forKey: .origin)
     }
 
     /// Memberwise init for tests and the model.
@@ -106,14 +111,15 @@ struct ConversationEntryWire: Equatable, Decodable, Identifiable {
          label: String? = nil, projectName: String? = nil, projectPath: String? = nil, branch: String? = nil,
          model: String? = nil, effort: String? = nil, prNumbers: [Int] = [], firstPrompt: String? = nil,
          firstPromptWithheld: String? = nil, sensitive: Bool = false, resumedFromTag: String? = nil,
-         transcriptPath: String? = nil, mainCheckout: String? = nil, noCodebase: Bool = false) {
+         transcriptPath: String? = nil, mainCheckout: String? = nil, noCodebase: Bool = false,
+         origin: String? = nil) {
         self.id = id; self.title = title; self.label = label; self.agent = agent
         self.projectName = projectName; self.projectPath = projectPath; self.branch = branch
         self.model = model; self.effort = effort; self.prNumbers = prNumbers
         self.firstPrompt = firstPrompt; self.firstPromptWithheld = firstPromptWithheld
         self.sensitive = sensitive; self.lastActiveMs = lastActiveMs; self.status = status
         self.resumedFromTag = resumedFromTag; self.transcriptPath = transcriptPath
-        self.mainCheckout = mainCheckout; self.noCodebase = noCodebase
+        self.mainCheckout = mainCheckout; self.noCodebase = noCodebase; self.origin = origin
     }
 }
 
@@ -121,6 +127,10 @@ struct ConversationHistoryWire: Equatable, Decodable {
     var requestId: String
     var entries: [ConversationEntryWire]
     var firstPromptsEnabled: Bool
+    /// The "include conversations started outside Nostromo" switch (off from a daemon that does not say).
+    var includeOutside: Bool = false
+    /// With the switch on: the daemon has built its terminal-conversation index.
+    var outsideReady: Bool = false
     var degradedKept: Int?
     var revision: UInt64
     /// The no-codebase folders any entry not yet purged names (visible or hidden). Every other folder under
@@ -135,6 +145,7 @@ struct ConversationHistoryWire: Equatable, Decodable {
         case entries, revision
         case referencedSpaceFolders = "referenced_space_folders", spacesRoot = "spaces_root"
         case requestId = "request_id", firstPromptsEnabled = "first_prompts_enabled", degradedKept = "degraded_kept"
+        case includeOutside = "include_outside", outsideReady = "outside_ready"
     }
 
     init(requestId: String, entries: [ConversationEntryWire], firstPromptsEnabled: Bool,
@@ -150,6 +161,8 @@ struct ConversationHistoryWire: Equatable, Decodable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         requestId = try c.decode(String.self, forKey: .requestId)
         firstPromptsEnabled = try c.decode(Bool.self, forKey: .firstPromptsEnabled)
+        includeOutside = try c.decodeIfPresent(Bool.self, forKey: .includeOutside) ?? false
+        outsideReady = try c.decodeIfPresent(Bool.self, forKey: .outsideReady) ?? false
         degradedKept = try c.decodeIfPresent(Int.self, forKey: .degradedKept)
         revision = try c.decode(UInt64.self, forKey: .revision)
         referencedSpaceFolders = try c.decodeIfPresent([String].self, forKey: .referencedSpaceFolders)
@@ -204,8 +217,10 @@ struct ClientConversationResume: Encodable {
     var noCodebaseFolder: String?
     /// The user chose "Resume anyway" for a conversation that may be open in another Claude window.
     var confirmActiveElsewhere = false
+    /// The agent to continue a terminal conversation with (its recorded one is not an agent here).
+    var agent: String?
     enum CodingKeys: String, CodingKey {
-        case type, id, place, requestId = "request_id", newTag = "new_tag",
+        case type, id, place, agent, requestId = "request_id", newTag = "new_tag",
              noCodebaseFolder = "no_codebase_folder",
              confirmActiveElsewhere = "confirm_active_elsewhere"
     }
@@ -219,6 +234,7 @@ struct ClientConversationResume: Encodable {
         try c.encodeIfPresent(place, forKey: .place)
         try c.encodeIfPresent(noCodebaseFolder, forKey: .noCodebaseFolder)
         if confirmActiveElsewhere { try c.encode(true, forKey: .confirmActiveElsewhere) }
+        try c.encodeIfPresent(agent, forKey: .agent)
     }
 }
 
@@ -262,6 +278,18 @@ struct ClientConversationHistoryPurgeRemoved: Encodable {
 struct ClientConversationHistorySettingsSet: Encodable {
     let type = "conversation_history_settings_set"
     let requestId: String
-    let firstPromptsEnabled: Bool
-    enum CodingKeys: String, CodingKey { case type, requestId = "request_id", firstPromptsEnabled = "first_prompts_enabled" }
+    var firstPromptsEnabled: Bool?
+    var includeOutside: Bool?
+    enum CodingKeys: String, CodingKey {
+        case type, requestId = "request_id", firstPromptsEnabled = "first_prompts_enabled",
+             includeOutside = "include_outside"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type, forKey: .type)
+        try c.encode(requestId, forKey: .requestId)
+        try c.encodeIfPresent(firstPromptsEnabled, forKey: .firstPromptsEnabled)
+        try c.encodeIfPresent(includeOutside, forKey: .includeOutside)
+    }
 }
