@@ -708,3 +708,25 @@ private class AgentView: NSView, NSSplitViewDelegate {
         UserDefaults.standard.synchronize()
     }
 }
+
+extension MainLayout {
+    /// The sign-in card's "Open sign-in terminal": a local terminal pane in the window showing the focus
+    /// `tag`, split below the active pane like Terminal > New Terminal (⌘T), in that focus's project
+    /// directory, taking the keyboard when the daemon reports it. False when there is no such window or
+    /// no daemon connection. Opens a login shell only: nothing is typed into it.
+    static func openSignInTerminalPane(tag: String) -> Bool {
+        let windows = ([NSApp.keyWindow] + NSApp.windows).compactMap { $0 }
+        guard AppStore.shared.client.hasConnection,
+              let window = windows.first(where: { ($0.contentView as? MainLayout)?.activeFocusTag == tag }),
+              let layout = window.contentView as? MainLayout else { return false }
+        let requestId = UUID().uuidString
+        let store = TerminalSessionStore.shared
+        store.expectKeyboardFocus(clientRequestId: requestId, windowId: layout.terminalWindowId)
+        store.transport(.openLocal(tag: tag,
+                                   relativeTo: layout.activePaneId(containing: window.firstResponder) ?? "repl",
+                                   position: "split_below",
+                                   cwd: layout.activeFocusProjectPath,
+                                   clientRequestId: requestId))
+        return true
+    }
+}
