@@ -198,6 +198,7 @@ impl TrackerRegistry {
         let ctx = WriteCtx {
             log: true,
             seen: Some(base_version),
+            unseen: &[],
             foreign_base,
             client: Some(client),
             detect: true,

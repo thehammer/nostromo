@@ -43,6 +43,10 @@ final class TrackerPaneView: NSView {
     let banner = TrackerBannerView()
     let strip = TrackerWaitingStrip()
     let backgroundRow = TrackerBackgroundRow()
+    /// The quiet one-line notice about an edit that did not happen (above the scroll view, like the banner).
+    let notice = TrackerNoticeView()
+    /// Takes keyboard focus after a mouse edit, so ⌘Z undoes it (see `focusSink`).
+    let sink = TrackerFocusSink()
     let scrollView = NSScrollView()
     let clipView = TrackerClipView()
     let documentView = TrackerFlippedView()
@@ -57,6 +61,14 @@ final class TrackerPaneView: NSView {
     private(set) var filter: TrackerFilter = .all
     private(set) var folds = TrackerFoldState()
     private(set) var deferral = TrackerDeferral()
+    /// Turns the user's actions into `tracker_edit` ops, takes the answers and owns undo.
+    private(set) var editing: TrackerItemEditing!
+    /// The open inline editors (and the saves still waiting for their board), by item id.
+    private(set) var editSessions: [String: TrackerEditSession] = [:]
+    /// The open conflict or sensitive-data popover, if any.
+    private(set) var activePopover: TrackerConflictPopover?
+    /// The daemon takes pane edits (both features advertised): edit controls exist only then.
+    private(set) var editEnabled = false
 
     /// Render probe (`tracker show`, PRD criterion 20): bumped by every render that changed a row.
     private(set) var renderGeneration = 0
@@ -88,6 +100,16 @@ final class TrackerPaneView: NSView {
     private let idleSchedule: (TimeInterval, @escaping () -> Void) -> Void
     private let pointerLocation: (() -> NSPoint?)?
     private let isMouseButtonDown: () -> Bool
+    private let editSupported: () -> Bool
+    /// The board each displayed item row's content came from. A row held back (a text selection, an open
+    /// editor) keeps the version it was drawn from, so an edit of it names the version the user saw.
+    private var rowBases: [String: TrackerBase] = [:]
+    /// A restored item's new id: the pane follows it (scroll, expansion) once its row is on screen.
+    private var followingItem: (id: String, version: UInt64)?
+    /// Items the user's own edit changed: they are not highlighted when the confirming board arrives.
+    private var ownEdits: [String: UInt64] = [:]
+    /// Undo for text typed in an inline editor (never the pane's edit undo, never the window's).
+    private let editorTextUndo = UndoManager()
 
     private var backgroundSummary = TrackerBackgroundSummary(chip: .hidden)
     private var cancellables = Set<AnyCancellable>()
@@ -115,6 +137,9 @@ final class TrackerPaneView: NSView {
     ///   - idleSchedule: runs the idle check after a delay (separate from `schedule`); tests pass their own.
     ///   - pointerLocation: the pointer in window coordinates; nil means the window's own.
     ///   - isMouseButtonDown: whether any mouse button is down; nothing is released meanwhile.
+    ///   - editSupported: whether the daemon takes pane edits (the app passes its client's features); the
+    ///     pane is read-only while this is false.
+    ///   - editSender / editSchedule: where `tracker_edit` frames go, and the clock for their 5 s timeout.
     init(tag: String,
          store: TrackerStore = .shared,
          decisions: TrackerDecisionProviding = DecisionPresenter.shared,
@@ -138,7 +163,15 @@ final class TrackerPaneView: NSView {
              DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
          },
          pointerLocation: (() -> NSPoint?)? = nil,
-         isMouseButtonDown: @escaping () -> Bool = { NSEvent.pressedMouseButtons != 0 }) {
+         isMouseButtonDown: @escaping () -> Bool = { NSEvent.pressedMouseButtons != 0 },
+         editSupported: @escaping () -> Bool = { false },
+         editSender: @escaping TrackerItemEditing.Sender = { tag, requestId, baseVersion, baseEpoch, ops in
+             AppStore.shared.client.sendTrackerEdit(tag: tag, requestId: requestId, baseVersion: baseVersion,
+                                                    baseEpoch: baseEpoch, ops: ops)
+         },
+         editSchedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
+             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+         }) {
         self.focusTag = tag
         self.store = store
         self.decisions = decisions
@@ -157,7 +190,17 @@ final class TrackerPaneView: NSView {
         self.idleSchedule = idleSchedule
         self.pointerLocation = pointerLocation
         self.isMouseButtonDown = isMouseButtonDown
+        self.editSupported = editSupported
         super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 400))
+        editing = TrackerItemEditing(
+            tag: tag, results: store.editResults.eraseToAnyPublisher(), send: editSender, schedule: editSchedule,
+            shownBase: { [weak self] ids in self?.shownBase(forItems: ids) ?? TrackerBase(version: 0, epoch: nil) },
+            itemExists: { [weak self] id in self?.wireItem(id) != nil })
+        editing.onNotice = { [weak self] text in self?.applyNotice(text ?? self?.openEditorRefusal()) }
+        editing.onLookAgain = { [weak self] in self?.lookAgain() }
+        editing.onConfirmed = { [weak self] ids, version in
+            for id in ids { self?.ownEdits[id] = version }
+        }
         setUp()
         let myTag = tag
         store.changes
@@ -193,6 +236,13 @@ final class TrackerPaneView: NSView {
 
     override var acceptsFirstResponder: Bool { false }
 
+    /// The pane's own undo (tick, status, titles, details, conflict choices), never the window's, so the
+    /// composer's typing undo is untouched. Text typed in an inline editor has its own undo.
+    override var undoManager: UndoManager? {
+        if let editor = window?.firstResponder as? NSTextView, editor.isDescendant(of: self) { return editorTextUndo }
+        return editing.undoManager
+    }
+
     // MARK: - Setup
 
     private func setUp() {
@@ -201,8 +251,13 @@ final class TrackerPaneView: NSView {
 
         header.onFilter = { [weak self] filter in self?.setFilter(filter) }
         header.onCopyBoard = { [weak self] in self?.copyBoardMarkdown() }
+        header.onConflictChip = { [weak self] anchor, fromKeyboard in self?.showBoardConflicts(anchor: anchor, fromKeyboard: fromKeyboard) }
+        sink.pane = self
+        sink.frame = NSRect(x: 0, y: 0, width: 1, height: 1)
+        addSubview(sink)
         addSubview(header)
         addSubview(banner)
+        addSubview(notice)
         addSubview(strip)
         addSubview(backgroundRow)
         strip.onSelect = { [weak self] entry in self?.select(entry) }
@@ -251,6 +306,8 @@ final class TrackerPaneView: NSView {
     func render() {
         guard let board = store.board(for: focusTag) else { return }
         self.board = board
+        syncEditing()
+        closeSettledSessions()
         let list = background.list(for: focusTag)
         backgroundSummary = TrackerBackgroundSummary(list: list)
         let sources = TrackerWaitingSources.make(
@@ -262,6 +319,20 @@ final class TrackerPaneView: NSView {
         commit(TrackerPresenter.present(board: board, now: now(), filter: filter, folds: folds, sources: sources,
                                         timeZone: timeZone),
                highlight: true)
+        refreshRowsOfLateOks()
+        followIfReady()
+    }
+
+    /// A late ok that beat its board: once the board shows the saved version, the session's row is that item.
+    private func refreshRowsOfLateOks() {
+        guard let version = board?.version else { return }
+        for (id, var session) in editSessions {
+            if let needed = session.rowRefreshVersion, version >= needed, let saved = newestItem(id) {
+                session.row = saved
+                session.rowRefreshVersion = nil
+                editSessions[id] = session
+            }
+        }
     }
 
     /// A click on a strip entry: go to what it names. A user act; nothing here answers anything.
@@ -335,6 +406,10 @@ final class TrackerPaneView: NSView {
     /// row keeps its content, which would swallow the toggle). Collapsing is also an explicit release:
     /// whatever the board moved while the reader was looking folds away now.
     func toggleNote(item id: String) {
+        // A dirty details editor saves first (the focus-loss rule), then the row folds.
+        if let session = editSessions[id], session.kind == .details, session.phase == .editing {
+            rowViews[TrackerRow.itemKey(id)]?.commitEditor()
+        }
         clearSelection(inItem: id)
         if folds.expandedItems.remove(id) == nil {
             folds.expandedItems.insert(id)
@@ -360,13 +435,13 @@ final class TrackerPaneView: NSView {
         let visible = visibleKeys()
         let scrollTop = scrollView.frame.minY
         let atVeryTop = clipView.bounds.minY <= 0.5
-        header.update(target.header)
+        header.update(target.header, showsConflicts: editEnabled)
         banner.update(target.banner)
         strip.update(target.strip)
         backgroundRow.update(backgroundSummary, enabled: replProvider() != nil)
 
         let result = deferral.resolve(displayed: displayedRows, target: target,
-                                      visibleKeys: visible, selectedKey: currentSelectedKey())
+                                      visibleKeys: visible, heldKeys: heldKeys())
         presentation = target
         if deferral.hasHeld { armIdleCheck() }
 
@@ -393,7 +468,8 @@ final class TrackerPaneView: NSView {
                 view.apply(row)
                 updated += 1
                 let renamedInPlace = result.renamed.values.contains(row.key)
-                if !row.differsOnlyInTime(from: old), !row.differsOnlyInFold(from: old), !renamedInPlace {
+                if !row.differsOnlyInTime(from: old), !row.differsOnlyInFold(from: old), !renamedInPlace,
+                   !isOwnConfirmedEdit(row) {
                     changed.append(view)
                 }
             case .move:
@@ -401,6 +477,8 @@ final class TrackerPaneView: NSView {
             }
         }
         displayedRows = result.rows
+        noteRowBases(target: target)
+        if let version = board?.version { ownEdits = ownEdits.filter { $0.value > version } }
 
         layoutChrome()
         // The banner or the strip appearing or going pushes the scroll view's top by this much: the
@@ -441,6 +519,23 @@ final class TrackerPaneView: NSView {
         view.onToggleLog = { [weak self] in self?.toggleLog() }
         view.onCopyMarkdown = { [weak self] row in self?.copyMarkdown(for: row) }
         view.onOpenLink = { [weak self] item, action in self?.openLink(item: item, action: action) }
+        view.editingEnabled = editEnabled
+        view.onTick = { [weak self] id in self?.tick(item: id) }
+        view.onSetStatus = { [weak self] id, wire in self?.setStatus(item: id, to: wire) }
+        view.onBeginEdit = { [weak self] id, kind in self?.beginEdit(item: id, kind: kind) }
+        view.onCommitEdit = { [weak self] id, kind, text in self?.commitEdit(item: id, kind: kind, text: text) }
+        view.onCancelEdit = { [weak self] id, kind in self?.cancelEdit(item: id, kind: kind) }
+        view.onFocusPendingEditor = { [weak self] id in self?.editSessions[id]?.editorWantsFocus = true }
+        view.onFocusLeftPendingEditor = { [weak self] id in
+            if self?.editSessions[id]?.phase == .saving { self?.editSessions[id]?.editorWantsFocus = false }
+        }
+        view.onShowConflict = { [weak self] id, anchor, fromKeyboard in
+            self?.showConflicts(item: id, anchor: anchor, fromKeyboard: fromKeyboard)
+        }
+        view.onReviewSensitive = { [weak self] id, anchor, fromKeyboard in
+            self?.reviewSensitive(item: id, anchor: anchor, fromKeyboard: fromKeyboard)
+        }
+        view.onEditorResized = { [weak self] in self?.relayoutRows() }
         return view
     }
 
@@ -487,6 +582,9 @@ final class TrackerPaneView: NSView {
         let bannerHeight = banner.preferredHeight
         banner.frame = NSRect(x: 0, y: y, width: width, height: bannerHeight)
         y += bannerHeight
+        let noticeHeight = notice.preferredHeight
+        notice.frame = NSRect(x: 0, y: y, width: width, height: noticeHeight)
+        y += noticeHeight
         let stripHeight = strip.preferredHeight
         strip.frame = NSRect(x: 0, y: y, width: width, height: stripHeight)
         y += stripHeight
@@ -519,6 +617,430 @@ final class TrackerPaneView: NSView {
             y += height
         }
         documentView.frame = NSRect(x: 0, y: 0, width: width, height: max(y, clipView.bounds.height))
+    }
+
+    // MARK: - Editing
+
+    /// The rows the deferral keeps as they are: the one holding a text selection, and every row with an
+    /// open editor or a save still waiting for its board.
+    private func heldKeys() -> Set<String> {
+        var keys = Set(editSessions.keys.map { TrackerRow.itemKey($0) })
+        if let selected = currentSelectedKey() { keys.insert(selected) }
+        return keys
+    }
+
+    /// The daemon's board item `id`, whatever the view shows.
+    private func wireItem(_ id: String) -> TrackerItemWire? {
+        for node in board?.nodes ?? [] {
+            if case .item(let item) = node, item.id == id { return item }
+        }
+        return nil
+    }
+
+    /// The item row the view shows for `id` (not a stub).
+    private func shownItem(_ id: String) -> TrackerItemRow? {
+        guard let content = rowViews[TrackerRow.itemKey(id)]?.row.content, case .item(let item) = content else { return nil }
+        return item
+    }
+
+    /// The item as the newest board has it (a row held back, or one with an open editor, still shows an older one).
+    private func newestItem(_ id: String) -> TrackerItemRow? {
+        let key = TrackerRow.itemKey(id)
+        guard let row = presentation?.rows.first(where: { $0.key == key }), case .item(let item) = row.content else { return nil }
+        return item
+    }
+
+    /// The board as it is now.
+    private func boardBase() -> TrackerBase {
+        TrackerBase(version: board?.version ?? 0, epoch: board?.epoch.isEmpty == false ? board?.epoch : nil)
+    }
+
+    /// The board the row for `id` was drawn from (the newest board unless the row is held back).
+    private func base(forItem id: String) -> TrackerBase {
+        rowBases[TrackerRow.itemKey(id)] ?? boardBase()
+    }
+
+    /// The version of the board the rows for `ids` show (the oldest, when they differ); the newest board for
+    /// rows not on screen. An undo is made against what the user sees, not against a board they have not seen.
+    private func shownBase(forItems ids: [String]) -> TrackerBase {
+        let bases = ids.compactMap { rowBases[TrackerRow.itemKey($0)] }
+        return bases.min { $0.version < $1.version } ?? boardBase()
+    }
+
+    /// A row shows the board's current content unless the selection hold or an open editor keeps it
+    /// back: only those keep an older base. A row the move-deferral merely keeps in place (a ticked item
+    /// on its way to Done) already shows the new content, so it takes the board's current version.
+    private func noteRowBases(target: TrackerPresentation) {
+        let now = boardBase()
+        let targets = Dictionary(target.rows.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+        let held = heldKeys()
+        var next: [String: TrackerBase] = [:]
+        for row in displayedRows where row.item != nil {
+            let showsTheBoard = targets[row.key].map {
+                $0 == row || row.differsOnlyInTime(from: $0) || row.differsOnlyInFold(from: $0)
+            } ?? false   // no row for it in the board's view (folded away or gone): what it shows is older
+            if held.contains(row.key), !showsTheBoard {
+                next[row.key] = rowBases[row.key] ?? now
+            } else {
+                next[row.key] = now
+            }
+        }
+        rowBases = next
+    }
+
+    /// The daemon says the view is out of date: show the board as it is now. Nothing stays held back: the
+    /// reader asked to look again, so a text selection is let go too (the row it held shows the new content).
+    func lookAgain() {
+        for view in rowViews.values {
+            for textView in view.allTextViews where textView.hasSelection {
+                textView.setSelectedRange(NSRange(location: 0, length: 0))
+            }
+        }
+        deferral.releaseAll()
+        render()
+    }
+
+    /// Edit controls follow the daemon's features: on or off for every row at once.
+    private func syncEditing() {
+        let enabled = editSupported()
+        guard enabled != editEnabled else { return }
+        editEnabled = enabled
+        for view in rowViews.values { view.editingEnabled = enabled }
+        relayoutRows()
+    }
+
+    /// `item`'s own confirmed edit is not a change from elsewhere: no highlight.
+    private func isOwnConfirmedEdit(_ row: TrackerRow) -> Bool {
+        guard let id = row.item?.id else { return false }
+        if editing.inFlightItemIds.contains(id) { return true }
+        if let version = ownEdits[id], (board?.version ?? 0) >= version { return true }
+        return false
+    }
+
+    func tick(item id: String) {
+        guard editEnabled, let item = shownItem(id) else { return }
+        userActed()
+        editing.tick(item, base: base(forItem: id))
+    }
+
+    func setStatus(item id: String, to wire: String) {
+        guard editEnabled, let item = shownItem(id) else { return }
+        userActed()
+        editing.setStatus(item, to: wire, base: base(forItem: id))
+    }
+
+    /// A mouse edit makes the sink first responder (so ⌘Z undoes it); a key press on a control in the
+    /// pane keeps the focus it has. A tracker update never gets here.
+    private func userActed() {
+        if let responder = window?.firstResponder as? NSView, responder.isDescendant(of: documentView) { return }
+        focusSink()
+    }
+
+    /// The pane's focus sink takes first responder; clicking back in the composer gives it back its text and selection.
+    func focusSink() {
+        guard let window else { return }
+        sink.allowsFocus = true
+        window.makeFirstResponder(sink)
+        sink.allowsFocus = false
+    }
+
+    func performUndo() {
+        let manager = editing.undoManager
+        guard manager.canUndo else { return }
+        manager.undo()
+    }
+
+    func performRedo() {
+        let manager = editing.undoManager
+        guard manager.canRedo else { return }
+        manager.redo()
+    }
+
+    /// Open the title or details editor of an item (a double-click, the menu, the actions line or VoiceOver).
+    /// Details first expand the row, and it stays expanded.
+    func beginEdit(item id: String, kind: TrackerEditKind) {
+        guard editEnabled, let item = shownItem(id) else { return }
+        let key = TrackerRow.itemKey(id)
+        if editSessions[id] != nil {
+            rowViews[key]?.focusEditor()
+            return
+        }
+        let prior = Self.focusOwner(window?.firstResponder)
+        let role = rowViews[key]?.focusedControlRole()
+        if kind == .details, !folds.expandedItems.contains(id) {
+            clearSelection(inItem: id)
+            folds.expandedItems.insert(id)
+            render()
+        }
+        guard let view = rowViews[key], case .item(let current) = view.row.content else { return }
+        let (prefill, boundLine) = Self.prefill(kind, for: current)
+        editSessions[id] = TrackerEditSession(kind: kind, base: base(forItem: id), original: prefill, row: current,
+                                              priorResponder: prior, priorRole: role)
+        view.beginEditor(kind, text: prefill, boundLine: boundLine)
+        relayoutRows()
+    }
+
+    /// The control that owns the field editor a text field is being edited in (the editor itself goes away
+    /// when editing ends); any other responder is its own owner.
+    private static func focusOwner(_ responder: NSResponder?) -> NSResponder? {
+        if let text = responder as? NSTextView, text.isFieldEditor, let owner = text.delegate as? NSView { return owner }
+        return responder
+    }
+
+    /// What an editor opens with: the raw title, or the raw body (for a legacy item the text after the title,
+    /// a blank line, then the note; for a bound item without its source-owned first line).
+    static func prefill(_ kind: TrackerEditKind, for item: TrackerItemRow) -> (text: String, boundLine: String?) {
+        switch kind {
+        case .title:
+            return (TrackerTitle.editableTitle(text: item.editText), nil)
+        case .details:
+            var note = item.editNote ?? ""
+            var boundLine: String?
+            if item.bound != nil {
+                let parts = note.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+                boundLine = parts.first.map(String.init)
+                note = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines) : ""
+            }
+            let body = [TrackerTitle.rawRest(text: item.editText), note].compactMap { $0 }.filter { !$0.isEmpty }
+            return (body.joined(separator: "\n\n"), boundLine)
+        }
+    }
+
+    /// Return, ⌘Return or focus loss: save if the text changed, else close.
+    func commitEdit(item id: String, kind: TrackerEditKind, text: String) {
+        guard var session = editSessions[id], session.kind == kind, session.phase == .editing else { return }
+        let key = TrackerRow.itemKey(id)
+        let view = rowViews[key]
+        switch kind {
+        case .title:
+            let typed = TrackerTitle.normalizedTitle(text)
+            if typed.isEmpty {
+                closeSession(id)
+                restorePriorFocus(session)
+                editing.showNotice("A title can't be empty")
+                render()
+                return
+            }
+            if typed == session.original { cancelEdit(item: id, kind: kind); return }
+        case .details:
+            if text.trimmingCharacters(in: .whitespacesAndNewlines) == session.original.trimmingCharacters(in: .whitespacesAndNewlines) {
+                cancelEdit(item: id, kind: kind)
+                return
+            }
+        }
+        session.phase = .saving
+        session.sentText = text
+        session.refusal = nil
+        editSessions[id] = session
+        applyNotice(editing.notice ?? openEditorRefusal())
+        view?.setEditorPending(true)
+        restorePriorFocus(session)
+        // Whether the pending editor itself holds focus now (focus did not go back to what had it before); a
+        // later try to focus it while it is pending sets this too.
+        session.editorWantsFocus = view?.editorOwnsFocus ?? false
+        editSessions[id] = session
+        let done: (TrackerItemEditing.Outcome) -> Void = { [weak self] outcome in self?.editFinished(id, outcome) }
+        switch kind {
+        case .title: editing.saveTitle(session.row, typed: text, base: session.base, completion: done)
+        case .details: editing.saveDetails(session.row, typed: text, base: session.base, completion: done)
+        }
+    }
+
+    /// Esc: nothing is sent.
+    func cancelEdit(item id: String, kind: TrackerEditKind) {
+        guard let session = editSessions[id], session.kind == kind, session.phase == .editing else { return }
+        closeSession(id)
+        restorePriorFocus(session)
+        restoreRoleFocus(session)
+        render()
+    }
+
+    private func editFinished(_ id: String, _ outcome: TrackerItemEditing.Outcome) {
+        guard var session = editSessions[id] else { return }
+        switch outcome {
+        case .saved(let version, _):
+            session.refusal = nil
+            let view = rowViews[TrackerRow.itemKey(id)]
+            if let sent = session.sentText, let typedNow = view?.editorText, typedNow != sent {
+                // A late answer to a send that timed out, and the user has typed since: their newer text stays
+                // in the editor as a fresh edit from what was saved.
+                session.phase = .editing
+                session.original = sent
+                session.base = TrackerBase(version: version, epoch: boardBase().epoch)
+                session.sentText = nil
+                // The next save and its undo start from what was saved. If the board has not reached that
+                // version yet (the ok beat its board), the row is refreshed when it does.
+                if (board?.version ?? 0) >= version, let saved = newestItem(id) {
+                    session.row = saved
+                    session.rowRefreshVersion = nil
+                } else {
+                    session.rowRefreshVersion = version
+                }
+                editSessions[id] = session   // the editor is already open and editable: nothing to reopen
+            } else {
+                session.phase = .awaiting(version)
+                editSessions[id] = session
+                if closeSettledSessions() { render() }
+            }
+        case .failed(let message), .timedOut(let message):
+            // The typed text is still in the editor: it opens up again, without taking focus, and the
+            // reason stays on screen for as long as the editor is open.
+            session.phase = .editing
+            session.refusal = message
+            editSessions[id] = session
+            let view = rowViews[TrackerRow.itemKey(id)]
+            view?.setEditorPending(false)
+            // A backstop: if the editor had focus when the save started and the window is left holding it,
+            // focus goes back to the editor. Never when the user had focus elsewhere.
+            if session.editorWantsFocus, let window, window.firstResponder === window { view?.focusEditor() }
+        }
+        applyNotice(editing.notice ?? openEditorRefusal())
+    }
+
+    /// Why an editor that is open again could not save: kept on screen after the notice's own time is up.
+    private func openEditorRefusal() -> String? {
+        editSessions.sorted { $0.key < $1.key }.first { $0.value.phase == .editing && $0.value.refusal != nil }?.value.refusal
+    }
+
+    /// Close the editors whose save the board now shows (the board's version reached the result's).
+    @discardableResult
+    private func closeSettledSessions() -> Bool {
+        guard let version = board?.version else { return false }
+        var closed = false
+        for (id, session) in editSessions {
+            if case .awaiting(let needed) = session.phase, version >= needed {
+                closeSession(id)
+                restoreRoleFocus(session)
+                closed = true
+            }
+        }
+        return closed
+    }
+
+    private func closeSession(_ id: String) {
+        editSessions.removeValue(forKey: id)
+        rowViews[TrackerRow.itemKey(id)]?.endEditor()
+        applyNotice(editing.notice ?? openEditorRefusal())
+    }
+
+    /// Focus goes back to whatever had it before the editor opened, unless the user has put it somewhere else.
+    private func restorePriorFocus(_ session: TrackerEditSession) {
+        guard let window else { return }
+        let current = window.firstResponder
+        let editorHasFocus = current === window
+            || ((current as? NSView).map { $0.isDescendant(of: documentView) } ?? false)
+        guard editorHasFocus, let prior = session.priorResponder as? NSView, prior.window === window,
+              !prior.isDescendant(of: documentView) else { return }
+        window.makeFirstResponder(prior)
+    }
+
+    /// A control of the row that had focus before the editor opened gets it back, on the rebuilt row.
+    private func restoreRoleFocus(_ session: TrackerEditSession) {
+        guard let role = session.priorRole, let window else { return }
+        let current = window.firstResponder
+        guard current === window || (current as? NSView)?.isDescendant(of: documentView) != false else { return }
+        rowViews[TrackerRow.itemKey(session.row.id)]?.focusControl(role)
+    }
+
+    /// The editor state of each item the view has an editor or pending save for (`tracker show`).
+    private func editingStates() -> [String: String] {
+        editSessions.mapValues { session in
+            session.phase == .editing ? session.kind.rawValue : "pending"
+        }
+    }
+
+    // MARK: Conflicts and badges
+
+    func showConflicts(item id: String, anchor: NSView, fromKeyboard: Bool) {
+        guard editEnabled, let item = shownItem(id), !item.conflicts.isEmpty else { return }
+        present(TrackerPopovers.item(item, now: now(), resolve: { [weak self] entry, keep in self?.resolve(entry, keep) }),
+                from: anchor, fromKeyboard: fromKeyboard)
+    }
+
+    /// The header chip: every live conflict (with Show) and every removed item (Restore, Dismiss).
+    func showBoardConflicts(anchor: NSView, fromKeyboard: Bool) {
+        guard editEnabled, let board else { return }
+        present(TrackerPopovers.board(board, now: now(),
+                                      show: { [weak self] id in self?.scrollToItem(id) },
+                                      resolve: { [weak self] entry, keep in self?.resolve(entry, keep) }),
+                from: anchor, fromKeyboard: fromKeyboard)
+    }
+
+    func reviewSensitive(item id: String, anchor: NSView, fromKeyboard: Bool) {
+        guard editEnabled, let item = shownItem(id), item.sensitive != nil else { return }
+        present(TrackerPopovers.sensitive(item, share: { [weak self] in self?.clearBadge(item: id) },
+                                          editDetails: { [weak self] in self?.beginEdit(item: id, kind: .details) }),
+                from: anchor, fromKeyboard: fromKeyboard)
+    }
+
+    private func present(_ popover: TrackerConflictPopover, from anchor: NSView, fromKeyboard: Bool) {
+        activePopover?.close()
+        activePopover = popover
+        popover.show(relativeTo: anchor, fromKeyboard: fromKeyboard)
+    }
+
+    func resolve(_ entry: TrackerConflictEntry, _ keep: TrackerConflictKeepWire) {
+        userActed()
+        editing.resolve(entry, keep: keep, base: base(forItem: entry.itemId)) { [weak self] outcome in
+            // A removed item put back may come back under a new id: the pane follows it.
+            if entry.isRemoval, keep == .losing, case .saved(let version, let created) = outcome, let id = created.first {
+                self?.follow(restored: entry.itemId, as: id, version: version)
+            }
+        }
+    }
+
+    /// The restored item `old` is `new` now: it keeps the fold the reader had, and the pane scrolls to it once
+    /// the board that holds it is on screen.
+    private func follow(restored old: String, as new: String, version: UInt64) {
+        if folds.expandedItems.remove(old) != nil { folds.expandedItems.insert(new) }
+        followingItem = (new, version)
+        followIfReady()
+    }
+
+    private func followIfReady() {
+        guard let follow = followingItem, (board?.version ?? 0) >= follow.version, rowViews[TrackerRow.itemKey(follow.id)] != nil
+        else { return }
+        followingItem = nil
+        scrollToItem(follow.id)
+    }
+
+    func clearBadge(item id: String) {
+        userActed()
+        editing.clearBadge(itemId: id, base: base(forItem: id))
+    }
+
+    // MARK: Chrome notice and layout
+
+    /// Show or hide the notice above the board, keeping the reading line where it is on screen.
+    private func applyNotice(_ text: String?) {
+        withChromeShift { notice.update(text) }
+    }
+
+    /// Run `change` (which may change the chrome's height) and keep the reading position still.
+    private func withChromeShift(_ change: () -> Void) {
+        guard !isApplying else { change(); return }
+        isApplying = true
+        defer { isApplying = false }
+        let anchor = captureAnchor()
+        let scrollTop = scrollView.frame.minY
+        let atVeryTop = clipView.bounds.minY <= 0.5
+        change()
+        layoutChrome()
+        let shift = scrollView.frame.minY - scrollTop
+        guard shift != 0 else { return }
+        layoutRowsToFit()
+        restore(anchor, renamed: [:], skipping: [], shift: atVeryTop ? 0 : shift, firstRender: false)
+    }
+
+    /// A row's height changed (an editor opened or grew): lay the rows out again, the reading line unmoved.
+    private func relayoutRows() {
+        guard !isApplying else { return }
+        isApplying = true
+        defer { isApplying = false }
+        let anchor = captureAnchor()
+        layoutChrome()
+        layoutRowsToFit()
+        restore(anchor, renamed: [:], skipping: [], shift: 0, firstRender: false)
     }
 
     // MARK: - Anchoring
@@ -812,7 +1334,9 @@ final class TrackerPaneView: NSView {
     func showReport() -> [String: Any] {
         AppControlTracker.show(tag: focusTag, presentation: presentation, displayedRows: displayedRows,
                                visible: window != nil && !isHiddenOrHasHiddenAncestor, held: deferral.held,
-                               renderGeneration: renderGeneration, rowsUpdatedLast: rowsUpdatedLast)
+                               renderGeneration: renderGeneration, rowsUpdatedLast: rowsUpdatedLast,
+                               editEnabled: editEnabled, removedConflicts: board?.removedConflicts.count ?? 0,
+                               editing: editingStates())
     }
 }
 
@@ -832,6 +1356,12 @@ final class TrackerHeaderView: NSView {
 
     var onFilter: ((TrackerFilter) -> Void)?
     var onCopyBoard: (() -> Void)?
+    /// The conflict chip was pressed (the chip, from the keyboard).
+    var onConflictChip: ((NSView, Bool) -> Void)?
+
+    /// "N conflicts": unsettled conflicts on the board (live and removed items); nil when there are none.
+    private(set) var conflictChip: TrackerChipButton?
+    private(set) var conflictCount = 0
 
     let titleLabel = NSTextField(labelWithString: "")
     let updatedLabel = NSTextField(labelWithString: "")
@@ -866,7 +1396,24 @@ final class TrackerHeaderView: NSView {
 
     override var acceptsFirstResponder: Bool { false }
 
-    func update(_ header: TrackerHeader) {
+    func update(_ header: TrackerHeader, showsConflicts: Bool = false) {
+        let count = showsConflicts ? header.conflictCount : 0
+        if count != conflictCount {
+            conflictCount = count
+            conflictChip?.removeFromSuperview()
+            conflictChip = nil
+            if count > 0 {
+                let text = count == 1 ? "1 conflict" : "\(count) conflicts"
+                let chip = TrackerChipButton(text: text, color: Theme.amber, fill: TrackerTheme.badgeFill)
+                chip.target = self
+                chip.action = #selector(conflictChipPressed(_:))
+                chip.setAccessibilityLabel("\(text): open the list")
+                chip.toolTip = "Open the unsettled conflicts"
+                addSubview(chip)
+                conflictChip = chip
+            }
+            needsLayout = true
+        }
         if titleLabel.stringValue != header.title { titleLabel.stringValue = header.title }
         if updatedLabel.stringValue != header.updatedText {
             updatedLabel.stringValue = header.updatedText
@@ -880,6 +1427,10 @@ final class TrackerHeaderView: NSView {
 
     func select(_ filter: TrackerFilter) {
         filterControl.selectedSegment = TrackerFilter.allCases.firstIndex(of: filter) ?? 0
+    }
+
+    @objc private func conflictChipPressed(_ sender: NSView) {
+        onConflictChip?(sender, window?.firstResponder === sender)
     }
 
     @objc private func filterChanged(_ sender: NSSegmentedControl) {
@@ -914,7 +1465,13 @@ final class TrackerHeaderView: NSView {
         updatedLabel.sizeToFit()
         updatedLabel.frame = NSRect(x: h, y: 29, width: updatedLabel.frame.width, height: 15)
         let badgeX = updatedLabel.frame.maxX + 10
-        committableLabel.frame = NSRect(x: badgeX, y: 29, width: max(bounds.width - h - badgeX, 1), height: 15)
+        var right = bounds.width - h
+        if let chip = conflictChip {
+            let w = chip.fittingWidth
+            chip.frame = NSRect(x: max(right - w, h), y: 29, width: w, height: TrackerRowView.chipHeight)
+            right = chip.frame.minX - 6
+        }
+        committableLabel.frame = NSRect(x: badgeX, y: 29, width: max(right - badgeX, 1), height: 15)
     }
 }
 

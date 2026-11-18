@@ -104,10 +104,21 @@ public struct TrackerDeferral {
         releasedSections.insert(section)
     }
 
+    /// One row holding a text selection.
     public mutating func resolve(displayed: [TrackerRow],
                                  target: TrackerPresentation,
                                  visibleKeys: Set<String>,
                                  selectedKey: String?) -> TrackerDeferralResult {
+        resolve(displayed: displayed, target: target, visibleKeys: visibleKeys,
+                heldKeys: selectedKey.map { [$0] } ?? [])
+    }
+
+    /// `heldKeys` are the rows that keep their content and place until released: the row holding a
+    /// text selection, and every row with an open editor or a save still pending.
+    public mutating func resolve(displayed: [TrackerRow],
+                                 target: TrackerPresentation,
+                                 visibleKeys: Set<String>,
+                                 heldKeys: Set<String>) -> TrackerDeferralResult {
         defer {
             releaseEverything = false
             releasedSections = []
@@ -115,7 +126,7 @@ public struct TrackerDeferral {
         // Releasing everything (the pane was reopened, the filter changed) still never takes the
         // content of a row out from under a text selection.
         let holds = findHolds(displayed: displayed, target: target, visibleKeys: releaseEverything ? [] : visibleKeys,
-                              selectedKey: selectedKey)
+                              heldKeys: heldKeys)
         let rows = place(holds, displayed: displayed, target: target)
 
         var renamed: [String: String] = [:]
@@ -137,7 +148,7 @@ public struct TrackerDeferral {
     // MARK: - Private
 
     private func findHolds(displayed: [TrackerRow], target: TrackerPresentation,
-                           visibleKeys: Set<String>, selectedKey: String?) -> [TrackerHold] {
+                           visibleKeys: Set<String>, heldKeys: Set<String>) -> [TrackerHold] {
         let targetByKey = Dictionary(target.rows.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
         // Rows whose place among the others changed (not just shifted by inserts and removals).
         let movedKeys = Set(TrackerDiff.ops(from: displayed, to: target.rows).compactMap { op -> String? in
@@ -148,7 +159,7 @@ public struct TrackerDeferral {
         for row in displayed where !row.key.hasPrefix(Self.movingPrefix) {
             let key = row.key
             let now = targetByKey[key]
-            if key == selectedKey {
+            if heldKeys.contains(key) {
                 guard now != row else { continue }
                 // The selected row keeps its content and its place; if the board moved it, the live
                 // item shows at its new place under `moving:<id>` meanwhile.
@@ -159,7 +170,7 @@ public struct TrackerDeferral {
             }
             guard let shown = row.item else { continue }   // only items are deferred
             // A selection in the moved item's new copy keeps its stub (and so its key) too.
-            let onScreen = visibleKeys.contains(key) || selectedKey == Self.movingPrefix + shown.id
+            let onScreen = visibleKeys.contains(key) || heldKeys.contains(Self.movingPrefix + shown.id)
             guard onScreen else { continue }
 
             if let now {

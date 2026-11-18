@@ -17,6 +17,14 @@ import Foundation
 /// The daemon advertises this in `Welcome.features` when it takes `tracker_edit` (the pane edits
 /// the board as the user). The pane shows its edit controls only when it is present.
 public let trackerEditFeature = "tracker_edit_v1"
+/// The daemon advertises this when conflicts carry a stable `conflict_id` and `resolve_conflict` names it.
+public let trackerConflictIdsFeature = "tracker_conflict_ids_v1"
+
+/// The pane edits only against a daemon that advertised both features: an older one leaves it read-only.
+public func trackerEditSupported(features: [String]?) -> Bool {
+    guard let features else { return false }
+    return features.contains(trackerEditFeature) && features.contains(trackerConflictIdsFeature)
+}
 
 // MARK: - Enums
 
@@ -214,11 +222,16 @@ public struct TrackerConflictWire: Decodable, Equatable {
     public let losingBy: String
     public let winningBy: String
     public let at: Date?
-    /// Position among this item field's losing values, oldest first (`resolve_conflict.index`).
+    /// Position among this item field's losing values, oldest first, as of this view. Informational:
+    /// `resolve_conflict` names the conflict by `conflictId`.
     public let index: Int
+    /// The conflict's stable id (`resolve_conflict.conflict_id`). Opaque: never parsed. Empty from a
+    /// daemon that predates conflict ids.
+    public let conflictId: String
 
     enum CodingKeys: String, CodingKey {
         case field, losing, at, index
+        case conflictId = "conflict_id"
         case losingBy = "losing_by"
         case winningBy = "winning_by"
     }
@@ -231,6 +244,7 @@ public struct TrackerConflictWire: Decodable, Equatable {
         winningBy = try c.decodeIfPresent(String.self, forKey: .winningBy) ?? ""
         at = try? c.decodeIfPresent(Date.self, forKey: .at)
         index = try c.decodeIfPresent(Int.self, forKey: .index) ?? 0
+        conflictId = try c.decodeIfPresent(String.self, forKey: .conflictId) ?? ""
     }
 }
 
@@ -243,9 +257,12 @@ public struct TrackerRemovedConflictWire: Decodable, Equatable {
     public let winningBy: String
     public let at: Date?
     public let source: String
+    /// The conflict's stable id (`resolve_conflict.conflict_id`); opaque. Empty from an older daemon.
+    public let conflictId: String
 
     enum CodingKeys: String, CodingKey {
         case title, at, source
+        case conflictId = "conflict_id"
         case itemId = "item_id"
         case losingBy = "losing_by"
         case winningBy = "winning_by"
@@ -259,6 +276,7 @@ public struct TrackerRemovedConflictWire: Decodable, Equatable {
         winningBy = try c.decodeIfPresent(String.self, forKey: .winningBy) ?? ""
         at = try? c.decodeIfPresent(Date.self, forKey: .at)
         source = try c.decodeIfPresent(String.self, forKey: .source) ?? ""
+        conflictId = try c.decodeIfPresent(String.self, forKey: .conflictId) ?? ""
     }
 }
 
@@ -341,6 +359,8 @@ public struct TrackerItemWire: Decodable, Equatable {
     public let bound: TrackerBoundWire?
     /// Overwritten values the user hasn't settled (empty from an older daemon).
     public let conflicts: [TrackerConflictWire]
+    /// How many older overwritten values a cap dropped: something was lost that can't be shown.
+    public let droppedConflicts: Int
     /// Sensitive-looking text the user hasn't cleared.
     public let sensitive: TrackerSensitiveWire?
     public let source: String
@@ -348,6 +368,7 @@ public struct TrackerItemWire: Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, section, status, owner, links, kind, command, env, ran, bound, source
         case text, note, conflicts, sensitive
+        case droppedConflicts = "dropped_conflicts"
         case textSpans = "text_spans"
         case updatedAt = "updated_at"
         case noteBlocks = "note_blocks"
@@ -371,6 +392,7 @@ public struct TrackerItemWire: Decodable, Equatable {
         ran = try c.decodeIfPresent(Bool.self, forKey: .ran) ?? false
         bound = try? c.decodeIfPresent(TrackerBoundWire.self, forKey: .bound)
         conflicts = (try? c.decodeIfPresent([TrackerConflictWire].self, forKey: .conflicts)) ?? []
+        droppedConflicts = (try? c.decodeIfPresent(Int.self, forKey: .droppedConflicts)) ?? 0
         sensitive = try? c.decodeIfPresent(TrackerSensitiveWire.self, forKey: .sensitive)
         source = try c.decodeIfPresent(String.self, forKey: .source) ?? ""
     }
@@ -452,9 +474,12 @@ public struct TrackerBoardViewWire: Decodable, Equatable {
     public let hiddenByUser: Bool
     /// Items removed over someone's edit (empty from an older daemon).
     public let removedConflicts: [TrackerRemovedConflictWire]
+    /// Which run of the board `version` counts in (changes when the daemon's state for the board is lost).
+    /// Sent back as `base_epoch`. Empty from an older daemon.
+    public let epoch: String
 
     enum CodingKeys: String, CodingKey {
-        case title, path, version, nodes, log, banner, committable
+        case title, path, version, nodes, log, banner, committable, epoch
         case removedConflicts = "removed_conflicts"
         case updatedAt = "updated_at"
         case hiddenByUser = "hidden_by_user"
@@ -465,6 +490,7 @@ public struct TrackerBoardViewWire: Decodable, Equatable {
         title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
         path = try c.decodeIfPresent(String.self, forKey: .path) ?? ""
         version = try c.decodeIfPresent(UInt64.self, forKey: .version) ?? 0
+        epoch = (try? c.decodeIfPresent(String.self, forKey: .epoch)) ?? ""
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt)
         nodes = try c.decodeIfPresent([TrackerNodeWire].self, forKey: .nodes) ?? []
         log = try c.decodeIfPresent([TrackerLogLineWire].self, forKey: .log) ?? []
@@ -512,6 +538,9 @@ public enum TrackerPaneOpWire: Codable, Equatable {
     /// At least one of `title` (one line, at most 80 characters), `text` (to undo a restructure)
     /// and `body` (the note; empty clears it).
     case edit(id: String, title: String?, text: String?, body: String?)
+    /// The item's text put back exactly as it was (`restore_text`): unlike `edit`'s `text` it is not cut at
+    /// 500 characters, so the undo of a long line returns it whole.
+    case restoreText(id: String, text: String)
     /// A new item; the daemon names it (`TrackerEditResultWire.created`).
     case add(section: String, title: String, body: String?, before: String?, after: String?)
     case move(id: String, section: String, before: String?, after: String?)
@@ -520,11 +549,13 @@ public enum TrackerPaneOpWire: Codable, Equatable {
     case restore(source: String, section: String, before: String?, after: String?)
     /// Accept the item's current sensitive-looking text.
     case clearBadge(id: String)
-    /// Settle a conflict: `field` is `removed` for a removed item.
-    case resolveConflict(id: String, field: String, keep: TrackerConflictKeepWire, index: Int?)
+    /// Settle a conflict: `field` is `removed` for a removed item; `conflictId` is the opaque id the
+    /// board showed (a position no longer names a conflict, so none is sent).
+    case resolveConflict(id: String, field: String, keep: TrackerConflictKeepWire, conflictId: String)
 
     private enum K: String, CodingKey {
-        case op, id, status, title, text, body, section, before, after, source, field, keep, index
+        case op, id, status, title, text, body, section, before, after, source, field, keep
+        case conflictId = "conflict_id"
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -540,6 +571,10 @@ public enum TrackerPaneOpWire: Codable, Equatable {
             try c.encodeIfPresent(title, forKey: .title)
             try c.encodeIfPresent(text, forKey: .text)
             try c.encodeIfPresent(body, forKey: .body)
+        case .restoreText(let id, let text):
+            try c.encode("restore_text", forKey: .op)
+            try c.encode(id, forKey: .id)
+            try c.encode(text, forKey: .text)
         case .add(let section, let title, let body, let before, let after):
             try c.encode("add", forKey: .op)
             try c.encode(section, forKey: .section)
@@ -565,12 +600,12 @@ public enum TrackerPaneOpWire: Codable, Equatable {
         case .clearBadge(let id):
             try c.encode("clear_badge", forKey: .op)
             try c.encode(id, forKey: .id)
-        case .resolveConflict(let id, let field, let keep, let index):
+        case .resolveConflict(let id, let field, let keep, let conflictId):
             try c.encode("resolve_conflict", forKey: .op)
             try c.encode(id, forKey: .id)
             try c.encode(field, forKey: .field)
             try c.encode(keep, forKey: .keep)
-            try c.encodeIfPresent(index, forKey: .index)
+            try c.encode(conflictId, forKey: .conflictId)
         }
     }
 
@@ -585,6 +620,8 @@ public enum TrackerPaneOpWire: Codable, Equatable {
                          title: try c.decodeIfPresent(String.self, forKey: .title),
                          text: try c.decodeIfPresent(String.self, forKey: .text),
                          body: try c.decodeIfPresent(String.self, forKey: .body))
+        case "restore_text":
+            self = .restoreText(id: try c.decode(String.self, forKey: .id), text: try c.decode(String.self, forKey: .text))
         case "add":
             self = .add(section: try c.decode(String.self, forKey: .section),
                         title: try c.decode(String.self, forKey: .title),
@@ -609,7 +646,7 @@ public enum TrackerPaneOpWire: Codable, Equatable {
             self = .resolveConflict(id: try c.decode(String.self, forKey: .id),
                                     field: try c.decode(String.self, forKey: .field),
                                     keep: try c.decode(TrackerConflictKeepWire.self, forKey: .keep),
-                                    index: try c.decodeIfPresent(Int.self, forKey: .index))
+                                    conflictId: try c.decode(String.self, forKey: .conflictId))
         default:
             throw DecodingError.dataCorruptedError(forKey: .op, in: c, debugDescription: "unknown tracker op \(op)")
         }
@@ -623,13 +660,17 @@ public struct TrackerEditRequestWire: Encodable, Equatable {
     public let requestId: String
     /// The board version the edit was made against (`TrackerBoardViewWire.version`).
     public let baseVersion: UInt64
+    /// The `epoch` of the board view `baseVersion` is from; nil when the board showed none (an older daemon).
+    public let baseEpoch: String?
     public let operatorNonce: String?
     public let ops: [TrackerPaneOpWire]
 
-    public init(tag: String, requestId: String, baseVersion: UInt64, operatorNonce: String?, ops: [TrackerPaneOpWire]) {
+    public init(tag: String, requestId: String, baseVersion: UInt64, baseEpoch: String? = nil,
+                operatorNonce: String?, ops: [TrackerPaneOpWire]) {
         self.tag = tag
         self.requestId = requestId
         self.baseVersion = baseVersion
+        self.baseEpoch = baseEpoch
         self.operatorNonce = operatorNonce
         self.ops = ops
     }
@@ -638,6 +679,7 @@ public struct TrackerEditRequestWire: Encodable, Equatable {
         case type, tag, ops
         case requestId = "request_id"
         case baseVersion = "base_version"
+        case baseEpoch = "base_epoch"
         case operatorNonce = "operator_nonce"
     }
 
@@ -647,6 +689,7 @@ public struct TrackerEditRequestWire: Encodable, Equatable {
         try c.encode(tag, forKey: .tag)
         try c.encode(requestId, forKey: .requestId)
         try c.encode(baseVersion, forKey: .baseVersion)
+        try c.encodeIfPresent(baseEpoch, forKey: .baseEpoch)
         try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
         try c.encode(ops, forKey: .ops)
     }
@@ -660,13 +703,16 @@ public struct TrackerEditErrorWire: Decodable, Equatable {
     public let reason: String?
     /// The failing op's position, when the failure is one op's.
     public let index: Int?
+    /// The pane's view is out of date: look again (the daemon sets it with `invalid_args`). False when absent.
+    public let stale: Bool
 
-    enum CodingKeys: String, CodingKey { case code, reason, index }
+    enum CodingKeys: String, CodingKey { case code, reason, index, stale }
 
-    public init(code: String, reason: String? = nil, index: Int? = nil) {
+    public init(code: String, reason: String? = nil, index: Int? = nil, stale: Bool = false) {
         self.code = code
         self.reason = reason
         self.index = index
+        self.stale = stale
     }
 
     public init(from decoder: Decoder) throws {
@@ -674,6 +720,7 @@ public struct TrackerEditErrorWire: Decodable, Equatable {
         code = try c.decodeIfPresent(String.self, forKey: .code) ?? ""
         reason = try c.decodeIfPresent(String.self, forKey: .reason)
         index = try c.decodeIfPresent(Int.self, forKey: .index)
+        stale = (try? c.decodeIfPresent(Bool.self, forKey: .stale)) ?? false
     }
 }
 

@@ -330,4 +330,59 @@ final class TrackerTitleTests: XCTestCase {
             }
         }
     }
+
+    // MARK: Editing (T3b)
+
+    private static let longWhole = String(repeating: "W", count: 80)
+    private static let legacySeparator = "Rotate the signing key: " + String(repeating: "the vendor rotated it ", count: 5)
+    private static let legacyCut = String(repeating: "word ", count: 30)
+
+    func testNormalizedTitleTurnsBreaksIntoSpacesAndDropsHiddenCharacters() {
+        XCTAssertEqual(TrackerTitle.normalizedTitle("  a\nb\tc\r\nd  "), "a b c  d")
+        XCTAssertEqual(TrackerTitle.normalizedTitle("a\u{202E}b\u{200B}c\u{2028}d"), "abcd")
+        XCTAssertEqual(TrackerTitle.normalizedTitle("\n \t"), "")
+    }
+
+    func testEditableTitleIsTheSplitTitleWithoutTheCutsEllipsis() {
+        XCTAssertEqual(TrackerTitle.editableTitle(text: "Short title"), "Short title")
+        XCTAssertEqual(TrackerTitle.editableTitle(text: Self.legacySeparator), "Rotate the signing key")
+        let cut = TrackerTitle.editableTitle(text: Self.legacyCut)
+        XCTAssertFalse(cut.hasSuffix("…"))
+        XCTAssertTrue(Self.legacyCut.hasPrefix(cut))
+    }
+
+    func testRestructureKeepsWhatTheRowShowedTitleEditedRestUnderTheFold() {
+        let r = TrackerTitle.restructure(text: Self.legacySeparator, note: "the note", newTitle: "Rotate the key")
+        XCTAssertEqual(r.title, "Rotate the key")
+        XCTAssertEqual(r.body, TrackerTitle.rawRest(text: Self.legacySeparator)! + "\n\nthe note")
+    }
+
+    func testRestructureOfACutItemDropsTheEllipsesAndKeepsEveryWord() {
+        let r = TrackerTitle.restructure(text: Self.legacyCut, note: nil, newTitle: "New")
+        XCTAssertEqual(r.title, "New")
+        XCTAssertFalse(r.body.contains("…"))
+        let oldTitle = TrackerTitle.editableTitle(text: Self.legacyCut)
+        let words = (oldTitle + " " + r.body).split(separator: " ").count
+        XCTAssertEqual(words, 30, "the old title's words are not lost: the user retitled, the rest stays")
+    }
+
+    func testRestructureOfAWholeItemWithANoteKeepsOnlyTheNote() {
+        let r = TrackerTitle.restructure(text: "Short", note: "n", newTitle: "Shorter")
+        XCTAssertEqual(r.title, "Shorter")
+        XCTAssertEqual(r.body, "n")
+        XCTAssertEqual(TrackerTitle.restructure(text: "Short", note: nil, newTitle: "x").body, "")
+    }
+
+    func testRestructureOfAnOverlongTypedTitleMovesItsRestToTheTopOfTheBody() {
+        let typed = "Title part: " + String(repeating: "x", count: 90)
+        let r = TrackerTitle.restructure(text: "Short", note: "old note", newTitle: typed)
+        XCTAssertEqual(r.title, "Title part")
+        XCTAssertEqual(r.body, String(repeating: "x", count: 90) + "\n\nold note")
+        XCTAssertLessThanOrEqual(r.title.count, TrackerTitle.maxChars)
+    }
+
+    func testRestructureNormalizesTheTypedTitle() {
+        let r = TrackerTitle.restructure(text: "Short", note: nil, newTitle: " a\nb ")
+        XCTAssertEqual(r.title, "a b")
+    }
 }

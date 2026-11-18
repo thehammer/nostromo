@@ -1000,6 +1000,64 @@ final class TrackerPresentationTests: XCTestCase {
         XCTAssertEqual(p.strip.count, 0)
         XCTAssertTrue(p.foldedItems.isEmpty)
     }
+
+    // MARK: Editing fields (T3b)
+
+    private func conflictsBoard() throws -> TrackerBoardViewWire {
+        try TFx.board(fromFrame: try JSONSerialization.jsonObject(
+            with: try TFx.fixtureData("frame-tracker-board-conflicts.json")) as? [String: Any] ?? [:])
+    }
+
+    func testRowsCarryTheRawTextNoteConflictsAndBadgeForTheEditors() throws {
+        let board = try conflictsBoard()
+        let p = TFx.present(board)
+        let check = try XCTUnwrap(TFx.itemRow("check-1000", in: p))
+        XCTAssertEqual(check.conflicts.map(\.field), ["status"])
+        XCTAssertEqual(check.conflicts.first?.conflictId, "7.0")
+        XCTAssertEqual(check.conflictSummary, "Conflict on status: agent claudia set in progress, then you changed it; it now reads in progress")
+        XCTAssertFalse(check.editText.isEmpty, "raw text for the editor")
+        let verif = try XCTUnwrap(TFx.itemRow("verif-1037", in: p))
+        XCTAssertEqual(verif.sensitive?.classes, ["ssn"])
+        XCTAssertEqual(verif.sensitiveLabel,
+                       "Possible sensitive data (social security number). Not shown to the agent.")
+        XCTAssertNil(TFx.itemRow("revie-1111", in: p)?.conflictSummary)
+    }
+
+    func testHeaderCountsLiveConflictsAndRemovedItems() throws {
+        let p = TFx.present(try conflictsBoard())
+        XCTAssertEqual(p.header.conflictCount, 2, "one live conflict and one removed item")
+        XCTAssertEqual(TFx.present(try TFx.golden()).header.conflictCount, 0)
+    }
+
+    func testCommandAndBoundItemsAreNotTickableAndKeepTheirStatusFromTheSource() throws {
+        let p = TFx.present(try conflictsBoard())
+        let command = try XCTUnwrap(TFx.allItems(p).first { $0.kind == .command })
+        XCTAssertFalse(command.isTickable)
+        XCTAssertFalse(command.isStatusEditable)
+        XCTAssertTrue(try XCTUnwrap(TFx.itemRow("check-1000", in: p)).isTickable)
+        let boundBoard = try TFx.edited { edit in
+            try edit.updateItem("revie-1111") { $0["bound"] = ["source": "mother.job", "as_of": TFx.iso(1_760_547_900), "badly_stale": false] }
+        }
+        let bound = try XCTUnwrap(TFx.itemRow("revie-1111", in: TFx.present(boundBoard)))
+        XCTAssertFalse(bound.isTickable)
+        XCTAssertEqual(bound.boundTooltip, "Status follows Mother job")
+    }
+
+    func testAConflictSentenceUsesLabelsAndThePanesClock() throws {
+        let p = TFx.present(try conflictsBoard())
+        let c = try XCTUnwrap(TFx.itemRow("check-1000", in: p)?.conflicts.first)
+        let at = try XCTUnwrap(c.at)
+        let sentence = TrackerConflictText.sentence(c, current: "done", now: at.addingTimeInterval(4))
+        XCTAssertEqual(sentence, "agent claudia set status to “in progress”, then you set it to “done”, 4 s ago.")
+        XCTAssertEqual(TrackerConflictText.actor("file (unknown editor)"), "a file edit")
+        XCTAssertEqual(TrackerConflictText.display(String(repeating: "a", count: 600)).count, 500 + 3)
+    }
+
+    func testAnEditorOpeningDoesNotChangeTheRowButEditsAndConflictsDo() throws {
+        let a = try XCTUnwrap(TFx.itemRow("check-1000", in: TFx.present(try TFx.golden())))
+        let b = try XCTUnwrap(TFx.itemRow("check-1000", in: TFx.present(try conflictsBoard())))
+        XCTAssertNotEqual(a, b, "a conflict is a content change: the row rebuilds and highlights")
+    }
 }
 
 // MARK: - Relative time

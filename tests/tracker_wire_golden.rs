@@ -16,7 +16,7 @@
 
 use std::path::PathBuf;
 
-use nostromo::ipc::protocol::ServerMsg;
+use nostromo::ipc::protocol::{ServerMsg, TrackerPaneOp};
 use nostromo::tracker::view::{build, ViewConflict, ViewNode, ViewRemovedConflict};
 use nostromo::tracker::{parse, ParsedBoard, ViewFacts};
 
@@ -313,4 +313,17 @@ fn joining_every_nodes_source_reproduces_the_board_file() {
         board60_source(),
         "Copy as Markdown is the file's own text"
     );
+}
+
+/// `pane-ops.json` is the ops the Mac pane sends (`TrackerPaneOpWire`); the NostromoKit test decodes the same
+/// file and encodes it back to the same JSON. `restore_text` is how an undo puts a long text back whole.
+#[test]
+fn the_pane_ops_fixture_decodes_and_encodes_back_to_the_same_json() {
+    let text = std::fs::read_to_string(fixture_path("pane-ops.json")).expect("pane-ops.json");
+    let wire: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let ops: Vec<TrackerPaneOp> = serde_json::from_str(&text).expect("every op decodes");
+    assert!(ops
+        .iter()
+        .any(|op| matches!(op, TrackerPaneOp::RestoreText { .. })));
+    assert_eq!(serde_json::to_value(&ops).unwrap(), wire);
 }

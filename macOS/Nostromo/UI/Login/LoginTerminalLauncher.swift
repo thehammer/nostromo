@@ -8,6 +8,8 @@ import AppKit
 
 /// How the terminal was opened (the card says which).
 enum LoginTerminalOutcome: Equatable {
+    /// A terminal pane inside Nostromo. Nothing is typed into it; the card copies the command.
+    case appPane
     case tmuxWindow
     case terminalApp
 }
@@ -99,10 +101,15 @@ struct LoginTerminalLauncher {
     /// Where the blocking work runs, and where the answer is delivered. A test runs both inline.
     private let background: (@escaping () -> Void) -> Void
     private let deliver: (@escaping () -> Void) -> Void
+    /// Asks Nostromo for a local terminal pane in the focus with this tag; true when it was requested.
+    /// Runs on the main thread, from the press.
+    private let paneOpener: (String) -> Bool
 
     init(process: ProcessLaunching = SystemProcessLauncher(), temporaryDirectory: String = NSTemporaryDirectory(),
          background: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.global(qos: .userInitiated).async(execute: $0) },
-         deliver: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) }) {
+         deliver: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) },
+         paneOpener: @escaping (String) -> Bool = { MainLayout.openSignInTerminalPane(tag: $0) }) {
+        self.paneOpener = paneOpener
         self.process = process
         self.temporaryDirectory = temporaryDirectory
         self.background = background
@@ -114,6 +121,11 @@ struct LoginTerminalLauncher {
         URL(fileURLWithPath: temporaryDirectory, isDirectory: true)
             .appendingPathComponent(Self.scriptDirectoryName, isDirectory: true)
             .appendingPathComponent(Self.scriptName)
+    }
+
+    /// Try an in-app terminal pane for the focus `tag`. Call on the main thread, after the human gesture.
+    func openAppPane(tag: String) -> Bool {
+        paneOpener(tag)
     }
 
     /// Start the sign-in off the main thread; `completion` runs on the main thread with where it
