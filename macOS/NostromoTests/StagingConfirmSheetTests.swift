@@ -318,9 +318,14 @@ final class StagingConfirmSheetTests: MouseQueueTestCase {
 
     private func openOnAClock(_ t: Timed) throws -> (Setup, StagingConfirmSheet) {
         let s = setup()
+        t.clock = ProcessInfo.processInfo.systemUptime   // after setup, so the click is as fresh as a real one
         s.rig.box.sheetClock = { t.clock }
         s.rig.box.sheetChecksGesture = true
-        s.rig.click(s.row, in: s.window)
+        // The opening click is stamped on the test's clock too. A click stamped with the real uptime would
+        // land `setup()`'s duration after `t.clock`, which under machine load is long enough to move the
+        // "0.1 s after the sheet appeared" and "0.6 s later" checks on either side of their limits.
+        s.row.mouseDown(with: StagingEvents.mouse(.leftMouseDown, in: s.window, at: StagingRig.point(in: s.row), timestamp: t.clock))
+        s.row.mouseUp(with: StagingEvents.mouse(.leftMouseUp, in: s.window, at: StagingRig.point(in: s.row), timestamp: t.clock))
         return (s, try sheet(s))
     }
 
@@ -414,6 +419,7 @@ final class StagingConfirmSheetTests: MouseQueueTestCase {
     func testTheEventThatOpenedTheSheetIsNotAnInsert() throws {
         let t = Timed()
         let s = setup()
+        t.clock = ProcessInfo.processInfo.systemUptime
         s.rig.box.sheetClock = { t.clock }
         s.rig.box.sheetChecksGesture = true
         let down = StagingEvents.mouse(.leftMouseDown, in: s.window, at: StagingRig.point(in: s.row), timestamp: t.clock)

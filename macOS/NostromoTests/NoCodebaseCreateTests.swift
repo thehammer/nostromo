@@ -47,10 +47,25 @@ final class NoCodebaseCreateTests: XCTestCase {
         return sheet
     }
 
-    private func pumpMain(_ seconds: TimeInterval = 0.3) {
-        let e = expectation(description: "pump")
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { e.fulfill() }
-        wait(for: [e], timeout: 20)
+    /// Spins the main run loop until `created` holds `count` focuses (the create callback is the event), then
+    /// a few more turns so a stray second create would still be seen by the exact-count assertions. Returns
+    /// the moment the condition holds; a callback that never comes fails here, naming what is missing,
+    /// instead of leaving a later assertion to guess.
+    private func waitForCreated(_ count: Int = 1, timeout: TimeInterval = 15, file: StaticString = #filePath, line: UInt = #line) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while created.count < count, Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
+        }
+        if created.count < count {
+            XCTFail("the create callback fired \(created.count) time(s) in \(timeout) s; expected \(count). The org lookup never answered.",
+                    file: file, line: line)
+        }
+        for _ in 0..<3 { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005)) }
+    }
+
+    /// For the paths that answer synchronously: lets already-queued main work run so a stray create would show.
+    private func drainMain() {
+        for _ in 0..<5 { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005)) }
     }
 
     private func allViews(_ root: NSView) -> [NSView] {
@@ -121,7 +136,7 @@ final class NoCodebaseCreateTests: XCTestCase {
         let sheet = makeSheet()
         sheet.selectNoCodebase()
         sheet.createTapped()
-        pumpMain()
+        waitForCreated()
 
         let focus = try XCTUnwrap(created.first)
         XCTAssertEqual(created.count, 1)
@@ -147,7 +162,7 @@ final class NoCodebaseCreateTests: XCTestCase {
         sheet.selectNoCodebase()
         sheet.typeLabel("  Memo  ")
         sheet.createTapped()
-        pumpMain()
+        waitForCreated()
         let focus = try XCTUnwrap(created.first)
         XCTAssertEqual(focus.label, "Memo")
         XCTAssertEqual(focus.displayName, "Memo")
@@ -157,7 +172,7 @@ final class NoCodebaseCreateTests: XCTestCase {
     func testEachNoCodebaseCreateGetsItsOwnFolder() throws {
         let first = makeSheet(); first.selectNoCodebase(); first.createTapped()
         let second = makeSheet(); second.selectNoCodebase(); second.createTapped()
-        pumpMain()
+        waitForCreated(2)
         XCTAssertEqual(created.count, 2)
         XCTAssertNotEqual(created[0].workingDirectory, created[1].workingDirectory)
         XCTAssertNotEqual(created[0].id, created[1].id)
@@ -168,7 +183,7 @@ final class NoCodebaseCreateTests: XCTestCase {
         sheet.selectNoCodebase()
         sheet.createTapped()
         sheet.createTapped()
-        pumpMain()
+        waitForCreated()
         XCTAssertEqual(created.count, 1)
         XCTAssertEqual(makerCalls, 1, "a second press must not leave a second empty folder behind")
     }
@@ -176,7 +191,7 @@ final class NoCodebaseCreateTests: XCTestCase {
     func testAFolderIsOnlyMadeForNoCodebase() throws {
         let sheet = makeSheet()   // a repo is selected
         sheet.createTapped()
-        pumpMain()
+        waitForCreated()
         XCTAssertEqual(created.count, 1)
         XCTAssertEqual(makerCalls, 0, "choosing a repo makes no folder")
     }
@@ -190,7 +205,7 @@ final class NoCodebaseCreateTests: XCTestCase {
         XCTAssertEqual(sheet.projectErrorText, "", "nothing is wrong until Create is pressed")
 
         sheet.createTapped()
-        pumpMain()
+        drainMain()
 
         XCTAssertTrue(created.isEmpty, "no focus without a folder")
         XCTAssertEqual(sheet.projectErrorText, NoCodebaseFolder.Failure.rootInsideGitRepo.reason)
@@ -200,7 +215,7 @@ final class NoCodebaseCreateTests: XCTestCase {
         // Fixed: the same sheet creates.
         sheet.noCodebaseFolderMaker = { [unowned self] in .success(spaces.appendingPathComponent("ok", isDirectory: true)) }
         sheet.createTapped()
-        pumpMain()
+        waitForCreated()
         XCTAssertEqual(created.count, 1)
         XCTAssertEqual(created.first?.workingDirectory, spaces.appendingPathComponent("ok", isDirectory: true).path)
     }
@@ -254,7 +269,7 @@ final class NoCodebaseCreateTests: XCTestCase {
         sheet.selectNoCodebase()
         sheet.selectProject(at: 1)
         sheet.createTapped()
-        pumpMain()
+        waitForCreated()
 
         let focus = try XCTUnwrap(created.first)
         XCTAssertEqual(focus.projectPath, "/tmp/beta", "the second repo, not the one next to it in the menu")
@@ -270,7 +285,7 @@ final class NoCodebaseCreateTests: XCTestCase {
             let sheet = makeSheet()
             sheet.selectProject(at: index)
             sheet.createTapped()
-            pumpMain()
+            waitForCreated()
             XCTAssertEqual(created.first?.projectPath, path, "repo \(index)")
         }
     }
@@ -278,7 +293,7 @@ final class NoCodebaseCreateTests: XCTestCase {
     func testTheDefaultRepoCreatesAtTheFirstPath() throws {
         let sheet = makeSheet(projects: ["/tmp/only"])
         sheet.createTapped()
-        pumpMain()
+        waitForCreated()
         XCTAssertEqual(created.first?.projectPath, "/tmp/only")
     }
 
