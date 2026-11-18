@@ -257,6 +257,9 @@ pub struct Detect<'a> {
     /// cursor, `Some(0)` when it never read (it has seen nothing). `None`:
     /// no notion of reading (a file save), only rule (a) applies.
     pub seen_through: Option<u64>,
+    /// Changes at or before `seen_through` the writer was told only were
+    /// hidden (withheld text): it has not seen them.
+    pub unseen: &'a [u64],
     /// The pane connection making the write (daemon-assigned); `None` for any
     /// other author.
     pub client: Option<&'a str>,
@@ -298,6 +301,7 @@ pub fn detect(
                     let losing_author = match last {
                         Some(last) => {
                             let settled = d.seen_through.is_some_and(|seen| last.seq <= seen)
+                                && !d.unseen.contains(&last.seq)
                                 && d.resolving.iter().any(|(i, f)| i == id && f == field);
                             if settled || !conflicts(last, d, || reverts(prior, id, field, new)) {
                                 continue;
@@ -444,7 +448,9 @@ fn conflicts(last: &Change, d: &Detect<'_>, stale_file: impl FnOnce() -> bool) -
     }
     match d.writer {
         Author::File => stale_file(),
-        _ => d.seen_through.is_some_and(|seen| last.seq > seen),
+        _ => d
+            .seen_through
+            .is_some_and(|seen| last.seq > seen || d.unseen.contains(&last.seq)),
     }
 }
 
@@ -531,6 +537,7 @@ mod tests {
             &Detect {
                 writer,
                 seen_through: seen,
+                unseen: &[],
                 client: None,
                 history_gap: false,
                 resolving: &[],

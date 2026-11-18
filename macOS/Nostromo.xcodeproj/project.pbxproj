@@ -647,6 +647,8 @@
 		ZZ0000000000000000NCH04 /* NoCodebaseSidebarAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCG04 /* NoCodebaseSidebarAppearanceTests.swift */; };
 		ZZ0000000000000000NCH03 /* NoCodebaseSidebarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCG03 /* NoCodebaseSidebarTests.swift */; };
 		ZZ0000000000000000NCH02 /* NoCodebaseCreateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCG02 /* NoCodebaseCreateTests.swift */; };
+		ZZ0000000000000000TBH01 /* TestBundleSetup.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TBG01 /* TestBundleSetup.swift */; };
+		ZZ0000000000000000TIH01 /* TestIsolationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TIG01 /* TestIsolationTests.swift */; };
 		ZZ0000000000000000NCH01 /* NoCodebaseFolderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCG01 /* NoCodebaseFolderTests.swift */; };
 		ZZ0000000000000000CH0701 /* ResumeTabTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0700 /* ResumeTabTests.swift */; };
 		ZZ0000000000000000CH0711 /* FolderGoneChoiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0710 /* FolderGoneChoiceTests.swift */; };
@@ -1318,6 +1320,8 @@
 		ZZ0000000000000000NCG04 /* NoCodebaseSidebarAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoCodebaseSidebarAppearanceTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000NCG03 /* NoCodebaseSidebarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoCodebaseSidebarTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000NCG02 /* NoCodebaseCreateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoCodebaseCreateTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TBG01 /* TestBundleSetup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestBundleSetup.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TIG01 /* TestIsolationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestIsolationTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000NCG01 /* NoCodebaseFolderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoCodebaseFolderTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0700 /* ResumeTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResumeTabTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0710 /* FolderGoneChoiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderGoneChoiceTests.swift; sourceTree = "<group>"; };
@@ -2051,6 +2055,8 @@
 				ZZ0000000000000000NCG04 /* NoCodebaseSidebarAppearanceTests.swift */,
 				ZZ0000000000000000NCG03 /* NoCodebaseSidebarTests.swift */,
 				ZZ0000000000000000NCG02 /* NoCodebaseCreateTests.swift */,
+				ZZ0000000000000000TBG01 /* TestBundleSetup.swift */,
+				ZZ0000000000000000TIG01 /* TestIsolationTests.swift */,
 				ZZ0000000000000000NCG01 /* NoCodebaseFolderTests.swift */,
 				ZZ0000000000000000CH0700 /* ResumeTabTests.swift */,
 				ZZ0000000000000000SH0404 /* OutsideConversationsAppearanceTests.swift */,
@@ -3107,6 +3113,8 @@
 				ZZ0000000000000000NCH04 /* NoCodebaseSidebarAppearanceTests.swift in Sources */,
 				ZZ0000000000000000NCH03 /* NoCodebaseSidebarTests.swift in Sources */,
 				ZZ0000000000000000NCH02 /* NoCodebaseCreateTests.swift in Sources */,
+				ZZ0000000000000000TBH01 /* TestBundleSetup.swift in Sources */,
+				ZZ0000000000000000TIH01 /* TestIsolationTests.swift in Sources */,
 				ZZ0000000000000000NCH01 /* NoCodebaseFolderTests.swift in Sources */,
 				ZZ0000000000000000CH0701 /* ResumeTabTests.swift in Sources */,
 				ZZ0000000000000000SH0405 /* OutsideConversationsAppearanceTests.swift in Sources */,
@@ -3295,6 +3303,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSPrincipalClass = NostromoTestBundleSetup;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.hammer.nostromo.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -3309,6 +3318,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSPrincipalClass = NostromoTestBundleSetup;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.hammer.nostromo.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";

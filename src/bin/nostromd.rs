@@ -577,6 +577,11 @@ async fn main() -> Result<()> {
             .lock()
             .unwrap()
             .configure_tracker_frame_provider(registry.clone());
+        // What the user changed on a board reaches the agent with its next
+        // message (never by starting a turn).
+        session_mgr.lock().unwrap().set_turn_note_provider(Arc::new(
+            nostromo::tracker::TrackerTurnNotes(registry.clone()),
+        ));
         registry.start_watching(broadcast_tx.clone());
         registry.flush(&broadcast_tx);
         // A layout call that drops the tracker pane (the user's close

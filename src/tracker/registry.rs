@@ -33,6 +33,7 @@ use super::clock::{Clock, SystemClock};
 use super::conflicts::{self, Conflict, Conflicts, Detect};
 use super::diff::{diff, field_value};
 use super::format::{parse, template, Malformed, ParsedBoard};
+use super::inject::{render_note, too_old_note, PreparedNote};
 use super::model::{fnv1a64, slug, Author, Board, ChangeKind, Counts, Kind, Link, Stamp, Status};
 use super::ops::{
     apply_steps_to_file, LinkInput, Op, OpError, PaneStep, Upsert, WriteError, MAX_NOTE_CHARS,
@@ -555,7 +556,15 @@ impl TrackerRegistry {
         // cursor (a restarted or resumed session that never read) has seen
         // nothing: every other author's change is news to it.
         let seen = matches!(author, Author::Agent { .. }).then(|| cursor.unwrap_or(0));
-        let result = self.write_ops_logged(entry, &path, ops, author, true, seen);
+        let unseen = inner.cursors.unseen(session, &key_of(&path));
+        let result = self.write_ops_logged(
+            entry,
+            &path,
+            ops,
+            author,
+            true,
+            seen.map(|s| (s, unseen.as_slice())),
+        );
         let user_changes = user_changes_of(entry, cursor, session);
         let version = entry.log.seq;
         // Even a refused write may have ingested an external edit.
@@ -609,6 +618,69 @@ impl TrackerRegistry {
         }
         self.persist(inner);
         Ok(outcome)
+    }
+
+    /// The note `session` of `tag` is owed before its next message: what a
+    /// `read` would return as a delta, framed (see [`super::inject`]). `None`
+    /// when the session has no cursor on the board (it never opened or read
+    /// it), nothing changed, or the board's log was reset. Moves no cursor:
+    /// [`TrackerRegistry::commit_turn_note`] does, once the note is delivered.
+    pub fn prepare_turn_note(&self, tag: &str, session: &str) -> Option<PreparedNote> {
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        let path = inner.bindings.get(tag)?.clone();
+        let cursor = inner.cursors.get(session, &key_of(&path))?;
+        let entry = inner.boards.get_mut(&path)?;
+        self.recheck_path(entry, &path).ok()?;
+        // As a read: what the file says now, even if the watcher hasn't fired.
+        let ingested = self.ingest_from_disk(entry, &path);
+        let version = entry.log.seq;
+        let title = entry
+            .parsed
+            .as_ref()
+            .and_then(|p| p.board.title.clone())
+            .unwrap_or_else(|| entry.topic.clone());
+        let note = match entry.log.since(Some(cursor), Some(session)) {
+            Since::Changes(changes) => render_note(&title, &changes, &entry.approvals, version)
+                .map(|r| (r.text, r.covers.unwrap_or(cursor), r.hidden)),
+            Since::TooOld { count } => Some((too_old_note(count), cursor, Vec::new())),
+            Since::Full => None,
+        };
+        // Only a board change the watcher has not seen yet is ingested here;
+        // it is saved with the next state write (the commit), not now: this
+        // runs under the session manager's lock.
+        if ingested {
+            inner.dirty.insert(path.clone());
+        }
+        note.map(|(text, advance_to, hidden)| PreparedNote {
+            text,
+            board_path: path,
+            advance_to,
+            hidden,
+        })
+    }
+
+    /// `note`'s message bound to its turn (turn start) in `session`: it has now seen
+    /// what the note showed.
+    /// The cursor moves to the note's version, never back (a `read` since the
+    /// note was prepared keeps its later one), and not at all when the log was
+    /// reset meanwhile.
+    pub fn commit_turn_note(&self, note: &PreparedNote, session: &str) {
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        let key = key_of(&note.board_path);
+        let Some(current) = inner.cursors.get(session, &key) else {
+            return;
+        };
+        let Some(entry) = inner.boards.get(&note.board_path) else {
+            return;
+        };
+        if note.advance_to > current && note.advance_to <= entry.log.seq {
+            inner
+                .cursors
+                .advance_hiding(session, &key, note.advance_to, &note.hidden);
+            self.persist(inner);
+        }
     }
 
     /// Re-reads `path` after a file signal. `true` when what a client sees
@@ -1030,7 +1102,8 @@ impl TrackerRegistry {
     /// [`Self::write_ops`]; `log: false` writes without appending the
     /// changes (a live item's state change was logged when it happened, and
     /// the file only catches up). `seen` is what the writer had read (see
-    /// [`conflicts::Detect::seen_through`]).
+    /// [`conflicts::Detect::seen_through`]) and the changes among them it was
+    /// only told were hidden ([`conflicts::Detect::unseen`]).
     fn write_ops_logged(
         &self,
         entry: &mut BoardEntry,
@@ -1038,12 +1111,17 @@ impl TrackerRegistry {
         ops: &[Op],
         author: &Author,
         log: bool,
-        seen: Option<u64>,
+        seen: Option<(u64, &[u64])>,
     ) -> Result<(), TrackerError> {
+        let (seen, unseen) = match seen {
+            Some((seen, unseen)) => (Some(seen), unseen),
+            None => (None, &[][..]),
+        };
         let steps: Vec<PaneStep> = ops.iter().cloned().map(PaneStep::Op).collect();
         let ctx = WriteCtx {
             log,
             seen,
+            unseen,
             foreign_base: false,
             client: None,
             detect: log,
@@ -1112,6 +1190,7 @@ impl TrackerRegistry {
                     &Detect {
                         writer: author,
                         seen_through: seen,
+                        unseen: ctx.unseen,
                         client: ctx.client,
                         history_gap,
                         resolving: ctx.resolving,
@@ -1235,6 +1314,7 @@ impl TrackerRegistry {
                         &Detect {
                             writer: &Author::File,
                             seen_through: None,
+                            unseen: &[],
                             client: None,
                             history_gap: false,
                             resolving: &[],
@@ -1846,6 +1926,8 @@ struct WriteCtx<'a> {
     log: bool,
     /// What the writer had read (the pane's base version, an agent's cursor).
     seen: Option<u64>,
+    /// Changes `seen` covers that the writer was only told were hidden.
+    unseen: &'a [u64],
     /// `seen` was taken against another run of the board (its epoch differs):
     /// the writer has seen nothing of this log.
     foreign_base: bool,
