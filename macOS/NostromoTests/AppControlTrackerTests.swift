@@ -363,6 +363,124 @@ final class AppControlTrackerTests: XCTestCase {
         assertValidJSON(rig.pane.showReport(), "under the Done filter")
     }
 
+    // MARK: - tracker show: the structure fields (T3b2)
+
+    /// A pane that takes edits, over the golden board, with a fake daemon.
+    private func editingHarness(supported: Bool = true, file: StaticString = #filePath, line: UInt = #line,
+                                configure: (inout TrackerBoardScript) throws -> Void = { _ in }) throws -> TrackerEditHarness {
+        try TrackerEditHarness(self, supported: supported, configure: configure, file: file, line: line)
+    }
+
+    private let allSections = ["now", "next", "waiting-on-you", "done", "findings", "loose-ends"]
+
+    func testShowListsTheAddRowsBySectionUnderAllAndOpenAndNoneUnderWaitingDoneOrABanner() throws {
+        let h = try editingHarness()
+        func addRows() -> [String]? { h.pane.showReport()["add_rows"] as? [String] }
+        XCTAssertEqual(addRows(), allSections, "under All: one per section, in display order")
+        h.pane.setFilter(.open)
+        XCTAssertEqual(addRows(), allSections.filter { $0 != "done" }, "under Open: the Done section has none")
+        h.pane.setFilter(.waiting)
+        XCTAssertEqual(addRows(), [], "under Waiting on you: none")
+        h.pane.setFilter(.done)
+        XCTAssertEqual(addRows(), [], "under Done: none")
+        h.pane.setFilter(.all)
+        XCTAssertEqual(addRows(), allSections)
+        // What it lists is what the pane has rows for.
+        XCTAssertEqual(h.pane.displayedRows.map(\.key).filter { $0.hasPrefix("add:") }, allSections.map { "add:\($0)" })
+        try h.agentChange { $0.setBanner(["type": "missing"]) }
+        XCTAssertEqual(addRows(), [], "a board under a banner has none")
+        assertValidJSON(h.pane.showReport(), "a report with add rows")
+    }
+
+    func testShowListsNoAddRowsForAPaneThatCannotTakeEditsAndTheRowsComeWithTheSupport() throws {
+        let h = try editingHarness(supported: false)
+        XCTAssertEqual(h.pane.showReport()["add_rows"] as? [String], [])
+        h.supported = true
+        h.pane.render()
+        h.rig.settle()
+        XCTAssertEqual(h.pane.showReport()["add_rows"] as? [String], allSections)
+    }
+
+    func testShowReportsDraggingWhileARowIsBeingDraggedAndNotBeforeOrAfter() throws {
+        let h = try editingHarness()
+        XCTAssertEqual(h.pane.showReport()["dragging"] as? Bool, false, "before any drag")
+        h.pane.dragBegan()
+        XCTAssertEqual(h.pane.showReport()["dragging"] as? Bool, true, "after dragBegan")
+        _ = h.pane.dragMoved(payload: (id: "verif-1037", pane: h.pane.paneIdentity),
+                             at: NSPoint(x: 100, y: try XCTUnwrap(h.pane.rowViews["item:draft-1148"]).frame.minY + 3))
+        XCTAssertEqual(h.pane.showReport()["dragging"] as? Bool, true, "while the pointer moves")
+        _ = h.pane.dragDropped(payload: (id: "verif-1037", pane: h.pane.paneIdentity),
+                               at: NSPoint(x: 100, y: try XCTUnwrap(h.pane.rowViews["item:draft-1148"]).frame.minY + 3))
+        XCTAssertEqual(h.pane.showReport()["dragging"] as? Bool, true, "a drop alone does not end the drag")
+        h.pane.dragEnded()
+        XCTAssertEqual(h.pane.showReport()["dragging"] as? Bool, false, "after dragEnded")
+        assertValidJSON(h.pane.showReport(), "a report after a drag")
+    }
+
+    func testShowReportsTheNoticeForAnEditRefusalAndForTheRemoveBannerAndNullOtherwise() throws {
+        let h = try editingHarness()
+        XCTAssertTrue(h.pane.showReport()["notice"] is NSNull, "no notice at first")
+
+        // An edit the daemon refuses.
+        h.pane.tick(item: "revie-1111")
+        h.answer(try XCTUnwrap(h.sent.last).requestId, ok: false, error: ["code": "board_unreadable", "reason": "line 42"])
+        XCTAssertEqual(h.pane.showReport()["notice"] as? String, "Not saved: the board file can't be read (line 42).")
+        assertValidJSON(h.pane.showReport(), "a report with a refusal notice")
+        h.fire(6)
+        h.rig.settle()
+        XCTAssertTrue(h.pane.showReport()["notice"] is NSNull, "the refusal goes after 6 s")
+
+        // The banner of a removal.
+        h.pane.removeItem("check-1000")
+        XCTAssertEqual(h.pane.showReport()["notice"] as? String, "Removed “Check referral 4411 duplicate”. Undo")
+        assertValidJSON(h.pane.showReport(), "a report with the remove banner")
+        h.rig.scheduler.scheduled.filter { $0.delay == TrackerPaneView.removalBannerLifetime }.forEach { $0.work() }
+        XCTAssertTrue(h.pane.showReport()["notice"] is NSNull, "the banner goes after 10 s")
+    }
+
+    func testShowReportsARowHeldForATextSelectionAsHeldAndTheAgentsMoveAsMovingButNotTheUsersOwn() throws {
+        // Held for a selection: the reader selected words in the row, then an agent rewrote its text.
+        let h = try editingHarness()
+        let textView = try XCTUnwrap(try h.row("revie-1111").textViews.first)
+        XCTAssertTrue(h.window.makeFirstResponder(textView))
+        textView.setSelectedRange(NSRange(location: 0, length: 4))
+        rigSettle(0.02)
+        XCTAssertNotNil(try h.row("revie-1111").selectedTextView, "setup: the selection holds the row")
+        try h.agentChange { script in
+            try script.updateItem("revie-1111") {
+                $0["text"] = "Rewritten by an agent"
+                $0["text_spans"] = [["kind": "text", "text": "Rewritten by an agent"]]
+            }
+        }
+        let report = h.pane.showReport()
+        let held = try XCTUnwrap(items(report, section: "now").first { ($0["id"] as? String) == "revie-1111" })
+        XCTAssertEqual(held["held"] as? String, "selection", "a row held for its selection says so")
+        XCTAssertTrue((held["held_reason"] as? String)?.contains("selected") ?? false, "and why: \(String(describing: held["held_reason"]))")
+        let others = items(report, section: "now").filter { ($0["id"] as? String) != "revie-1111" }
+        XCTAssertTrue(others.allSatisfy { $0["held"] is NSNull }, "no other row is held")
+
+        // An agent moves an item to another section: its new copy is `moving`, its old place is a `moved` stub.
+        let agent = try editingHarness()
+        try agent.agentChange { try $0.place("draft-1148", section: "next") }
+        let agentReport = agent.pane.showReport()
+        let stub = try XCTUnwrap(items(agentReport, section: "now").first { ($0["id"] as? String) == "draft-1148" })
+        XCTAssertEqual(stub["held"] as? String, "moved")
+        XCTAssertEqual(stub["stub"] as? String, "moved to Next")
+        let arrived = try XCTUnwrap(items(agentReport, section: "next").first { ($0["id"] as? String) == "draft-1148" })
+        XCTAssertEqual(arrived["held"] as? String, "moving", "the moved-elsewhere row reports the moving state")
+
+        // The user's own move is applied at once: nothing is held and nothing is moving.
+        let own = try editingHarness()
+        own.pane.moveItem("draft-1148", .toSection("next"))
+        try own.echo { try $0.place("draft-1148", section: "next") }
+        let ownReport = own.pane.showReport()
+        let ownRow = try XCTUnwrap(items(ownReport, section: "next").first { ($0["id"] as? String) == "draft-1148" })
+        XCTAssertTrue(ownRow["held"] is NSNull, "the user's own move is not held: \(String(describing: ownRow["held"]))")
+        XCTAssertTrue(items(ownReport, section: "now").allSatisfy { ($0["id"] as? String) != "draft-1148" }, "and leaves no stub")
+        assertValidJSON(report, "a report with a selection hold")
+        assertValidJSON(agentReport, "a report with a moving row")
+    }
+
     // MARK: - tracker file
 
     private func temporaryFile(_ contents: Data) throws -> String {

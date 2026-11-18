@@ -1550,6 +1550,96 @@ final class TrackerStructureEditingTests: MouseQueueTestCase {
         XCTAssertNil(h.pane.notice.spokenText)
     }
 
+    // MARK: - The strip and the sidebar pill follow a removal, its Undo and an add
+
+    /// The ids the sidebar pill counts for this pane's board.
+    private func pillIDs(_ h: TrackerEditHarness) throws -> Set<String> {
+        Set(TrackerNeedsYouProducer.items(tag: h.rig.tag, board: try XCTUnwrap(h.pane.board)).map(\.id))
+    }
+
+    /// The keys of the waiting strip's entries.
+    private func stripKeys(_ h: TrackerEditHarness) -> Set<String> {
+        Set(h.pane.presentation?.strip.entries.map(\.key) ?? [])
+    }
+
+    /// Put the restored node back where the restore op the pane sent says (what the daemon does).
+    private func echoRestore(_ h: TrackerEditHarness, _ node: TrackerBoardScript.Obj, file: StaticString = #filePath, line: UInt = #line) throws {
+        guard case .restore(_, let section, let before, let after)? = h.sent.last?.ops.first else {
+            return XCTFail("the last thing sent was not a restore: \(h.sent.last.map { "\($0.ops)" } ?? "nothing")", file: file, line: line)
+        }
+        let id = try XCTUnwrap(node["id"] as? String, file: file, line: line)
+        try h.echo({ try $0.insert(node, section: section, before: before, after: after) }, created: [id], file: file, line: line)
+    }
+
+    func testRemovingANeedsYouItemDropsItFromTheStripAndThePillOnceTheDaemonEchoesAndUndoBringsItBackToBoth() throws {
+        for viaBanner in [true, false] {
+            let how = viaBanner ? "the banner's Undo" : "⌘Z"
+            let h = try harness()
+            let id = "backf-1777"        // one of the golden board's ten needs-you items
+            let node = try XCTUnwrap(h.script.item(id))
+            let strip = stripKeys(h), pill = try pillIDs(h)
+            let total = strip.count        // the golden board's ten needs-you items and its three un-run commands
+            XCTAssertGreaterThanOrEqual(total, 10, "setup: items wait on the person")
+            XCTAssertEqual(pill.count, total, "setup: and the pill counts the same")
+            XCTAssertTrue(strip.contains("item:\(id)"))
+            XCTAssertEqual(h.pane.presentation?.strip.title, "Waiting on you (\(total))")
+
+            h.pane.removeItem(id)
+            XCTAssertEqual(h.sent.map(\.ops), [[.remove(id: id)]], "\(how): the removal is sent now, not when the banner expires")
+            XCTAssertEqual(stripKeys(h), strip, "\(how): nothing changes before the daemon's board: no optimistic strip")
+            XCTAssertEqual(try pillIDs(h), pill)
+
+            try echoRemoval(h, id)
+            XCTAssertEqual(stripKeys(h), strip.subtracting(["item:\(id)"]), "\(how): the strip dropped it once the daemon echoed")
+            XCTAssertEqual(h.pane.presentation?.strip.title, "Waiting on you (\(total - 1))")
+            XCTAssertEqual(try pillIDs(h).count, total - 1, "\(how): and so did the pill's count")
+            XCTAssertFalse(try pillIDs(h).contains { $0.hasSuffix("item:\(id)") }, "\(how): the pill no longer counts that item")
+            XCTAssertNotNil(h.pane.notice.actionButton, "\(how): setup: the banner is still up")
+
+            try undoRemoval(h, viaBanner: viaBanner)
+            XCTAssertEqual(stripKeys(h).count, total - 1, "\(how): the strip waits for the daemon's board for the restore too")
+            try echoRestore(h, node)
+            XCTAssertEqual(stripKeys(h), strip, "\(how): Undo brought the item back to the strip")
+            XCTAssertEqual(h.pane.presentation?.strip.title, "Waiting on you (\(total))")
+            XCTAssertEqual(try pillIDs(h), pill, "\(how): and to the pill")
+        }
+    }
+
+    func testRemovingANeedsYouItemAfterTheBannerHasExpiredStillRestoresItToTheStripAndThePillWithCommandZ() throws {
+        let h = try harness()
+        let id = "backf-1777"
+        let node = try XCTUnwrap(h.script.item(id))
+        let strip = stripKeys(h), pill = try pillIDs(h)
+        h.pane.removeItem(id)
+        try echoRemoval(h, id)
+        h.rig.scheduler.scheduled.filter { $0.delay == 10 }.forEach { $0.work() }
+        XCTAssertNil(h.pane.notice.spokenText, "setup: the banner expired")
+        XCTAssertEqual(stripKeys(h).count, strip.count - 1)
+
+        h.pane.performUndo()
+        try echoRestore(h, node)
+        XCTAssertEqual(stripKeys(h), strip, "the strip has it again")
+        XCTAssertEqual(try pillIDs(h), pill, "and so does the pill")
+    }
+
+    func testAddingAnItemToASectionDoesNotChangeTheStripOrThePill() throws {
+        for section in ["waiting-on-you", "now"] {
+            let h = try harness()
+            let strip = stripKeys(h), pill = try pillIDs(h)
+            let last = try XCTUnwrap(h.script.openItemIDs(inSection: section).last)
+            let (_, field) = try openAdd(h, section)
+            h.type("An item that waits on nobody", into: field)
+            h.pressReturn(in: field)
+            XCTAssertEqual(h.sent.map(\.ops), [[.add(section: section, title: "An item that waits on nobody", body: nil, before: nil, after: last)]])
+            try h.echo({ try $0.insert(self.newItem("added-0001", section, "An item that waits on nobody"), section: section, after: last) },
+                       created: ["added-0001"])
+            XCTAssertNotNil(h.pane.rowViews["item:added-0001"], "\(section): setup: the new row is on the board")
+            XCTAssertEqual(stripKeys(h), strip, "\(section): the strip is the same")
+            XCTAssertEqual(h.pane.presentation?.strip.count, strip.count, "\(section): and counts the same")
+            XCTAssertEqual(try pillIDs(h), pill, "\(section): the pill counts the same")
+        }
+    }
+
     // MARK: - Focus
 
     func testAMouseMoveMakesTheSinkFirstResponderSoCommandZUndoesIt() throws {

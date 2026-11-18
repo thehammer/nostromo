@@ -180,4 +180,139 @@ final class TrackerTranscriptSafetyTests: XCTestCase {
     func testPaneEditsKeepAFollowingTranscriptAtTheBottomWithItsComposerUntouched() throws {
         try runEditing(following: true)
     }
+
+    // T3b2: add, drag and remove next to a transcript. Dragging a row and dropping it, typing in the "+ Add item"
+    // field (open, typed in, sent, answered, closed) and removing an item (the banner appearing, the Undo, the banner
+    // going after 10 s) move neither the divider, the transcript nor the composer's text and selection. A drop never
+    // takes the keyboard; the add field and a mouse remove take it on purpose and the add field hands it back to the
+    // composer when it closes. The only frames the pane sends are the edits asked for (it has no other way to send
+    // anything, `focus_layout` included).
+
+    private func runStructure(following: Bool) throws {
+        let p = try makePane(following: following, editing: true)
+        let rig = p.rig
+        let h = p.harness
+        let pane = h.pane
+        let leftFrame = p.left.frame
+        let trackerFrame = pane.frame
+        let label = following ? "following" : "scrolled up"
+
+        func isOpen(_ item: TrackerItemRow) -> Bool { item.status == .todo || item.status == .inProgress || item.status == .blocked }
+        let viewport = pane.clipView.bounds
+        let rows = h.placedRows()
+        var triple: [TrackerItemRow] = []
+        for i in 0 ..< max(0, rows.count - 2) where triple.isEmpty {
+            let items = rows[i ... i + 2].compactMap { placed -> TrackerItemRow? in
+                guard case .item(let item) = placed.row.content, placed.key == TrackerRow.itemKey(item.id), isOpen(item),
+                      placed.frame.maxY > viewport.minY, placed.frame.minY < viewport.maxY else { return nil }
+                return item
+            }
+            if items.count == 3, Set(items.map(\.sectionId)).count == 1 { triple = items }
+        }
+        let (a, b, c) = try { () throws -> (TrackerItemRow, TrackerItemRow, TrackerItemRow) in
+            guard triple.count == 3 else { throw TrackerGateError("no three neighbouring open items on screen") }
+            return (triple[0], triple[1], triple[2])
+        }()
+        let section = a.sectionId
+        var lastOpen: String?
+        var inSection = false
+        for row in pane.displayedRows {
+            if case .section(let heading) = row.content { inSection = heading.id == section }
+            if inSection, case .item(let item) = row.content, row.key == TrackerRow.itemKey(item.id), isOpen(item) { lastOpen = item.id }
+        }
+        let last = try XCTUnwrap(lastOpen, "the section has open items")
+
+        func step(_ name: String, focusMovesOnPurpose: Bool = false, _ event: @escaping () throws -> Void) {
+            let full = "\(label) \(name)"
+            rig.assertNoMove(full, following: following, focusMovesOnPurpose: focusMovesOnPurpose) {
+                do { try event() } catch { XCTFail("\(full): \(error)") }
+            }
+            XCTAssertEqual(p.left.frame, leftFrame, "\(full): the divider moved (transcript side)")
+            XCTAssertEqual(pane.frame, trackerFrame, "\(full): the divider moved (tracker side)")
+        }
+        func over(_ id: String) throws -> NSPoint {
+            let frame = try XCTUnwrap(h.frame(of: TrackerRow.itemKey(id)), "no row for \(id)")
+            return NSPoint(x: frame.midX, y: frame.minY + 3)
+        }
+
+        // Drag a above c: it lands between b and c.
+        let payload = (id: a.id, pane: pane.paneIdentity)
+        step("a drag begins") { pane.dragBegan() }
+        step("the pointer is over a row, the line shows") {
+            XCTAssertEqual(pane.dragMoved(payload: payload, at: try over(c.id)), .move)
+            XCTAssertFalse(pane.dropIndicator.isHidden)
+        }
+        step("the drop (the move is sent)") { XCTAssertTrue(pane.dragDropped(payload: payload, at: try over(c.id))) }
+        step("the drag ends") { pane.dragEnded() }
+        XCTAssertEqual(h.edits.sent.last?.ops, [.move(id: a.id, section: section, before: nil, after: b.id)], "the drop sent the right move")
+        step("the daemon's board with the move, applied at once") { try h.echo { try $0.placeItem(a.id, after: b.id) } }
+        XCTAssertTrue(rig.window.firstResponder === rig.textView, "the composer kept the keyboard through the drop")
+
+        // Add: the field opens (it takes the keyboard on purpose), is typed in, sends, is answered, and closes.
+        let newID = "gate-structure-new"
+        step("the add field opens", focusMovesOnPurpose: true) { pane.beginAdd(section: section) }
+        let field = try XCTUnwrap(pane.rowViews[TrackerRow.addKey(section)]?.addField, "the add field is open")
+        step("typing in the add field", focusMovesOnPurpose: true) {
+            (field.currentEditor() as? NSTextView)?.string = "A title typed at the gate"
+        }
+        step("Return sends the add; the field waits", focusMovesOnPurpose: true) {
+            _ = field.control(field, textView: NSTextView(), doCommandBy: #selector(NSResponder.insertNewline(_:)))
+        }
+        XCTAssertEqual(h.edits.sent.last?.ops,
+                       [.add(section: section, title: "A title typed at the gate", body: nil, before: nil, after: last)],
+                       "the add went after the section's last open item")
+        step("the board with the new row arrives", focusMovesOnPurpose: true) {
+            try h.echo(created: [newID]) { try $0.addItem(id: newID, after: last, text: "A title typed at the gate") }
+        }
+        step("Esc closes the field and the keyboard goes back", focusMovesOnPurpose: true) {
+            _ = field.control(field, textView: NSTextView(), doCommandBy: #selector(NSResponder.cancelOperation(_:)))
+        }
+        XCTAssertNil(pane.rowViews[TrackerRow.addKey(section)]?.addField, "the field is closed")
+        XCTAssertTrue(rig.window.firstResponder === rig.textView, "focus returned to the composer that had it before")
+        XCTAssertEqual(rig.textView.string, SafetyRig.typedText, "the composer's text is intact")
+        XCTAssertEqual(rig.textView.selectedRange(), SafetyRig.typedSelection, "and so is its selection")
+
+        // Remove, with the banner coming, going and being used.
+        rig.focusComposer()
+        let expire = { h.scheduled.scheduled.filter { $0.delay == TrackerPaneView.removalBannerLifetime }.forEach { $0.work() } }
+        step("Remove: the banner appears (a mouse edit takes the pane's keyboard)", focusMovesOnPurpose: true) { pane.removeItem(c.id) }
+        XCTAssertEqual(pane.notice.actionButton?.title, "Undo", "the banner offers Undo")
+        rig.focusComposer()
+        step("the board without the row") { try h.echo { try $0.removeItem(c.id) } }
+        step("the banner goes after 10 s") { expire() }
+        XCTAssertNil(pane.notice.text, "the banner is gone")
+        step("a second Remove, its banner", focusMovesOnPurpose: true) { pane.removeItem(a.id) }
+        XCTAssertEqual(pane.notice.actionButton?.title, "Undo")
+        rig.focusComposer()
+        step("the board without it") { try h.echo { try $0.removeItem(a.id) } }
+        step("the banner's Undo sends the restore and the banner goes", focusMovesOnPurpose: true) {
+            try XCTUnwrap(pane.notice.actionButton).performClick(nil)
+        }
+        rig.focusComposer()
+        step("the board with the item back") {
+            try h.echo(created: [a.id]) { try $0.addItem(id: a.id, after: b.id, text: "Restored at the gate") }
+        }
+        XCTAssertNil(pane.notice.text)
+
+        // The pane sent the five edits above and nothing else.
+        let ops = h.edits.sent.map(\.ops)
+        XCTAssertEqual(ops.count, 5, "move, add, remove, remove, restore: \(ops)")
+        XCTAssertEqual(ops.dropLast().last?.first, .remove(id: a.id))
+        if case .restore(_, let into, _, let after)? = ops.last?.first {
+            XCTAssertEqual(into, section)
+            XCTAssertEqual(after, b.id)
+        } else {
+            XCTFail("the last frame was not a restore: \(String(describing: ops.last))")
+        }
+        XCTAssertEqual(p.left.frame, leftFrame, "the divider did not move (transcript side)")
+        XCTAssertEqual(pane.frame, trackerFrame, "the divider did not move (tracker side)")
+    }
+
+    func testDragAddAndRemoveLeaveAScrolledUpTranscriptAndItsComposerUntouched() throws {
+        try runStructure(following: false)
+    }
+
+    func testDragAddAndRemoveKeepAFollowingTranscriptAtTheBottomWithItsComposerUntouched() throws {
+        try runStructure(following: true)
+    }
 }
