@@ -103,6 +103,9 @@ mod notice_inject_tests;
 mod slash_command_tests;
 pub mod slash_commands;
 mod task_runtime;
+mod turn_note;
+#[cfg(test)]
+mod turn_note_tests;
 #[cfg(test)]
 mod wake_tests;
 use control::ControlReply;
@@ -123,6 +126,8 @@ use task_runtime::{
     stop_task, tasks_msg, TaskRuntime,
 };
 pub use task_runtime::{OutputReply, StopReport, TaskIoConfig};
+use turn_note::TurnNoteCell;
+pub use turn_note::{TurnNote, TurnNoteProvider};
 
 /// Env var overriding the resolved `claude` binary path (used by tests and by
 /// operators with a non-standard install).
@@ -225,7 +230,9 @@ impl std::fmt::Debug for DeliveredHook {
 /// `model_io` → `state` → `model` → `pending`.
 /// The task runtime's `hub` lock (in `tasks`) may be held while the
 /// `transcript` lock is taken, never the reverse.
-/// `stdin`, `note_prefix`, `transcript`, `waiters` and the `login` cell are leaf
+/// `stdin`, `note_prefix`, `turn_note` (the tracker registry's own lock is taken
+/// inside its calls and never holds a session lock), `transcript`, `waiters` and
+/// the `login` cell are leaf
 /// locks: they may be taken while holding the others, but nothing else is ever
 /// acquired while one of them is held.
 ///
@@ -278,6 +285,9 @@ struct Shared {
     /// one set later reaches sessions already running. A leaf lock: the hook is
     /// cloned out and called with nothing held.
     turn_hook: TurnHookCell,
+    /// The manager's tracker-note provider (see [`TurnNoteProvider`]); shared
+    /// like `turn_hook`. A leaf lock: cloned out and called with nothing held.
+    turn_note: TurnNoteCell,
     /// The conversation history, told when a turn completes (see
     /// `conversation_history`). A shared handle.
     conversations: crate::conversations::ConversationHistory,
@@ -716,6 +726,8 @@ pub struct SessionManager {
     session_end_hook: Option<SessionEndHook>,
     /// Told when a turn starts (and who wrote its message) or ends.
     turn_hook: TurnHookCell,
+    /// Provides the tracker note a written message carries.
+    turn_note: TurnNoteCell,
     /// Mother job notices, when the daemon wires them in: told about focus
     /// registry pushes and reachable by the IPC server.
     notice_engine: Option<Arc<crate::mother::notices::NoticeEngine>>,
@@ -828,6 +840,7 @@ impl SessionManager {
             task_io: TaskIoConfig::default(),
             session_end_hook: None,
             turn_hook: Arc::new(std::sync::RwLock::new(None)),
+            turn_note: Arc::new(std::sync::RwLock::new(None)),
             notice_engine: None,
             authored_prs: None,
             authored_pr_actions: None,
@@ -1524,6 +1537,7 @@ impl SessionManager {
             tasks,
             login: login::LoginLink::new(self.login.clone()),
             turn_hook: Arc::clone(&self.turn_hook),
+            turn_note: Arc::clone(&self.turn_note),
             conversations: self.conversations.clone(),
             sensitive: self.sensitive.clone(),
             activity: self.activity.for_session(&tag, &session_id),
@@ -1713,10 +1727,14 @@ impl SessionManager {
             // agent hears about it once, ahead of what it was sent. Only a message
             // written now carries it (a queued one can still be dropped by an
             // interrupt), and it is forgotten only once the write has succeeded.
-            let note = self
-                .approvals
-                .as_ref()
-                .and_then(|b| b.peek_restart_note(tag));
+            // (Not before a typed slash command: it must start the message.)
+            let note = if local_command::split_typed_command(&message.text).is_some() {
+                None
+            } else {
+                self.approvals
+                    .as_ref()
+                    .and_then(|b| b.peek_restart_note(tag))
+            };
             let outgoing = match &note {
                 Some(note) => PendingMessage {
                     text: format!("{note}\n\n{}", message.text),
@@ -3939,30 +3957,65 @@ fn write_user_message(shared: &Shared, msg: &PendingMessage) -> Result<()> {
 }
 
 fn write_user_message_framed(shared: &Shared, msg: &PendingMessage) -> Result<()> {
-    let prefix = lock_recover(&shared.note_prefix).take();
-    match prefix {
-        Some(note) => {
-            let text = format!(
-                "{NOSTROMO_NOTE_OPEN}{note}{NOSTROMO_NOTE_CLOSE}{}",
-                msg.text
-            );
-            let result = login::write_recorded(
-                shared,
-                &PendingMessage {
-                    text,
-                    images: msg.images.clone(),
-                    origin: msg.origin.clone(),
-                    on_delivered: None,
-                },
-            );
-            if result.is_err() {
-                // Not delivered: the note goes with the next message instead.
-                *lock_recover(&shared.note_prefix) = Some(note);
-            }
-            result
-        }
-        None => login::write_recorded(shared, msg),
+    // The CLI runs a slash command only when it STARTS the message: a note in
+    // front would hand `/compact` to the model as text. No note goes with a
+    // typed command (the model note stays queued, the tracker's is not even
+    // prepared); both wait for the next ordinary message.
+    if local_command::split_typed_command(&msg.text).is_some() {
+        return login::write_recorded(shared, msg, None);
     }
+    let model_note = lock_recover(&shared.note_prefix).take();
+    let tracker_note = tracker_note_for(shared);
+    if model_note.is_none() && tracker_note.is_none() {
+        return login::write_recorded(shared, msg, None);
+    }
+    // One block: the model note first, a blank line, then the tracker's.
+    let note = [
+        model_note.as_deref(),
+        tracker_note.as_ref().map(|n| n.text()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n\n");
+    let text = format!(
+        "{NOSTROMO_NOTE_OPEN}{note}{NOSTROMO_NOTE_CLOSE}{}",
+        msg.text
+    );
+    // The tracker note is committed by the login cell when the frame binds to
+    // its turn (not when it is written: the CLI may die before reading it).
+    let result = login::write_recorded(
+        shared,
+        &PendingMessage {
+            text,
+            images: msg.images.clone(),
+            origin: msg.origin.clone(),
+            on_delivered: None,
+        },
+        tracker_note,
+    );
+    if result.is_err() {
+        // Not delivered: the model note goes with the next message, and the
+        // tracker note was dropped uncommitted so its changes do too.
+        if let Some(note) = model_note {
+            *lock_recover(&shared.note_prefix) = Some(note);
+        }
+    }
+    result
+}
+
+/// What the tracker has to tell this session, never for a network-driven focus.
+/// The provider runs with no session lock held.
+fn tracker_note_for(shared: &Shared) -> Option<Box<dyn TurnNote>> {
+    let provider = shared
+        .turn_note
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()?;
+    if shared.sensitive.is_network_driven(&shared.ctx.tag) {
+        return None;
+    }
+    provider.prepare(&shared.ctx.tag, &shared.ctx.session_id)
 }
 
 /// Write one stream-json user-message frame to the child's stdin.

@@ -155,7 +155,15 @@ struct CursorEntry {
     board_key: String,
     seq: u64,
     used: u64,
+    /// Changes at or before `seq` that the session was only told were hidden
+    /// (withheld text): it has not seen them, so its overwrite of one still
+    /// conflicts. Cleared by `set` (a read shows everything again).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    unseen: Vec<u64>,
 }
+
+/// Most hidden changes tracked per (session, board); the oldest fall off.
+pub const MAX_UNSEEN: usize = 200;
 
 impl Cursors {
     pub fn new() -> Cursors {
@@ -169,6 +177,36 @@ impl Cursors {
             .map(|e| e.seq)
     }
 
+    /// The changes at or before the session's cursor it was told only were
+    /// hidden (see [`Cursors::advance_hiding`]).
+    pub fn unseen(&self, session_id: &str, board_key: &str) -> Vec<u64> {
+        self.entries
+            .iter()
+            .find(|e| e.session_id == session_id && e.board_key == board_key)
+            .map(|e| e.unseen.clone())
+            .unwrap_or_default()
+    }
+
+    /// Moves an existing cursor to `seq` past the `hidden` changes: the
+    /// session was told they exist, not what they say, so they stay unseen
+    /// for the conflict rule. A no-op without a cursor.
+    pub fn advance_hiding(&mut self, session_id: &str, board_key: &str, seq: u64, hidden: &[u64]) {
+        let mut unseen = self.unseen(session_id, board_key);
+        unseen.extend_from_slice(hidden);
+        unseen.sort_unstable();
+        unseen.dedup();
+        let excess = unseen.len().saturating_sub(MAX_UNSEEN);
+        unseen.drain(..excess);
+        self.set(session_id, board_key, seq);
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.session_id == session_id && e.board_key == board_key)
+        {
+            entry.unseen = unseen;
+        }
+    }
+
     pub fn set(&mut self, session_id: &str, board_key: &str, seq: u64) {
         self.tick += 1;
         let used = self.tick;
@@ -180,12 +218,14 @@ impl Cursors {
             Some(entry) => {
                 entry.seq = seq;
                 entry.used = used;
+                entry.unseen.clear();
             }
             None => self.entries.push(CursorEntry {
                 session_id: session_id.to_string(),
                 board_key: board_key.to_string(),
                 seq,
                 used,
+                unseen: Vec::new(),
             }),
         }
         while self.session_count() > MAX_CURSOR_SESSIONS {

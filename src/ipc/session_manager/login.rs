@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use super::{
     advance, lock_recover, resolve_claude, write_user_frame, PendingMessage, SessionEvent,
-    SessionManager, Shared, TurnAuthor,
+    SessionManager, Shared, TurnAuthor, TurnNote,
 };
 use crate::ipc::auth_failure::TurnAuthOutcome;
 use crate::ipc::claude_login::{
@@ -204,6 +204,10 @@ struct LoginCell {
     /// The frame that started the turn now running.
     bound: Option<PendingMessage>,
     hold: Option<Hold>,
+    /// The tracker note `written` carries, committed the moment the message
+    /// binds to its turn (the agent has it from then on); dropped
+    /// (uncommitted) whenever the message is lost or never bound.
+    written_note: Option<Box<dyn TurnNote>>,
 }
 
 /// A session's login state, shared with its reader thread.
@@ -265,12 +269,16 @@ impl LoginLink {
         }
     }
 
-    fn remember_written(&self, msg: &PendingMessage) {
-        lock_recover(&self.cell).written = Some(msg.clone());
+    fn remember_written(&self, msg: &PendingMessage, note: Option<Box<dyn TurnNote>>) {
+        let mut cell = lock_recover(&self.cell);
+        cell.written = Some(msg.clone());
+        cell.written_note = note;
     }
 
     fn forget_written(&self) {
-        lock_recover(&self.cell).written = None;
+        let mut cell = lock_recover(&self.cell);
+        cell.written = None;
+        cell.written_note = None;
     }
 }
 
@@ -279,8 +287,18 @@ impl LoginLink {
 /// Write `msg` verbatim as one user frame, remembering it as the message the
 /// next turn will be bound to. It is remembered *before* the write: the CLI's
 /// echo can reach the reader before the write returns. A failed write forgets it.
-pub(super) fn write_recorded(shared: &Shared, msg: &PendingMessage) -> Result<()> {
-    shared.login.remember_written(msg);
+///
+/// `note` is the tracker note the frame carries. The agent has it once the
+/// frame binds to its turn: until then it is kept here, and dropped
+/// uncommitted if the write fails or the session dies first. A turn that then
+/// fails to authenticate keeps the commit: the held message is resent with the
+/// note in its text.
+pub(super) fn write_recorded(
+    shared: &Shared,
+    msg: &PendingMessage,
+    note: Option<Box<dyn TurnNote>>,
+) -> Result<()> {
+    shared.login.remember_written(msg, note);
     let result = write_user_frame(&shared.stdin, &msg.text, &msg.images);
     if result.is_err() {
         shared.login.forget_written();
@@ -290,13 +308,27 @@ pub(super) fn write_recorded(shared: &Shared, msg: &PendingMessage) -> Result<()
 
 // ── the reader's side ──────────────────────────────────────────────────────────
 
+/// The message carrying `note` bound to its turn: the agent has the note, so
+/// the cursor moves now (not at turn end, or the agent acting on the note
+/// would conflict with the very change it showed). The registry's lock is
+/// taken with no login lock held.
+fn commit_note(note: Option<Box<dyn TurnNote>>) {
+    if let Some(note) = note {
+        note.commit();
+    }
+}
+
 /// A turn started: it belongs to the message the daemon last wrote, if any.
 /// Returns who wrote that message (the turn's author; never read from the
 /// prompt text).
 pub(super) fn on_turn_started(shared: &Shared) -> TurnAuthor {
     let mut cell = lock_recover(&shared.login.cell);
     cell.bound = cell.written.take();
-    TurnAuthor::of(cell.bound.as_ref())
+    let note = cell.written_note.take();
+    let author = TurnAuthor::of(cell.bound.as_ref());
+    drop(cell);
+    commit_note(note);
+    author
 }
 
 /// A turn the transcript read as a wake (`task_wake` origin) started. It is
@@ -313,12 +345,17 @@ pub(super) fn on_wake_turn_started(shared: &Shared) -> TurnAuthor {
             .trim_start()
             .starts_with(TASK_NOTIFICATION_OPEN)
     });
-    if is_ours {
+    let note = if is_ours {
         cell.bound = cell.written.take();
+        cell.written_note.take()
     } else {
         cell.bound = None;
-    }
-    TurnAuthor::of(cell.bound.as_ref())
+        None
+    };
+    let author = TurnAuthor::of(cell.bound.as_ref());
+    drop(cell);
+    commit_note(note);
+    author
 }
 
 /// The text of the message the daemon last wrote, when it is a typed slash
@@ -342,12 +379,17 @@ pub(super) fn has_unanswered_command(shared: &Shared) -> bool {
 pub(super) fn on_local_command_started(shared: &Shared) -> (TurnAuthor, Option<String>) {
     let mut cell = lock_recover(&shared.login.cell);
     let text = written_command_text(&cell);
-    cell.bound = if text.is_some() {
-        cell.written.take()
+    let note = if text.is_some() {
+        cell.bound = cell.written.take();
+        cell.written_note.take()
     } else {
+        cell.bound = None;
         None
     };
-    (TurnAuthor::of(cell.bound.as_ref()), text)
+    let author = TurnAuthor::of(cell.bound.as_ref());
+    drop(cell);
+    commit_note(note);
+    (author, text)
 }
 
 /// The message the running turn is bound to, as a typed slash command (the
@@ -373,7 +415,9 @@ pub(super) fn on_cli_turn_started(shared: &Shared) -> TurnAuthor {
 /// a typed slash command): the written message is spent, so nothing later can
 /// bind it.
 pub(super) fn on_unbound_echo(shared: &Shared) {
-    lock_recover(&shared.login.cell).written = None;
+    let mut cell = lock_recover(&shared.login.cell);
+    cell.written = None;
+    cell.written_note = None;
 }
 
 /// The turn that last started was a phantom (a replayed system entry), dropped
@@ -398,6 +442,7 @@ pub(super) fn on_turn_end(shared: &Shared, tag: &str, outcome: Option<TurnAuthOu
             // written meanwhile is still waiting for its own turn.
             if cell.bound.take().is_some() {
                 cell.written = None;
+                cell.written_note = None;
             }
             let resending = cell
                 .hold
@@ -420,6 +465,9 @@ pub(super) fn on_turn_end(shared: &Shared, tag: &str, outcome: Option<TurnAuthOu
         let mut cell = lock_recover(&link.cell);
         let bound = cell.bound.take();
         cell.written = None;
+        // The note was committed when its turn started, and stays so: the
+        // held message is resent byte for byte, note included.
+        cell.written_note = None;
         match cell.hold.take() {
             Some(prev) if prev.phase == HoldPhase::Resending => {
                 let hold = prev.failed_again(outcome.resendable);
@@ -765,7 +813,7 @@ impl SessionManager {
                     attempt,
                     "resending held message"
                 );
-                if write_recorded(&shared, &frame).is_ok() {
+                if write_recorded(&shared, &frame, None).is_ok() {
                     shared.broadcast(SessionEvent::State(SessionState::MidTurn));
                     shared.login.notify();
                     return ResendOutcome::Resent;
