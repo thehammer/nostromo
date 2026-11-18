@@ -221,6 +221,68 @@ struct TrackerBoardScript {
     }
 }
 
+/// What the daemon does for the structure ops (T3b2): `add`, `move` and `restore` put an item node at a place in a
+/// section. In an extension so the placement shares the script's private node list.
+extension TrackerBoardScript {
+    /// A new item node, as the daemon's `add` or `restore` writes it (its own markdown in `source`).
+    static func newItemNode(id: String, section: String, text: String, status: String = "todo") -> Obj {
+        let spans: [Obj] = [["kind": "text", "text": text]]
+        let none: [Obj] = []
+        return ["type": "item", "id": id, "section": section, "text_spans": spans, "status": status,
+                "updated_at": TrackerPaneFx.iso(1_760_547_900), "note_blocks": none, "links": none,
+                "kind": "item", "ran": false,
+                "source": "- [ ] \(text) — \(status) <!-- #\(id) 1760547900 -->\n"]
+    }
+
+    /// The node goes to `section`: before `before`, after `after`, or (neither) the end of the section's open items
+    /// (its heading when it has none).
+    mutating func insert(_ node: Obj, section: String, before: String? = nil, after: String? = nil) throws {
+        var all = nodes
+        var placed = node
+        placed["section"] = section
+        func itemIndex(_ id: String) throws -> Int {
+            guard let i = all.firstIndex(where: { ($0["type"] as? String) == "item" && ($0["id"] as? String) == id }) else {
+                throw TrackerFixtureError(description: "no item \(id) to place the node beside")
+            }
+            return i
+        }
+        let at: Int
+        if let before {
+            at = try itemIndex(before)
+        } else if let after {
+            at = try itemIndex(after) + 1
+        } else {
+            let open = all.indices.filter { i in
+                (all[i]["type"] as? String) == "item" && (all[i]["section"] as? String) == section
+                    && (all[i]["status"] as? String) != "done"
+            }
+            if let last = open.last {
+                at = last + 1
+            } else if let heading = all.firstIndex(where: { ($0["type"] as? String) == "section" && ($0["id"] as? String) == section }) {
+                at = heading + 1
+            } else {
+                throw TrackerFixtureError(description: "no section \(section) in the golden board")
+            }
+        }
+        all.insert(placed, at: at)
+        nodes = all
+    }
+
+    /// The daemon's `move`: the item leaves its place for the one named.
+    mutating func place(_ id: String, section: String, before: String? = nil, after: String? = nil) throws {
+        var all = nodes
+        let node = all.remove(at: try index(ofItem: id))
+        nodes = all
+        try insert(node, section: section, before: before, after: after)
+    }
+
+    /// The open item ids of a section, in board order.
+    func openItemIDs(inSection section: String) -> [String] {
+        itemNodes.filter { ($0["section"] as? String) == section && ($0["status"] as? String) != "done" }
+            .compactMap { $0["id"] as? String }
+    }
+}
+
 /// One pane in its own window, with the injected collaborators the tests drive.
 struct TrackerPaneRig {
     let window: NSWindow
