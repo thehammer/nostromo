@@ -15,6 +15,15 @@ struct TrackerBase: Equatable {
     let epoch: String?
 }
 
+/// What putting a removed item back needs, taken from the board on screen when the item goes: its exact
+/// markdown and the place it was in.
+struct TrackerItemSnapshot: Equatable {
+    /// The item's title as the banner names it.
+    let title: String
+    let source: String
+    let origin: TrackerMoveDestination
+}
+
 /// The tracker pane's edit controller (one per pane): builds the `tracker_edit` ops for what the user
 /// does in the pane, sends them, takes the daemon's answers, tells the pane why an edit did not
 /// happen, and registers the inverse of every undoable edit with the pane's own `UndoManager`.
@@ -62,6 +71,15 @@ final class TrackerItemEditing {
     /// The daemon says the pane's view is out of date: the pane shows the board as it is now.
     var onLookAgain: (() -> Void)?
 
+    /// The item's removal has just happened (its title), or the removal was taken back or refused (nil).
+    var onRemoved: ((String?) -> Void)?
+    /// The exact source and place of an item on the board on screen (nil when it is not there).
+    var itemSnapshot: (String) -> TrackerItemSnapshot? = { _ in nil }
+    /// Where the view has an item now, as a place to move it back to.
+    var itemOrigin: (String) -> TrackerMoveDestination? = { _ in nil }
+    /// The version of the newest board the pane has applied.
+    var boardVersion: () -> UInt64 = { 0 }
+
     private let tag: String
     private let send: Sender
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
@@ -84,6 +102,26 @@ final class TrackerItemEditing {
     }
     private var undoStack: [UndoToken] = []
     private var redoStack: [UndoToken] = []
+
+    /// The id of an item that a removal and its undo and redo keep naming: a restore may bring the item back
+    /// under a new id (the answer's `created`).
+    private final class ItemRef {
+        var id: String
+        init(_ id: String) { self.id = id }
+    }
+    /// The newest removal the user made (the banner's Undo).
+    private var latestRemoval: (token: UndoToken, snapshot: TrackerItemSnapshot, ref: ItemRef)?
+
+    /// Items whose next change is this pane's own move or removal (sent, or confirmed and waiting for its
+    /// board): the deferral applies them even on screen.
+    private var exemptPending: [String: Int] = [:]
+    private var exemptConfirmed: [String: UInt64] = [:]
+    var exemptItemIds: Set<String> { Set(exemptPending.keys).union(exemptConfirmed.keys) }
+
+    /// A board with this version is on screen: the confirmed edits it shows are no longer exempt.
+    func boardApplied(version: UInt64) {
+        exemptConfirmed = exemptConfirmed.filter { $0.value > version }
+    }
 
     init(tag: String,
          results: AnyPublisher<TrackerEditResultWire, Never>,
@@ -181,13 +219,104 @@ final class TrackerItemEditing {
         submit([.clearBadge(id: itemId)], base: base, completion: { _ in })
     }
 
+    // MARK: - Structure: add, move, remove
+
+    /// A new item at the end of `after`'s place in `section` (the section's end without it). Undo removes it.
+    func add(section: String, title: String, body: String?, after: String?, base: TrackerBase,
+             completion: @escaping (Outcome) -> Void) {
+        let op = TrackerPaneOpWire.add(section: section, title: title, body: body, before: nil, after: after)
+        submit([op], base: base) { [weak self] outcome in
+            if case .saved(_, let created) = outcome, let id = created.first {
+                self?.registerUndo(name: "Add Item", ids: [id]) { me in
+                    me.removeItem(ItemRef(id), base: me.shownBase([id]), announce: false)
+                }
+            }
+            completion(outcome)
+        }
+    }
+
+    /// Move an item to `destination`; undo moves it back to where the view has it now.
+    func move(_ id: String, to destination: TrackerMoveDestination, base: TrackerBase) {
+        guard let origin = itemOrigin(id), origin != destination else { return }
+        perform([destination.moveOp(id)], inverse: [origin.moveOp(id)], name: "Move Item", base: base, exempt: true)
+    }
+
+    /// Remove an item (the user's own: the banner offers Undo).
+    func remove(_ id: String, base: TrackerBase) {
+        removeItem(ItemRef(id), base: base, announce: true)
+    }
+
+    /// The banner's Undo: put the newest removal back. When it is also the newest undo, that is ⌘Z itself
+    /// (so Redo removes it again); otherwise it is restored directly and its ⌘Z entry is dropped.
+    func undoLatestRemoval() {
+        guard let latest = latestRemoval else { return }
+        if undoStack.last === latest.token, manager.canUndo {
+            manager.undo()
+            return
+        }
+        latest.token.isVoid = true
+        restoreItem(latest.snapshot, ref: latest.ref, base: shownBase([]))
+    }
+
+    private func removeItem(_ ref: ItemRef, base: TrackerBase, announce: Bool) {
+        guard let snapshot = itemSnapshot(ref.id) else {
+            showNotice("Not removed: that item is no longer on the board.")
+            return
+        }
+        let token = registerUndo(name: "Remove Item", ids: []) { me in
+            me.restoreItem(snapshot, ref: ref, base: me.shownBase([]))
+        }
+        if announce {
+            latestRemoval = (token, snapshot, ref)
+            onRemoved?(snapshot.title)
+        }
+        submitExempt([ref.id], [.remove(id: ref.id)], base: base) { [weak self] outcome in
+            guard case .failed = outcome else { return }
+            self?.retract(token)
+            if self?.latestRemoval?.token === token {
+                self?.latestRemoval = nil
+                self?.onRemoved?(nil)
+            }
+        }
+    }
+
+    private func restoreItem(_ snapshot: TrackerItemSnapshot, ref: ItemRef, base: TrackerBase) {
+        if latestRemoval?.ref === ref {
+            latestRemoval = nil
+            onRemoved?(nil)
+        }
+        let token = registerUndo(name: "Remove Item", ids: []) { me in
+            me.removeItem(ref, base: me.shownBase([ref.id]), announce: false)
+        }
+        submit([snapshot.origin.restoreOp(source: snapshot.source)], base: base) { [weak self] outcome in
+            switch outcome {
+            case .saved(_, let created): if let id = created.first { ref.id = id }
+            case .failed: self?.retract(token)
+            case .timedOut: break
+            }
+        }
+    }
+
     // MARK: - Sending
 
     /// Send `ops` and register `inverse` for ⌘Z (and, from inside the undo, the redo). A refusal takes back
     /// this edit's registration only: the history before it stays.
     private func perform(_ ops: [TrackerPaneOpWire], inverse: [TrackerPaneOpWire], name: String,
-                         base: TrackerBase, completion: ((Outcome) -> Void)? = nil) {
+                         base: TrackerBase, exempt: Bool = false, completion: ((Outcome) -> Void)? = nil) {
         let ids = Set(ops.compactMap(Self.itemId)).union(inverse.compactMap(Self.itemId))
+        let token = registerUndo(name: name, ids: Array(ids)) { me in
+            me.perform(inverse, inverse: ops, name: name, base: me.shownBase(Array(ids)), exempt: exempt)
+        }
+        submitExempt(exempt ? Array(ids) : [], ops, base: base) { [weak self] outcome in
+            if case .failed = outcome { self?.retract(token) }
+            completion?(outcome)
+        }
+    }
+
+    /// Register what ⌘Z runs (`run`, when every item in `ids` is still on the board). Registered while undoing
+    /// it is a redo; a fresh edit also clears the redo stack.
+    @discardableResult
+    private func registerUndo(name: String, ids: [String], run: @escaping (TrackerItemEditing) -> Void) -> UndoToken {
         let token = UndoToken()
         manager.beginUndoGrouping()
         manager.registerUndo(withTarget: self) { me in
@@ -198,20 +327,43 @@ final class TrackerItemEditing {
                 me.showNotice("Couldn't undo: the item was removed.")
                 return
             }
-            me.perform(inverse, inverse: ops, name: name, base: me.shownBase(Array(ids)))
+            run(me)
         }
         manager.setActionName(name)
         manager.endUndoGrouping()
-        // Registered while undoing, it is a redo; a fresh edit also clears the redo stack.
         if manager.isUndoing {
             redoStack.append(token)
         } else {
             if !manager.isRedoing { redoStack.removeAll() }
             undoStack.append(token)
         }
+        return token
+    }
+
+    /// `submit`, with `ids` exempt from the deferral until the board with the change is on screen.
+    private func submitExempt(_ ids: [String], _ ops: [TrackerPaneOpWire], base: TrackerBase,
+                              completion: @escaping (Outcome) -> Void) {
+        guard !ids.isEmpty else {
+            submit(ops, base: base, completion: completion)
+            return
+        }
+        for id in ids { exemptPending[id, default: 0] += 1 }
+        var released = false
         submit(ops, base: base) { [weak self] outcome in
-            if case .failed = outcome { self?.retract(token) }
-            completion?(outcome)
+            if let self {
+                if !released {
+                    released = true
+                    for id in ids {
+                        let left = (self.exemptPending[id] ?? 1) - 1
+                        if left > 0 { self.exemptPending[id] = left } else { self.exemptPending.removeValue(forKey: id) }
+                    }
+                }
+                // The answer came before its board: the board that follows is still the user's own change.
+                if case .saved(let version, _) = outcome, self.boardVersion() < version {
+                    for id in ids { self.exemptConfirmed[id] = version }
+                }
+            }
+            completion(outcome)
         }
     }
 
@@ -344,9 +496,24 @@ final class TrackerItemEditing {
 
 // MARK: - Row controls
 
+/// Where an item can go from the Move menu, VoiceOver or the keyboard.
+struct TrackerMoveOptions {
+    var canUp: Bool
+    var canDown: Bool
+    /// The other sections, in board order.
+    var sections: [(id: String, title: String)]
+}
+
+/// One choice of the Move menu.
+enum TrackerMoveRequest: Equatable {
+    case up
+    case down
+    case toSection(String)
+}
+
 /// A control inside an item row that keyboard focus returns to after the row is rebuilt.
 enum TrackerControlRole: String, CaseIterable {
-    case tick, disclosure, conflict, sensitive, editTitle, editDetails, status
+    case tick, disclosure, conflict, sensitive, editTitle, editDetails, status, move, remove
 }
 
 /// The status mark as a button: the same glyph, colour and place as the label it replaces, so a row
@@ -359,6 +526,30 @@ final class TrackerTickButton: NSButton {
 
     private var glyphRect: NSRect {
         NSRect(x: Self.glyphOrigin.x, y: Self.glyphOrigin.y, width: TrackerRowView.markWidth, height: 17)
+    }
+
+    /// The press began, moved or ended: the row tells a click from a drag (more than 3 pt of movement).
+    var onPress: ((NSEvent) -> Void)?
+    var onMove: ((NSEvent) -> Bool)?
+    private var pressed = false
+    private var dragged = false
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        pressed = true
+        dragged = false
+        onPress?(event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard pressed, !dragged else { return }
+        if onMove?(event) == true { dragged = true }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer { pressed = false }
+        guard pressed, !dragged, bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+        sendAction(action, to: target)
     }
 
     init(glyph: String, color: NSColor) {
@@ -439,6 +630,8 @@ final class TrackerTitleEditor: NSTextField, NSTextFieldDelegate {
     var onCommit: ((String) -> Void)?
     var onCancel: (() -> Void)?
     private(set) var isFinished = false
+    /// The last commit was Return (not losing focus).
+    private(set) var committedByReturn = false
     /// Focus events before the editor is set up (arming) are not the user's: they save and cancel nothing.
     private var isArmed = false
     let original: String
@@ -512,6 +705,7 @@ final class TrackerTitleEditor: NSTextField, NSTextFieldDelegate {
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         switch selector {
         case #selector(NSResponder.insertNewline(_:)):
+            committedByReturn = true
             commit()
             return true
         case #selector(NSResponder.cancelOperation(_:)):
@@ -524,6 +718,7 @@ final class TrackerTitleEditor: NSTextField, NSTextFieldDelegate {
 
     func controlTextDidEndEditing(_ obj: Notification) {
         if !isEditable { onFocusLeftWhilePending?() }
+        if !isFinished { committedByReturn = false }
         commit()
     }
 }
@@ -688,14 +883,20 @@ struct TrackerEditSession {
     }
 }
 
-/// The quiet one-line notice about an edit that did not happen. Fixed height while shown, nothing otherwise.
+/// The quiet one-line notice above the board: an edit that did not happen, or "Removed … Undo". Fixed
+/// height while shown, nothing otherwise. The text truncates before it reaches the action button.
 final class TrackerNoticeView: NSView {
     override var isFlipped: Bool { true }
 
     static let height: CGFloat = 28
+    /// Clear space between the end of the text's frame and the action button.
+    static let actionGap: CGFloat = 8
 
     let label = NSTextField(labelWithString: "")
     private(set) var text: String?
+    private(set) var actionButton: TrackerChipButton?
+    private(set) var actionTitle: String?
+    private var onAction: (() -> Void)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -716,17 +917,47 @@ final class TrackerNoticeView: NSView {
 
     var preferredHeight: CGFloat { text == nil ? 0 : Self.height }
 
-    func update(_ text: String?) {
-        guard text != self.text else { return }
+    /// Everything the notice says, as the probe reports it ("Removed “Ship it”. Undo").
+    var spokenText: String? {
+        guard let text else { return nil }
+        return [text, actionTitle].compactMap { $0 }.joined(separator: " ")
+    }
+
+    func update(_ text: String?, actionTitle: String? = nil, onAction: (() -> Void)? = nil) {
+        self.onAction = onAction
+        guard text != self.text || actionTitle != self.actionTitle else { return }
         self.text = text
+        self.actionTitle = text == nil ? nil : actionTitle
         label.stringValue = text ?? ""
+        actionButton?.removeFromSuperview()
+        actionButton = nil
+        if let title = self.actionTitle {
+            let button = TrackerChipButton(text: title, color: TrackerTheme.text, fill: TrackerTheme.badgeFill)
+            button.target = self
+            button.action = #selector(actionPressed(_:))
+            button.setAccessibilityLabel(title)
+            addSubview(button)
+            actionButton = button
+        }
         isHidden = text == nil
         needsLayout = true
     }
 
+    @objc private func actionPressed(_ sender: Any?) {
+        onAction?()
+    }
+
     override func layout() {
         super.layout()
-        label.frame = NSRect(x: TrackerRowView.hPad, y: 6, width: max(bounds.width - TrackerRowView.hPad * 2, 1), height: 16)
+        let h = TrackerRowView.hPad
+        var right = bounds.width - h
+        if let button = actionButton {
+            let w = button.fittingWidth
+            button.frame = NSRect(x: max(right - w, h), y: floor((Self.height - TrackerRowView.chipHeight) / 2),
+                                  width: w, height: TrackerRowView.chipHeight)
+            right = button.frame.minX - Self.actionGap
+        }
+        label.frame = NSRect(x: h, y: 6, width: max(right - h, 1), height: 16)
     }
 }
 

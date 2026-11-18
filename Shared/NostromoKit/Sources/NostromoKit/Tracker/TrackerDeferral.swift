@@ -114,11 +114,14 @@ public struct TrackerDeferral {
     }
 
     /// `heldKeys` are the rows that keep their content and place until released: the row holding a
-    /// text selection, and every row with an open editor or a save still pending.
+    /// text selection, and every row with an open editor or a save still pending. `exempt` are the rows whose
+    /// next change is this pane's own pending move or removal: the user asked for it, so it applies even on
+    /// screen (only the agent's on-screen moves wait).
     public mutating func resolve(displayed: [TrackerRow],
                                  target: TrackerPresentation,
                                  visibleKeys: Set<String>,
-                                 heldKeys: Set<String>) -> TrackerDeferralResult {
+                                 heldKeys: Set<String>,
+                                 exempt: Set<String> = []) -> TrackerDeferralResult {
         defer {
             releaseEverything = false
             releasedSections = []
@@ -126,7 +129,7 @@ public struct TrackerDeferral {
         // Releasing everything (the pane was reopened, the filter changed) still never takes the
         // content of a row out from under a text selection.
         let holds = findHolds(displayed: displayed, target: target, visibleKeys: releaseEverything ? [] : visibleKeys,
-                              heldKeys: heldKeys)
+                              heldKeys: heldKeys, exempt: exempt)
         let rows = place(holds, displayed: displayed, target: target)
 
         var renamed: [String: String] = [:]
@@ -148,10 +151,13 @@ public struct TrackerDeferral {
     // MARK: - Private
 
     private func findHolds(displayed: [TrackerRow], target: TrackerPresentation,
-                           visibleKeys: Set<String>, heldKeys: Set<String>) -> [TrackerHold] {
+                           visibleKeys: Set<String>, heldKeys: Set<String>, exempt: Set<String>) -> [TrackerHold] {
         let targetByKey = Dictionary(target.rows.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
         // Rows whose place among the others changed (not just shifted by inserts and removals).
-        let movedKeys = Set(TrackerDiff.ops(from: displayed, to: target.rows).compactMap { op -> String? in
+        // The user's own moves are left out of the comparison: moving one row past another must not make
+        // that other row look moved by the agent.
+        let movedKeys = Set(TrackerDiff.ops(from: displayed.filter { !exempt.contains($0.key) },
+                                            to: target.rows.filter { !exempt.contains($0.key) }).compactMap { op -> String? in
             if case .move(let key, _) = op { return key }
             return nil
         })
@@ -169,6 +175,7 @@ public struct TrackerDeferral {
                 continue
             }
             guard let shown = row.item else { continue }   // only items are deferred
+            if exempt.contains(key) { continue }
             // A selection in the moved item's new copy keeps its stub (and so its key) too.
             let onScreen = visibleKeys.contains(key) || heldKeys.contains(Self.movingPrefix + shown.id)
             guard onScreen else { continue }

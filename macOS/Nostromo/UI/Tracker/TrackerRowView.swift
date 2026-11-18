@@ -45,7 +45,7 @@ enum TrackerTheme {
 /// Text is in non-editable, selectable `TrackerTextView`s that wrap at the row's width. An item's
 /// relative time sits in a fixed-width right-aligned label, so a clock tick changes only that label
 /// and never the row's layout.
-final class TrackerRowView: NSView {
+final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
     override var isFlipped: Bool { true }
 
     static let hPad: CGFloat = 12
@@ -127,6 +127,23 @@ final class TrackerRowView: NSView {
     var onReviewSensitive: ((String, NSView, Bool) -> Void)?
     /// The details editor's height changed: the pane lays the rows out again.
     var onEditorResized: (() -> Void)?
+    /// What the Move menu offers for an item (the pane knows the sections and the neighbours).
+    var moveOptions: ((String) -> TrackerMoveOptions)?
+    /// A move was chosen (item id, where).
+    var onMove: ((String, TrackerMoveRequest) -> Void)?
+    /// Remove was chosen (item id).
+    var onRemove: ((String) -> Void)?
+    /// The add row was activated (section id).
+    var onBeginAdd: ((String) -> Void)?
+    /// Return or losing focus in the add field (section id, the text, whether Return did it).
+    var onCommitAdd: ((String, String, Bool) -> Void)?
+    /// Esc in the add field (section id).
+    var onCancelAdd: ((String) -> Void)?
+    /// A drag of this row began, or ended.
+    var onDragBegan: (() -> Void)?
+    var onDragEnded: (() -> Void)?
+    /// The pane's identity on the dragging pasteboard (a drop from another pane is refused).
+    var dragPaneIdentity = ""
 
     /// The ≤ 1 s change highlight is showing.
     private(set) var isHighlighted = false
@@ -141,6 +158,11 @@ final class TrackerRowView: NSView {
     private(set) var editTitleButton: TrackerChipButton?
     private(set) var editDetailsButton: TrackerChipButton?
     private(set) var statusPopUp: NSPopUpButton?
+    private(set) var movePopUp: NSPopUpButton?
+    private(set) var removeButton: TrackerChipButton?
+    /// The "+ Add item" row's button, and its field while it is open (the field survives a rebuild).
+    private(set) var addItemButton: TrackerChipButton?
+    private(set) var addField: TrackerTitleEditor?
     /// The inline editors; they survive a rebuild of the row.
     private(set) var titleEditor: TrackerTitleEditor?
     private(set) var detailsEditor: TrackerDetailsEditor?
@@ -292,7 +314,39 @@ final class TrackerRowView: NSView {
             entry.target = self
             items.append(entry)
         }
+        if row.key == TrackerRow.itemKey(item.id) {
+            let submenu = NSMenu()
+            fillMoveMenu(submenu, for: item)
+            let parent = NSMenuItem(title: "Move", action: nil, keyEquivalent: "")
+            parent.submenu = submenu
+            items.append(parent)
+            let remove = NSMenuItem(title: "Remove", action: #selector(menuRemove(_:)), keyEquivalent: "")
+            remove.target = self
+            items.append(remove)
+        }
         return items
+    }
+
+    /// Up, Down and one entry for each other section (an entry that does nothing is disabled).
+    private func fillMoveMenu(_ menu: NSMenu, for item: TrackerItemRow) {
+        let options = moveOptions?(item.id) ?? TrackerMoveOptions(canUp: false, canDown: false, sections: [])
+        func add(_ title: String, _ request: TrackerMoveRequest, enabled: Bool = true) {
+            let entry = NSMenuItem(title: title, action: #selector(menuMove(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = request
+            entry.isEnabled = enabled
+            menu.addItem(entry)
+        }
+        add("Move Up", .up, enabled: options.canUp)
+        add("Move Down", .down, enabled: options.canDown)
+        if !options.sections.isEmpty { menu.addItem(.separator()) }
+        for section in options.sections { add("Move to \(section.title)", .toSection(section.id)) }
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === movePopUp?.menu, let item = row.item else { return }
+        while menu.numberOfItems > 1 { menu.removeItem(at: 1) }
+        fillMoveMenu(menu, for: item)
     }
 
     /// "Copy as Markdown" for an item or a section row.
@@ -317,6 +371,10 @@ final class TrackerRowView: NSView {
         if let item = row.item, let wire = sender.representedObject as? String { onSetStatus?(item.id, wire) }
     }
     @objc private func menuShowConflict(_ sender: Any?) { showConflict(fromKeyboard: false) }
+    @objc private func menuMove(_ sender: NSMenuItem) {
+        if let item = row.item, let request = sender.representedObject as? TrackerMoveRequest { onMove?(item.id, request) }
+    }
+    @objc private func menuRemove(_ sender: Any?) { removePressed(sender) }
 
     private func beginEditFromUser(_ kind: TrackerEditKind) {
         if let item = row.item { onBeginEdit?(item.id, kind) }
@@ -342,6 +400,8 @@ final class TrackerRowView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let hit = super.hitTest(point) else { return nil }
         if case .doneGroup = row.content { return self }
+        // A label (mark, time, badges) is part of the row: a drag that starts on it is the row's drag.
+        if case .item = row.content, let label = hit as? NSTextField, !label.isEditable, !label.isSelectable { return self }
         if tickButton == nil, hit !== disclosureButton, disclosureButton != nil,
            foldHitRect.contains(convert(point, from: superview)) {
             return self
@@ -355,8 +415,90 @@ final class TrackerRowView: NSView {
         case .item where tickButton == nil && disclosureButton != nil
             && foldHitRect.contains(convert(event.locationInWindow, from: nil)):
             toggleFold(nil)
-        default: super.mouseDown(with: event)
+        default:
+            dragOrigin = event.locationInWindow
+            super.mouseDown(with: event)
         }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if !trackDrag(event) { super.mouseDragged(with: event) }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragOrigin = nil
+        super.mouseUp(with: event)
+    }
+
+    // MARK: - Dragging
+
+    static let dragType = NSPasteboard.PasteboardType("com.nostromo.tracker-item")
+    /// More movement than this (points) turns a press into a drag.
+    static let dragThreshold: CGFloat = 3
+
+    private var dragOrigin: NSPoint?
+    private var dragStarted = false
+
+    /// Only an item the view really shows (not a stub or a `moving:` copy) with no editor open can be dragged.
+    private var isDraggable: Bool {
+        guard editingEnabled, case .item(let item) = row.content, row.key == TrackerRow.itemKey(item.id) else { return false }
+        return titleEditor == nil && detailsEditor == nil
+    }
+
+    /// The press began on one of this row's controls (the tick): a click stays a click until it moves.
+    func pressBegan(_ event: NSEvent) {
+        dragOrigin = event.locationInWindow
+        dragStarted = false
+    }
+
+    /// The mouse moved with the button down; true once this has become a drag of the row.
+    @discardableResult
+    func trackDrag(_ event: NSEvent) -> Bool {
+        if dragStarted { return true }
+        guard let origin = dragOrigin, isDraggable else { return false }
+        let moved = hypot(event.locationInWindow.x - origin.x, event.locationInWindow.y - origin.y)
+        guard moved > Self.dragThreshold else { return false }
+        dragStarted = true
+        beginDrag(with: event)
+        return true
+    }
+
+    private func beginDrag(with event: NSEvent) {
+        guard let item = row.item,
+              let data = try? JSONSerialization.data(withJSONObject: ["id": item.id, "pane": dragPaneIdentity]) else { return }
+        let pasteboardItem = NSPasteboardItem()
+        pasteboardItem.setData(data, forType: Self.dragType)
+        let dragging = NSDraggingItem(pasteboardWriter: pasteboardItem)
+        dragging.setDraggingFrame(bounds, contents: snapshotImage())
+        onDragBegan?()
+        beginDraggingSession(with: [dragging], event: event, source: self)
+    }
+
+    private func snapshotImage() -> NSImage {
+        let image = NSImage(size: bounds.size)
+        if let rep = bitmapImageRepForCachingDisplay(in: bounds) {
+            cacheDisplay(in: bounds, to: rep)
+            image.addRepresentation(rep)
+        }
+        return image
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        context == .withinApplication ? .move : []
+    }
+
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        dragOrigin = nil
+        dragStarted = false
+        onDragEnded?()
+    }
+
+    /// What the pasteboard of a drag from a tracker row says: the item and the pane it came from.
+    static func dragPayload(_ pasteboard: NSPasteboard) -> (id: String, pane: String)? {
+        guard let data = pasteboard.data(forType: dragType),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+              let id = object["id"], let pane = object["pane"] else { return nil }
+        return (id, pane)
     }
 
     @objc private func toggleFold(_ sender: Any?) {
@@ -407,6 +549,17 @@ final class TrackerRowView: NSView {
             let textHeight = mainText?.height(forWidth: textWidth) ?? 0
             mainText?.frame = NSRect(x: h + Self.markWidth, y: v, width: textWidth, height: textHeight)
             return v + textHeight + v
+
+        case .addItem:
+            let textWidth = max(width - Self.textX - h, 1)
+            if let addItemButton {
+                // The label's text lines up with the titles: the chip's own padding sits left of it.
+                addItemButton.frame = NSRect(x: Self.textX - 6, y: v, width: min(addItemButton.fittingWidth, textWidth + 6),
+                                             height: Self.addLineHeight)
+                addItemButton.isHidden = addField != nil
+            }
+            addField?.frame = NSRect(x: Self.textX, y: v, width: textWidth, height: Self.addLineHeight)
+            return v + Self.addLineHeight + v
 
         case .doneGroup, .log:
             var y = v + 2
@@ -506,12 +659,19 @@ final class TrackerRowView: NSView {
             proseView.frame = NSRect(x: textX, y: y, width: blockWidth, height: ph)
             y += ph
         }
-        let actionViews: [NSView] = [editTitleButton, editDetailsButton, statusPopUp].compactMap { $0 }
+        let actionViews: [NSView] = [editTitleButton, editDetailsButton, statusPopUp, movePopUp, removeButton].compactMap { $0 }
         if !actionViews.isEmpty {
             y += 2
             var x = textX
+            let limit = max(width - h, textX + 1)
             for view in actionViews {
-                let w = view === statusPopUp ? Self.statusPopUpWidth : (view as? TrackerChipButton)?.fittingWidth ?? 60
+                let w = view === statusPopUp ? Self.statusPopUpWidth
+                    : (view === movePopUp ? Self.movePopUpWidth : (view as? TrackerChipButton)?.fittingWidth ?? 60)
+                // The line wraps instead of running past the row's edge.
+                if x > textX, x + w > limit {
+                    x = textX
+                    y += Self.actionLineHeight + 2
+                }
                 view.frame = NSRect(x: x, y: y, width: w, height: Self.actionLineHeight)
                 x += w + 6
             }
@@ -548,7 +708,10 @@ final class TrackerRowView: NSView {
     }
 
     static let actionLineHeight: CGFloat = 18
+    /// The add row's one line (its button, or its field).
+    static let addLineHeight: CGFloat = 18
     static let statusPopUpWidth: CGFloat = ceil(("Status ▾" as NSString).size(withAttributes: [.font: TrackerTheme.metaFont]).width) + 16
+    static let movePopUpWidth: CGFloat = ceil(("Move ▾" as NSString).size(withAttributes: [.font: TrackerTheme.metaFont]).width) + 16
 
     // MARK: - Building
 
@@ -559,7 +722,7 @@ final class TrackerRowView: NSView {
         defer {
             if let focusedRole { _ = focusControl(focusedRole) }
         }
-        subviews.filter { $0 !== titleEditor && $0 !== detailsEditor }.forEach { $0.removeFromSuperview() }
+        subviews.filter { $0 !== titleEditor && $0 !== detailsEditor && $0 !== addField }.forEach { $0.removeFromSuperview() }
         textViews = []
         badges = []
         ownerChip = nil
@@ -571,6 +734,9 @@ final class TrackerRowView: NSView {
         editTitleButton = nil
         editDetailsButton = nil
         statusPopUp = nil
+        movePopUp = nil
+        removeButton = nil
+        addItemButton = nil
         markLabel = nil
         timeLabel = nil
         mainText = nil
@@ -598,6 +764,16 @@ final class TrackerRowView: NSView {
             mainText = addText(NSAttributedString(string: stub.text, attributes: [
                 .font: NSFontManager.shared.convert(TrackerTheme.metaFont, toHaveTrait: .italicFontMask),
                 .foregroundColor: TrackerTheme.muted]))
+
+        case .addItem(let add):
+            let button = TrackerChipButton(text: TrackerAddRow.label, color: TrackerTheme.mutedOnFill, fill: nil,
+                                           font: TrackerTheme.textFont, padding: 6)
+            button.target = self
+            button.action = #selector(addPressed(_:))
+            button.setAccessibilityLabel(add.accessibilityLabel)
+            addSubview(button)
+            addItemButton = button
+            if let addField, addField.superview !== self { addSubview(addField) }
 
         case .doneGroup(let group):
             _ = addText(NSAttributedString(string: (group.expanded ? "▾ " : "▸ ") + group.title, attributes: [
@@ -648,6 +824,8 @@ final class TrackerRowView: NSView {
             tick.setAccessibilityHelp("Status: \(Self.statusName(item.status))")
             tick.toolTip = item.isDone ? "Mark not done" : "Mark done"
             tick.setAccessibilityCustomActions(customActions(for: item))
+            tick.onPress = { [weak self] event in self?.pressBegan(event) }
+            tick.onMove = { [weak self] event in self?.trackDrag(event) ?? false }
             addSubview(tick)
             tickButton = tick
         } else {
@@ -832,6 +1010,26 @@ final class TrackerRowView: NSView {
             addSubview(pop)
             statusPopUp = pop
         }
+        guard row.key == TrackerRow.itemKey(item.id) else { return }
+        let move = NSPopUpButton(frame: .zero, pullsDown: true)
+        move.isBordered = false
+        move.refusesFirstResponder = false
+        move.font = TrackerTheme.metaFont
+        (move.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
+        move.addItem(withTitle: "Move ▾")
+        move.item(at: 0)?.attributedTitle = NSAttributedString(string: "Move ▾", attributes: [
+            .font: TrackerTheme.metaFont, .foregroundColor: text])
+        move.menu?.delegate = self
+        if let menu = move.menu { fillMoveMenu(menu, for: item) }
+        move.setAccessibilityLabel("Move: \(String(item.title.prefix(80)))")
+        addSubview(move)
+        movePopUp = move
+        let remove = TrackerChipButton(text: "Remove", color: text, fill: nil, padding: 3)
+        remove.target = self
+        remove.action = #selector(removePressed(_:))
+        remove.setAccessibilityLabel("Remove: \(String(item.title.prefix(80)))")
+        addSubview(remove)
+        removeButton = remove
     }
 
     @objc private func tickPressed(_ sender: Any?) {
@@ -841,6 +1039,12 @@ final class TrackerRowView: NSView {
     @objc private func sensitivePressed(_ sender: NSView) { reviewSensitive(fromKeyboard: window?.firstResponder === sender) }
     @objc private func editTitlePressed(_ sender: Any?) { beginEditFromUser(.title) }
     @objc private func editDetailsPressed(_ sender: Any?) { beginEditFromUser(.details) }
+    @objc private func removePressed(_ sender: Any?) {
+        if let item = row.item { onRemove?(item.id) }
+    }
+    @objc private func addPressed(_ sender: Any?) {
+        if case .addItem(let add) = row.content { onBeginAdd?(add.sectionId) }
+    }
 
     /// What VoiceOver offers on the tick and the disclosure, beyond pressing them.
     func customActions(for item: TrackerItemRow) -> [NSAccessibilityCustomAction] {
@@ -856,6 +1060,16 @@ final class TrackerRowView: NSView {
                 let id = item.id
                 add("Set status to \(name)") { [weak self] in self?.onSetStatus?(id, wire) }
             }
+        }
+        if row.key == TrackerRow.itemKey(item.id) {
+            let options = moveOptions?(item.id) ?? TrackerMoveOptions(canUp: false, canDown: false, sections: [])
+            let id = item.id
+            if options.canUp { add("Move up") { [weak self] in self?.onMove?(id, .up) } }
+            if options.canDown { add("Move down") { [weak self] in self?.onMove?(id, .down) } }
+            for section in options.sections {
+                add("Move to \(section.title)") { [weak self] in self?.onMove?(id, .toSection(section.id)) }
+            }
+            add("Remove") { [weak self] in self?.onRemove?(id) }
         }
         if !item.conflicts.isEmpty { add("Show conflict") { [weak self] in self?.showConflict(fromKeyboard: true) } }
         if item.sensitive != nil {
@@ -875,6 +1089,8 @@ final class TrackerRowView: NSView {
         if let editTitleButton { found[.editTitle] = editTitleButton }
         if let editDetailsButton { found[.editDetails] = editDetailsButton }
         if let statusPopUp { found[.status] = statusPopUp }
+        if let movePopUp { found[.move] = movePopUp }
+        if let removeButton { found[.remove] = removeButton }
         return found
     }
 
@@ -996,6 +1212,82 @@ final class TrackerRowView: NSView {
 
     private func editorCancelled(_ kind: TrackerEditKind) {
         if let item = row.item { onCancelEdit?(item.id, kind) }
+    }
+
+    // MARK: - The add field
+
+    /// Turn the add row, in place and at the same height, into a one-line title field with focus.
+    func beginAddField() {
+        guard case .addItem(let add) = row.content else { return }
+        if addField != nil {
+            focusAddField()
+            return
+        }
+        let field = TrackerTitleEditor(text: "")
+        field.setAccessibilityLabel("New item in \(add.sectionTitle)")
+        field.onCommit = { [weak self, weak field] typed in
+            guard let self, case .addItem(let add) = self.row.content else { return }
+            self.onCommitAdd?(add.sectionId, typed, field?.committedByReturn ?? false)
+        }
+        field.onCancel = { [weak self] in
+            if case .addItem(let add)? = self?.row.content { self?.onCancelAdd?(add.sectionId) }
+        }
+        addField = field
+        addSubview(field)
+        measured = nil
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+        field.arm()
+        focusAddField()
+        if field.currentEditor() == nil { focusAddField() }
+    }
+
+    func focusAddField() {
+        guard let addField, let window else { return }
+        window.makeFirstResponder(addField)
+    }
+
+    /// The field is read-only and dimmed while its item is being created, and editable again (text intact) if
+    /// that fails.
+    func setAddPending(_ pending: Bool) {
+        let ownedFocus = addFieldOwnsFocus
+        addField?.setPending(pending)
+        guard !pending else { return }
+        if ownedFocus { focusAddField() }
+        addField?.reopen()
+    }
+
+    /// The item was created: the field is empty again for the next one, and keeps focus if it had it.
+    func resetAddField() {
+        guard let addField else { return }
+        let ownedFocus = addFieldOwnsFocus
+        addField.stringValue = ""
+        addField.setPending(false)
+        if ownedFocus { focusAddField() }
+        addField.reopen()
+    }
+
+    /// Return on an empty field: nothing is sent and the field stays.
+    func reopenAddField() {
+        addField?.reopen()
+    }
+
+    var addFieldOwnsFocus: Bool {
+        guard let addField, let responder = window?.firstResponder else { return false }
+        return responder === addField || (responder as? NSTextView)?.delegate === addField
+    }
+
+    /// The text typed in the open add field.
+    var addFieldText: String? { addField?.typed }
+
+    func endAddField() {
+        guard let field = addField else { return }
+        field.finish()
+        addField = nil
+        field.removeFromSuperview()
+        build()
+        measured = nil
+        needsLayout = true
     }
 
     private func addText(_ text: NSAttributedString) -> TrackerTextView {

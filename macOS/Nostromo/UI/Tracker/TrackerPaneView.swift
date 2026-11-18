@@ -49,7 +49,9 @@ final class TrackerPaneView: NSView {
     let sink = TrackerFocusSink()
     let scrollView = NSScrollView()
     let clipView = TrackerClipView()
-    let documentView = TrackerFlippedView()
+    let documentView = TrackerDocumentView()
+    /// The line a drag draws between rows (an overlay: no row moves for it).
+    let dropIndicator = TrackerDropIndicatorView()
     let placeholder = NSTextField(labelWithString: "Waiting for the tracker…")
 
     /// The board last rendered and what it was presented as.
@@ -65,6 +67,18 @@ final class TrackerPaneView: NSView {
     private(set) var editing: TrackerItemEditing!
     /// The open inline editors (and the saves still waiting for their board), by item id.
     private(set) var editSessions: [String: TrackerEditSession] = [:]
+    /// The open "+ Add item" fields, by section id.
+    private(set) var addSessions: [String: TrackerAddSession] = [:]
+    /// Names this pane on the dragging pasteboard: a drop from another pane or app is refused.
+    let paneIdentity = UUID().uuidString
+    /// A row of this pane is being dragged: the pane changes nothing until it ends.
+    private(set) var isDragging = false
+    private var renderDeferredByDrag = false
+    /// The "Removed “…”" banner's title (nil when it is not showing).
+    private var removalTitle: String?
+    private var removalGeneration = 0
+    /// How long "Removed … Undo" stays in the notice slot.
+    static let removalBannerLifetime: TimeInterval = 10
     /// The open conflict or sensitive-data popover, if any.
     private(set) var activePopover: TrackerConflictPopover?
     /// The daemon takes pane edits (both features advertised): edit controls exist only then.
@@ -201,6 +215,10 @@ final class TrackerPaneView: NSView {
         editing.onConfirmed = { [weak self] ids, version in
             for id in ids { self?.ownEdits[id] = version }
         }
+        editing.onRemoved = { [weak self] title in self?.removalChanged(title) }
+        editing.itemSnapshot = { [weak self] id in self?.snapshot(of: id) }
+        editing.itemOrigin = { [weak self] id in self?.origin(of: id) }
+        editing.boardVersion = { [weak self] in self?.board?.version ?? 0 }
         setUp()
         let myTag = tag
         store.changes
@@ -275,6 +293,9 @@ final class TrackerPaneView: NSView {
         scrollView.contentInsets = NSEdgeInsetsZero
         scrollView.borderType = .noBorder
         documentView.frame = NSRect(x: 0, y: 0, width: 320, height: 1)
+        documentView.pane = self
+        documentView.registerForDraggedTypes([TrackerRowView.dragType])
+        documentView.addSubview(dropIndicator)
         scrollView.documentView = documentView
         addSubview(scrollView)
 
@@ -304,6 +325,11 @@ final class TrackerPaneView: NSView {
 
     /// Present the store's board for this tag and show it.
     func render() {
+        // A drag changes nothing on screen: the board is shown when it ends.
+        if isDragging {
+            renderDeferredByDrag = true
+            return
+        }
         guard let board = store.board(for: focusTag) else { return }
         self.board = board
         syncEditing()
@@ -319,7 +345,9 @@ final class TrackerPaneView: NSView {
         commit(TrackerPresenter.present(board: board, now: now(), filter: filter, folds: folds, sources: sources,
                                         timeZone: timeZone),
                highlight: true)
+        editing.boardApplied(version: board.version)
         refreshRowsOfLateOks()
+        settleAddSessions()
         followIfReady()
     }
 
@@ -441,7 +469,8 @@ final class TrackerPaneView: NSView {
         backgroundRow.update(backgroundSummary, enabled: replProvider() != nil)
 
         let result = deferral.resolve(displayed: displayedRows, target: target,
-                                      visibleKeys: visible, heldKeys: heldKeys())
+                                      visibleKeys: visible, heldKeys: heldKeys(),
+                                      exempt: Set(editing.exemptItemIds.map { TrackerRow.itemKey($0) }))
         presentation = target
         if deferral.hasHeld { armIdleCheck() }
 
@@ -454,7 +483,7 @@ final class TrackerPaneView: NSView {
             case .insert(let row, _):
                 let view = makeRowView(row)
                 rowViews[row.key] = view
-                documentView.addSubview(view)
+                documentView.addSubview(view, positioned: .below, relativeTo: dropIndicator)
                 updated += 1
                 if case .item = row.content { changed.append(view) }
             case .update(let row):
@@ -519,7 +548,16 @@ final class TrackerPaneView: NSView {
         view.onToggleLog = { [weak self] in self?.toggleLog() }
         view.onCopyMarkdown = { [weak self] row in self?.copyMarkdown(for: row) }
         view.onOpenLink = { [weak self] item, action in self?.openLink(item: item, action: action) }
+        view.moveOptions = { [weak self] id in self?.moveOptions(for: id) ?? TrackerMoveOptions(canUp: false, canDown: false, sections: []) }
+        view.dragPaneIdentity = paneIdentity
         view.editingEnabled = editEnabled
+        view.onMove = { [weak self] id, request in self?.moveItem(id, request) }
+        view.onRemove = { [weak self] id in self?.removeItem(id) }
+        view.onBeginAdd = { [weak self] section in self?.beginAdd(section: section) }
+        view.onCommitAdd = { [weak self] section, typed, byReturn in self?.commitAdd(section: section, typed: typed, byReturn: byReturn) }
+        view.onCancelAdd = { [weak self] section in self?.cancelAdd(section: section) }
+        view.onDragBegan = { [weak self] in self?.dragBegan() }
+        view.onDragEnded = { [weak self] in self?.dragEnded() }
         view.onTick = { [weak self] id in self?.tick(item: id) }
         view.onSetStatus = { [weak self] id, wire in self?.setStatus(item: id, to: wire) }
         view.onBeginEdit = { [weak self] id, kind in self?.beginEdit(item: id, kind: kind) }
@@ -925,11 +963,15 @@ final class TrackerPaneView: NSView {
 
     /// Focus goes back to whatever had it before the editor opened, unless the user has put it somewhere else.
     private func restorePriorFocus(_ session: TrackerEditSession) {
+        restorePriorFocus(responder: session.priorResponder)
+    }
+
+    private func restorePriorFocus(responder: NSResponder?) {
         guard let window else { return }
         let current = window.firstResponder
         let editorHasFocus = current === window
             || ((current as? NSView).map { $0.isDescendant(of: documentView) } ?? false)
-        guard editorHasFocus, let prior = session.priorResponder as? NSView, prior.window === window,
+        guard editorHasFocus, let prior = responder as? NSView, prior.window === window,
               !prior.isDescendant(of: documentView) else { return }
         window.makeFirstResponder(prior)
     }
@@ -947,6 +989,231 @@ final class TrackerPaneView: NSView {
         editSessions.mapValues { session in
             session.phase == .editing ? session.kind.rawValue : "pending"
         }
+    }
+
+    // MARK: Structure: add, move, remove
+
+    /// "+ Add item" was activated: its row becomes a title field with focus. Focus goes back to what had it
+    /// when the field closes.
+    func beginAdd(section: String) {
+        guard editEnabled, let view = rowViews[TrackerRow.addKey(section)] else { return }
+        if addSessions[section] == nil {
+            addSessions[section] = TrackerAddSession(priorResponder: Self.focusOwner(window?.firstResponder))
+        }
+        view.beginAddField()
+    }
+
+    /// Return, or focus leaving the field. Text creates an item (and, after Return, the field stays open and
+    /// empty for the next one); an empty field creates nothing (and closes when focus left).
+    func commitAdd(section: String, typed: String, byReturn: Bool) {
+        guard var session = addSessions[section], !session.inFlight else { return }
+        let view = rowViews[TrackerRow.addKey(section)]
+        let title = TrackerTitle.normalizedTitle(typed)
+        guard !title.isEmpty else {
+            if byReturn { view?.reopenAddField() } else { endAdd(section, restoreFocus: false) }
+            return
+        }
+        let fitted = TrackerTitle.fitScalars(title)
+        session.inFlight = true
+        session.closeAfter = !byReturn
+        session.sentText = typed
+        session.awaiting = nil
+        addSessions[section] = session
+        view?.setAddPending(true)
+        let after = TrackerMoves.lastItem(in: section, rows: displayedRows, filter: filter)
+        editing.add(section: section, title: fitted.title, body: fitted.overflow, after: after, base: boardBase()) {
+            [weak self] outcome in self?.addFinished(section, outcome)
+        }
+    }
+
+    /// Esc: nothing is sent and the field closes.
+    func cancelAdd(section: String) {
+        guard let session = addSessions[section], !session.inFlight else { return }
+        endAdd(section, restoreFocus: true)
+    }
+
+    private func addFinished(_ section: String, _ outcome: TrackerItemEditing.Outcome) {
+        guard var session = addSessions[section] else { return }
+        switch outcome {
+        case .saved(let version, _):
+            session.awaiting = version
+            addSessions[section] = session
+            settleAddSessions()
+        case .failed, .timedOut:
+            // The text is still in the field: it opens up again and the notice says why.
+            session.inFlight = false
+            addSessions[section] = session
+            rowViews[TrackerRow.addKey(section)]?.setAddPending(false)
+        }
+    }
+
+    /// The board that shows a created item is on screen: the field is empty for the next one, or closes.
+    private func settleAddSessions() {
+        guard let version = board?.version else { return }
+        for (section, session) in addSessions {
+            guard let needed = session.awaiting, version >= needed else { continue }
+            if session.closeAfter {
+                endAdd(section, restoreFocus: false)
+                continue
+            }
+            var next = session
+            next.inFlight = false
+            next.awaiting = nil
+            addSessions[section] = next
+            guard let view = rowViews[TrackerRow.addKey(section)] else {
+                addSessions.removeValue(forKey: section)
+                continue
+            }
+            if view.addFieldText == session.sentText { view.resetAddField() } else { view.setAddPending(false) }
+        }
+    }
+
+    private func endAdd(_ section: String, restoreFocus: Bool) {
+        guard let session = addSessions.removeValue(forKey: section) else { return }
+        rowViews[TrackerRow.addKey(section)]?.endAddField()
+        if restoreFocus { restorePriorFocus(responder: session.priorResponder) }
+    }
+
+    /// What the Move menu, VoiceOver and the context menu offer for an item.
+    func moveOptions(for id: String) -> TrackerMoveOptions {
+        TrackerMoveOptions(
+            canUp: TrackerMoves.up(id, rows: displayedRows, filter: filter) != nil,
+            canDown: TrackerMoves.down(id, rows: displayedRows, filter: filter) != nil,
+            sections: TrackerMoves.otherSections(of: id, rows: displayedRows, filter: filter).map { (id: $0.id, title: $0.title) })
+    }
+
+    /// Up or down past the next shown item, or to the end of another section.
+    func moveItem(_ id: String, _ request: TrackerMoveRequest) {
+        guard editEnabled, shownItem(id) != nil else { return }
+        let destination: TrackerMoveDestination?
+        switch request {
+        case .up: destination = TrackerMoves.up(id, rows: displayedRows, filter: filter)
+        case .down: destination = TrackerMoves.down(id, rows: displayedRows, filter: filter)
+        case .toSection(let section): destination = TrackerMoves.toSection(section)
+        }
+        guard let destination else { return }
+        userActed()
+        editing.move(id, to: destination, base: base(forItem: id))
+    }
+
+    /// Remove an item. No dialog: the banner offers Undo for 10 s and ⌘Z keeps it for longer.
+    func removeItem(_ id: String) {
+        guard editEnabled, shownItem(id) != nil else { return }
+        userActed()
+        editing.remove(id, base: base(forItem: id))
+    }
+
+    /// The banner's Undo button.
+    func undoRemoval() {
+        userActed()
+        editing.undoLatestRemoval()
+    }
+
+    private func removalChanged(_ title: String?) {
+        removalGeneration += 1
+        let generation = removalGeneration
+        removalTitle = title.map { $0.count > 60 ? String($0.prefix(60)) + "…" : $0 }
+        applyNotice(editing.notice ?? openEditorRefusal())
+        guard let title else { return }
+        let spoken = "Removed \(title). Undo available."
+        NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
+                             userInfo: [.announcement: spoken, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+        schedule(Self.removalBannerLifetime) { [weak self] in
+            guard let self, self.removalGeneration == generation else { return }
+            self.removalTitle = nil
+            self.applyNotice(self.editing.notice ?? self.openEditorRefusal())
+        }
+    }
+
+    /// An item's exact markdown and place, from the board on screen (what Undo puts back).
+    private func snapshot(of id: String) -> TrackerItemSnapshot? {
+        guard let board, let source = TrackerMarkdown.item(id, in: board), let origin = origin(of: id) else { return nil }
+        let title = shownItem(id)?.title ?? newestItem(id)?.title ?? wireItem(id)?.text ?? ""
+        return TrackerItemSnapshot(title: title, source: source, origin: origin)
+    }
+
+    private func origin(of id: String) -> TrackerMoveDestination? {
+        guard let section = shownItem(id)?.sectionId ?? newestItem(id)?.sectionId ?? wireItem(id)?.section else { return nil }
+        return TrackerMoves.origin(of: id, rows: displayedRows, filter: filter, fallbackSection: section)
+    }
+
+    // MARK: Dragging
+
+    /// A row of this pane started to be dragged: nothing changes on screen until it ends.
+    func dragBegan() {
+        isDragging = true
+    }
+
+    func dragEnded() {
+        isDragging = false
+        hideDropIndicator()
+        guard renderDeferredByDrag else { return }
+        renderDeferredByDrag = false
+        render()
+    }
+
+    func dragUpdated(_ info: NSDraggingInfo) -> NSDragOperation {
+        guard let payload = TrackerRowView.dragPayload(info.draggingPasteboard) else {
+            hideDropIndicator()
+            return []
+        }
+        return dragMoved(payload: payload, at: documentView.convert(info.draggingLocation, from: nil))
+    }
+
+    func dragExited() {
+        hideDropIndicator()
+    }
+
+    func performDrop(_ info: NSDraggingInfo) -> Bool {
+        guard let payload = TrackerRowView.dragPayload(info.draggingPasteboard) else { return false }
+        return dragDropped(payload: payload, at: documentView.convert(info.draggingLocation, from: nil))
+    }
+
+    /// The pointer is over `point` (document coordinates) with a dragged item: draw where it would land.
+    func dragMoved(payload: (id: String, pane: String), at point: NSPoint) -> NSDragOperation {
+        guard let drop = dropTarget(for: payload, at: point) else {
+            hideDropIndicator()
+            return []
+        }
+        showDropIndicator(drop.indicator)
+        return .move
+    }
+
+    /// The item was dropped at `point`: the move is sent (nothing else changes until the daemon's board arrives).
+    func dragDropped(payload: (id: String, pane: String), at point: NSPoint) -> Bool {
+        defer { hideDropIndicator() }
+        guard let drop = dropTarget(for: payload, at: point) else { return false }
+        userActed()
+        editing.move(payload.id, to: drop.destination, base: base(forItem: payload.id))
+        return true
+    }
+
+    private func dropTarget(for payload: (id: String, pane: String), at point: NSPoint) -> TrackerDrop? {
+        guard editEnabled, payload.pane == paneIdentity, shownItem(payload.id) != nil,
+              let row = displayedRows.first(where: { rowViews[$0.key]?.frame.contains(point) == true }),
+              let view = rowViews[row.key] else { return nil }
+        return TrackerMoves.drop(payload.id, over: row.key, lowerHalf: point.y > view.frame.midY,
+                                 rows: displayedRows, filter: filter)
+    }
+
+    private func showDropIndicator(_ indicator: TrackerDrop.Indicator) {
+        let key: String, below: Bool
+        switch indicator {
+        case .above(let rowKey): (key, below) = (rowKey, false)
+        case .below(let rowKey): (key, below) = (rowKey, true)
+        }
+        guard let frame = rowViews[key]?.frame else {
+            hideDropIndicator()
+            return
+        }
+        let edge = below ? frame.maxY : frame.minY
+        dropIndicator.frame = NSRect(x: 0, y: edge - TrackerDropIndicatorView.thickness / 2, width: documentView.bounds.width,
+                                     height: TrackerDropIndicatorView.thickness)
+        dropIndicator.isHidden = false
+    }
+
+    private func hideDropIndicator() {
+        dropIndicator.isHidden = true
     }
 
     // MARK: Conflicts and badges
@@ -1013,7 +1280,16 @@ final class TrackerPaneView: NSView {
 
     /// Show or hide the notice above the board, keeping the reading line where it is on screen.
     private func applyNotice(_ text: String?) {
-        withChromeShift { notice.update(text) }
+        let removal = removalTitle
+        withChromeShift {
+            if let text {
+                notice.update(text)
+            } else if let removal {
+                notice.update("Removed “\(removal)”.", actionTitle: "Undo") { [weak self] in self?.undoRemoval() }
+            } else {
+                notice.update(nil)
+            }
+        }
     }
 
     /// Run `change` (which may change the chrome's height) and keep the reading position still.
@@ -1336,7 +1612,7 @@ final class TrackerPaneView: NSView {
                                visible: window != nil && !isHiddenOrHasHiddenAncestor, held: deferral.held,
                                renderGeneration: renderGeneration, rowsUpdatedLast: rowsUpdatedLast,
                                editEnabled: editEnabled, removedConflicts: board?.removedConflicts.count ?? 0,
-                               editing: editingStates())
+                               editing: editingStates(), dragging: isDragging, notice: notice.spokenText)
     }
 }
 
@@ -1517,5 +1793,65 @@ final class TrackerBannerView: NSView {
     override func layout() {
         super.layout()
         label.frame = NSRect(x: TrackerRowView.hPad, y: 3, width: max(bounds.width - TrackerRowView.hPad * 2, 1), height: 30)
+    }
+}
+
+// MARK: - Structure support
+
+/// The pane's document: a flipped view that takes the drop of a dragged item row. All the logic is the pane's.
+final class TrackerDocumentView: NSView {
+    override var isFlipped: Bool { true }
+
+    weak var pane: TrackerPaneView?
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        pane?.dragUpdated(sender) ?? []
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        pane?.dragUpdated(sender) ?? []
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        pane?.dragExited()
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        pane?.performDrop(sender) ?? false
+    }
+}
+
+/// The drop indicator: a 2 pt line in the accent colour, drawn over the rows (never between them as a row).
+final class TrackerDropIndicatorView: NSView {
+    static let thickness: CGFloat = 2
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = Theme.cornflower.cgColor
+        isHidden = true
+        setAccessibilityElement(false)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var acceptsFirstResponder: Bool { false }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// One open "+ Add item" field: where focus goes when it closes, and where its create stands.
+struct TrackerAddSession {
+    weak var priorResponder: NSResponder?
+    /// A create was sent and has no board yet: the field is read-only.
+    var inFlight = false
+    /// Focus left the field to create: the field closes afterwards (Return keeps it open).
+    var closeAfter = false
+    /// What was sent (the field is only emptied if it still holds this).
+    var sentText: String?
+    /// The create is confirmed: the field waits for a board with at least this version.
+    var awaiting: UInt64?
+
+    init(priorResponder: NSResponder?) {
+        self.priorResponder = priorResponder
     }
 }
