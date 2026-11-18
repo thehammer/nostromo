@@ -18,6 +18,9 @@
 //  - Let a stub, a `moving:` copy or an expanded done item count as a neighbour: the neighbour tests fail.
 //  - Make `drop` answer for the Done group, the dragged item itself or the slot it already sits in: the nil cases fail.
 //  - Ignore `exempt` (or apply it to the agent's moves too): the exempt / still-held pairs fail.
+//  - Ignore `editSupported` in the presenter: the read-only add-row tests fail.
+//  - Let an exempt row that an agent also finished skip the done hold: the exempt-and-done tests fail.
+//  - Put an item back beside a neighbour that is gone, moved or in another section, or prefer the one below: the place-hint tests fail.
 
 import XCTest
 @testable import NostromoKit
@@ -176,6 +179,31 @@ final class TrackerAddRowTests: XCTestCase {
         let after = TFx.present(try TFx.edited { try $0.moveItem("revie-1111", toSection: "next") }).rows
         let touched = TrackerDiff.ops(from: before, to: after).map(\.key).filter { $0.hasPrefix("add:") }
         XCTAssertTrue(touched.isEmpty, "touched \(touched)")
+    }
+
+    // MARK: A daemon that does not take pane edits gets no add row
+
+    private func present(_ filter: TrackerFilter, editSupported: Bool) throws -> [TrackerRow] {
+        TrackerPresenter.present(board: try TFx.golden(), now: TFx.now, filter: filter, timeZone: TFx.utc,
+                                 editSupported: editSupported).rows
+    }
+
+    func testWithoutEditSupportThereIsNoAddRowUnderAllOrOpenAndWithItThereIs() throws {
+        for filter in [TrackerFilter.all, .open] {
+            let readOnly = try present(filter, editSupported: false)
+            XCTAssertTrue(TFx.rows(readOnly, ofKind: .addItem).isEmpty, "\(filter): an older daemon gets no half-working control")
+            XCTAssertTrue(readOnly.allSatisfy { !$0.key.hasPrefix("add:") }, "\(filter): and no add key either")
+            let editable = try present(filter, editSupported: true)
+            XCTAssertEqual(TFx.rows(editable, ofKind: .addItem).count, filter == .all ? 6 : 5, "\(filter): with edit support it has them")
+        }
+    }
+
+    func testTheReadOnlyBoardIsTheEditableBoardMinusItsAddRows() throws {
+        for filter in TrackerFilter.allCases {
+            let readOnly = try present(filter, editSupported: false)
+            let editable = try present(filter, editSupported: true).filter { $0.key.hasPrefix("add:") == false }
+            XCTAssertEqual(readOnly, editable, "\(filter): edit support adds the add rows and changes nothing else")
+        }
     }
 }
 
@@ -617,6 +645,61 @@ final class TrackerDeferralExemptTests: XCTestCase {
         XCTAssertEqual(new.held.map(\.kind), [.doneInPlace, .moved, .removed])
     }
 
+    // MARK: An agent's tick beats the exemption
+
+    func testAnExemptMoveOfAnItemTheAgentAlsoFinishedStaysWhereTheReaderSeesItStruckThrough() throws {
+        let before = TFx.present(try TFx.golden())
+        let key = "item:verif-1037"
+        let target = TFx.present(try TFx.edited { edit in
+            try edit.moveItem("verif-1037", after: "retry-1074")   // the user's own move (exempt) ...
+            try edit.setStatus("verif-1037", "done")                // ... and an agent ticked it meanwhile
+        })
+        var control = TrackerDeferral()
+        let plain = control.resolve(displayed: before.rows, target: target, visibleKeys: [key], heldKeys: [])
+        XCTAssertEqual(plain.held.map(\.kind), [.doneInPlace], "control: with no exemption an agent's tick is held in place")
+
+        var deferral = TrackerDeferral()
+        let result = deferral.resolve(displayed: before.rows, target: target, visibleKeys: [key], heldKeys: [], exempt: [key])
+        XCTAssertEqual(result.held.map(\.kind), [.doneInPlace], "a done item is held even when its row was exempt: \(result.held.map(\.key))")
+        XCTAssertEqual(result.held.map(\.key), [key])
+        let row = try XCTUnwrap(result.rows.first { $0.key == key }, "the row stays on screen where the reader had it")
+        XCTAssertEqual(row.item?.isDone, true, "struck through, as every done fold does")
+        XCTAssertEqual(index(key, result.rows), index(key, before.rows), "and it has not jumped")
+    }
+
+    func testAnExemptRowTheAgentFinishedIsHeldWhetherDoneItemsFoldAwayOrAreHiddenByTheFilter() throws {
+        let before = TFx.present(try TFx.golden(), filter: .open)
+        let key = "item:verif-1037"
+        let target = TFx.present(try TFx.edited { try $0.setStatus("verif-1037", "done") }, filter: .open)
+        XCTAssertNil(index(key, target.rows), "setup: under Open a done item is not a row of the target")
+        var deferral = TrackerDeferral()
+        let result = deferral.resolve(displayed: before.rows, target: target, visibleKeys: [key], heldKeys: [], exempt: [key])
+        XCTAssertEqual(result.held.map(\.kind), [.doneInPlace])
+        XCTAssertNotNil(index(key, result.rows))
+
+        // Off screen the same change just applies, exemption or not.
+        var offScreen = TrackerDeferral()
+        let applied = offScreen.resolve(displayed: before.rows, target: target, visibleKeys: [], heldKeys: [], exempt: [key])
+        XCTAssertTrue(applied.held.isEmpty)
+        XCTAssertEqual(applied.rows, target.rows)
+    }
+
+    func testAnExemptMoveOrRemovalOfAnItemNobodyFinishedStillAppliesAtOnceNextToAFinishedOne() throws {
+        let before = TFx.present(try TFx.golden())
+        let target = TFx.present(try TFx.edited { edit in
+            try edit.moveItem("rotat-1370", after: "triag-1703")    // the user's move
+            try edit.removeItem("backf-1333")                        // the user's removal
+            try edit.setStatus("verif-1037", "done")                 // an agent's tick (not exempt)
+        })
+        var deferral = TrackerDeferral()
+        let result = deferral.resolve(displayed: before.rows, target: target, visibleKeys: everyKey(before.rows), heldKeys: [],
+                                      exempt: ["item:rotat-1370", "item:backf-1333"])
+        XCTAssertEqual(result.held.map(\.key), ["item:verif-1037"], "only the agent's tick waits")
+        XCTAssertNil(index("item:backf-1333", result.rows), "the user's removal applied")
+        let order = TFx.keys(result.rows).filter { $0.hasPrefix("item:") && nextIds.contains(String($0.dropFirst(5))) }
+        XCTAssertEqual(order.last, "item:rotat-1370", "the user's move applied: it is last in Next")
+    }
+
     func testOnceTheExemptionEndsTheAgentsNextMoveOfThatRowWaitsAgain() throws {
         // First push: the user's own move (exempt) applies. Second push, no exemption: the agent moves the same
         // on-screen item again and that one is held.
@@ -634,5 +717,122 @@ final class TrackerDeferralExemptTests: XCTestCase {
         let second = deferral.resolve(displayed: first.rows, target: agentMove, visibleKeys: everyKey(first.rows), heldKeys: [])
         XCTAssertFalse(second.held.isEmpty, "the same item moved by the agent is deferred again")
         XCTAssertNotEqual(second.rows.map(\.key), agentMove.rows.map(\.key))
+    }
+}
+
+// MARK: - Where an undo puts an item back (worked out against the board as it is then)
+
+final class TrackerPlaceHintTests: XCTestCase {
+
+    private func hint(_ section: String, above: String? = nil, below: String? = nil) -> TrackerPlaceHint {
+        TrackerPlaceHint(section: section, above: above, below: below)
+    }
+
+    // MARK: hint(of:)
+
+    func testTheHintNamesTheSectionAndBothOpenNeighboursTheViewShows() throws {
+        let r = try rows(.all)
+        XCTAssertEqual(TrackerMoves.hint(of: "verif-1037", rows: r, filter: .all, fallbackSection: "now"),
+                       hint("now", above: "check-1000", below: "retry-1074"))
+        XCTAssertEqual(TrackerMoves.hint(of: "check-1000", rows: r, filter: .all, fallbackSection: "now"),
+                       hint("now", above: nil, below: "verif-1037"), "nothing above the first item")
+        XCTAssertEqual(TrackerMoves.hint(of: "backf-1333", rows: r, filter: .all, fallbackSection: "now"),
+                       hint("now", above: "docum-1296", below: nil), "nothing below the last item")
+        XCTAssertEqual(TrackerMoves.hint(of: "rotat-1370", rows: r, filter: .all, fallbackSection: "next"),
+                       hint("next", above: nil, below: "audit-1407"),
+                       "the last item of Now is another section's: not a neighbour")
+    }
+
+    func testTheHintSkipsDoneItemsLikeEveryOtherNeighbourAndNamesTheSectionOfTheItem() throws {
+        let r = try rows(.all)
+        // Findings interleaves open and done items; only open ones are neighbours.
+        XCTAssertEqual(TrackerMoves.hint(of: "docum-2628", rows: r, filter: .all, fallbackSection: "findings"),
+                       hint("findings", above: "repro-2554", below: "rotat-2702"))
+    }
+
+    func testTheHintOfAnItemTheViewDoesNotListIsJustTheFallbackSection() throws {
+        let r = try rows(.all)
+        XCTAssertEqual(TrackerMoves.hint(of: "triag-2591", rows: r, filter: .all, fallbackSection: "findings"), hint("findings"),
+                       "a folded done item has no neighbours to name")
+        XCTAssertEqual(TrackerMoves.hint(of: "nobody-0000", rows: r, filter: .all, fallbackSection: "now"), hint("now"))
+    }
+
+    func testAHintMadeFromAMoveDestinationIsAfterAndBeforeAsAboveAndBelow() {
+        XCTAssertEqual(TrackerPlaceHint(dest("now", after: "check-1000")), hint("now", above: "check-1000"))
+        XCTAssertEqual(TrackerPlaceHint(dest("now", before: "retry-1074")), hint("now", below: "retry-1074"))
+        XCTAssertEqual(TrackerPlaceHint(dest("next")), hint("next"))
+    }
+
+    // MARK: place(_:)
+
+    func testAnAboveNeighbourThatIsStillThereMeansAfterIt() throws {
+        let r = try rows(.all)
+        XCTAssertEqual(TrackerMoves.place(hint("now", above: "check-1000", below: "retry-1074"), rows: r, filter: .all),
+                       dest("now", after: "check-1000"), "the item above wins when both are there")
+        XCTAssertEqual(TrackerMoves.place(hint("now", above: "check-1000"), rows: r, filter: .all), dest("now", after: "check-1000"))
+    }
+
+    func testWhenTheAboveNeighbourIsGoneThePlaceIsBeforeTheBelowOne() throws {
+        let r = TFx.present(try TFx.edited { try $0.removeItem("check-1000") }).rows
+        XCTAssertEqual(TrackerMoves.place(hint("now", above: "check-1000", below: "verif-1037"), rows: r, filter: .all),
+                       dest("now", before: "verif-1037"), "never an id that is gone")
+    }
+
+    func testWhenTheBelowNeighbourIsGoneAndTheAboveIsToo() throws {
+        let r = TFx.present(try TFx.edited { edit in
+            try edit.removeItem("check-1000")
+            try edit.removeItem("verif-1037")
+        }).rows
+        XCTAssertEqual(TrackerMoves.place(hint("now", above: "check-1000", below: "verif-1037"), rows: r, filter: .all),
+                       dest("now"), "both gone: the end of the section's open items")
+        XCTAssertEqual(TrackerMoves.place(hint("now"), rows: r, filter: .all), dest("now"), "no neighbours at all: the end too")
+    }
+
+    func testAnAboveNeighbourThatMovedToAnotherSectionIsSkipped() throws {
+        let r = TFx.present(try TFx.edited { try $0.moveItem("check-1000", toSection: "next") }).rows
+        XCTAssertEqual(TrackerMoves.place(hint("now", above: "check-1000", below: "verif-1037"), rows: r, filter: .all),
+                       dest("now", before: "verif-1037"), "it is no longer in Now's rows")
+        let both = TFx.present(try TFx.edited { edit in
+            try edit.moveItem("check-1000", toSection: "next")
+            try edit.moveItem("verif-1037", toSection: "next")
+        }).rows
+        XCTAssertEqual(TrackerMoves.place(hint("now", above: "check-1000", below: "verif-1037"), rows: both, filter: .all), dest("now"))
+    }
+
+    func testANeighbourTheDaemonsBoardHasInAnotherSectionIsSkippedEvenIfTheViewStillShowsItHere() throws {
+        // The rows on screen may hold a change back: the row is here, the daemon has it elsewhere.
+        let r = try rows(.all)
+        let gone: (String, String) -> Bool = { id, _ in id != "check-1000" }
+        XCTAssertEqual(TrackerMoves.place(hint("now", above: "check-1000", below: "verif-1037"), rows: r, filter: .all, isInSection: gone),
+                       dest("now", before: "verif-1037"))
+        let neither: (String, String) -> Bool = { _, _ in false }
+        XCTAssertEqual(TrackerMoves.place(hint("now", above: "check-1000", below: "verif-1037"), rows: r, filter: .all, isInSection: neither),
+                       dest("now"))
+        var asked: [String] = []
+        _ = TrackerMoves.place(hint("now", above: "check-1000", below: "verif-1037"), rows: r, filter: .all) { id, section in
+            asked.append("\(id)@\(section)")
+            return true
+        }
+        XCTAssertTrue(asked.allSatisfy { $0.hasSuffix("@now") }, "the question is about the hint's own section: \(asked)")
+    }
+
+    func testADoneOrFoldedNeighbourIsNotAPlaceToPutAnItemNextTo() throws {
+        let r = try rows(.all)
+        XCTAssertEqual(TrackerMoves.place(hint("findings", above: "triag-2591", below: "docum-2628"), rows: r, filter: .all),
+                       dest("findings", before: "docum-2628"), "triag-2591 is a done item the view folds away")
+    }
+
+    func testASectionTheViewDoesNotShowMeansThatSectionsEnd() throws {
+        let waiting = try rows(.waiting)
+        XCTAssertEqual(TrackerMoves.place(hint("now", above: "check-1000", below: "verif-1037"), rows: waiting, filter: .waiting),
+                       dest("now"), "no rows of Now under this filter")
+        let r = try rows(.all)
+        XCTAssertEqual(TrackerMoves.place(hint("nowhere", above: "check-1000"), rows: r, filter: .all), dest("nowhere"))
+    }
+
+    func testTheNeighbourMustBeInTheHintsSectionNotJustOnTheBoard() throws {
+        let r = try rows(.all)
+        XCTAssertEqual(TrackerMoves.place(hint("next", above: "check-1000", below: "audit-1407"), rows: r, filter: .all),
+                       dest("next", before: "audit-1407"), "check-1000 is in Now: not a place in Next")
     }
 }

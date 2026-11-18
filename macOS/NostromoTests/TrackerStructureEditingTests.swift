@@ -30,9 +30,24 @@ import NostromoKit
 //  - Keep the banner after 10 s, or drop ⌘Z with it: the lifetime test fails.
 //  - Hold the user's own move or removal like an agent's: the exempt tests fail.
 //  - Drop focus from the Move pull-down when its row is rebuilt: the focus tests fail.
+//  - Show an add row to a daemon that cannot take edits: the read-only add-row tests fail.
+//  - Put an item back at the place fixed when it was removed (or moved), not worked out against the board now: the
+//    undo-place tests fail. Drop the undo entry or the banner when a restore (or a move back) is refused: the refused tests fail.
+//  - Send the newest board version instead of the version the held row shows, for a move, a removal or a drop: the held-row tests fail.
+//  - Let a drop take the keyboard from the composer: the drop-focus test fails.
+//  - Register a new undo (or clear redo) from the banner's Undo of an older removal: the banner-undo test fails.
+//  - Offer Remove (button, menu, VoiceOver) or accept `removeItem` under an open editor: the Remove-under-an-editor tests fail.
 
 private typealias Fx = TrackerPaneFx
 private typealias Script = TrackerBoardScript
+
+/// Where a restore or a move back is expected to land: beside an item, or at the end of the section.
+private enum PlaceExpectation {
+    case before(String), after(String), sectionEnd
+
+    var before: String? { if case .before(let id) = self { return id } else { return nil } }
+    var after: String? { if case .after(let id) = self { return id } else { return nil } }
+}
 
 private let nowIds = ["check-1000", "verif-1037", "retry-1074", "revie-1111", "draft-1148",
                       "close-1185", "repro-1222", "triag-1259", "docum-1296", "backf-1333"]
@@ -954,7 +969,9 @@ final class TrackerStructureEditingTests: MouseQueueTestCase {
         XCTAssertNil(h.pane.notice.actionButton, "the notice is only a notice")
         h.fire(6)
         h.rig.settle()
-        XCTAssertNil(h.pane.notice.text, "the notice goes after 6 s")
+        XCTAssertNotEqual(h.pane.notice.text, "Not saved: the board file can't be read (line 7).", "the notice goes after 6 s")
+        XCTAssertEqual(h.pane.notice.spokenText, removedBanner("Check referral 4411 duplicate"),
+                       "and the removal's banner is back: a refused restore leaves the removal undoable")
         XCTAssertEqual(h.sent.count, count, "nothing was sent again: the pane does not retry")
         XCTAssertFalse(h.pane.editing.undoManager.canRedo, "there is no redo of an undo that did not happen")
     }
@@ -1091,7 +1108,8 @@ final class TrackerStructureEditingTests: MouseQueueTestCase {
         let h = try harness()
         h.pane.moveItem("verif-1037", .down)
         h.answer(try XCTUnwrap(h.sent.last).requestId, ok: false, error: ["code": "unknown_item"])
-        XCTAssertEqual(h.pane.notice.text, "Not saved: that item is no longer on the board.")
+        // A move names its neighbour: the daemon's unknown_item is about that item, not the one the user moved.
+        XCTAssertEqual(h.pane.notice.text, "Not saved: the place for it changed (the item next to it moved or is gone). Try again.")
         XCTAssertFalse(h.pane.editing.undoManager.canUndo)
         XCTAssertEqual(shownIDs(h, in: "now"), nowIds)
     }
@@ -1102,6 +1120,434 @@ final class TrackerStructureEditingTests: MouseQueueTestCase {
         h.pane.moveItem("backf-1333", .down)
         XCTAssertTrue(h.sent.isEmpty, "nothing above the first item, nothing below the last")
         XCTAssertFalse(h.pane.editing.undoManager.canUndo)
+    }
+
+    // MARK: - Fix-ups: a daemon without edit support gets no add row
+
+    private func addKeys(_ h: TrackerEditHarness) -> [String] {
+        h.pane.displayedRows.map(\.key).filter { $0.hasPrefix("add:") }
+    }
+
+    /// Every "+ Add item" button anywhere in the pane's view tree.
+    private func addButtons(in view: NSView) -> [NSButton] {
+        var found: [NSButton] = []
+        if let button = view as? NSButton, button.title == "+ Add item" { found.append(button) }
+        for sub in view.subviews { found += addButtons(in: sub) }
+        return found
+    }
+
+    func testAPaneWhoseDaemonCannotTakeEditsHasNoAddRowNoAddButtonAndReportsNoAddRows() throws {
+        let h = try harness(supported: false)
+        XCTAssertEqual(addKeys(h), [], "no add row among the rows")
+        XCTAssertTrue(h.pane.rowViews.keys.allSatisfy { !$0.hasPrefix("add:") }, "and no row view for one")
+        XCTAssertTrue(addButtons(in: h.pane).isEmpty, "no add control in the view tree: it would only do nothing")
+        XCTAssertEqual(h.pane.showReport()["add_rows"] as? [String], [], "tracker show agrees")
+        XCTAssertEqual(h.pane.showReport()["edit_enabled"] as? Bool, false)
+        for filter in [TrackerFilter.open, .all] {
+            h.pane.setFilter(filter)
+            XCTAssertEqual(addKeys(h), [], "\(filter): still none")
+        }
+    }
+
+    func testTheAddRowsAppearWhenTheDaemonGainsEditSupportAndGoWhenItLosesIt() throws {
+        let h = try harness(supported: false)
+        XCTAssertEqual(addKeys(h), [])
+        h.supported = true
+        h.pane.render()
+        h.rig.settle()
+        XCTAssertEqual(addKeys(h), ["now", "next", "waiting-on-you", "done", "findings", "loose-ends"].map { "add:\($0)" })
+        XCTAssertEqual(h.pane.showReport()["add_rows"] as? [String], ["now", "next", "waiting-on-you", "done", "findings", "loose-ends"])
+        XCTAssertEqual(addButtons(in: h.pane).count, 6, "each with its button")
+
+        h.supported = false
+        h.pane.render()
+        h.rig.settle()
+        XCTAssertEqual(addKeys(h), [], "the rows go with the support")
+        XCTAssertTrue(h.pane.rowViews.keys.allSatisfy { !$0.hasPrefix("add:") })
+        XCTAssertTrue(addButtons(in: h.pane).isEmpty)
+        XCTAssertEqual(h.pane.showReport()["add_rows"] as? [String], [])
+    }
+
+    // MARK: - Fix-ups: an undo works its place out against the board as it is then
+
+    private func source(_ h: TrackerEditHarness, _ id: String) throws -> String {
+        try XCTUnwrap(try XCTUnwrap(h.script.item(id))["source"] as? String)
+    }
+
+    /// The user removes `id`; the daemon applies it.
+    private func removeAndEcho(_ h: TrackerEditHarness, _ id: String) throws {
+        h.pane.removeItem(id)
+        XCTAssertEqual(h.sent.last?.ops, [.remove(id: id)], "setup")
+        try echoRemoval(h, id)
+    }
+
+    /// Undo the removal the way the user does: the banner's Undo, or ⌘Z.
+    private func undoRemoval(_ h: TrackerEditHarness, viaBanner: Bool) throws {
+        if viaBanner {
+            try XCTUnwrap(h.pane.notice.actionButton, "the banner is up").performClick(nil)
+        } else {
+            h.pane.performUndo()
+        }
+    }
+
+    func testUndoingARemovalPutsItBesideTheOtherNeighbourWhenTheOneItWasBesideIsGone() throws {
+        // draft-1148 sat between revie-1111 and close-1185.
+        let scenarios: [(String, (inout TrackerBoardScript) throws -> Void, PlaceExpectation)] = [
+            ("the item above was removed by an agent", { try $0.removeItem("revie-1111") }, .before("close-1185")),
+            ("the item above was moved to another section by an agent", { try $0.place("revie-1111", section: "next") }, .before("close-1185")),
+            ("the item below was removed (the one above is still there)", { try $0.removeItem("close-1185") }, .after("revie-1111")),
+            ("both neighbours were removed", { try $0.removeItem("revie-1111"); try $0.removeItem("close-1185") }, .sectionEnd),
+            ("both neighbours were moved to another section", { try $0.place("revie-1111", section: "next"); try $0.place("close-1185", section: "next") }, .sectionEnd),
+        ]
+        for viaBanner in [true, false] {
+            for (name, change, expected) in scenarios {
+                let h = try harness()
+                let id = "draft-1148"
+                let markdown = try source(h, id)
+                try removeAndEcho(h, id)
+                try h.agentChange(change)
+                try undoRemoval(h, viaBanner: viaBanner)
+                XCTAssertEqual(h.sent.last?.ops, [.restore(source: markdown, section: "now", before: expected.before, after: expected.after)],
+                               "\(name) (via \(viaBanner ? "the banner" : "⌘Z")): the place is worked out against the board now")
+            }
+        }
+    }
+
+    func testUndoingTheRemovalOfAnEdgeItemWhoseOnlyNeighbourIsGoneRestoresToTheSectionEnd() throws {
+        let h = try harness()
+        let markdown = try source(h, "check-1000")
+        try removeAndEcho(h, "check-1000")      // the first item: only verif-1037 was beside it
+        try h.agentChange { try $0.removeItem("verif-1037") }
+        try XCTUnwrap(h.pane.notice.actionButton).performClick(nil)
+        XCTAssertEqual(h.sent.last?.ops, [.restore(source: markdown, section: "now", before: nil, after: nil)],
+                       "never a neighbour that is gone")
+    }
+
+    func testARefusedRestoreKeepsTheBannerAndTheCommandZEntryAndDoesNotBlameTheItem() throws {
+        for viaBanner in [true, false] {
+            let h = try harness()
+            let id = "check-1000"
+            let markdown = try source(h, id)
+            let node = try XCTUnwrap(h.script.item(id))
+            let banner = removedBanner("Check referral 4411 duplicate")
+            try removeAndEcho(h, id)
+            let restore = [TrackerPaneOpWire.restore(source: markdown, section: "now", before: "verif-1037", after: nil)]
+
+            try undoRemoval(h, viaBanner: viaBanner)
+            XCTAssertEqual(h.sent.last?.ops, restore, "setup")
+            h.answer(try XCTUnwrap(h.sent.last).requestId, ok: false, error: ["code": "unknown_item"])
+            let text = try XCTUnwrap(h.pane.notice.text)
+            XCTAssertTrue(text.hasPrefix("Not saved: the place for it changed"), "via \(viaBanner): says what changed: \(text)")
+            XCTAssertFalse(text.contains("no longer on the board"), "the item is not what is missing: \(text)")
+
+            h.fire(6)
+            h.rig.settle()
+            XCTAssertEqual(h.pane.notice.spokenText, banner, "via \(viaBanner): the banner is back once the notice has gone")
+            XCTAssertEqual(h.pane.notice.actionButton?.title, "Undo")
+            XCTAssertEqual(h.pane.showReport()["notice"] as? String, banner)
+            XCTAssertEqual(h.pane.editing.undoManager.undoMenuItemTitle, "Undo Remove Item", "via \(viaBanner): ⌘Z still has it")
+            XCTAssertFalse(h.pane.editing.undoManager.canRedo, "nothing was undone, so there is no redo")
+
+            let count = h.sent.count
+            h.pane.performUndo()
+            XCTAssertEqual(h.sent.count, count + 1, "via \(viaBanner): ⌘Z tries again")
+            XCTAssertEqual(h.sent.last?.ops, restore)
+            try h.echo({ try $0.insert(node, section: "now", before: "verif-1037") }, created: [id])
+            XCTAssertEqual(Array(shownIDs(h, in: "now").prefix(2)), ["check-1000", "verif-1037"], "via \(viaBanner): and this time it is back")
+            XCTAssertNotNil(h.pane.rowViews["item:check-1000"], "via \(viaBanner): the row is on the board again")
+        }
+    }
+
+    func testARefusedRestoreFromTheBannerCanBeTriedAgainFromTheBannerToo() throws {
+        let h = try harness()
+        let id = "check-1000"
+        let node = try XCTUnwrap(h.script.item(id))
+        try removeAndEcho(h, id)
+        try XCTUnwrap(h.pane.notice.actionButton).performClick(nil)
+        h.answer(try XCTUnwrap(h.sent.last).requestId, ok: false, error: ["code": "unknown_item"])
+        h.fire(6)
+        h.rig.settle()
+        let count = h.sent.count
+        try XCTUnwrap(h.pane.notice.actionButton, "the banner offers Undo again").performClick(nil)
+        XCTAssertEqual(h.sent.count, count + 1)
+        try h.echo({ try $0.insert(node, section: "now", before: "verif-1037") }, created: [id])
+        XCTAssertEqual(Array(shownIDs(h, in: "now").prefix(2)), ["check-1000", "verif-1037"])
+    }
+
+    func testUndoingAMoveWorksItsPlaceOutAgainstTheBoardNow() throws {
+        // verif-1037 sat between check-1000 and retry-1074 and was moved down past retry-1074.
+        let scenarios: [(String, (inout TrackerBoardScript) throws -> Void, PlaceExpectation)] = [
+            ("the item above it was removed", { try $0.removeItem("check-1000") }, .before("retry-1074")),
+            ("the item above it went to another section", { try $0.place("check-1000", section: "next") }, .before("retry-1074")),
+            ("the item below it was removed (the one above is still there)", { try $0.removeItem("retry-1074") }, .after("check-1000")),
+            ("both were removed", { try $0.removeItem("check-1000"); try $0.removeItem("retry-1074") }, .sectionEnd),
+        ]
+        for (name, change, expected) in scenarios {
+            let h = try harness()
+            let id = "verif-1037"
+            h.pane.moveItem(id, .down)
+            try h.echo { try $0.place(id, section: "now", after: "retry-1074") }
+            try h.agentChange(change)
+            h.pane.performUndo()
+            XCTAssertEqual(h.sent.last?.ops, [.move(id: id, section: "now", before: expected.before, after: expected.after)],
+                           "\(name): the move back is worked out against the board now")
+        }
+    }
+
+    func testARefusedUndoOfAMoveKeepsItsCommandZEntrySaysThePlaceChangedAndCanBeTriedAgain() throws {
+        let h = try harness()
+        let id = "verif-1037"
+        h.pane.moveItem(id, .down)
+        try h.echo { try $0.place(id, section: "now", after: "retry-1074") }
+
+        h.pane.performUndo()
+        let back = [TrackerPaneOpWire.move(id: id, section: "now", before: nil, after: "check-1000")]
+        XCTAssertEqual(h.sent.last?.ops, back, "setup")
+        h.answer(try XCTUnwrap(h.sent.last).requestId, ok: false, error: ["code": "unknown_item"])
+        let text = try XCTUnwrap(h.pane.notice.text)
+        XCTAssertTrue(text.hasPrefix("Not saved: the place for it changed"), text)
+        XCTAssertFalse(text.contains("no longer on the board"), text)
+        XCTAssertTrue(h.pane.editing.undoManager.canUndo, "the undo entry is still there")
+        XCTAssertEqual(h.pane.editing.undoManager.undoMenuItemTitle, "Undo Move Item")
+        XCTAssertFalse(h.pane.editing.undoManager.canRedo, "the move was not undone: nothing to redo")
+
+        let count = h.sent.count
+        h.pane.performUndo()
+        XCTAssertEqual(h.sent.count, count + 1, "⌘Z tries the move back again")
+        XCTAssertEqual(h.sent.last?.ops, back)
+        try h.echo { try $0.place(id, section: "now", after: "check-1000") }
+        XCTAssertEqual(shownIDs(h, in: "now"), nowIds, "and this time it went")
+        XCTAssertEqual(h.pane.editing.undoManager.redoMenuItemTitle, "Redo Move Item")
+    }
+
+    // MARK: - Fix-ups: a held row's move, removal and drop name the version the row shows
+
+    /// `id` shows version 7's content, held by a text selection, while an agent changes its text (version 8).
+    private func heldHarness(_ id: String, file: StaticString = #filePath, line: UInt = #line) throws -> TrackerEditHarness {
+        let h = try harness(file: file, line: line)
+        let textView = try XCTUnwrap(try h.row(id, file: file, line: line).textViews.first, file: file, line: line)
+        XCTAssertTrue(h.window.makeFirstResponder(textView), file: file, line: line)
+        textView.setSelectedRange(NSRange(location: 0, length: 4))
+        rigSettle(0.02)
+        XCTAssertNotNil(try h.row(id, file: file, line: line).selectedTextView, "setup: a selection holds the row", file: file, line: line)
+        let shown = try h.row(id, file: file, line: line).visibleText
+        try h.agentChange({ script in
+            try script.updateItem(id) {
+                $0["text"] = "Rewritten by an agent"
+                $0["text_spans"] = [["kind": "text", "text": "Rewritten by an agent"]]
+            }
+        }, file: file, line: line)
+        XCTAssertEqual(h.version, 8, "setup", file: file, line: line)
+        XCTAssertEqual(try h.row(id, file: file, line: line).visibleText, shown,
+                       "setup: the held row still shows version 7's content", file: file, line: line)
+        return h
+    }
+
+    func testAMoveOfAHeldRowSendsTheVersionItShowedNotTheNewestBoard() throws {
+        let id = "revie-1111"
+        let h = try heldHarness(id)
+        h.pane.moveItem(id, .down)
+        XCTAssertEqual(h.sent.last?.ops, [.move(id: id, section: "now", before: nil, after: "draft-1148")], "setup: the move went")
+        XCTAssertEqual(h.sent.last?.base, 7, "not 8: the user never saw version 8's text")
+    }
+
+    func testARemovalOfAHeldRowSendsTheVersionItShowedNotTheNewestBoard() throws {
+        let id = "revie-1111"
+        let h = try heldHarness(id)
+        h.pane.removeItem(id)
+        XCTAssertEqual(h.sent.last?.ops, [.remove(id: id)], "setup: the removal went")
+        XCTAssertEqual(h.sent.last?.base, 7, "not 8: the user never saw version 8's text")
+    }
+
+    func testADropOfAHeldRowSendsTheVersionItShowedNotTheNewestBoard() throws {
+        let id = "revie-1111"
+        let h = try heldHarness(id)
+        h.pane.dragBegan()
+        XCTAssertTrue(h.pane.dragDropped(payload: payload(h, id), at: try point(h, over: "item:close-1185", lower: true)))
+        XCTAssertEqual(h.sent.last?.ops, [.move(id: id, section: "now", before: nil, after: "close-1185")], "setup: the drop went")
+        XCTAssertEqual(h.sent.last?.base, 7, "not 8: the user never saw version 8's text")
+        h.pane.dragEnded()
+    }
+
+    // MARK: - Fix-ups: a drop does not take the keyboard
+
+    private func drop(_ h: TrackerEditHarness, file: StaticString = #filePath, line: UInt = #line) throws {
+        h.pane.dragBegan()
+        XCTAssertTrue(h.pane.dragDropped(payload: payload(h, "verif-1037"),
+                                         at: try point(h, over: "item:draft-1148", lower: false, file: file, line: line)),
+                      "setup: the drop was taken", file: file, line: line)
+        XCTAssertEqual(h.sent.last?.ops, [.move(id: "verif-1037", section: "now", before: nil, after: "revie-1111")],
+                       "the move is sent", file: file, line: line)
+        h.pane.dragEnded()
+    }
+
+    func testADropLeavesTheComposerFirstResponderSoTypingGoesOn() throws {
+        let h = try harness()
+        XCTAssertTrue(h.window.makeFirstResponder(h.rig.composer))
+        let editor = try XCTUnwrap(h.rig.composer.currentEditor() as? NSTextView)
+        editor.string = "half-written message"
+        try drop(h)
+        XCTAssertTrue(h.window.firstResponder === h.rig.composer.currentEditor(), "the composer still has the keyboard")
+        XCTAssertFalse(h.window.firstResponder === h.pane.sink, "the pane did not take it")
+        XCTAssertEqual(h.rig.composer.stringValue, "half-written message")
+        try h.echo { try $0.place("verif-1037", section: "now", after: "revie-1111") }
+        XCTAssertTrue(h.window.firstResponder === h.rig.composer.currentEditor(), "nor when the daemon's board arrives")
+    }
+
+    func testADropLeavesTheSinkFirstResponderWhenThePaneAlreadyHadTheKeyboard() throws {
+        let h = try harness()
+        h.pane.focusSink()
+        XCTAssertTrue(h.window.firstResponder === h.pane.sink, "setup")
+        try drop(h)
+        XCTAssertTrue(h.window.firstResponder === h.pane.sink, "the pane keeps the focus it had")
+    }
+
+    func testADropWithNothingFocusedDoesNotGiveThePaneTheKeyboard() throws {
+        let h = try harness()
+        h.window.makeFirstResponder(nil)
+        try drop(h)
+        XCTAssertFalse(h.window.firstResponder === h.pane.sink, "a drop is not a keyboard action")
+    }
+
+    // MARK: - Fix-ups: the banner's Undo when the removal is not the newest undo
+
+    private func statusID(_ op: TrackerPaneOpWire?) -> String? {
+        if case .status(let id, _)? = op { return id }
+        return nil
+    }
+
+    func testTheBannersUndoOfAnOlderRemovalRestoresOnlyThatAndLeavesEveryOtherUndoAndRedoAlone() throws {
+        let h = try harness()
+        let a = "check-1000"
+        let node = try XCTUnwrap(h.script.item(a))
+        let markdown = try source(h, a)
+        try removeAndEcho(h, a)                                           // the removal, with its banner
+        h.pane.setStatus(item: "close-1185", to: "blocked")               // an older edit ...
+        try h.echo { try $0.setStatus("close-1185", "blocked") }
+        h.pane.setStatus(item: "triag-1259", to: "blocked")               // ... and a newer one, which is undone
+        try h.echo { try $0.setStatus("triag-1259", "blocked") }
+        h.pane.performUndo()
+        XCTAssertEqual(statusID(h.sent.last?.ops.first), "triag-1259", "setup: ⌘Z undid the newest edit")
+        try h.echo { try $0.setStatus("triag-1259", "todo") }
+        let undoTitle = h.pane.editing.undoManager.undoMenuItemTitle
+        XCTAssertEqual(undoTitle, "Undo Status", "setup: the removal is not the newest undo")
+        XCTAssertEqual(h.pane.editing.undoManager.redoMenuItemTitle, "Redo Status", "setup: a redo exists")
+        XCTAssertNotNil(h.pane.notice.actionButton, "setup: the banner is still up")
+
+        let before = h.sent.count
+        try XCTUnwrap(h.pane.notice.actionButton).performClick(nil)
+        XCTAssertEqual(h.sent.count, before + 1, "one op")
+        XCTAssertEqual(h.sent.last?.ops, [.restore(source: markdown, section: "now", before: "verif-1037", after: nil)],
+                       "exactly the removal's own restore")
+        try h.echo({ try $0.insert(node, section: "now", before: "verif-1037") }, created: [a])
+
+        XCTAssertEqual(h.pane.editing.undoManager.undoMenuItemTitle, undoTitle, "no undo entry was added by the restore")
+        XCTAssertTrue(h.pane.editing.undoManager.canRedo, "the redo was not cleared")
+        XCTAssertEqual(h.pane.editing.undoManager.redoMenuItemTitle, "Redo Status")
+
+        h.pane.performRedo()
+        XCTAssertEqual(statusID(h.sent.last?.ops.first), "triag-1259", "the redo is still the one that was there")
+        try h.echo { try $0.setStatus("triag-1259", "blocked") }
+        h.pane.performUndo()
+        XCTAssertEqual(statusID(h.sent.last?.ops.first), "triag-1259")
+        try h.echo { try $0.setStatus("triag-1259", "todo") }
+
+        h.pane.performUndo()
+        XCTAssertEqual(statusID(h.sent.last?.ops.first), "close-1185", "⌘Z goes on to the other edit, not to the removal again")
+        try h.echo { try $0.setStatus("close-1185", "in-progress") }
+        let count = h.sent.count
+        for _ in 0..<5 where h.pane.editing.undoManager.canUndo { h.pane.performUndo() }
+        XCTAssertEqual(h.sent.count, count, "nothing else is left to undo: the removal's own entry was spent")
+        let restores = h.sent.filter { $0.ops.contains { if case .restore = $0 { return true } else { return false } } }
+        XCTAssertEqual(restores.count, 1, "the item was restored once")
+    }
+
+    // MARK: - Fix-ups: Remove is not offered under an open editor
+
+    private func openEditor(_ h: TrackerEditHarness, _ id: String, _ kind: TrackerEditKind) throws {
+        expand(h, id)
+        h.pane.beginEdit(item: id, kind: kind)
+        let row = try h.row(id)
+        XCTAssertNotNil(kind == .title ? row.titleEditor : row.detailsEditor, "setup: the \(kind) editor is open")
+    }
+
+    private func closeEditor(_ h: TrackerEditHarness, _ id: String, _ kind: TrackerEditKind) throws {
+        let row = try h.row(id)
+        if kind == .title { h.pressEscape(in: try XCTUnwrap(row.titleEditor)) } else { try XCTUnwrap(row.detailsEditor).cancelOperation(nil) }
+        XCTAssertNil(try h.row(id).activeEditor, "setup: the editor closed")
+    }
+
+    func testTheRowHasNoRemoveButtonWhileItsTitleOrDetailsEditorIsOpenAndHasItAgainAfter() throws {
+        for kind in [TrackerEditKind.title, .details] {
+            let h = try harness()
+            let id = "check-1000"
+            expand(h, id)
+            XCTAssertNotNil(try h.row(id).removeButton, "setup: an expanded row has Remove")
+            try openEditor(h, id, kind)
+            XCTAssertNil(try h.row(id).removeButton, "\(kind): no Remove button under the open editor")
+            XCTAssertNotNil(try h.row(id).movePopUp, "\(kind): the rest of the row's controls are untouched")
+            try closeEditor(h, id, kind)
+            XCTAssertNotNil(try h.row(id).removeButton, "\(kind): Remove is offered again once the editor has closed")
+        }
+    }
+
+    func testTheContextMenuHasNoRemoveWhileAnEditorIsOpenAndHasItAgainAfter() throws {
+        for kind in [TrackerEditKind.title, .details] {
+            let h = try harness()
+            let id = "draft-1148"
+            try openEditor(h, id, kind)
+            let open = try h.row(id).editMenuItems().map(\.title)
+            XCTAssertFalse(open.contains("Remove"), "\(kind): \(open)")
+            XCTAssertTrue(open.contains("Move"), "\(kind): the rest of the menu is there: \(open)")
+            XCTAssertFalse(try h.row(id).menuItems().map(\.title).contains("Remove"), "\(kind): nor in the whole menu")
+            try closeEditor(h, id, kind)
+            XCTAssertTrue(try h.row(id).editMenuItems().map(\.title).contains("Remove"), "\(kind): back after the editor closes")
+        }
+    }
+
+    func testVoiceOverDoesNotOfferRemoveWhileAnEditorIsOpenAndOffersItAgainAfter() throws {
+        func names(_ h: TrackerEditHarness, _ id: String) throws -> [String] {
+            let tick = try XCTUnwrap(try h.row(id).tickButton)
+            return (tick.accessibilityCustomActions() ?? []).map(\.name)
+        }
+        for kind in [TrackerEditKind.title, .details] {
+            let h = try harness()
+            let id = "draft-1148"
+            XCTAssertTrue(try names(h, id).contains("Remove"), "setup")
+            try openEditor(h, id, kind)
+            let open = try names(h, id)
+            XCTAssertFalse(open.contains("Remove"), "\(kind): \(open)")
+            XCTAssertTrue(open.contains("Move down"), "\(kind): the other actions stay: \(open)")
+            try closeEditor(h, id, kind)
+            XCTAssertTrue(try names(h, id).contains("Remove"), "\(kind): back after the editor closes")
+        }
+    }
+
+    func testTheOnePaneRemoveRefusesAnItemWhoseEditorIsOpenOrWhoseEditIsBeingSavedAndWorksAfter() throws {
+        for kind in [TrackerEditKind.title, .details] {
+            let h = try harness()
+            let id = "check-1000"
+            try openEditor(h, id, kind)
+            h.pane.removeItem(id)
+            XCTAssertTrue(h.sent.isEmpty, "\(kind): nothing is sent while the editor is open")
+            XCTAssertNil(h.pane.notice.spokenText, "\(kind): and no Removed banner")
+            XCTAssertFalse(h.pane.editing.undoManager.canUndo, "\(kind): and nothing to undo")
+            try closeEditor(h, id, kind)
+            h.pane.removeItem(id)
+            XCTAssertEqual(h.sent.map(\.ops), [[.remove(id: id)]], "\(kind): once the editor has closed it removes")
+        }
+
+        // The edit was sent and its board has not come: the item is still not removed from under its save.
+        let h = try harness()
+        let id = "revie-1111"
+        h.pane.beginEdit(item: id, kind: .title)
+        let editor = try XCTUnwrap(try h.row(id).titleEditor)
+        h.type("Review the queue job", into: editor)
+        h.pressReturn(in: editor)
+        XCTAssertEqual(h.sent.map(\.ops), [[.edit(id: id, title: "Review the queue job", text: nil, body: nil)]], "setup: the save is on its way")
+        h.pane.removeItem(id)
+        XCTAssertEqual(h.sent.count, 1, "no removal while its edit waits for the board")
+        XCTAssertNil(h.pane.notice.spokenText)
     }
 
     // MARK: - Focus
