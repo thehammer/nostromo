@@ -46,6 +46,78 @@ public enum TrackerTitle {
         }
     }
 
+    /// What a typed title becomes: line breaks and tabs are spaces, hidden format characters and
+    /// control characters are gone (the daemon refuses them in a `title`), the ends are trimmed.
+    public static func normalizedTitle(_ typed: String) -> String {
+        let spaced = typed.unicodeScalars.map { scalar -> Character in
+            switch scalar {
+            case "\n", "\r", "\t", "\u{0B}", "\u{0C}", "\u{85}": return " "
+            default: return Character(scalar)
+            }
+        }
+        let clean = String(String.UnicodeScalarView(String(spaced).unicodeScalars.filter {
+            !isInvisible($0) && !($0.properties.generalCategory == .control)
+        }))
+        return clean.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The daemon counts Unicode scalars (`chars()`), the display rule counts characters (graphemes): a title
+    /// is sent only when its scalar count fits, or the daemon refuses it ("é" as e + accent is 2 scalars).
+    public static func fitsTitle(_ title: String) -> Bool {
+        title.unicodeScalars.count <= maxChars
+    }
+
+    /// A title cut to at most `maxChars` scalars (never inside a character), at the last space when there is
+    /// one past `minOffset`; what was cut off comes second. A title that fits comes back whole.
+    public static func fitScalars(_ title: String) -> (title: String, overflow: String?) {
+        guard !fitsTitle(title) else { return (title, nil) }
+        var count = 0
+        var end = title.startIndex
+        var lastSpace: String.Index?
+        for index in title.indices {
+            let next = title.index(after: index)
+            count += title[index..<next].unicodeScalars.count
+            if count > maxChars { break }
+            if title[index] == " ", title.distance(from: title.startIndex, to: index) >= minOffset { lastSpace = index }
+            end = next
+        }
+        let cut = lastSpace ?? end
+        let head = String(title[..<cut]).trimmingCharacters(in: .whitespaces)
+        let tail = String(title[cut...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (head, tail.isEmpty ? nil : tail)
+    }
+
+    /// The title an editor opens with for the stored `text`: the whole text when it fits, else the
+    /// split's title (without the `…` of a cut) computed on the raw text.
+    public static func editableTitle(text: String) -> String {
+        let split = split(text)
+        return split.rule == .cut ? String(split.title.dropLast()) : split.title
+    }
+
+    /// The text after the title the pane shows under the fold, raw, without the `…` of a cut.
+    public static func rawRest(text: String) -> String? {
+        let split = split(text)
+        guard let rest = split.rest else { return nil }
+        return split.rule == .cut ? String(rest.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines) : rest
+    }
+
+    /// The title and body a title edit sends so that what the row showed stays shown: the typed
+    /// title (split by the display rule when it is over `maxChars`, its rest going first in the
+    /// body), then what was under the fold: the old text's rest, then the old note. The body is
+    /// empty when nothing is left.
+    public static func restructure(text: String, note: String?, newTitle: String) -> (title: String, body: String) {
+        let typed = normalizedTitle(newTitle)
+        let typedSplit = split(typed)
+        let title = typedSplit.rule == .cut ? String(typedSplit.title.dropLast()) : typedSplit.title
+        let overflow = typedSplit.rule == .cut
+            ? typedSplit.rest.map { String($0.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines) }
+            : typedSplit.rest
+        // Characters fit but scalars may not (a letter and its combining accent): the daemon counts scalars.
+        let fitted = fitScalars(title)
+        let parts = [fitted.overflow, overflow, rawRest(text: text), note].compactMap { $0 }.filter { !$0.isEmpty }
+        return (fitted.title, parts.joined(separator: "\n\n"))
+    }
+
     public static func split(_ text: String) -> TrackerTitleSplit {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let chars = Array(trimmed)

@@ -9,6 +9,16 @@ import NostromoKit
 final class TrackerTextView: NSTextView {
     /// Items put at the top of the context menu (the row's Copy as Markdown).
     var extraMenuItems: () -> [NSMenuItem] = { [] }
+    /// A double-click on the text (the pane opens an editor); nil leaves the default word selection.
+    var onDoubleClick: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2, let onDoubleClick {
+            onDoubleClick()
+            return
+        }
+        super.mouseDown(with: event)
+    }
 
     static func make(singleLine: Bool = false) -> TrackerTextView {
         let view = TrackerTextView(usingTextLayoutManager: false)

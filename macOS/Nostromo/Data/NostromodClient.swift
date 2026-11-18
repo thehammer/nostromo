@@ -1437,6 +1437,13 @@ class NostromodClient {
         advertisedFeatures = features
     }
 
+    /// Whether the connection's last `welcome` advertised both `tracker_edit_v1` and
+    /// `tracker_conflict_ids_v1`: the tracker pane edits the board only against such a daemon.
+    var daemonAdvertisesTrackerEdit: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return trackerEditSupported(features: advertisedFeatures)
+    }
+
     /// Whether the connection's last `welcome` advertised `slash_commands_v1`.
     var daemonAdvertisesSlashCommands: Bool {
         sendLock.lock(); defer { sendLock.unlock() }
@@ -1503,13 +1510,14 @@ class NostromodClient {
     /// connection's operator nonce, and answers with `ServerMsg.trackerEditResult`. Returns whether
     /// the frame was written (dropped when not connected, or without a nonce for this connection).
     @discardableResult
-    func sendTrackerEdit(tag: String, requestId: String, baseVersion: UInt64, ops: [TrackerPaneOpWire]) -> Bool {
+    func sendTrackerEdit(tag: String, requestId: String, baseVersion: UInt64, baseEpoch: String? = nil,
+                         ops: [TrackerPaneOpWire]) -> Bool {
         sendLock.lock(); defer { sendLock.unlock() }
         let curFd = fd
         guard curFd >= 0 else { log.debug("tracker_edit dropped — not connected"); return false }
         let nonce = operatorNonce.flatMap { $0.sock == curFd ? $0.value : nil }
         guard let body = try? encoder.encode(TrackerEditRequestWire(tag: tag, requestId: requestId,
-                                                                    baseVersion: baseVersion,
+                                                                    baseVersion: baseVersion, baseEpoch: baseEpoch,
                                                                     operatorNonce: nonce, ops: ops))
         else { return false }
         writeFrameLocked(body, to: curFd, type: "tracker_edit", tag: tag)

@@ -31,7 +31,7 @@ final class TrackerTranscriptSafetyTests: XCTestCase {
         let leftWidth: CGFloat
     }
 
-    private func makePane(following: Bool) throws -> Pane {
+    private func makePane(following: Bool, editing: Bool = false) throws -> Pane {
         let rig = following ? SafetyRig.followingTail(self) : SafetyRig.scrolledUp(self)
         let window = rig.window
         let content = try XCTUnwrap(window.contentView)
@@ -53,7 +53,7 @@ final class TrackerTranscriptSafetyTests: XCTestCase {
         split.frame = NSRect(x: 0, y: 0, width: total, height: height)
         window.contentView = split
 
-        let harness = try TrackerGateHarness(self)
+        let harness = try TrackerGateHarness(self, editing: editing)
         split.addSubview(content)
         split.addSubview(harness.pane)
         content.autoresizingMask = []
@@ -136,5 +136,48 @@ final class TrackerTranscriptSafetyTests: XCTestCase {
 
     func testLinkClicksAndStaleFootnotesKeepAFollowingTranscriptAtTheBottom() throws {
         try runScript(following: true, events: TrackerLinkGateScript.events(), label: "links ")
+    }
+
+    // T3b: pane edits next to a transcript. A mouse tick or status change, and an editor opened, typed in
+    // and saved from a focused composer, move neither the divider, the transcript nor the composer's text
+    // and selection; the editor hands focus back to the composer. (A mouse edit puts focus on the pane's
+    // sink so ⌘Z undoes it, on purpose: see `TrackerPaneView.focusSink`.)
+
+    private func runEditing(following: Bool) throws {
+        let p = try makePane(following: following, editing: true)
+        let rig = p.rig
+        let pane = p.harness.pane
+        let leftFrame = p.left.frame
+        let trackerFrame = pane.frame
+        let id = try XCTUnwrap(pane.displayedRows.first { row in
+            guard let item = row.item, item.isTickable, let view = pane.rowViews[row.key] else { return false }
+            let rect = pane.convert(view.bounds, from: view)
+            return rect.minY > pane.scrollView.frame.minY + 10 && rect.maxY < pane.bounds.maxY - 10
+        }?.item?.id, "a tickable row on screen")
+
+        rig.assertNoMove("mouse tick", following: following, focusMovesOnPurpose: true) { pane.tick(item: id) }
+        rig.assertNoMove("mouse status change", following: following, focusMovesOnPurpose: true) {
+            pane.setStatus(item: id, to: "blocked")
+        }
+        rig.focusComposer()
+        rig.assertNoMove("title editor opened, typed in and saved", following: following) {
+            pane.beginEdit(item: id, kind: .title)
+            guard let editor = pane.rowViews["item:\(id)"]?.titleEditor else { return XCTFail("no title editor") }
+            (editor.currentEditor() as? NSTextView)?.string = "A title typed at the gate"
+            editor.commit()
+        }
+        XCTAssertTrue(rig.window.firstResponder === rig.textView, "focus returned to the composer")
+        XCTAssertEqual(rig.textView.string, SafetyRig.typedText)
+        XCTAssertEqual(rig.textView.selectedRange(), SafetyRig.typedSelection)
+        XCTAssertEqual(p.left.frame, leftFrame, "the divider moved (transcript side)")
+        XCTAssertEqual(pane.frame, trackerFrame, "the divider moved (tracker side)")
+    }
+
+    func testPaneEditsLeaveAScrolledUpTranscriptAndItsComposerUntouched() throws {
+        try runEditing(following: false)
+    }
+
+    func testPaneEditsKeepAFollowingTranscriptAtTheBottomWithItsComposerUntouched() throws {
+        try runEditing(following: true)
     }
 }

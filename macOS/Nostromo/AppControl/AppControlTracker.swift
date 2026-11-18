@@ -14,12 +14,16 @@ enum AppControlTracker {
                      visible: Bool,
                      held: [TrackerHold] = [],
                      renderGeneration: Int = 0,
-                     rowsUpdatedLast: Int = 0) -> [String: Any] {
+                     rowsUpdatedLast: Int = 0,
+                     editEnabled: Bool = false,
+                     removedConflicts: Int = 0,
+                     editing: [String: String] = [:]) -> [String: Any] {
         guard let p = presentation else {
             return ["tag": tag, "waiting": true, "visible": visible, "title": NSNull(), "path": NSNull(),
                     "sections": [Any](), "strip": ["count": 0, "title": "Waiting on you (0)", "items": [Any]()],
                     "banners": [Any](), "filter": TrackerFilter.all.rawValue,
-                    "render_generation": renderGeneration, "rows_updated_last": rowsUpdatedLast]
+                    "render_generation": renderGeneration, "rows_updated_last": rowsUpdatedLast,
+                    "edit_enabled": editEnabled, "removed_conflicts": removedConflicts]
         }
         let heldByKey = Dictionary(held.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
         let heldByItem = Dictionary(held.compactMap { hold in hold.row.item.map { ($0.id, hold) } },
@@ -48,7 +52,10 @@ enum AppControlTracker {
             let shown = moving ? section : (shownSection[item.id] ?? section)
             return ["held": state, "held_reason": reason, "model_section": section.map { $0 as Any } ?? NSNull(),
                     "shown_section": shown.map { $0 as Any } ?? NSNull(),
-                    "shown_expanded": shownExpanded[item.id] ?? (item.isExpanded)]
+                    "shown_expanded": shownExpanded[item.id] ?? (item.isExpanded),
+                    "tickable": editEnabled && item.isTickable,
+                    "status_editable": editEnabled && item.isStatusEditable,
+                    "editing": editing[item.id] ?? "none"]
         }
 
         var sections: [[String: Any]] = []
@@ -120,6 +127,8 @@ enum AppControlTracker {
             "log": log,
             "render_generation": renderGeneration,
             "rows_updated_last": rowsUpdatedLast,
+            "edit_enabled": editEnabled,
+            "removed_conflicts": removedConflicts,
         ]
     }
 
@@ -162,8 +171,14 @@ enum AppControlTracker {
             "shown_section": state["shown_section"] ?? NSNull(),
             "shown_expanded": state["shown_expanded"] ?? (item.isExpanded),
             "stub": stub.map { $0 as Any } ?? NSNull(),
-            "conflict": NSNull(),
-            "badge": NSNull(),
+            "conflict": (item.conflicts.isEmpty ? NSNull() as Any : item.conflicts.map(\.field) as Any),
+            "badge": item.sensitive.map { $0.classes as Any } ?? NSNull(),
+            "conflicts": ["count": item.conflicts.count, "fields": item.conflicts.map(\.field),
+                          "dropped": item.droppedConflicts] as [String: Any],
+            "sensitive": item.sensitive != nil,
+            "tickable": state["tickable"] ?? false,
+            "status_editable": state["status_editable"] ?? false,
+            "editing": state["editing"] ?? "none",
         ]
     }
 

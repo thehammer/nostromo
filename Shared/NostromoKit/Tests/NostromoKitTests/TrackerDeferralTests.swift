@@ -478,6 +478,35 @@ final class TrackerDeferralTests: XCTestCase {
         XCTAssertEqual(stub(in: result.rows[indexes[2]])?.text, "removed")
         assertUniqueKeys(result.rows)
     }
+
+    // MARK: Held keys (open editors and pending saves, T3b)
+
+    func testAHeldKeyKeepsItsRowWhileOthersApplyAndSeveralKeysCanBeHeld() throws {
+        let s = try scenario {
+            try $0.setStatus("check-1000", "done")
+            try $0.setOwner("verif-1037", "someone")
+            try $0.setOwner("revie-1111", "other")
+        }
+        var deferral = TrackerDeferral()
+        let result = deferral.resolve(displayed: s.before.rows, target: s.target, visibleKeys: everyKey(s.before.rows),
+                                      heldKeys: ["item:verif-1037", "item:revie-1111"])
+        let shown = Dictionary(uniqueKeysWithValues: result.rows.compactMap { row in row.item.map { ($0.id, $0) } })
+        XCTAssertEqual(shown["verif-1037"]?.owner, TFx.itemRow("verif-1037", in: s.before)?.owner, "held row keeps content")
+        XCTAssertEqual(shown["revie-1111"]?.owner, TFx.itemRow("revie-1111", in: s.before)?.owner, "second held row too")
+        XCTAssertEqual(deferral.held.filter { $0.kind == .selection }.count, 2)
+    }
+
+    func testDroppingAKeyFromTheHeldSetReleasesItsRow() throws {
+        // An editor's hold is the pane's to end: the key stays held through releaseAll (like a
+        // selection), and leaving the set is what lets the board's row show.
+        let s = try scenario { try $0.setOwner("verif-1037", "someone") }
+        var deferral = TrackerDeferral()
+        deferral.releaseAll()
+        let held = deferral.resolve(displayed: s.before.rows, target: s.target, visibleKeys: [], heldKeys: ["item:verif-1037"])
+        XCTAssertEqual(held.rows, s.before.rows, "held through releaseAll")
+        let released = deferral.resolve(displayed: held.rows, target: s.target, visibleKeys: [], heldKeys: [])
+        XCTAssertEqual(released.rows, s.target.rows, "no held key: the board's rows show")
+    }
 }
 
 // MARK: - Moves within a section, open Done groups, selections that move (review edge cases)
