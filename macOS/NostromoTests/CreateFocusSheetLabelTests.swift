@@ -33,8 +33,9 @@ final class CreateFocusSheetLabelTests: XCTestCase {
         }
     }
 
-    private func makeSheet(_ g: GatedLookup, onCreate: @escaping (Focus) -> Void = { _ in }) -> CreateFocusSheet {
-        CreateFocusSheet(orgResolver: RepoOrgResolver(lookup: g.lookup),
+    private func makeSheet(_ g: GatedLookup, resolver: RepoOrgResolver? = nil,
+                           onCreate: @escaping (Focus) -> Void = { _ in }) -> CreateFocusSheet {
+        CreateFocusSheet(orgResolver: resolver ?? RepoOrgResolver(lookup: g.lookup),
                          agents: ["claudia"], projects: ["/tmp/alpha", "/tmp/beta"],
                          onCreate: onCreate)
     }
@@ -46,10 +47,15 @@ final class CreateFocusSheetLabelTests: XCTestCase {
                          onCreate: onCreate)
     }
 
-    private func pumpMain(_ seconds: TimeInterval = 0.3) {
-        let e = expectation(description: "pump")
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { e.fulfill() }
-        wait(for: [e], timeout: 20)
+    /// Spins the main run loop until `condition` holds, returning the moment it does. A condition that never
+    /// holds fails here with `message`, after a bounded wait, instead of leaving a later assertion to guess.
+    private func waitUntil(_ message: @autoclosure () -> String, timeout: TimeInterval = 15,
+                           file: StaticString = #filePath, line: UInt = #line, _ condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
+        }
+        if !condition() { XCTFail("timed out after \(timeout) s: \(message())", file: file, line: line) }
     }
 
     private func allViews(_ root: NSView) -> [NSView] {
@@ -133,11 +139,16 @@ final class CreateFocusSheetLabelTests: XCTestCase {
 
     func testTypedLabelSurvivesALateOrgLookupCompleting() {
         let g = GatedLookup(["/tmp/alpha": .resolved("Carefeed")])
-        let sheet = makeSheet(g)
+        let resolver = RepoOrgResolver(lookup: g.lookup)
+        let sheet = makeSheet(g, resolver: resolver)
         sheet.typeLabel("Hotfix")
 
+        // A second waiter on the same lookup is called right after the sheet's own, in the same main-queue
+        // block: when it has run, the lookup has landed and the sheet has seen it.
+        var landed = false
+        resolver.resolve("/tmp/alpha") { _ in landed = true }
         g.release(path: "/tmp/alpha")   // the org lookup lands after the user typed
-        pumpMain()
+        waitUntil("the org lookup never landed") { landed }
 
         XCTAssertEqual(sheet.previewText, "→ Hotfix",
                        "a finishing background lookup must not overwrite what the user typed")
@@ -152,7 +163,7 @@ final class CreateFocusSheetLabelTests: XCTestCase {
         if let text { sheet.typeLabel(text) }
         sheet.createTapped()
         g.release(2)
-        pumpMain()
+        waitUntil("the create callback never fired (created \(created.count))", file: file, line: line) { created.count >= 1 }
         XCTAssertEqual(created.count, 1, file: file, line: line)
         return created.first
     }
@@ -211,7 +222,7 @@ final class CreateFocusSheetLabelTests: XCTestCase {
         field.stringValue = "  From the field  "
         sheet.createTapped()
         g.release(2)
-        pumpMain()
+        waitUntil("the create callback never fired (created \(created.count))") { !created.isEmpty }
 
         XCTAssertEqual(created.first?.label, "From the field")
     }
