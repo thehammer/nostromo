@@ -1114,6 +1114,16 @@ final class TrackerStructureEditingTests: MouseQueueTestCase {
         XCTAssertEqual(shownIDs(h, in: "now"), nowIds)
     }
 
+    func testARefusedMoveWhoseReasonNamesTheMovedItemSaysTheItemIsGone() throws {
+        let h = try harness()
+        h.pane.moveItem("verif-1037", .down)
+        h.answer(try XCTUnwrap(h.sent.last).requestId, ok: false, error: ["code": "unknown_item", "reason": "verif-1037"])
+        XCTAssertEqual(h.pane.notice.text, "Not saved: that item is no longer on the board.")
+        h.pane.moveItem("verif-1037", .down)
+        h.answer(try XCTUnwrap(h.sent.last).requestId, ok: false, error: ["code": "unknown_item", "reason": "retry-1074"])
+        XCTAssertTrue(try XCTUnwrap(h.pane.notice.text).hasPrefix("Not saved: the place for it changed"), "a neighbour's id is about the place")
+    }
+
     func testAMoveToWhereTheItemAlreadyIsSendsNothing() throws {
         let h = try harness()
         h.pane.moveItem("check-1000", .up)
@@ -1210,6 +1220,26 @@ final class TrackerStructureEditingTests: MouseQueueTestCase {
                 XCTAssertEqual(h.sent.last?.ops, [.restore(source: markdown, section: "now", before: expected.before, after: expected.after)],
                                "\(name) (via \(viaBanner ? "the banner" : "⌘Z")): the place is worked out against the board now")
             }
+        }
+    }
+
+    func testUndoingARemovalSkipsANeighbourStillDrawnButMovedAwayByAnAgent() throws {
+        for viaBanner in [true, false] {
+            let h = try harness()
+            let id = "draft-1148"      // sat between revie-1111 and close-1185
+            let markdown = try source(h, id)
+            try removeAndEcho(h, id)
+            // A text selection holds revie-1111 on screen while an agent moves it to another section.
+            let textView = try XCTUnwrap(try h.row("revie-1111").textViews.first)
+            XCTAssertTrue(h.window.makeFirstResponder(textView))
+            textView.setSelectedRange(NSRange(location: 0, length: 4))
+            rigSettle(0.02)
+            XCTAssertNotNil(try h.row("revie-1111").selectedTextView, "setup: a selection holds the row")
+            try h.agentChange { try $0.place("revie-1111", section: "next") }
+            XCTAssertTrue(shownIDs(h, in: "now").contains("revie-1111"), "setup: the moved neighbour is still drawn in Now")
+            try undoRemoval(h, viaBanner: viaBanner)
+            XCTAssertEqual(h.sent.last?.ops, [.restore(source: markdown, section: "now", before: "close-1185", after: nil)],
+                           "via \(viaBanner ? "the banner" : "⌘Z"): beside the neighbour that is still in Now, not the one drawn there")
         }
     }
 

@@ -467,7 +467,7 @@ final class TrackerItemEditing {
             onConfirmed?(entry.ids, result.version)
             entry.completion(.saved(version: result.version, created: result.created))
         } else {
-            let message = Self.message(for: result.error, placing: entry.places)
+            let message = Self.message(for: result.error, placing: entry.places, moving: entry.ids)
             showNotice(message)
             if Self.isStale(result.error) { onLookAgain?() }
             entry.completion(.failed(message))
@@ -517,8 +517,13 @@ final class TrackerItemEditing {
     /// One plain sentence for each reason the daemon refuses an edit.
     /// `placing`: the edit put an item next to another (a move or a restore), so "unknown item" or "not in
     /// section" is about that neighbour or section, not about the item the user acted on.
-    static func message(for error: TrackerEditErrorWire?, placing: Bool = false) -> String {
+    /// `moving`: the items the edit moved. An `unknown_item` whose reason names one of them (the daemon's
+    /// reason carries the missing id) means the item itself is gone, not its neighbour.
+    static func message(for error: TrackerEditErrorWire?, placing: Bool = false, moving: [String] = []) -> String {
         let reason = error?.reason ?? ""
+        if placing, !isStale(error), error?.code == "unknown_item", moving.contains(where: { reason == $0 || reason.hasSuffix(" \($0)") }) {
+            return "Not saved: that item is no longer on the board."
+        }
         if placing, !isStale(error), error?.code == "unknown_item" || (error?.code == "invalid_args" && reason.contains("is not in section")) {
             return "Not saved: the place for it changed (the item next to it moved or is gone). Try again."
         }
