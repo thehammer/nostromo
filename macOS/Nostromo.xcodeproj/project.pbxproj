@@ -738,6 +738,7 @@
 		ZZ0000000000000000TK1402 /* TrackerAnchorProbe.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1400 /* TrackerAnchorProbe.swift */; };
 		ZZ0000000000000000TK1501 /* TrackerStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1500 /* TrackerStoreTests.swift */; };
 		ZZ0000000000000000TK1601 /* TrackerPaneViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1600 /* TrackerPaneViewTests.swift */; };
+		ZZ0000000000000000TK9901 /* TrackerStructureEditingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK9900 /* TrackerStructureEditingTests.swift */; };
 		ZZ0000000000000000TK1701 /* TrackerScrollSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1700 /* TrackerScrollSafetyTests.swift */; };
 		ZZ0000000000000000TK1801 /* TrackerTranscriptSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1800 /* TrackerTranscriptSafetyTests.swift */; };
 		ZZ0000000000000000TK1901 /* TrackerAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK1900 /* TrackerAppearanceTests.swift */; };
@@ -1367,6 +1368,7 @@
 		ZZ0000000000000000TK1400 /* TrackerAnchorProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerAnchorProbe.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK1500 /* TrackerStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerStoreTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK1600 /* TrackerPaneViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerPaneViewTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK9900 /* TrackerStructureEditingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerStructureEditingTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK1700 /* TrackerScrollSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerScrollSafetyTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK1800 /* TrackerTranscriptSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerTranscriptSafetyTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK1900 /* TrackerAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerAppearanceTests.swift; sourceTree = "<group>"; };
@@ -2078,6 +2080,7 @@
 				ZZ0000000000000000BA5000 /* TaskRequestsTests.swift */,
 				ZZ0000000000000000TK1500 /* TrackerStoreTests.swift */,
 				ZZ0000000000000000TK1600 /* TrackerPaneViewTests.swift */,
+				ZZ0000000000000000TK9900 /* TrackerStructureEditingTests.swift */,
 				ZZ0000000000000000TK1700 /* TrackerScrollSafetyTests.swift */,
 				ZZ0000000000000000TK1800 /* TrackerTranscriptSafetyTests.swift */,
 				ZZ0000000000000000TK1900 /* TrackerAppearanceTests.swift */,
@@ -3150,6 +3153,7 @@
 				ZZ0000000000000000TK1402 /* TrackerAnchorProbe.swift in TestSources */,
 				ZZ0000000000000000TK1501 /* TrackerStoreTests.swift in Sources */,
 				ZZ0000000000000000TK1601 /* TrackerPaneViewTests.swift in Sources */,
+				ZZ0000000000000000TK9901 /* TrackerStructureEditingTests.swift in Sources */,
 				ZZ0000000000000000TK1701 /* TrackerScrollSafetyTests.swift in Sources */,
 				ZZ0000000000000000TK1801 /* TrackerTranscriptSafetyTests.swift in Sources */,
 				ZZ0000000000000000TK1901 /* TrackerAppearanceTests.swift in Sources */,
