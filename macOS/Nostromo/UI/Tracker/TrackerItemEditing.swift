@@ -445,12 +445,17 @@ final class TrackerTitleEditor: NSTextField, NSTextFieldDelegate {
 
     func arm() { isArmed = true }
 
-    /// The user tried to put focus in this editor while its save was pending (read-only).
+    /// Focus was asked for on this editor while its save was pending (read-only; the field may refuse): a click or an explicit
+    /// focus request. Merely being asked `acceptsFirstResponder` or `canBecomeKeyView` (key-view loop,
+    /// accessibility) is not focus and does not count.
     var onFocusWhilePending: (() -> Void)?
+    /// Focus left this editor while its save was pending: the user no longer wants it there.
+    var onFocusLeftWhilePending: (() -> Void)?
 
-    override var acceptsFirstResponder: Bool {
+    override func becomeFirstResponder() -> Bool {
+        // Asked to take focus (a click, an explicit request), whether or not a read-only field accepts it.
         if !isEditable { onFocusWhilePending?() }
-        return super.acceptsFirstResponder
+        return super.becomeFirstResponder()
     }
 
     init(text: String) {
@@ -518,6 +523,7 @@ final class TrackerTitleEditor: NSTextField, NSTextFieldDelegate {
     }
 
     func controlTextDidEndEditing(_ obj: Notification) {
+        if !isEditable { onFocusLeftWhilePending?() }
         commit()
     }
 }
@@ -528,14 +534,17 @@ final class TrackerDetailsEditor: NSTextView {
     var onCommit: ((String) -> Void)?
     var onCancel: (() -> Void)?
     var onResize: (() -> Void)?
-    /// The user tried to put focus in this editor while its save was pending (read-only).
+    /// Focus actually went into this editor while its save was pending (read-only); being asked does not count.
     var onFocusWhilePending: (() -> Void)?
+    /// Focus left this editor while its save was pending.
+    var onFocusLeftWhilePending: (() -> Void)?
     private(set) var isFinished = false
     private(set) var original = ""
 
-    override var acceptsFirstResponder: Bool {
+    override func becomeFirstResponder() -> Bool {
+        // Asked to take focus (a click, an explicit request), whether or not a read-only field accepts it.
         if !isEditable { onFocusWhilePending?() }
-        return super.acceptsFirstResponder
+        return super.becomeFirstResponder()
     }
 
     static func make(text: String) -> TrackerDetailsEditor {
@@ -628,7 +637,9 @@ final class TrackerDetailsEditor: NSTextView {
     }
 
     override func resignFirstResponder() -> Bool {
+        let pending = !isEditable
         let resigned = super.resignFirstResponder()
+        if resigned, pending { onFocusLeftWhilePending?() }
         if resigned { commit() }
         return resigned
     }

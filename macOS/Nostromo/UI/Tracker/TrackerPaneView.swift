@@ -526,6 +526,9 @@ final class TrackerPaneView: NSView {
         view.onCommitEdit = { [weak self] id, kind, text in self?.commitEdit(item: id, kind: kind, text: text) }
         view.onCancelEdit = { [weak self] id, kind in self?.cancelEdit(item: id, kind: kind) }
         view.onFocusPendingEditor = { [weak self] id in self?.editSessions[id]?.editorWantsFocus = true }
+        view.onFocusLeftPendingEditor = { [weak self] id in
+            if self?.editSessions[id]?.phase == .saving { self?.editSessions[id]?.editorWantsFocus = false }
+        }
         view.onShowConflict = { [weak self] id, anchor, fromKeyboard in
             self?.showConflicts(item: id, anchor: anchor, fromKeyboard: fromKeyboard)
         }

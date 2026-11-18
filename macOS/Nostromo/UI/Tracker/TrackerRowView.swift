@@ -119,6 +119,7 @@ final class TrackerRowView: NSView {
     var onCommitEdit: ((String, TrackerEditKind, String) -> Void)?
     /// The user tried to focus an editor whose save is pending (item id).
     var onFocusPendingEditor: ((String) -> Void)?
+    var onFocusLeftPendingEditor: ((String) -> Void)?
     /// Esc in an editor.
     var onCancelEdit: ((String, TrackerEditKind) -> Void)?
     /// The conflict mark or the sensitive badge asked for its popover (item id, anchor, from the keyboard).
@@ -915,12 +916,14 @@ final class TrackerRowView: NSView {
             editor.onCommit = { [weak self] typed in self?.editorFinished(.title, typed) }
             editor.onCancel = { [weak self] in self?.editorCancelled(.title) }
             editor.onFocusWhilePending = { [weak self] in if let id = self?.row.item?.id { self?.onFocusPendingEditor?(id) } }
+            editor.onFocusLeftWhilePending = { [weak self] in if let id = self?.row.item?.id { self?.onFocusLeftPendingEditor?(id) } }
             titleEditor = editor
         case .details:
             let editor = TrackerDetailsEditor.make(text: text)
             editor.onCommit = { [weak self] typed in self?.editorFinished(.details, typed) }
             editor.onCancel = { [weak self] in self?.editorCancelled(.details) }
             editor.onFocusWhilePending = { [weak self] in if let id = self?.row.item?.id { self?.onFocusPendingEditor?(id) } }
+            editor.onFocusLeftWhilePending = { [weak self] in if let id = self?.row.item?.id { self?.onFocusLeftPendingEditor?(id) } }
             editor.onResize = { [weak self] in
                 self?.measured = nil
                 self?.needsLayout = true

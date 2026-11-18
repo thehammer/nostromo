@@ -236,6 +236,45 @@ final class TrackerFixupTests: XCTestCase {
         XCTAssertTrue(h.window.firstResponder === h.window, "a refusal never pulls focus into the editor (delegate: \(String(describing: (h.window.firstResponder as? NSTextView)?.delegate)), editor: \(editor), composer: \(h.rig.composer))")
     }
 
+    /// P3a: AppKit asks the pending editor `canBecomeKeyView` (key-view loop) for its own reasons; that is not
+    /// the user asking for focus, so a late refusal must not pull focus into the editor.
+    func testAppKitAskingWhetherThePendingEditorAcceptsFocusDoesNotLetALateRefusalTakeFocus() throws {
+        let h = try TrackerEditHarness(self)
+        _ = try saveTitleFromComposer(h)
+        let editor = try XCTUnwrap(try h.row(plain).titleEditor)
+        XCTAssertTrue(h.window.makeFirstResponder(nil))
+        _ = editor.canBecomeKeyView
+        _ = editor.acceptsFirstResponder
+        h.answer(try XCTUnwrap(h.sent.last).requestId, ok: false, error: ["code": "board_missing"])
+        XCTAssertTrue(h.window.firstResponder === h.window, "now \(String(describing: h.window.firstResponder))")
+    }
+
+    /// P3b: the pending editor holds focus (the user is in it), then the user moves on; a late refusal must not
+    /// pull focus back into it.
+    func testALateRefusalAfterTheUserLeftThePendingEditorDoesNotTakeFocus() throws {
+        let h = try TrackerEditHarness(self)
+        h.pane.beginEdit(item: withNote, kind: .details)
+        let editor = try XCTUnwrap(try h.row(withNote).detailsEditor)
+        h.window.makeFirstResponder(editor)
+        editor.string = "Seen on host 15"
+        XCTAssertTrue(editor.performKeyEquivalent(with: h.commandReturn()), "⌘Return saves")
+        XCTAssertTrue(h.window.firstResponder === editor, "setup: the pending editor keeps the focus it had")
+        XCTAssertTrue(h.window.makeFirstResponder(nil))
+        XCTAssertTrue(h.window.firstResponder === h.window, "setup: the user moved on")
+        h.answer(try XCTUnwrap(h.sent.last).requestId, ok: false, error: ["code": "board_missing"])
+        XCTAssertTrue(h.window.firstResponder === h.window, "now \(String(describing: h.window.firstResponder))")
+    }
+
+    /// P3c (the rule's other side): a click on the pending editor while the user stays there keeps the backstop.
+    func testALateRefusalAfterClickingIntoThePendingEditorStillReturnsFocusToIt() throws {
+        let h = try TrackerEditHarness(self)
+        _ = try saveTitleFromComposer(h)
+        let editor = try XCTUnwrap(try h.row(plain).titleEditor)
+        XCTAssertTrue(h.window.makeFirstResponder(editor))   // the user clicks back in
+        h.answer(try XCTUnwrap(h.sent.last).requestId, ok: false, error: ["code": "board_missing"])
+        XCTAssertFalse(h.window.firstResponder === h.window, "focus must not be dropped onto the window")
+    }
+
     func testAnUndoIsMadeAgainstTheVersionTheRowShowsNotTheNewestBoard() throws {
         let h = try TrackerEditHarness(self)
         try XCTUnwrap(try h.row(plain).tickButton).performClick(nil)
