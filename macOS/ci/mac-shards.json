@@ -48,6 +48,7 @@
         "FollowModelTests",
         "FollowTailPolicyTests",
         "FullScreenMaskGuardTests",
+        "GitHubSignedOut404HintTests",
         "HumanGestureMenuSelectionTests",
         "IdleBannerViewTests",
         "IdleCountdownModelTests",
@@ -126,6 +127,7 @@
         "TeriSentryFilterBarLayoutTests",
         "TeriSentryRowContentTests",
         "TeriSentryTabSurfaceTests",
+        "TeriSurfaceViewTests",
         "TeriTabFilterBarLayoutTests",
         "TeriTodosRowContentTests",
         "TeriViewStateStoreTests",
@@ -163,6 +165,7 @@
       "classes": [
         "ActivationAuditTests",
         "AgentDisplayTextTests",
+        "AlwaysAllowCardTests",
         "AppControlHitTestTests",
         "AppControlMouseForeignEventTests",
         "AppControlProtocolTests",
