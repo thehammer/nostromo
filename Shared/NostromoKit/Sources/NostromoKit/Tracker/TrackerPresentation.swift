@@ -544,9 +544,11 @@ public enum TrackerPresenter {
                                filter: TrackerFilter = .all,
                                folds: TrackerFoldState = TrackerFoldState(),
                                sources: [TrackerWaitingSource] = [TrackerNeedsYouSource()],
-                               timeZone: TimeZone = .current) -> TrackerPresentation {
-        // Under All and Open, on a board that can be read: a section ends with its add row.
-        let showsAdd = board.banner == nil && (filter == .all || filter == .open)
+                               timeZone: TimeZone = .current,
+                               editSupported: Bool = true) -> TrackerPresentation {
+        // Under All and Open, on a board that can be read, and only when the daemon takes pane edits (an older
+        // daemon gets no half-working control): a section ends with its add row.
+        let showsAdd = editSupported && board.banner == nil && (filter == .all || filter == .open)
         var builder = RowBuilder(filter: filter, folds: folds, now: now, timeZone: timeZone, showsAdd: showsAdd)
         for node in board.nodes { builder.add(node) }
         builder.finishSection()

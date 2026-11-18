@@ -28,6 +28,26 @@ public struct TrackerMoveDestination: Equatable {
     }
 }
 
+/// Where an item was: its section and the open items on either side of it then. An undo does not replay
+/// a place fixed in the past: the neighbours may have moved or gone, so the place is worked out again
+/// against the board as it is when the undo runs (`TrackerMoves.place`).
+public struct TrackerPlaceHint: Equatable {
+    public let section: String
+    public let above: String?
+    public let below: String?
+
+    public init(section: String, above: String? = nil, below: String? = nil) {
+        self.section = section
+        self.above = above
+        self.below = below
+    }
+
+    /// A place that was a move's target: after `after`, before `before`.
+    public init(_ destination: TrackerMoveDestination) {
+        self.init(section: destination.section, above: destination.after, below: destination.before)
+    }
+}
+
 /// Where a drop would land and where the pane draws the drop indicator.
 public struct TrackerDrop: Equatable {
     public enum Indicator: Equatable {
@@ -109,6 +129,32 @@ public enum TrackerMoves {
         if i > 0 { return TrackerMoveDestination(section: group.sectionId, after: group.ids[i - 1]) }
         if group.ids.count > 1 { return TrackerMoveDestination(section: group.sectionId, before: group.ids[1]) }
         return TrackerMoveDestination(section: group.sectionId)
+    }
+
+    /// Both neighbours of the item now (for an item the view does not list: just the section).
+    public static func hint(of id: String, rows: [TrackerRow], filter: TrackerFilter,
+                            fallbackSection: String) -> TrackerPlaceHint {
+        let groups = groups(rows, filter: filter)
+        guard let (g, i) = position(of: id, in: groups) else { return TrackerPlaceHint(section: fallbackSection) }
+        let ids = groups[g].ids
+        return TrackerPlaceHint(section: groups[g].sectionId, above: i > 0 ? ids[i - 1] : nil,
+                                below: i + 1 < ids.count ? ids[i + 1] : nil)
+    }
+
+    /// The place `hint` means on the board as it is now: after the item that was above (when it is still in
+    /// the section), else before the one that was below, else the end of the section's open items.
+    /// `isInSection` says whether the daemon's newest board still has an item in a section (a row the view
+    /// holds back may already be gone from it).
+    public static func place(_ hint: TrackerPlaceHint, rows: [TrackerRow], filter: TrackerFilter,
+                             isInSection: (_ id: String, _ section: String) -> Bool = { _, _ in true }) -> TrackerMoveDestination {
+        let shown = groups(rows, filter: filter).first { $0.sectionId == hint.section }?.ids ?? []
+        func usable(_ id: String?) -> String? {
+            guard let id, shown.contains(id), isInSection(id, hint.section) else { return nil }
+            return id
+        }
+        if let above = usable(hint.above) { return TrackerMoveDestination(section: hint.section, after: above) }
+        if let below = usable(hint.below) { return TrackerMoveDestination(section: hint.section, before: below) }
+        return TrackerMoveDestination(section: hint.section)
     }
 
     /// The last open item the view shows in the section (what a new item goes after).

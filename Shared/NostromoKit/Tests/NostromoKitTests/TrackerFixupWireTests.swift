@@ -23,6 +23,13 @@ final class TrackerFixupWireTests: XCTestCase {
         let data = try fixtureData()
         let ops = try JSONDecoder().decode([TrackerPaneOpWire].self, from: data)
         XCTAssertTrue(ops.contains { if case .restoreText = $0 { return true } else { return false } })
+        // The structure ops share the fixture with the daemon's test: add, move (each kind of place), remove, restore.
+        XCTAssertTrue(ops.contains { if case .add = $0 { return true } else { return false } })
+        XCTAssertTrue(ops.contains { if case .move(_, _, let before, _) = $0 { return before != nil } else { return false } })
+        XCTAssertTrue(ops.contains { if case .move(_, _, _, let after) = $0 { return after != nil } else { return false } })
+        XCTAssertTrue(ops.contains { if case .move(_, _, nil, nil) = $0 { return true } else { return false } })
+        XCTAssertTrue(ops.contains { if case .remove = $0 { return true } else { return false } })
+        XCTAssertTrue(ops.contains { if case .restore = $0 { return true } else { return false } })
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let again = try JSONSerialization.jsonObject(with: try encoder.encode(ops)) as? NSArray

@@ -217,7 +217,10 @@ final class TrackerPaneView: NSView {
         }
         editing.onRemoved = { [weak self] title in self?.removalChanged(title) }
         editing.itemSnapshot = { [weak self] id in self?.snapshot(of: id) }
-        editing.itemOrigin = { [weak self] id in self?.origin(of: id) }
+        editing.itemPlace = { [weak self] id in self?.place(of: id) }
+        editing.resolvePlace = { [weak self] hint in
+            self?.placeNow(hint) ?? TrackerMoveDestination(section: hint.section, after: hint.above)
+        }
         editing.boardVersion = { [weak self] in self?.board?.version ?? 0 }
         setUp()
         let myTag = tag
@@ -343,7 +346,7 @@ final class TrackerPaneView: NSView {
             tasks: background.state(for: focusTag)?.allTasks ?? [],
             seenEndedAtMs: background.seenMark(tag: focusTag))
         commit(TrackerPresenter.present(board: board, now: now(), filter: filter, folds: folds, sources: sources,
-                                        timeZone: timeZone),
+                                        timeZone: timeZone, editSupported: editEnabled),
                highlight: true)
         editing.boardApplied(version: board.version)
         refreshRowsOfLateOks()
@@ -1098,7 +1101,8 @@ final class TrackerPaneView: NSView {
 
     /// Remove an item. No dialog: the banner offers Undo for 10 s and ⌘Z keeps it for longer.
     func removeItem(_ id: String) {
-        guard editEnabled, shownItem(id) != nil else { return }
+        // Not while its editor is open or its edit is being saved: the edit would land on a removed item.
+        guard editEnabled, shownItem(id) != nil, editSessions[id] == nil else { return }
         userActed()
         editing.remove(id, base: base(forItem: id))
     }
@@ -1127,14 +1131,23 @@ final class TrackerPaneView: NSView {
 
     /// An item's exact markdown and place, from the board on screen (what Undo puts back).
     private func snapshot(of id: String) -> TrackerItemSnapshot? {
-        guard let board, let source = TrackerMarkdown.item(id, in: board), let origin = origin(of: id) else { return nil }
+        guard let board, let source = TrackerMarkdown.item(id, in: board), let place = place(of: id) else { return nil }
         let title = shownItem(id)?.title ?? newestItem(id)?.title ?? wireItem(id)?.text ?? ""
-        return TrackerItemSnapshot(title: title, source: source, origin: origin)
+        return TrackerItemSnapshot(title: title, source: source, place: place)
     }
 
-    private func origin(of id: String) -> TrackerMoveDestination? {
+    /// The section and both neighbours an item has in the rows on screen.
+    private func place(of id: String) -> TrackerPlaceHint? {
         guard let section = shownItem(id)?.sectionId ?? newestItem(id)?.sectionId ?? wireItem(id)?.section else { return nil }
-        return TrackerMoves.origin(of: id, rows: displayedRows, filter: filter, fallbackSection: section)
+        return TrackerMoves.hint(of: id, rows: displayedRows, filter: filter, fallbackSection: section)
+    }
+
+    /// The place `hint` means on the board as it is now: a neighbour counts only while the daemon's newest
+    /// board still has it in that section (the rows on screen may be holding back a change).
+    private func placeNow(_ hint: TrackerPlaceHint) -> TrackerMoveDestination {
+        TrackerMoves.place(hint, rows: displayedRows, filter: filter) { [weak self] id, section in
+            self?.wireItem(id)?.section == section
+        }
     }
 
     // MARK: Dragging
@@ -1183,7 +1196,8 @@ final class TrackerPaneView: NSView {
     func dragDropped(payload: (id: String, pane: String), at point: NSPoint) -> Bool {
         defer { hideDropIndicator() }
         guard let drop = dropTarget(for: payload, at: point) else { return false }
-        userActed()
+        // No `userActed()`: a drop does not take the keyboard from the composer (the pane keeps whatever focus
+        // it already had), so typing goes on. ⌘Z after a drop is the composer's own while it has focus.
         editing.move(payload.id, to: drop.destination, base: base(forItem: payload.id))
         return true
     }

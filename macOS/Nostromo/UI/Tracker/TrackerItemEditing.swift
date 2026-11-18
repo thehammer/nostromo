@@ -16,12 +16,13 @@ struct TrackerBase: Equatable {
 }
 
 /// What putting a removed item back needs, taken from the board on screen when the item goes: its exact
-/// markdown and the place it was in.
+/// markdown and the place it was in (as neighbours: the undo works the place out again against the board it
+/// finds, since those neighbours may have moved or gone by then).
 struct TrackerItemSnapshot: Equatable {
     /// The item's title as the banner names it.
     let title: String
     let source: String
-    let origin: TrackerMoveDestination
+    let place: TrackerPlaceHint
 }
 
 /// The tracker pane's edit controller (one per pane): builds the `tracker_edit` ops for what the user
@@ -75,8 +76,13 @@ final class TrackerItemEditing {
     var onRemoved: ((String?) -> Void)?
     /// The exact source and place of an item on the board on screen (nil when it is not there).
     var itemSnapshot: (String) -> TrackerItemSnapshot? = { _ in nil }
-    /// Where the view has an item now, as a place to move it back to.
-    var itemOrigin: (String) -> TrackerMoveDestination? = { _ in nil }
+    /// Where the view has an item now (its section and neighbours), as a place to put it back to.
+    var itemPlace: (String) -> TrackerPlaceHint? = { _ in nil }
+    /// The place a hint means on the board as it is now (neighbour still there, else the other, else the
+    /// section's end).
+    var resolvePlace: (TrackerPlaceHint) -> TrackerMoveDestination = { hint in
+        TrackerMoveDestination(section: hint.section, after: hint.above)
+    }
     /// The version of the newest board the pane has applied.
     var boardVersion: () -> UInt64 = { 0 }
 
@@ -86,7 +92,7 @@ final class TrackerItemEditing {
     /// The board version the pane shows for these items (what an undo is made against, not the newest board).
     private let shownBase: ([String]) -> TrackerBase
     private let itemExists: (String) -> Bool
-    private typealias Entry = (ids: [String], completion: (Outcome) -> Void)
+    private typealias Entry = (ids: [String], places: Bool, completion: (Outcome) -> Void)
     private var pending: [String: Entry] = [:]
     /// Sends that timed out, oldest first: an answer that comes after all is still theirs.
     private var timedOut: [(requestId: String, entry: Entry)] = []
@@ -99,6 +105,8 @@ final class TrackerItemEditing {
     /// One registered undo (or redo), so a refused edit takes back only its own.
     private final class UndoToken {
         var isVoid = false
+        /// The manager has run (and dropped) it.
+        var isConsumed = false
     }
     private var undoStack: [UndoToken] = []
     private var redoStack: [UndoToken] = []
@@ -235,10 +243,37 @@ final class TrackerItemEditing {
         }
     }
 
-    /// Move an item to `destination`; undo moves it back to where the view has it now.
+    /// Move an item to `destination`; undo moves it back to where the view has it now (worked out again when
+    /// the undo runs, so a neighbour that moved or went away in between does not strand it).
     func move(_ id: String, to destination: TrackerMoveDestination, base: TrackerBase) {
-        guard let origin = itemOrigin(id), origin != destination else { return }
-        perform([destination.moveOp(id)], inverse: [origin.moveOp(id)], name: "Move Item", base: base, exempt: true)
+        guard let place = itemPlace(id) else { return }
+        let current = place.above != nil ? TrackerMoveDestination(section: place.section, after: place.above)
+            : place.below != nil ? TrackerMoveDestination(section: place.section, before: place.below)
+            : TrackerMoveDestination(section: place.section)
+        guard current != destination else { return }
+        sendMove(id, to: destination, undoHint: place, base: base)
+    }
+
+    /// `onRefused` puts back the entry this send came from when it is the undo (or redo) of an earlier one:
+    /// a refusal leaves the history as it was, so the user can try again.
+    private func sendMove(_ id: String, to destination: TrackerMoveDestination, undoHint: TrackerPlaceHint,
+                          base: TrackerBase, onRefused: (() -> Void)? = nil) {
+        let token = registerMoveUndo(id, destination: destination, undoHint: undoHint)
+        submitExempt([id], [destination.moveOp(id)], base: base, places: true) { [weak self] outcome in
+            guard case .failed = outcome else { return }
+            self?.retract(token)
+            onRefused?()
+        }
+    }
+
+    @discardableResult
+    private func registerMoveUndo(_ id: String, destination: TrackerMoveDestination, undoHint: TrackerPlaceHint) -> UndoToken {
+        registerUndo(name: "Move Item", ids: [id]) { me in
+            // Where the item is when the undo runs is where its redo goes (and what that redo then undoes to).
+            let hereNow = me.itemPlace(id) ?? TrackerPlaceHint(destination)
+            me.sendMove(id, to: me.resolvePlace(undoHint), undoHint: hereNow, base: me.shownBase([id]),
+                        onRefused: { me.registerMoveUndo(id, destination: destination, undoHint: undoHint) })
+        }
     }
 
     /// Remove an item (the user's own: the banner offers Undo).
@@ -247,7 +282,8 @@ final class TrackerItemEditing {
     }
 
     /// The banner's Undo: put the newest removal back. When it is also the newest undo, that is ⌘Z itself
-    /// (so Redo removes it again); otherwise it is restored directly and its ⌘Z entry is dropped.
+    /// (so Redo removes it again); otherwise it restores exactly this removal and nothing else: its own ⌘Z
+    /// entry is spent, every other undo and redo stays.
     func undoLatestRemoval() {
         guard let latest = latestRemoval else { return }
         if undoStack.last === latest.token, manager.canUndo {
@@ -255,7 +291,7 @@ final class TrackerItemEditing {
             return
         }
         latest.token.isVoid = true
-        restoreItem(latest.snapshot, ref: latest.ref, base: shownBase([]))
+        restoreItem(latest.snapshot, ref: latest.ref, base: shownBase([]), registering: false, spent: latest.token)
     }
 
     private func removeItem(_ ref: ItemRef, base: TrackerBase, announce: Bool) {
@@ -263,9 +299,7 @@ final class TrackerItemEditing {
             showNotice("Not removed: that item is no longer on the board.")
             return
         }
-        let token = registerUndo(name: "Remove Item", ids: []) { me in
-            me.restoreItem(snapshot, ref: ref, base: me.shownBase([]))
-        }
+        let token = registerRemovalUndo(snapshot, ref: ref)
         if announce {
             latestRemoval = (token, snapshot, ref)
             onRemoved?(snapshot.title)
@@ -280,18 +314,41 @@ final class TrackerItemEditing {
         }
     }
 
-    private func restoreItem(_ snapshot: TrackerItemSnapshot, ref: ItemRef, base: TrackerBase) {
-        if latestRemoval?.ref === ref {
+    @discardableResult
+    private func registerRemovalUndo(_ snapshot: TrackerItemSnapshot, ref: ItemRef) -> UndoToken {
+        registerUndo(name: "Remove Item", ids: []) { me in
+            me.restoreItem(snapshot, ref: ref, base: me.shownBase([]), registering: true, spent: nil)
+        }
+    }
+
+    /// Put a removed item back at its place worked out against the board as it is now. A refusal keeps the
+    /// way to try again (the undo entry and the banner) and says why. `registering` is false for the banner's
+    /// direct Undo, which adds nothing to the history; `spent` is the removal's own entry it voided.
+    private func restoreItem(_ snapshot: TrackerItemSnapshot, ref: ItemRef, base: TrackerBase,
+                             registering: Bool, spent: UndoToken?) {
+        let wasLatest = latestRemoval?.ref === ref
+        if wasLatest {
             latestRemoval = nil
             onRemoved?(nil)
         }
-        let token = registerUndo(name: "Remove Item", ids: []) { me in
+        let redo = registering ? registerUndo(name: "Remove Item", ids: []) { me in
             me.removeItem(ref, base: me.shownBase([ref.id]), announce: false)
-        }
-        submit([snapshot.origin.restoreOp(source: snapshot.source)], base: base) { [weak self] outcome in
+        } : nil
+        let destination = resolvePlace(snapshot.place)
+        submitExempt([], [destination.restoreOp(source: snapshot.source)], base: base, places: true) { [weak self] outcome in
+            guard let self else { return }
             switch outcome {
-            case .saved(_, let created): if let id = created.first { ref.id = id }
-            case .failed: self?.retract(token)
+            case .saved(_, let created):
+                if let id = created.first { ref.id = id }
+            case .failed:
+                if let redo { self.retract(redo) }
+                // The removal can still be undone: its entry comes back (a direct Undo only un-voids it).
+                var token = spent
+                if let spent, !spent.isConsumed { spent.isVoid = false } else { token = self.registerRemovalUndo(snapshot, ref: ref) }
+                if wasLatest, let token {
+                    self.latestRemoval = (token, snapshot, ref)
+                    self.onRemoved?(snapshot.title)
+                }
             case .timedOut: break
             }
         }
@@ -322,6 +379,7 @@ final class TrackerItemEditing {
         manager.registerUndo(withTarget: self) { me in
             // This entry is being run: it is no longer on the stack it was on.
             if me.manager.isUndoing { me.undoStack.removeAll { $0 === token } } else { me.redoStack.removeAll { $0 === token } }
+            token.isConsumed = true
             guard !token.isVoid else { return }
             guard ids.allSatisfy(me.itemExists) else {
                 me.showNotice("Couldn't undo: the item was removed.")
@@ -341,15 +399,15 @@ final class TrackerItemEditing {
     }
 
     /// `submit`, with `ids` exempt from the deferral until the board with the change is on screen.
-    private func submitExempt(_ ids: [String], _ ops: [TrackerPaneOpWire], base: TrackerBase,
+    private func submitExempt(_ ids: [String], _ ops: [TrackerPaneOpWire], base: TrackerBase, places: Bool = false,
                               completion: @escaping (Outcome) -> Void) {
         guard !ids.isEmpty else {
-            submit(ops, base: base, completion: completion)
+            submit(ops, base: base, places: places, completion: completion)
             return
         }
         for id in ids { exemptPending[id, default: 0] += 1 }
         var released = false
-        submit(ops, base: base) { [weak self] outcome in
+        submit(ops, base: base, places: places) { [weak self] outcome in
             if let self {
                 if !released {
                     released = true
@@ -384,10 +442,11 @@ final class TrackerItemEditing {
         while let last = redoStack.last, last.isVoid, manager.canRedo { manager.redo() }
     }
 
-    func submit(_ ops: [TrackerPaneOpWire], base: TrackerBase, completion: @escaping (Outcome) -> Void) {
+    func submit(_ ops: [TrackerPaneOpWire], base: TrackerBase, places: Bool = false,
+                completion: @escaping (Outcome) -> Void) {
         sequence += 1
         let requestId = "pane-\(tag)-\(sequence)"
-        pending[requestId] = (ops.compactMap(Self.itemId), completion)
+        pending[requestId] = (ops.compactMap(Self.itemId), places, completion)
         guard send(tag, requestId, base.version, base.epoch, ops) else {
             fail(requestId, "Not saved: Nostromo isn't connected to its daemon.")
             return
@@ -408,7 +467,7 @@ final class TrackerItemEditing {
             onConfirmed?(entry.ids, result.version)
             entry.completion(.saved(version: result.version, created: result.created))
         } else {
-            let message = Self.message(for: result.error)
+            let message = Self.message(for: result.error, placing: entry.places)
             showNotice(message)
             if Self.isStale(result.error) { onLookAgain?() }
             entry.completion(.failed(message))
@@ -456,8 +515,13 @@ final class TrackerItemEditing {
     }
 
     /// One plain sentence for each reason the daemon refuses an edit.
-    static func message(for error: TrackerEditErrorWire?) -> String {
+    /// `placing`: the edit put an item next to another (a move or a restore), so "unknown item" or "not in
+    /// section" is about that neighbour or section, not about the item the user acted on.
+    static func message(for error: TrackerEditErrorWire?, placing: Bool = false) -> String {
         let reason = error?.reason ?? ""
+        if placing, !isStale(error), error?.code == "unknown_item" || (error?.code == "invalid_args" && reason.contains("is not in section")) {
+            return "Not saved: the place for it changed (the item next to it moved or is gone). Try again."
+        }
         if isStale(error) {
             return reason.contains("no longer kept") ? "That conflict is no longer there: look again."
                 : "Not saved: that changed since you looked. Look again."

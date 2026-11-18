@@ -3,5 +3,14 @@
   {"op": "edit", "id": "a-1", "title": "T", "body": ""},
   {"op": "restore_text", "id": "a-1", "text": "A long line that came from the file, kept whole by restore_text"},
   {"op": "clear_badge", "id": "a-1"},
-  {"op": "resolve_conflict", "id": "a-1", "field": "title", "keep": "losing", "conflict_id": "1760540000.7.3"}
+  {"op": "resolve_conflict", "id": "a-1", "field": "title", "keep": "losing", "conflict_id": "1760540000.7.3"},
+  {"op": "add", "section": "now", "title": "A new item", "body": "Its note", "after": "a-1"},
+  {"op": "add", "section": "next", "title": "First of its section"},
+  {"op": "move", "id": "a-1", "section": "next", "before": "b-2"},
+  {"op": "move", "id": "a-1", "section": "now", "after": "c-3"},
+  {"op": "move", "id": "a-1", "section": "loose"},
+  {"op": "remove", "id": "a-1"},
+  {"op": "restore", "source": "- [ ] A removed item <!-- id: a-1 -->\n  its note\n", "section": "now", "after": "c-3"},
+  {"op": "restore", "source": "- [ ] Another\n", "section": "next", "before": "b-2"},
+  {"op": "restore", "source": "- [ ] Alone\n", "section": "loose"}
 ]

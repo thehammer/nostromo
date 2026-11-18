@@ -175,7 +175,16 @@ public struct TrackerDeferral {
                 continue
             }
             guard let shown = row.item else { continue }   // only items are deferred
-            if exempt.contains(key) { continue }
+            if exempt.contains(key) {
+                // The pane's own move or removal applies now. An item that has also become done (an agent's
+                // tick of it) stays in place, struck through, as every done fold does.
+                let doneNow: Bool
+                if target.foldedItems[shown.id] != nil { doneNow = true }
+                else if let hidden = target.hiddenItems[shown.id], hidden.isDone { doneNow = true }
+                else if let now, case .item(let item) = now.content, item.isDone, !shown.isDone { doneNow = true }
+                else { doneNow = false }
+                if !doneNow { continue }
+            }
             // A selection in the moved item's new copy keeps its stub (and so its key) too.
             let onScreen = visibleKeys.contains(key) || heldKeys.contains(Self.movingPrefix + shown.id)
             guard onScreen else { continue }

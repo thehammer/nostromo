@@ -320,9 +320,11 @@ final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
             let parent = NSMenuItem(title: "Move", action: nil, keyEquivalent: "")
             parent.submenu = submenu
             items.append(parent)
-            let remove = NSMenuItem(title: "Remove", action: #selector(menuRemove(_:)), keyEquivalent: "")
-            remove.target = self
-            items.append(remove)
+            if canRemove {
+                let remove = NSMenuItem(title: "Remove", action: #selector(menuRemove(_:)), keyEquivalent: "")
+                remove.target = self
+                items.append(remove)
+            }
         }
         return items
     }
@@ -444,6 +446,10 @@ final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
         guard editingEnabled, case .item(let item) = row.content, row.key == TrackerRow.itemKey(item.id) else { return false }
         return titleEditor == nil && detailsEditor == nil
     }
+
+    /// An item whose title or details editor is open is not removed from under it (the editor would later
+    /// save to an item that is gone).
+    private var canRemove: Bool { titleEditor == nil && detailsEditor == nil }
 
     /// The press began on one of this row's controls (the tick): a click stays a click until it moves.
     func pressBegan(_ event: NSEvent) {
@@ -1024,6 +1030,7 @@ final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
         move.setAccessibilityLabel("Move: \(String(item.title.prefix(80)))")
         addSubview(move)
         movePopUp = move
+        guard canRemove else { return }
         let remove = TrackerChipButton(text: "Remove", color: text, fill: nil, padding: 3)
         remove.target = self
         remove.action = #selector(removePressed(_:))
@@ -1069,7 +1076,7 @@ final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
             for section in options.sections {
                 add("Move to \(section.title)") { [weak self] in self?.onMove?(id, .toSection(section.id)) }
             }
-            add("Remove") { [weak self] in self?.onRemove?(id) }
+            if canRemove { add("Remove") { [weak self] in self?.onRemove?(id) } }
         }
         if !item.conflicts.isEmpty { add("Show conflict") { [weak self] in self?.showConflict(fromKeyboard: true) } }
         if item.sensitive != nil {
