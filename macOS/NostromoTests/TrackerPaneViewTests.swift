@@ -735,7 +735,7 @@ final class TrackerPaneViewTests: MouseQueueTestCase {
         XCTAssertTrue(rig.pane.placeholder.superview === rig.pane)
         XCTAssertFalse(rig.pane.placeholder.isHidden)
         XCTAssertTrue(rig.pane.rowViews.isEmpty)
-        XCTAssertTrue(rig.pane.documentView.subviews.isEmpty)
+        XCTAssertTrue(rig.pane.documentView.subviews.allSatisfy { $0 === rig.pane.dropIndicator }, "no rows (only the hidden drop indicator)")
         XCTAssertTrue(rig.pane.displayedRows.isEmpty)
         XCTAssertNil(rig.pane.board)
         XCTAssertFalse(Fx.allTexts(in: rig.pane).contains { $0.localizedCaseInsensitiveContains("loading") }, "no Loading before the first board")
@@ -1827,7 +1827,7 @@ final class TrackerLargeBoardTests: MouseQueueTestCase {
     }
 
     private func assertSane(_ pane: TrackerPaneView, _ message: String, line: UInt = #line) {
-        XCTAssertEqual(pane.documentView.subviews.count, pane.displayedRows.count, "\(message): one view per row, no strays", line: line)
+        XCTAssertEqual(pane.documentView.subviews.filter { $0 !== pane.dropIndicator }.count, pane.displayedRows.count, "\(message): one view per row, no strays", line: line)
         XCTAssertEqual(pane.rowViews.count, pane.displayedRows.count, "\(message): a view for each row and none for anything else", line: line)
         XCTAssertEqual(pane.documentView.frame.width, pane.clipView.bounds.width, accuracy: 0.5, "\(message): document width", line: line)
         XCTAssertFalse(pane.scrollView.hasHorizontalScroller, "\(message): horizontal scroller", line: line)

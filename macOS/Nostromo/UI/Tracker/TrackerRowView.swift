@@ -188,7 +188,7 @@ final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
     private var hasChipLine = false
     private var disclosure: NSButton?
     /// The item's fold control (nil on a row with nothing under the fold).
-    private(set) var disclosureButton: NSButton?
+    private(set) var disclosureButton: TrackerDisclosureButton?
     private var hazardEdge: NSView?
     private let highlightLayer = CALayer()
 
@@ -823,7 +823,7 @@ final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
             tick.setAccessibilityValue(item.isDone ? 1 : 0)
             tick.setAccessibilityHelp("Status: \(Self.statusName(item.status))")
             tick.toolTip = item.isDone ? "Mark not done" : "Mark done"
-            tick.setAccessibilityCustomActions(customActions(for: item))
+            tick.liveCustomActions = { [weak self] in self?.customActions(for: item) ?? [] }
             tick.onPress = { [weak self] event in self?.pressBegan(event) }
             tick.onMove = { [weak self] event in self?.trackDrag(event) ?? false }
             addSubview(tick)
@@ -885,7 +885,7 @@ final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
         timeLabel = time
 
         if item.isFoldable {
-            let button = NSButton(frame: .zero)
+            let button = TrackerDisclosureButton(frame: .zero)
             button.bezelStyle = .disclosure
             button.setButtonType(.pushOnPushOff)
             button.title = ""
@@ -897,7 +897,7 @@ final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
             button.toolTip = item.isExpanded ? "Hide details" : "Show details"
             button.setAccessibilityRole(.disclosureTriangle)
             button.setAccessibilityValue(item.isExpanded ? 1 : 0)
-            if editingEnabled { button.setAccessibilityCustomActions(customActions(for: item)) }
+            if editingEnabled { button.liveCustomActions = { [weak self] in self?.customActions(for: item) ?? [] } }
             addSubview(button)
             disclosureButton = button
         }

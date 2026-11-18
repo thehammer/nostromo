@@ -272,8 +272,9 @@ final class TrackerEditingTests: XCTestCase {
         XCTAssertEqual((tick.accessibilityValue() as? NSNumber)?.intValue, 0)
         XCTAssertEqual(tick.accessibilityHelp(), "Status: to do")
         let names = (tick.accessibilityCustomActions() ?? []).map(\.name)
-        XCTAssertEqual(names, ["Edit title", "Edit details", "Set status to In progress", "Set status to Blocked",
-                               "Set status to Needs you", "Set status to Done"].filter { $0 != "Set status to To do" })
+        XCTAssertEqual(names.filter { !$0.hasPrefix("Move") && $0 != "Remove" }, ["Edit title", "Edit details", "Set status to In progress", "Set status to Blocked",
+                               "Set status to Needs you", "Set status to Done"].filter { $0 != "Set status to To do" },
+                       "the structure actions (Move, Remove) are checked in TrackerStructureEditingTests")
         let blocked = try XCTUnwrap(tick.accessibilityCustomActions()?.first { $0.name == "Set status to Blocked" })
         XCTAssertEqual(blocked.handler?(), true)
         XCTAssertEqual(h.sent.last?.ops, [.status(id: plain, status: "blocked")])

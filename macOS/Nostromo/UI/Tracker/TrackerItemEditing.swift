@@ -487,7 +487,7 @@ final class TrackerItemEditing {
     private static func itemId(of op: TrackerPaneOpWire) -> String? {
         switch op {
         case .status(let id, _), .edit(let id, _, _, _), .restoreText(let id, _), .clearBadge(let id),
-             .resolveConflict(let id, _, _, _):
+             .resolveConflict(let id, _, _, _), .move(let id, _, _, _):
             return id
         default: return nil
         }
@@ -527,6 +527,10 @@ final class TrackerTickButton: NSButton {
     private var glyphRect: NSRect {
         NSRect(x: Self.glyphOrigin.x, y: Self.glyphOrigin.y, width: TrackerRowView.markWidth, height: 17)
     }
+
+    /// VoiceOver's actions, asked for when VoiceOver looks (the Move choices follow the neighbours the board has now).
+    var liveCustomActions: (() -> [NSAccessibilityCustomAction])?
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? { liveCustomActions?() }
 
     /// The press began, moved or ended: the row tells a click from a drag (more than 3 pt of movement).
     var onPress: ((NSEvent) -> Void)?
@@ -992,4 +996,10 @@ final class TrackerFocusSink: NSView, NSMenuItemValidation {
             return false
         }
     }
+}
+
+/// The disclosure triangle, with VoiceOver's actions asked for when VoiceOver looks (see `TrackerTickButton`).
+final class TrackerDisclosureButton: NSButton {
+    var liveCustomActions: (() -> [NSAccessibilityCustomAction])?
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? { liveCustomActions?() }
 }
