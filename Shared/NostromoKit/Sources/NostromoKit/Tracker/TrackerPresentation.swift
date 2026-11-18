@@ -403,6 +403,18 @@ public struct TrackerDoneGroupRow: Equatable {
     public var title: String { "Done (\(count))" }
 }
 
+/// The "+ Add item" row that ends a section's open items. It carries nothing that changes when an item
+/// is added (the pane works out where the new item goes when the user creates it), so adding items never
+/// rebuilds the row whose field is open.
+public struct TrackerAddRow: Equatable {
+    public let sectionId: String
+    public let sectionTitle: String
+    /// "+ Add item".
+    public static let label = "+ Add item"
+    /// "Add item to <section title>".
+    public var accessibilityLabel: String { "Add item to \(sectionTitle)" }
+}
+
 public struct TrackerProseRow: Equatable {
     public let key: String
     public let blocks: [MdBlock]
@@ -444,6 +456,7 @@ public struct TrackerRow: Equatable {
         case section(TrackerSectionRow)
         case item(TrackerItemRow)
         case doneGroup(TrackerDoneGroupRow)
+        case addItem(TrackerAddRow)
         case prose(TrackerProseRow)
         case log(TrackerLogRow)
         case stub(TrackerStubRow)
@@ -460,6 +473,7 @@ public struct TrackerRow: Equatable {
     public static func sectionKey(_ id: String) -> String { "section:\(id)" }
     public static func itemKey(_ id: String) -> String { "item:\(id)" }
     public static func doneKey(_ section: String) -> String { "done:\(section)" }
+    public static func addKey(_ section: String) -> String { "add:\(section)" }
     public static func proseKey(_ key: String) -> String { "prose:\(key)" }
     public static let logKey = "log"
 
@@ -530,8 +544,12 @@ public enum TrackerPresenter {
                                filter: TrackerFilter = .all,
                                folds: TrackerFoldState = TrackerFoldState(),
                                sources: [TrackerWaitingSource] = [TrackerNeedsYouSource()],
-                               timeZone: TimeZone = .current) -> TrackerPresentation {
-        var builder = RowBuilder(filter: filter, folds: folds, now: now, timeZone: timeZone)
+                               timeZone: TimeZone = .current,
+                               editSupported: Bool = true) -> TrackerPresentation {
+        // Under All and Open, on a board that can be read, and only when the daemon takes pane edits (an older
+        // daemon gets no half-working control): a section ends with its add row.
+        let showsAdd = editSupported && board.banner == nil && (filter == .all || filter == .open)
+        var builder = RowBuilder(filter: filter, folds: folds, now: now, timeZone: timeZone, showsAdd: showsAdd)
         for node in board.nodes { builder.add(node) }
         builder.finishSection()
         if builder.sawLog || !board.log.isEmpty, filter == .all {
@@ -610,6 +628,7 @@ public enum TrackerPresenter {
         let folds: TrackerFoldState
         let now: Date
         let timeZone: TimeZone
+        let showsAdd: Bool
 
         var rows: [TrackerRow] = []
         var folded: [String: TrackerItemRow] = [:]
@@ -623,7 +642,8 @@ public enum TrackerPresenter {
         private var sectionDone: [TrackerItemRow] = []
         private var inLog = false
 
-        init(filter: TrackerFilter, folds: TrackerFoldState, now: Date, timeZone: TimeZone) {
+        init(filter: TrackerFilter, folds: TrackerFoldState, now: Date, timeZone: TimeZone, showsAdd: Bool) {
+            self.showsAdd = showsAdd
             self.filter = filter
             self.folds = folds
             self.now = now
@@ -702,6 +722,10 @@ public enum TrackerPresenter {
             rows[index] = TrackerRow(key: TrackerRow.sectionKey(section.id),
                                      content: .section(TrackerSectionRow(id: section.id, title: section.title,
                                                                         count: sectionCount)))
+            if showsAdd {
+                rows.append(TrackerRow(key: TrackerRow.addKey(section.id), content: .addItem(
+                    TrackerAddRow(sectionId: section.id, sectionTitle: section.title))))
+            }
             guard filter == .all, !sectionDone.isEmpty else { return }
             let expanded = folds.expandedDoneGroups.contains(section.id)
             rows.append(TrackerRow(key: TrackerRow.doneKey(section.id), content: .doneGroup(TrackerDoneGroupRow(

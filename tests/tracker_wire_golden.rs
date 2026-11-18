@@ -325,5 +325,31 @@ fn the_pane_ops_fixture_decodes_and_encodes_back_to_the_same_json() {
     assert!(ops
         .iter()
         .any(|op| matches!(op, TrackerPaneOp::RestoreText { .. })));
+    // The structure ops the pane sends too: add, move (before, after, and the section's end), remove, restore.
+    assert!(ops.iter().any(|op| matches!(op, TrackerPaneOp::Add { .. })));
+    assert!(ops.iter().any(|op| matches!(
+        op,
+        TrackerPaneOp::Move {
+            before: Some(_),
+            ..
+        }
+    )));
+    assert!(ops
+        .iter()
+        .any(|op| matches!(op, TrackerPaneOp::Move { after: Some(_), .. })));
+    assert!(ops.iter().any(|op| matches!(
+        op,
+        TrackerPaneOp::Move {
+            before: None,
+            after: None,
+            ..
+        }
+    )));
+    assert!(ops
+        .iter()
+        .any(|op| matches!(op, TrackerPaneOp::Remove { .. })));
+    assert!(ops
+        .iter()
+        .any(|op| matches!(op, TrackerPaneOp::Restore { .. })));
     assert_eq!(serde_json::to_value(&ops).unwrap(), wire);
 }

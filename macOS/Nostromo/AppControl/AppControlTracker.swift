@@ -17,13 +17,16 @@ enum AppControlTracker {
                      rowsUpdatedLast: Int = 0,
                      editEnabled: Bool = false,
                      removedConflicts: Int = 0,
-                     editing: [String: String] = [:]) -> [String: Any] {
+                     editing: [String: String] = [:],
+                     dragging: Bool = false,
+                     notice: String? = nil) -> [String: Any] {
         guard let p = presentation else {
             return ["tag": tag, "waiting": true, "visible": visible, "title": NSNull(), "path": NSNull(),
                     "sections": [Any](), "strip": ["count": 0, "title": "Waiting on you (0)", "items": [Any]()],
                     "banners": [Any](), "filter": TrackerFilter.all.rawValue,
                     "render_generation": renderGeneration, "rows_updated_last": rowsUpdatedLast,
-                    "edit_enabled": editEnabled, "removed_conflicts": removedConflicts]
+                    "edit_enabled": editEnabled, "removed_conflicts": removedConflicts,
+                    "add_rows": [Any](), "dragging": dragging, "notice": notice.map { $0 as Any } ?? NSNull()]
         }
         let heldByKey = Dictionary(held.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
         let heldByItem = Dictionary(held.compactMap { hold in hold.row.item.map { ($0.id, hold) } },
@@ -84,6 +87,7 @@ enum AppControlTracker {
         }
 
         var log: Any = NSNull()
+        var addRows: [String] = []
         for row in displayedRows ?? p.rows {
             switch row.content {
             case .section(let section):
@@ -98,6 +102,8 @@ enum AppControlTracker {
                 current?["done"] = ["count": group.count, "expanded": group.expanded, "title": group.title]
             case .log(let row):
                 log = ["title": row.title, "count": row.total, "shown": row.lines.count, "expanded": row.expanded]
+            case .addItem(let add):
+                addRows.append(add.sectionId)
             case .prose:
                 break
             }
@@ -129,6 +135,9 @@ enum AppControlTracker {
             "rows_updated_last": rowsUpdatedLast,
             "edit_enabled": editEnabled,
             "removed_conflicts": removedConflicts,
+            "add_rows": addRows,
+            "dragging": dragging,
+            "notice": notice.map { $0 as Any } ?? NSNull(),
         ]
     }
 

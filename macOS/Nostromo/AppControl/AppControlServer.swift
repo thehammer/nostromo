@@ -577,7 +577,8 @@ final class AppControlServer {
                                           fileSize: board.flatMap { AppControlTracker.fileSize(atPath: $0.path) })
         }
         if let pane { return pane.showReport() }
-        let presentation = board.map { TrackerPresenter.present(board: $0, now: Date()) }
+        let presentation = board.map { TrackerPresenter.present(board: $0, now: Date(),
+                                                                 editSupported: AppStore.shared.client.daemonAdvertisesTrackerEdit) }
         return AppControlTracker.show(tag: tag, presentation: presentation, displayedRows: nil, visible: false)
     }
 

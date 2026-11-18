@@ -349,7 +349,7 @@ jobs:
       # name the last running test.
       - name: make mac-test (shard)
         if: needs.changes.outputs.swift == 'true'
-        timeout-minutes: 22
+        timeout-minutes: 25
         run: make mac-test SHARD=${{ matrix.shard }}
 
       # MotherDetailWidthConstraintTests read AppKit's constraint-conflict report from stderr and skip when it

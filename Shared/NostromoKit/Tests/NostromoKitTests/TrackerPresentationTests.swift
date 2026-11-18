@@ -253,7 +253,7 @@ enum TrackerFixtures {
     }
 
     enum RowKind: Equatable {
-        case section, item, doneGroup, prose, log, stub
+        case section, item, doneGroup, addItem, prose, log, stub
     }
 
     static func kind(of row: TrackerRow) -> RowKind {
@@ -261,6 +261,7 @@ enum TrackerFixtures {
         case .section: return .section
         case .item: return .item
         case .doneGroup: return .doneGroup
+        case .addItem: return .addItem
         case .prose: return .prose
         case .log: return .log
         case .stub: return .stub
@@ -497,7 +498,8 @@ final class TrackerPresentationTests: XCTestCase {
         let p = TFx.present(try TFx.golden())
         let start = try XCTUnwrap(TFx.rowIndex("section:done", in: p.rows))
         let end = try XCTUnwrap(TFx.rowIndex("section:findings", in: p.rows))
-        XCTAssertEqual(TFx.keys(Array(p.rows[start..<end])), ["section:done", "done:done"])
+        XCTAssertEqual(TFx.keys(Array(p.rows[start..<end])), ["section:done", "add:done", "done:done"],
+                       "heading, then the add row, then the Done group (there are no open items)")
     }
 
     // MARK: Waiting on you strip
@@ -512,7 +514,9 @@ final class TrackerPresentationTests: XCTestCase {
 
         let start = try XCTUnwrap(TFx.rowIndex("section:waiting-on-you", in: p.rows))
         let end = try XCTUnwrap(TFx.rowIndex("section:done", in: p.rows))
-        XCTAssertEqual(TFx.keys(Array(p.rows[(start + 1)..<end])), needsYouIds.map { "item:\($0)" })
+        XCTAssertEqual(TFx.keys(Array(p.rows[(start + 1)..<end])),
+                       needsYouIds.map { "item:\($0)" } + ["add:waiting-on-you"],
+                       "the section's open items, then its add row")
     }
 
     func testAnItemTurnedNeedsYouJoinsTheStripInFileOrderAndKeepsItsRow() throws {
@@ -552,7 +556,8 @@ final class TrackerPresentationTests: XCTestCase {
 
         XCTAssertEqual(p.rows.first?.key, keys[0], "the intro sits above the first section")
         let waiting = try XCTUnwrap(TFx.rowIndex("section:waiting-on-you", in: p.rows))
-        XCTAssertEqual(p.rows[waiting - 1].key, keys[1], "the note closes the Next section")
+        XCTAssertEqual(p.rows[waiting - 1].key, "add:next", "the add row ends the Next section")
+        XCTAssertEqual(p.rows[waiting - 2].key, keys[1], "the note sits just above the add row")
         let loose = try XCTUnwrap(TFx.rowIndex("section:loose-ends", in: p.rows))
         XCTAssertEqual(p.rows[loose + 1].key, keys[2], "the loose-ends intro follows its heading")
 
@@ -881,7 +886,9 @@ final class TrackerPresentationTests: XCTestCase {
     func testBannerLeavesTheRowsUntouched() throws {
         let clean = TFx.present(try TFx.golden())
         let board = try TFx.edited { $0.setBanner(["type": "missing"]) }
-        XCTAssertEqual(TFx.present(board).rows, clean.rows)
+        let withBanner = TFx.present(board).rows
+        // A banner takes the add rows away (nothing can be added to a board that cannot be read); nothing else.
+        XCTAssertEqual(withBanner, clean.rows.filter { TFx.kind(of: $0) != .addItem })
     }
 
     // MARK: Filters
@@ -983,6 +990,7 @@ final class TrackerPresentationTests: XCTestCase {
             case .section(let section): XCTAssertEqual(row.key, "section:\(section.id)")
             case .item(let item): XCTAssertEqual(row.key, "item:\(item.id)")
             case .doneGroup(let group): XCTAssertEqual(row.key, "done:\(group.sectionId)")
+            case .addItem(let add): XCTAssertEqual(row.key, "add:\(add.sectionId)")
             case .prose(let prose): XCTAssertEqual(row.key, "prose:\(prose.key)")
             case .log: XCTAssertEqual(row.key, "log")
             case .stub: XCTFail("a presentation never holds stubs")

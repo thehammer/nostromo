@@ -180,6 +180,18 @@ struct TrackerGateBoard {
         nodes = all
     }
 
+    /// The daemon's own move (T3b2): `id` goes right after `other`, into `other`'s section.
+    mutating func placeItem(_ id: String, after other: String) throws {
+        var all = nodes
+        var node = all.remove(at: try index(ofItem: id))
+        guard let to = all.firstIndex(where: { $0["type"] as? String == "item" && $0["id"] as? String == other }) else {
+            throw TrackerGateError("the board has no item \(other)")
+        }
+        node["section"] = all[to]["section"]
+        all.insert(node, at: to + 1)
+        nodes = all
+    }
+
     mutating func appendLog(_ text: String) {
         var log = root["log"] as? [[String: Any]] ?? []
         let time = String(format: "10:%02d", log.count)
@@ -386,6 +398,17 @@ enum TrackerGateScript {
     }
 }
 
+/// What the pane's edit sender was handed, in order.
+final class TrackerGateEditLog {
+    struct Sent {
+        let requestId: String
+        let base: UInt64
+        let ops: [TrackerPaneOpWire]
+    }
+
+    var sent: [Sent] = []
+}
+
 /// A tracker pane fed by a real store, plus everything the gate reads from it.
 final class TrackerGateHarness {
     enum Start: String {
@@ -405,6 +428,10 @@ final class TrackerGateHarness {
 
     /// What the pane asked its injected openers to do (T6): nothing reaches a daemon or the browser.
     let links = TrackerGateLinkRecorder()
+    /// Every `tracker_edit` frame the pane sent (T3b2): the pane has no other way to send anything.
+    let edits = TrackerGateEditLog()
+    /// What the pane asked its injected schedule to run later (the remove banner's 10 s); nothing runs unless a test says so.
+    let scheduled = TrackerManualScheduler()
 
     let pane: TrackerPaneView
     let store: TrackerStore
@@ -425,12 +452,18 @@ final class TrackerGateHarness {
         self.paneClock = paneClock
         self.store = store
         let links = self.links
+        let edits = self.edits
+        let scheduled = self.scheduled
         pane = TrackerPaneView(tag: TrackerGateHarness.tag, store: store, now: { paneClock.date },
                                reduceMotion: { true }, pasteboard: rigPrivatePasteboard(testCase),
                                openLinkInDaemon: { tag, item, index in links.daemonOpens.append(.init(tag: tag, item: item, index: index)) },
                                openURL: { links.urlOpens.append($0) },
-                               schedule: { _, _ in }, timeZone: TimeZone(identifier: "UTC")!, tickInterval: nil,
-                               editSupported: { editing }, editSender: { _, _, _, _, _ in true },
+                               schedule: { scheduled.schedule($0, $1) }, timeZone: TimeZone(identifier: "UTC")!, tickInterval: nil,
+                               editSupported: { editing },
+                               editSender: { _, requestId, base, _, ops in
+                                   edits.sent.append(.init(requestId: requestId, base: base, ops: ops))
+                                   return true
+                               },
                                editSchedule: { _, _ in })
     }
 
@@ -452,6 +485,18 @@ final class TrackerGateHarness {
         let msg = client.decode(type_: "tracker_board", json: json, raw: data)
         guard case .trackerBoard = msg else { throw TrackerGateError("the frame did not decode as tracker_board") }
         store.ingest(msg)
+    }
+
+    /// The daemon applies the user's last edit (T3b2): the board with `change` arrives, then the result.
+    func echo(created: [String] = [], _ change: (inout TrackerGateBoard) throws -> Void) throws {
+        guard let last = edits.sent.last else { throw TrackerGateError("nothing was sent to echo") }
+        try mutate(change)
+        var object: [String: Any] = ["tag": Self.tag, "request_id": last.requestId, "ok": true,
+                                     "version": (board.root["version"] as? Int) ?? 0]
+        if !created.isEmpty { object["created"] = created }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        store.ingestEditResult(try JSONDecoder().decode(TrackerEditResultWire.self, from: data))
+        layout()
     }
 
     /// Edit the board and deliver it.
@@ -1121,5 +1166,319 @@ final class TrackerScrollSafetyTests: XCTestCase {
 
     func testAnItemRemovedWhileBelowTheViewportGoesAtOnce() throws {
         try assertOffScreenRemoveAppliesAtOnce(viewportAtBottom: false)
+    }
+
+    // MARK: - T3b2: add, keyboard move, drop and remove (and the remove banner) never move the reading line
+
+    private enum StructureStart { case mid, top }
+
+    /// A 360 x 600 pane beside a fake daemon over the golden board, Now cut to five items (so its add row is on
+    /// screen at the top of the board) and Next's third item open on a three-paragraph note (a tall row to read).
+    /// `mid`: the viewport top is 2 pt into that tall row, with Now, Next's first two items and the headings above it.
+    private func structureHarness(_ start: StructureStart, file: StaticString = #filePath, line: UInt = #line) throws -> TrackerEditHarness {
+        let h = try TrackerEditHarness(self, size: NSSize(width: 360, height: 600), configure: { script in
+            for id in ["close-1185", "repro-1222", "triag-1259", "docum-1296", "backf-1333"] { try script.removeItem(id) }
+            try script.setNote("check-1444", paragraphs: (1...3).map {
+                "Paragraph \($0) of a note that is long enough to wrap over two lines at the width of the pane, so the row is tall."
+            })
+        }, file: file, line: line)
+        h.pane.toggleNote(item: "check-1444")
+        h.rig.settle()
+        switch start {
+        case .top:
+            h.rig.scroll(to: 0)
+        case .mid:
+            h.rig.scroll(to: try XCTUnwrap(h.pane.rowViews["item:check-1444"], file: file, line: line).frame.minY + 2)
+        }
+        let anchor = h.pane.anchorSnapshot(windowIndex: 0)
+        switch start {
+        case .top:
+            XCTAssertEqual(anchor.scrollY, 0, accuracy: 0.5, "setup: at the very top", file: file, line: line)
+        case .mid:
+            XCTAssertEqual(anchor.firstVisible?.rowKey, "item:check-1444", "setup: reading the tall row", file: file, line: line)
+            XCTAssertEqual(anchor.firstVisible?.offsetPt ?? -1, 2, accuracy: 0.5, "setup: 2 pt into it", file: file, line: line)
+            XCTAssertGreaterThan(anchor.scrollY, 100, "setup: scrolled into the board", file: file, line: line)
+            XCTAssertGreaterThan(try XCTUnwrap(h.pane.rowViews["item:check-1444"]).frame.height, TrackerNoticeView.height + 20,
+                                 "setup: tall enough to stay the first row when the notice shifts it", file: file, line: line)
+        }
+        XCTAssertEqual(h.pane.notice.preferredHeight, 0, "setup: no notice", file: file, line: line)
+        return h
+    }
+
+    /// One thing the user (or the daemon answering them) does, and how far the notice slot grows (or shrinks) because of it.
+    private struct StructureEvent {
+        let name: String
+        let chromeShift: CGFloat
+        let run: () throws -> Void
+    }
+
+    /// Run `event`; afterwards the row that was first on screen is still the first row on screen, and the viewport
+    /// top is as far into it as it was, EXCEPT where the notice slot changed height: then the viewport top went
+    /// down the document by exactly the notice's height, so the line being read did not move on screen. At the very
+    /// top of the board nothing shifts at all.
+    private func assertTheReadingLineStays(_ h: TrackerEditHarness, _ start: StructureStart, _ event: StructureEvent,
+                                          file: StaticString = #filePath, line: UInt = #line) {
+        let before = h.pane.anchorSnapshot(windowIndex: 0)
+        guard let first = before.firstVisible else { return XCTFail("\(event.name): no first visible row", file: file, line: line) }
+        let rowView = h.pane.rowViews[first.rowKey]
+        let screenBefore = rowView.map { h.pane.convert($0.bounds, from: $0).minY }
+        let docTopBefore = rowView?.frame.minY
+        let chromeBefore = h.pane.scrollView.frame.minY
+        do {
+            try event.run()
+        } catch {
+            return XCTFail("\(event.name): \(error)", file: file, line: line)
+        }
+        h.rig.settle()
+        let after = h.pane.anchorSnapshot(windowIndex: 0)
+        let shift = h.pane.scrollView.frame.minY - chromeBefore
+        XCTAssertEqual(shift, event.chromeShift, accuracy: 0.5, "\(event.name): how far the notice slot grew", file: file, line: line)
+        XCTAssertEqual(after.firstVisible?.rowKey, first.rowKey, "\(event.name): the first visible row is the same row", file: file, line: line)
+        switch start {
+        case .top:
+            XCTAssertEqual(after.scrollY, 0, accuracy: 0.5, "\(event.name): still at the very top", file: file, line: line)
+            XCTAssertEqual(after.firstVisible?.offsetPt ?? .infinity, first.offsetPt, accuracy: 1,
+                           "\(event.name): at the top nothing shifts, even where the notice appeared", file: file, line: line)
+        case .mid:
+            XCTAssertEqual(after.firstVisible?.offsetPt ?? .infinity, first.offsetPt + Double(event.chromeShift), accuracy: 1,
+                           "\(event.name): the offset into the first row moved by the notice height (\(event.chromeShift)) and nothing more",
+                           file: file, line: line)
+            // The scroll position follows the notice (28 pt) and, when rows above the reading line came or went, the
+            // height they added or took away: the row being read is where it was on screen.
+            let aboveDelta = Double((h.pane.rowViews[first.rowKey]?.frame.minY ?? 0) - (docTopBefore ?? 0))
+            XCTAssertEqual(after.scrollY, before.scrollY + Double(event.chromeShift) + aboveDelta, accuracy: 1,
+                           "\(event.name): the scroll position compensates for the notice height and for rows added or removed above",
+                           file: file, line: line)
+            if let rowView, let screenBefore {
+                XCTAssertEqual(h.pane.convert(rowView.bounds, from: rowView).minY, screenBefore, accuracy: 1,
+                               "\(event.name): the line being read did not move on screen", file: file, line: line)
+            }
+        }
+    }
+
+    private func runStructureEvents(_ start: StructureStart, file: StaticString = #filePath, line: UInt = #line,
+                                    _ events: (TrackerEditHarness) throws -> [StructureEvent]) throws {
+        let h = try structureHarness(start, file: file, line: line)
+        for event in try events(h) { assertTheReadingLineStays(h, start, event, file: file, line: line) }
+    }
+
+    private func newItem(_ id: String, _ section: String, _ text: String) -> TrackerBoardScript.Obj {
+        TrackerBoardScript.newItemNode(id: id, section: section, text: text)
+    }
+
+    private func addEvents(_ h: TrackerEditHarness, section: String, after last: String) -> [StructureEvent] {
+        let key = TrackerRow.addKey(section)
+        func row() throws -> TrackerRowView { try XCTUnwrap(h.pane.rowViews[key], "no \(key)") }
+        func field() throws -> TrackerTitleEditor { try XCTUnwrap(try row().addField, "the add field is not open") }
+        return [
+            StructureEvent(name: "add: the add row opens its field", chromeShift: 0) {
+                try XCTUnwrap(try row().addItemButton).performClick(nil)
+            },
+            StructureEvent(name: "add: a title is typed", chromeShift: 0) { h.type("A brand new item", into: try field()) },
+            StructureEvent(name: "add: Return sends it and the field waits, dimmed", chromeShift: 0) { h.pressReturn(in: try field()) },
+            StructureEvent(name: "add: the daemon's board has the new row (inserted at once, no deferral)", chromeShift: 0) {
+                try h.echo({ try $0.insert(self.newItem("gate-new-1", section, "A brand new item"), section: section, after: last) },
+                           created: ["gate-new-1"])
+            },
+            StructureEvent(name: "add: Esc closes the field", chromeShift: 0) { h.pressEscape(in: try field()) },
+        ]
+    }
+
+    func testAddingAnItemFromTheAddRowNeverMovesTheReadingLineMidBoard() throws {
+        try runStructureEvents(.mid) { h in addEvents(h, section: "next", after: "triag-1703") }
+    }
+
+    func testAddingAnItemFromTheAddRowNeverMovesTheReadingLineAtTheTop() throws {
+        try runStructureEvents(.top) { h in addEvents(h, section: "now", after: "draft-1148") }
+    }
+
+    func testAnAddThatLandsAboveTheReadingLineLeavesTheLineWhereItWasMidBoard() throws {
+        // The user opened the field, scrolled down, and the daemon's board puts the new row above the viewport.
+        let h = try structureHarness(.mid)
+        let field = try { () throws -> TrackerTitleEditor in
+            let row = try XCTUnwrap(h.pane.rowViews[TrackerRow.addKey("now")])
+            row.addItemButton?.performClick(nil)
+            return try XCTUnwrap(row.addField)
+        }()
+        h.type("Added above the viewport", into: field)
+        h.pressReturn(in: field)
+        h.rig.scroll(to: try XCTUnwrap(h.pane.rowViews["item:check-1444"]).frame.minY + 2)
+        let events = [
+            StructureEvent(name: "add: the new row lands above the viewport", chromeShift: 0) {
+                try h.echo({ try $0.insert(self.newItem("gate-new-2", "now", "Added above the viewport"), section: "now", after: "draft-1148") },
+                           created: ["gate-new-2"])
+            },
+        ]
+        for event in events { assertTheReadingLineStays(h, .mid, event) }
+        XCTAssertNotNil(h.pane.rowViews["item:gate-new-2"], "the row is there")
+    }
+
+    // Keyboard move (the Move pull-down, the menu and VoiceOver all call `moveItem`).
+
+    private func moveEvents(_ h: TrackerEditHarness, down id: String, after neighbour: String, section: String) -> [StructureEvent] {
+        [
+            StructureEvent(name: "keyboard move: Move Down sends the move", chromeShift: 0) { h.pane.moveItem(id, .down) },
+            StructureEvent(name: "keyboard move: the daemon's board, applied at once", chromeShift: 0) {
+                try h.echo { try $0.place(id, section: section, after: neighbour) }
+            },
+        ]
+    }
+
+    func testAKeyboardMoveNeverMovesTheReadingLineMidBoard() throws {
+        try runStructureEvents(.mid) { h in
+            let toSectionAbove = StructureEvent(name: "keyboard move: to the section above the viewport, the row lands above the reading line", chromeShift: 0) {
+                h.pane.moveItem("close-1629", .toSection("now"))
+                try h.echo { try $0.place("close-1629", section: "now") }
+            }
+            return moveEvents(h, down: "draft-1592", after: "close-1629", section: "next") + [toSectionAbove]
+        }
+    }
+
+    func testAKeyboardMoveNeverMovesTheReadingLineAtTheTop() throws {
+        try runStructureEvents(.top) { h in moveEvents(h, down: "retry-1074", after: "revie-1111", section: "now") }
+    }
+
+    // Drop.
+
+    private func dropEvents(_ h: TrackerEditHarness, drag id: String, over key: String, after neighbour: String, section: String) -> [StructureEvent] {
+        func point() throws -> NSPoint {
+            let frame = try XCTUnwrap(h.pane.rowViews[key]?.frame, "no row \(key)")
+            return NSPoint(x: frame.midX, y: frame.minY + 3)
+        }
+        let payload = (id: id, pane: h.pane.paneIdentity)
+        return [
+            StructureEvent(name: "drop: the drag begins", chromeShift: 0) { h.pane.dragBegan() },
+            StructureEvent(name: "drop: the pointer is over a row (the line shows)", chromeShift: 0) {
+                XCTAssertEqual(h.pane.dragMoved(payload: payload, at: try point()), .move)
+                XCTAssertFalse(h.pane.dropIndicator.isHidden)
+            },
+            StructureEvent(name: "drop: dropped (the move is sent)", chromeShift: 0) {
+                XCTAssertTrue(h.pane.dragDropped(payload: payload, at: try point()))
+            },
+            StructureEvent(name: "drop: the drag ends", chromeShift: 0) { h.pane.dragEnded() },
+            StructureEvent(name: "drop: the daemon's board, applied at once", chromeShift: 0) {
+                XCTAssertEqual(h.sent.last?.ops, [.move(id: id, section: section, before: nil, after: neighbour)])
+                try h.echo { try $0.place(id, section: section, after: neighbour) }
+            },
+        ]
+    }
+
+    func testADropNeverMovesTheReadingLineMidBoard() throws {
+        try runStructureEvents(.mid) { h in
+            dropEvents(h, drag: "verif-1481", over: "item:revie-1555", after: "retry-1518", section: "next")
+        }
+    }
+
+    func testADropNeverMovesTheReadingLineAtTheTop() throws {
+        try runStructureEvents(.top) { h in
+            dropEvents(h, drag: "verif-1037", over: "item:draft-1148", after: "revie-1111", section: "now")
+        }
+    }
+
+    func testADragInProgressMovesNothingNeitherRowsNorTheScrollPosition() throws {
+        for start in [StructureStart.mid, .top] {
+            let h = try structureHarness(start)
+            let frames = h.rig.rowFrames
+            let before = h.pane.anchorSnapshot(windowIndex: 0)
+            let payload = (id: "verif-1037", pane: h.pane.paneIdentity)
+            h.pane.dragBegan()
+            for key in ["item:retry-1074", "section:next", "add:now", "item:draft-1148", "done:findings"] {
+                guard let frame = h.pane.rowViews[key]?.frame else { continue }
+                _ = h.pane.dragMoved(payload: payload, at: NSPoint(x: frame.midX, y: frame.minY + 3))
+                _ = h.pane.dragMoved(payload: payload, at: NSPoint(x: frame.midX, y: frame.maxY - 3))
+                h.rig.settle()
+                let after = h.pane.anchorSnapshot(windowIndex: 0)
+                XCTAssertEqual(h.rig.rowFrames, frames, "\(start): no row moved or changed size over \(key)")
+                XCTAssertEqual(after.scrollY, before.scrollY, accuracy: 0.01, "\(start): the scroll position over \(key)")
+                XCTAssertEqual(after.firstVisible, before.firstVisible, "\(start): the reading line over \(key)")
+                XCTAssertEqual(after.documentHeight, before.documentHeight, accuracy: 0.01, "\(start): the document's height over \(key)")
+            }
+            h.pane.dragExited()
+            XCTAssertEqual(h.rig.rowFrames, frames, "\(start): leaving the pane moved nothing")
+            h.pane.dragEnded()
+            XCTAssertEqual(h.rig.rowFrames, frames, "\(start): ending the drag moved nothing")
+            XCTAssertEqual(h.pane.anchorSnapshot(windowIndex: 0).scrollY, before.scrollY, accuracy: 0.01, "\(start)")
+            XCTAssertTrue(h.sent.isEmpty, "\(start): a drag that is not dropped sends nothing")
+        }
+    }
+
+    // Remove, and the banner coming and going. The notice slot is 28 pt: the line being read stays still on
+    // screen by the viewport moving down the document by that much (mid-board), and at the very top nothing shifts.
+
+    private func removeEvents(_ h: TrackerEditHarness, remove first: String, then second: String,
+                              firstTitle: String) -> [StructureEvent] {
+        func expire() { h.rig.scheduler.scheduled.filter { $0.delay == TrackerPaneView.removalBannerLifetime }.forEach { $0.work() } }
+        let sourceTitle = firstTitle
+        return [
+            StructureEvent(name: "remove: Remove sends it and the banner appears", chromeShift: TrackerNoticeView.height) {
+                h.pane.removeItem(first)
+                XCTAssertEqual(h.pane.notice.text, "Removed “\(sourceTitle)”.")
+            },
+            StructureEvent(name: "remove: the daemon's board, the row goes at once (no stub)", chromeShift: 0) {
+                try h.echo { try $0.removeItem(first) }
+                XCTAssertNil(h.pane.rowViews["item:\(first)"])
+            },
+            StructureEvent(name: "remove: a second removal replaces the banner (same height)", chromeShift: 0) {
+                h.pane.removeItem(second)
+                try h.echo { try $0.removeItem(second) }
+            },
+            StructureEvent(name: "remove: the banner goes after 10 s", chromeShift: -TrackerNoticeView.height) {
+                expire()
+                XCTAssertNil(h.pane.notice.text)
+            },
+        ]
+    }
+
+    func testRemovingItemsAndTheBannerComingAndGoingMoveTheReadingLineByExactlyTheNoticeHeightMidBoard() throws {
+        XCTAssertEqual(TrackerNoticeView.height, 28, "the notice slot is 28 pt as designed")
+        try runStructureEvents(.mid) { h in
+            removeEvents(h, remove: "revie-1555", then: "repro-1666", firstTitle: "Review invoice batch")
+        }
+    }
+
+    func testRemovingItemsAndTheBannerComingAndGoingMoveNothingAtTheTop() throws {
+        try runStructureEvents(.top) { h in
+            removeEvents(h, remove: "revie-1111", then: "draft-1148", firstTitle: "Review queue job 8812")
+        }
+    }
+
+    func testTheBannersUndoTakesTheBannerAwayAndTheRestoreLandsWithoutMovingTheReadingLine() throws {
+        for start in [StructureStart.mid, .top] {
+            let h = try structureHarness(start)
+            let id = start == .mid ? "revie-1555" : "revie-1111"
+            let section = start == .mid ? "next" : "now"
+            let node = try XCTUnwrap(h.script.item(id))
+            let events = [
+                StructureEvent(name: "undo: Remove", chromeShift: TrackerNoticeView.height) { h.pane.removeItem(id) },
+                StructureEvent(name: "undo: the board without the row", chromeShift: 0) { try h.echo { try $0.removeItem(id) } },
+                StructureEvent(name: "undo: the banner's Undo sends the restore and the banner goes", chromeShift: -TrackerNoticeView.height) {
+                    try XCTUnwrap(h.pane.notice.actionButton).performClick(nil)
+                },
+                StructureEvent(name: "undo: the board with the item back", chromeShift: 0) {
+                    guard case .restore(_, let into, let before, let after)? = h.sent.last?.ops.first else {
+                        return XCTFail("no restore was sent: \(h.sent)")
+                    }
+                    XCTAssertEqual(into, section)
+                    try h.echo({ try $0.insert(node, section: into, before: before, after: after) }, created: [id])
+                },
+            ]
+            for event in events { assertTheReadingLineStays(h, start, event) }
+        }
+    }
+
+    func testARemovalAboveTheReadingLineAndItsBannerLeaveTheLineWhereItWasMidBoard() throws {
+        // VoiceOver can act on a row that is scrolled out of view: the row above goes, the rows under it move up,
+        // and the line being read stays where it is on screen (the viewport moves up the document by the row's height).
+        try runStructureEvents(.mid) { h in
+            [
+                StructureEvent(name: "remove above: Remove on a row above the viewport; the banner appears", chromeShift: TrackerNoticeView.height) {
+                    h.pane.removeItem("audit-1407")
+                },
+                StructureEvent(name: "remove above: the board without it, applied at once", chromeShift: 0) {
+                    try h.echo { try $0.removeItem("audit-1407") }
+                    XCTAssertNil(h.pane.rowViews["item:audit-1407"])
+                },
+            ]
+        }
     }
 }
