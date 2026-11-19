@@ -1037,7 +1037,8 @@ impl Rig {
                 dir.path().join("agents"),
                 Arc::clone(&clock),
             )
-            .with_merge(Arc::clone(&handle.verdicts), Arc::clone(&handle.api)),
+            .with_merge(Arc::clone(&handle.verdicts), Arc::clone(&handle.api))
+            .with_heads(Arc::clone(&handle.heads)),
         );
         let mut rig = Rig {
             fake,

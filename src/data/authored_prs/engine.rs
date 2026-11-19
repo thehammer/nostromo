@@ -88,12 +88,14 @@ pub(super) struct Shared {
     pub memory: Arc<FocusMemory>,
     pub verdicts: Arc<VerdictStore>,
     pub api: ApiSlot,
+    pub heads: super::HeadBook,
 }
 
 pub(super) struct Engine {
     api: Option<Api>,
     api_slot: ApiSlot,
     verdicts: Arc<VerdictStore>,
+    heads: super::HeadBook,
     api_base: String,
     clock: Arc<dyn Clock>,
     relay_status: Arc<RelayStatus>,
@@ -185,6 +187,7 @@ impl Engine {
             memory,
             verdicts,
             api: api_slot,
+            heads,
         } = shared;
         let (api, token) = match &deps.github {
             Some(c) => (Some(make_api(c, &deps.api_base)), TokenState::Connected),
@@ -195,6 +198,7 @@ impl Engine {
             api,
             api_slot,
             verdicts,
+            heads,
             api_base: deps.api_base,
             clock: deps.clock,
             relay_status: deps.relay_status,
@@ -1551,6 +1555,12 @@ impl Engine {
         copies: &HashMap<String, WorkingCopy>,
     ) {
         let snap = self.build(now, wall, infos, copies);
+        // The full heads, in step with the snapshot (never before it is built).
+        *self.heads.lock().unwrap_or_else(|e| e.into_inner()) = self
+            .prs
+            .iter()
+            .filter_map(|(k, p)| Some((k.clone(), p.head_sha.clone()?)))
+            .collect();
         if let Some(last) = &self.last_published {
             let mut same = last.clone();
             same.generated_at = snap.generated_at;

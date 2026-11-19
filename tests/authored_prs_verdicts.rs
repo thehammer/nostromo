@@ -375,6 +375,19 @@ async fn an_approval_of_a_head_the_daemon_has_not_seen_is_refused_and_nothing_is
 }
 
 #[tokio::test]
+async fn an_approval_must_match_the_whole_head_not_just_its_first_eight_digits() {
+    let mut rig = start_with(pr_at(&sha('a'))).await;
+    // A commit crafted to share the head's first eight digits.
+    let lookalike = format!("{}{}", &sha('a')[..8], "b".repeat(32));
+    let r = try_record(&mut rig, REPO, N, &lookalike, Verdict::Approved).await;
+    assert_eq!(r, Err("head_not_current"));
+    assert!(rig.verdicts.is_empty());
+    // The real head is taken.
+    let r = try_record(&mut rig, REPO, N, &sha('a'), Verdict::Approved).await;
+    assert_eq!(r, Ok(true));
+}
+
+#[tokio::test]
 async fn a_fresh_push_the_poll_has_not_seen_is_read_once_and_then_accepted() {
     let mut rig = start_with(pr_at(&sha('a'))).await;
     // GitHub moves to `b`; the daemon's list still says `a`.

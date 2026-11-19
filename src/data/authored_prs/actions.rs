@@ -21,7 +21,7 @@ use super::snapshot::{AuthoredPr, AuthoredPrsSnapshot, Lifecycle, OwnerKind, Rev
 use super::verdicts::{short_sha, Verdict, VerdictRecord, VerdictStore};
 use super::wire::{AuthoredPrResult, LastTold, StartOk};
 use super::working_copy::{find_transcript, first_cwd, working_copy_at};
-use super::{ApiSlot, Clock, DemandBoard};
+use super::{ApiSlot, Clock, DemandBoard, HeadBook};
 use crate::mother::origin::SessionHistory;
 
 const REMEMBERED_STARTS: usize = 64;
@@ -53,6 +53,9 @@ pub struct AuthoredPrActions {
     pub(super) verdicts: Arc<VerdictStore>,
     /// The engine's GitHub client: the Merge verb uses the same token.
     pub(super) api: ApiSlot,
+    /// The full heads the engine holds. Without it (a test that feeds the
+    /// snapshot itself) only the row's first 8 digits are compared.
+    heads: Option<HeadBook>,
     /// Merges in flight and answered.
     pub(super) merges: MergeBook,
     /// How long `record_verdict` waits for its one refresh to show up.
@@ -90,6 +93,14 @@ impl AuthoredPrActions {
             clock,
         )
         .with_merge(Arc::clone(&handle.verdicts), Arc::clone(&handle.api))
+        .with_heads(Arc::clone(&handle.heads))
+    }
+
+    /// Compare a verdict's head with the engine's full head, not just the 8
+    /// digits a row carries.
+    pub fn with_heads(mut self, heads: HeadBook) -> Self {
+        self.heads = Some(heads);
+        self
     }
 
     /// Share Perri's verdicts and the engine's GitHub client with the verbs
@@ -127,6 +138,7 @@ impl AuthoredPrActions {
             clock,
             verdicts: Arc::new(VerdictStore::in_memory()),
             api: Arc::new(Mutex::new(None)),
+            heads: None,
             merges: MergeBook::default(),
             refresh_wait: REFRESH_WAIT,
             starts: Mutex::new(VecDeque::new()),
@@ -208,9 +220,19 @@ impl AuthoredPrActions {
     /// PR is not in the snapshot.
     fn is_current_head(&self, repo: &str, number: u64, head_sha: &str) -> Option<bool> {
         let row = self.row_any(repo, number)?;
-        Some(match (row.head_sha_short.as_deref(), short_sha(head_sha)) {
-            (Some(held), Some(given)) => held == given,
-            _ => false,
+        Some(match &self.heads {
+            Some(book) => {
+                let key = PrKey {
+                    repo: row.repo.to_ascii_lowercase(),
+                    number,
+                };
+                let book = book.lock().unwrap_or_else(|e| e.into_inner());
+                book.get(&key).is_some_and(|held| held == head_sha)
+            }
+            None => match (row.head_sha_short.as_deref(), short_sha(head_sha)) {
+                (Some(held), Some(given)) => held == given,
+                _ => false,
+            },
         })
     }
 

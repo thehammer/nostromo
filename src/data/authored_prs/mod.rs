@@ -237,6 +237,11 @@ pub struct Deps {
 /// started), shared with the merge verb so both use the one token.
 pub type ApiSlot = Arc<Mutex<Option<github::Api>>>;
 
+/// The full head commit of each PR the engine holds, as of its last publish.
+/// In memory, shared with the verbs only: it never reaches the wire or a log
+/// (a row carries only the first 8 digits).
+pub type HeadBook = Arc<Mutex<HashMap<PrKey, String>>>;
+
 pub struct AuthoredPrsHandle {
     pub demand: Arc<DemandBoard>,
     pub store: Arc<links::AuthoredPrStore>,
@@ -245,6 +250,8 @@ pub struct AuthoredPrsHandle {
     pub verdicts: Arc<verdicts::VerdictStore>,
     /// The engine's GitHub client, for the merge verb.
     pub api: ApiSlot,
+    /// The full heads the engine holds, for `perri.record_verdict`.
+    pub heads: HeadBook,
     /// The latest snapshot; `None` until the engine publishes its first.
     pub snapshot: watch::Receiver<Option<AuthoredPrsSnapshot>>,
     pub task: tokio::task::JoinHandle<()>,
@@ -270,6 +277,7 @@ impl AuthoredPrsSource {
             ),
         };
         let api: ApiSlot = Arc::new(Mutex::new(None));
+        let heads: HeadBook = Arc::new(Mutex::new(HashMap::new()));
         let task = tokio::spawn(
             engine::Engine::new(
                 deps,
@@ -280,6 +288,7 @@ impl AuthoredPrsSource {
                     memory: Arc::clone(&memory),
                     verdicts: Arc::clone(&verdicts),
                     api: Arc::clone(&api),
+                    heads: Arc::clone(&heads),
                 },
             )
             .run(),
@@ -290,6 +299,7 @@ impl AuthoredPrsSource {
             memory,
             verdicts,
             api,
+            heads,
             snapshot: rx,
             task,
         }
