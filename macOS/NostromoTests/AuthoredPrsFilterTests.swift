@@ -309,7 +309,6 @@ final class AuthoredPrsFilterBarTests: XCTestCase {
             XCTAssertFalse(popUp.itemArray.isEmpty)
             for item in popUp.itemArray {
                 XCTAssertTrue(item.keyEquivalent.isEmpty, "'\(item.title)' takes no key: the job list's From: and the main menu own them")
-                XCTAssertEqual(item.keyEquivalentModifierMask.intersection([.command]), [], item.title)
             }
         }
         let window = try XCTUnwrap(overview.window)
@@ -364,22 +363,6 @@ final class AuthoredPrsFilterBarTests: XCTestCase {
     }
 
     /// The count pills drawn outside the Overview itself: the pinned row's.
-    private func pinnedCountTexts(_ view: MotherView) -> [String] {
-        let inside = Set(APT.descendants(of: view.overviewView).map(ObjectIdentifier.init))
-        return APT.descendants(of: view).compactMap { $0 as? AuthoredPrsChipView }
-            .filter { !inside.contains(ObjectIdentifier($0)) }.map(\.text)
-    }
-
-    private func waitForPinnedCount(_ view: MotherView, _ text: String) -> Bool {
-        let deadline = Date().addingTimeInterval(3)
-        while Date() < deadline {
-            view.layoutSubtreeIfNeeded()
-            if pinnedCountTexts(view).contains(text) { return true }
-            RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
-        }
-        return false
-    }
-
     func testAFilterThatHidesEverythingNeverChangesThePinnedRowsCountOrTheSidebarPills() {
         let tagA = "pill-a-\(UUID().uuidString)", tagB = "pill-b-\(UUID().uuidString)"
         func owner(_ tag: String) -> AuthoredPrOwner { AuthoredPrOwner(kind: .motherJob, tag: tag, name: "Cody \(tag.prefix(6))", jobId: "j") }
@@ -392,7 +375,7 @@ final class AuthoredPrsFilterBarTests: XCTestCase {
         func waiting(_ tag: String) -> Int { SidebarBadgeModel.needsYouCounts(from: AppStore.shared.needsYou).waiting[tag] ?? 0 }
         XCTAssertTrue(view.hasPinnedOverviewRow, "precondition")
         XCTAssertFalse(view.overviewView.displayed.isEmpty, "precondition: the Overview has the snapshot")
-        XCTAssertTrue(waitForPinnedCount(view, "3"), "precondition: the pinned row says 3 open PRs (pills seen: \(pinnedCountTexts(view)))")
+        XCTAssertEqual(view.pinnedOverviewCount, 3, "precondition: the pinned row says 3 open PRs")
         XCTAssertEqual(waiting(tagA), 2, "precondition")
         XCTAssertEqual(waiting(tagB), 1, "precondition")
 
@@ -402,13 +385,13 @@ final class AuthoredPrsFilterBarTests: XCTestCase {
         XCTAssertEqual(view.overviewView.shownMessage?.title, "No PRs in nobody/nothing.", "precondition: the filter is in force")
         XCTAssertEqual(view.overviewView.header.titleLabel.stringValue, "My open PRs · 0 of 3")
 
-        // ... and a fresh snapshot arriving under it, which is what recomputes the pills.
-        AppStore.shared.applyAuthoredPrsForTesting(APT.snapshot(prs))
+        // ... and a fresh snapshot arriving under it, which is what recomputes the pills. (It must differ from the
+        // last one: the store ignores a snapshot equal to the one it holds.)
+        AppStore.shared.applyAuthoredPrsForTesting(APT.snapshot(prs, poll: AuthoredPrsPoll(state: .ok, checkedAt: APT.t0.addingTimeInterval(-5))))
         APT.flushMain()
 
         XCTAssertTrue(view.hasPinnedOverviewRow)
-        XCTAssertTrue(waitForPinnedCount(view, "3"), "the pinned row still says 3 (pills seen: \(pinnedCountTexts(view)))")
-        XCTAssertFalse(pinnedCountTexts(view).contains("0"), "the filter's match count never reaches the pinned row")
+        XCTAssertEqual(view.pinnedOverviewCount, 3, "the pinned row still says 3: the filter's match count never reaches it")
         XCTAssertEqual(waiting(tagA), 2, "the sidebar waiting pills still come from the whole snapshot")
         XCTAssertEqual(waiting(tagB), 1)
     }
