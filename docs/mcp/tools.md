@@ -755,6 +755,37 @@ Source: `src/mcp/tools/perri_mutators.rs`
 
 ---
 
+### `perri.record_verdict`
+
+Record Perri's verdict on one commit of a pull request, so the Mother pane's Overview can tell whether the
+commit about to be merged is the one Perri approved (see "Perri's verdict and the Merge verb" in
+`docs/authored-prs.md`). It **only records**: it never merges and never talks to GitHub. Requires `nostromd`
+with the authored-PR list on.
+
+**Input**: `{ "repo": "owner/name", "pr": 123, "head_sha": "<40 lowercase hex>", "verdict": "approved" |
+"changes_requested" | "comment", "note"?: "<at most 200 chars>" }`. No other argument is accepted. `repo` must be
+a valid `owner/name`, `pr` a positive integer, `head_sha` the full head commit (a short or upper-case SHA is
+refused), and a `note` longer than 200 characters is refused. The note is plain text; control characters are
+dropped and it is never rendered as markup or put on the board row.
+
+**Output**: `{ "ok": true, "recorded": { "repo", "pr", "head_sha", "verdict" }, "matches_current_head": true |
+false | "unknown" }`. `matches_current_head` compares `head_sha` with the head the daemon knows for the PR
+(`false`: the PR has moved on since, so the record will show as an older version; `"unknown"`: the PR is not in
+the daemon's list, or its head is not known yet). A verdict is for `head_sha` exactly: a later push is a new head
+and the old verdict no longer applies to it. Recording again for the same head replaces the earlier verdict.
+
+**Who may call it**: any session of the operator's own focuses (the record carries the caller's agent name and
+focus tag, capped at 80 characters, as `by`). A session a network peer is steering does not see the tool and is
+refused at dispatch (`Forbidden`), like the Teri, Fred, Mother and Huey tools.
+
+**Errors**: `invalid_args` (a bad `repo`, `pr`, `head_sha`, `verdict` or `note`, or an unknown argument),
+`unidentified_caller` (no focus to attribute the record to), `not_supported` (no daemon, or the authored-PR list
+is off).
+
+Source: `src/mcp/tools/perri_verdict.rs`
+
+---
+
 ### `mother.enqueue_job`
 
 Enqueue a plan file as a new Mother job (`mother add`).

@@ -6,6 +6,10 @@ import Foundation
 
 /// The feature flag in `Welcome.features`.
 public let authoredPrsNotifyFeature = "authored_prs_notify_v1"
+/// Rows carry `head_sha_short` and Perri's verdict (`perri`).
+public let authoredPrsPerriFeature = "authored_prs_perri_v1"
+/// The daemon takes `authored_pr_merge` (the Merge button's verb) and answers `authored_pr_merge_result`.
+public let authoredPrsMergeFeature = "authored_prs_merge_v1"
 
 /// Who a preview is for: an open focus, or a session that does not exist yet.
 public enum AuthoredPrPreviewTarget: Equatable, Sendable {
@@ -89,6 +93,24 @@ public struct ClientAuthoredPrLink: Encodable, Equatable {
     }
 }
 
+/// Squash-merge the PR now. The daemon merges only when a human approved, GitHub says it is clean and Perri
+/// approved the head the app was showing (`expectedHeadShaShort`, 8 hex digits); it answers with a code only.
+/// Send it only after a human gesture.
+public struct ClientAuthoredPrMerge: Encodable, Equatable {
+    let type_ = "authored_pr_merge"
+    public let requestId: String
+    public let repo: String
+    public let number: Int
+    public let expectedHeadShaShort: String
+    public init(requestId: String, repo: String, number: Int, expectedHeadShaShort: String) {
+        self.requestId = requestId; self.repo = repo; self.number = number
+        self.expectedHeadShaShort = expectedHeadShaShort
+    }
+    enum CodingKeys: String, CodingKey {
+        case type_ = "type", requestId = "request_id", repo, number, expectedHeadShaShort = "expected_head_sha_short"
+    }
+}
+
 // MARK: Answers
 
 /// What a verb answered: a value, or a code.
@@ -169,10 +191,12 @@ public enum AuthoredPrAnswerFrame: Equatable, Sendable {
     case notify(requestId: String, AuthoredPrAnswer<AuthoredPrDone>)
     case startSession(requestId: String, AuthoredPrAnswer<AuthoredPrStarted>)
     case link(requestId: String, AuthoredPrAnswer<AuthoredPrDone>)
+    case merge(requestId: String, AuthoredPrAnswer<AuthoredPrDone>)
 
     public var requestId: String {
         switch self {
-        case .preview(let id, _), .notify(let id, _), .startSession(let id, _), .link(let id, _): return id
+        case .preview(let id, _), .notify(let id, _), .startSession(let id, _), .link(let id, _), .merge(let id, _):
+            return id
         }
     }
 
@@ -214,6 +238,12 @@ public enum AuthoredPrAnswerFrame: Equatable, Sendable {
             case .failed(let code): return .link(requestId: head.request_id, .failed(code: code))
             case .ok: return .link(requestId: head.request_id, .ok(AuthoredPrDone()))
             }
+        case "authored_pr_merge_result":
+            guard let raw = parse(DoneValue.self) else { return nil }
+            switch raw {
+            case .failed(let code): return .merge(requestId: head.request_id, .failed(code: code))
+            case .ok: return .merge(requestId: head.request_id, .ok(AuthoredPrDone()))
+            }
         default:
             return nil
         }
@@ -249,6 +279,73 @@ public enum AuthoredPrsHandoffWords {
         case "changed": return changed
         case "already_sent": return "Already sent: that message was delivered"
         default: return "Couldn't send (\(code))"
+        }
+    }
+}
+
+/// Why a merge did not happen, from the answer's code. A code this build does not know is `.unknown`, a
+/// generic failure: the app never shows the daemon's string and never treats an unknown one as success.
+public enum AuthoredPrMergeCode: Equatable, Sendable {
+    case notFound, notOpen, draft, notApproved, checksNotGreen, notMergeable, blocked, behind, headChanged
+    case perriNotApproved, perriStale, tokenCannotMerge, rateLimited, unreachable, busy, notPermitted
+    case unknown
+
+    public init(wire code: String) {
+        switch code {
+        case "not_found": self = .notFound
+        case "not_open": self = .notOpen
+        case "draft": self = .draft
+        case "not_approved": self = .notApproved
+        case "checks_not_green": self = .checksNotGreen
+        case "not_mergeable": self = .notMergeable
+        case "blocked": self = .blocked
+        case "behind": self = .behind
+        case "head_changed": self = .headChanged
+        case "perri_not_approved": self = .perriNotApproved
+        case "perri_stale": self = .perriStale
+        case "token_cannot_merge": self = .tokenCannotMerge
+        case "rate_limited": self = .rateLimited
+        case "unreachable": self = .unreachable
+        case "busy": self = .busy
+        // A refusal of the peer, however the daemon spelled it: this app is not allowed to merge.
+        case "not_permitted", "not_operator_app", "requires_secure_connection": self = .notPermitted
+        default: self = .unknown
+        }
+    }
+}
+
+extension AuthoredPrAnswer where Value == AuthoredPrDone {
+    /// The merge code of a failed answer; `.unreachable` when the daemon never answered; nil for success.
+    public var mergeFailure: AuthoredPrMergeCode? {
+        switch self {
+        case .ok: return nil
+        case .unreachable: return .unreachable
+        case .failed(let code): return AuthoredPrMergeCode(wire: code)
+        }
+    }
+}
+
+/// The words for a merge code. The daemon never sends prose.
+public enum AuthoredPrsMergeWords {
+    public static func failure(_ code: AuthoredPrMergeCode) -> String {
+        switch code {
+        case .notFound: return "Couldn't merge: this PR is no longer in the list"
+        case .notOpen: return "Couldn't merge: this PR is no longer open"
+        case .draft: return "Couldn't merge: this PR is a draft"
+        case .notApproved: return "Couldn't merge: no human reviewer has approved it"
+        case .checksNotGreen: return "Couldn't merge: checks aren't green"
+        case .notMergeable: return "Couldn't merge: GitHub says it can't be merged (conflicts?)"
+        case .blocked: return "Couldn't merge: GitHub's branch protection blocks it"
+        case .behind: return "Couldn't merge: the branch is behind its base"
+        case .headChanged: return "Couldn't merge: the PR changed. Look again"
+        case .perriNotApproved: return "Couldn't merge: Perri hasn't approved this version"
+        case .perriStale: return "Couldn't merge: Perri approved an older version"
+        case .tokenCannotMerge: return "Couldn't merge: the GitHub token may not merge here"
+        case .rateLimited: return "Couldn't merge: GitHub is rate limiting. Try again later"
+        case .unreachable: return "Couldn't merge: GitHub or Nostromo isn't reachable"
+        case .busy: return "A merge of this PR is already running"
+        case .notPermitted: return "Couldn't merge: Nostromo refused the request"
+        case .unknown: return "Couldn't merge"
         }
     }
 }

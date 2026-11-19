@@ -296,6 +296,54 @@ public enum AuthoredPrsPresentation {
         return model
     }
 
+    // MARK: Merge
+
+    /// Whether the Merge button is enabled for a row, and if not, the first reason it is not.
+    /// The cases are in the order the reasons are weighed, apart from `mergedOrClosed`, which is first in
+    /// the checks: a PR that is no longer open has nothing else worth saying.
+    public enum MergeReadiness: Equatable, Sendable {
+        case ready
+        case draft
+        case checksNotGreen
+        /// No human reviewer has approved (none yet, changes requested, or only requested).
+        case humanApprovalMissing
+        case perriNotApproved(PerriBlock)
+        case mergedOrClosed
+
+        /// How Perri has not approved the PR's current head.
+        public enum PerriBlock: Equatable, Sendable {
+            /// No verdict, or one that is not an approval (a comment).
+            case none
+            /// The verdict is for an older version: a push came after it.
+            case olderVersion
+            case changesRequested
+        }
+
+        public var isReady: Bool { self == .ready }
+    }
+
+    /// The daemon enforces every one of these again when it merges; this only says whether to offer the button.
+    /// Merge needs an open PR that is not a draft, whose checks are passing (or there are none), that a human
+    /// approved, and that Perri approved at the head the row shows (`headShaShort`).
+    public static func mergeReadiness(_ pr: AuthoredPr) -> MergeReadiness {
+        if pr.lifecycle != .open { return .mergedOrClosed }
+        if pr.draft { return .draft }
+        switch pr.checks.state {
+        case .passing, .none: break
+        case .failing, .pending, .unknown: return .checksNotGreen
+        }
+        if pr.review.state != .approved { return .humanApprovalMissing }
+        guard let perri = pr.perri else { return .perriNotApproved(.none) }
+        if !perri.forCurrentHead { return .perriNotApproved(.olderVersion) }
+        switch perri.verdict {
+        case .approved:
+            // Without the head there is nothing to echo, so nothing to merge.
+            return pr.headShaShort == nil ? .perriNotApproved(.none) : .ready
+        case .changesRequested: return .perriNotApproved(.changesRequested)
+        case .comment, .unknown: return .perriNotApproved(.none)
+        }
+    }
+
     // MARK: Hand-off
 
     /// A PR the user can hand to an agent: open, not a draft, in Needs you, and something to fix.

@@ -116,11 +116,71 @@ offered again. No title, branch, check or comment data is stored or logged. The 
 `pill` is true when a needs-you, non-draft PR has a known open owner that has not been told its current
 `attention_key` (a hash of the failing checks, change requesters, newest new-comment time and unresolved count).
 
+## Perri's verdict and the Merge verb (`authored_prs_perri_v1`, `authored_prs_merge_v1`)
+
+The user's rule: a PR may be merged only when a human reviewer approved it on GitHub, the required checks are
+green **and** Perri (the local review agent) approved the PR's **current head commit**. Perri's verdict used to
+live only in the conversation; it is now a record.
+
+**The verdict store** (`verdicts.rs`). `<state_root>/perri-verdicts.json`, mode 0600, written atomically
+(temp file + rename). One record per `repo + number + head_sha` (the full 40-hex head): `verdict`
+(`approved` | `changes_requested` | `comment`), `at`, `by` (the recording agent and focus, at most 80 chars) and
+an optional plain-text `note` (at most 200 chars, control characters dropped; never markup, never on the board
+row, never logged). The newest verdict for a head wins; the newest 500 records are kept. The file is read
+leniently: unknown fields are ignored, a record that does not validate (bad repo, number, SHA or verdict) is
+dropped, and a file that does not parse starts the store empty (its bytes are kept as a backup) and is not fatal.
+
+**Recording** is the MCP tool `perri.record_verdict` (see `docs/mcp/tools.md`). It only records. Any session of
+the operator's own focuses may call it; a session a network peer is steering is refused (the tool is withheld,
+like the Teri/Fred/Mother/Huey tools). Its result says whether the head matches the one the daemon knows
+(`matches_current_head: true | false | "unknown"`).
+
+**Row fields** (additive, absent when empty, so an older Mac decodes the frame unchanged): `head_sha_short` (the
+first 8 hex digits of the engine's in-memory head; the full SHA never leaves the daemon) and
+`perri { verdict, at, by?, for_current_head }`. A verdict for the current head sets `for_current_head: true`;
+when only an older head has a verdict it is reported with `for_current_head: false` (the app says "approved an
+older version"): a push makes the old verdict stale, never approved. The note is not on the row.
+
+**The Merge verb** (`authored_pr_merge {request_id, repo, number, expected_head_sha_short}` answered by
+`authored_pr_merge_result`, the verified operator app only, like the hand-off verbs; a plain local client gets
+`not_permitted`, a TCP peer `requires_secure_connection`, each logged as verb + code only). The Mac sends it
+after a human gesture; the daemon cannot see that, so it enforces every rule itself, in this order, and each
+failure has its own code:
+
+1. The PR is in the daemon's list (`not_found`), and the engine is not paused on a rate limit (`rate_limited`).
+2. The PR is **read from GitHub now** (one GraphQL read, never the cached row): `not_open`, `draft`,
+   `not_mergeable` (`mergeable` is not `MERGEABLE`), `not_approved` (the review state is not approved, or no
+   *human* approved: a bot's approval does not count), `checks_not_green` (not passing or none), and then GitHub's
+   own `mergeStateStatus` has the last word: `CLEAN` or `HAS_HOOKS` pass; `BEHIND` is `behind`, `BLOCKED` is
+   `blocked`, `UNSTABLE` is `checks_not_green`, `DIRTY`/`UNKNOWN` are `not_mergeable`.
+3. The live head's first 8 hex digits must equal `expected_head_sha_short` (`head_changed`), and a stored Perri
+   verdict `approved` must exist for the **full** live head: `perri_not_approved` when there is none, or it is a
+   changes-requested or comment verdict; `perri_stale` when verdicts exist only for other heads.
+4. `PUT /repos/{repo}/pulls/{number}/merge` with exactly `{"merge_method":"squash","sha":"<full live head>"}`,
+   with the engine's own GitHub client and token. `sha` makes GitHub itself refuse if the head moved after the
+   checks above. There is never an admin or bypass parameter: branch protection always applies (an admin merge
+   is a separate, later feature). 405 is `blocked`, 409 `head_changed`, 403 `token_cannot_merge` (a 403 that
+   carries a rate-limit signal is `rate_limited`), 404 `not_found`, 422 `not_mergeable`, 429 `rate_limited`, a
+   network failure or any other status `unreachable`.
+
+Nothing GitHub says (a message, a title) is forwarded to the client or logged: the answer is `ok` or a code.
+One `request_id` gets one answer (a repeat returns the first, whatever it was; a new press needs a new id), and a
+request for a PR whose merge is still running is refused `busy`. On success the daemon logs one line (repo,
+number, short head, who asked; no token, title or body) and asks the engine to read that PR again, so the row
+turns merged without waiting for the next poll. The codes: `ok`, `not_found`, `not_open`, `draft`,
+`not_approved`, `checks_not_green`, `not_mergeable`, `blocked`, `behind`, `head_changed`, `perri_not_approved`,
+`perri_stale`, `token_cannot_merge`, `rate_limited`, `unreachable`, `busy`, `not_permitted`.
+
+Not verified by tests, because it needs the real thing: a merge on a real PR, and whether a real token's scope
+allows merging.
+
 ## What is logged
 
 Counts, durations, error classes and posture changes only. Never a title, branch,
 check name, login, repo, PR number, URL or token. The relay client's event line is
-`github-relay: event {type}`. The head branch and SHA stay in memory.
+`github-relay: event {type}`. The head branch and the full SHA stay in memory. The one exception is the audit line
+of a successful merge, `authored-pr merged`, which names the repo, the number, the first 8 hex of the head and who
+asked (no token, title or body). Nothing logs a Perri note, or a verdict's repo, number or SHA.
 
 ## Wire
 
@@ -136,4 +196,9 @@ check name, login, repo, PR number, URL or token. The relay client's event line 
   `authored_pr_notify_result`, `authored_pr_start_session_result`, `authored_pr_link_result`; each
   `{request_id, result: {status: ok|err, value}}`, `LocalOnly`), and the additive `told` / `pill` row fields.
   The Mac shows buttons, pickers and pills only when it is advertised.
+- Feature `authored_prs_perri_v1` (advertised whenever the list is): the additive `head_sha_short` and `perri`
+  row fields.
+- Feature `authored_prs_merge_v1` (advertised with the hand-off verbs): `authored_pr_merge` and
+  `authored_pr_merge_result` (`{request_id, result: {status: ok|err, value}}`, `LocalOnly`; `ok` carries `{}` and
+  an error only `{code}`).
 - Golden frames: `tests/fixtures/authored_prs/frame-authored-pr*.json`.
