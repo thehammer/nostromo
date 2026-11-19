@@ -1,0 +1,7 @@
+{
+  "type": "authored_pr_merge",
+  "request_id": "r7",
+  "repo": "thehammer/nostromo",
+  "number": 458,
+  "expected_head_sha_short": "0123abcd"
+}

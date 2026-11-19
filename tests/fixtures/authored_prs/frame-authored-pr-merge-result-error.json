@@ -1,0 +1,10 @@
+{
+  "type": "authored_pr_merge_result",
+  "request_id": "r7",
+  "result": {
+    "status": "err",
+    "value": {
+      "code": "perri_stale"
+    }
+  }
+}

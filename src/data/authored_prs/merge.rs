@@ -231,15 +231,16 @@ impl AuthoredPrActions {
         }
     }
 
-    /// The engine is paused on a rate limit that has not ended: the merge
-    /// waits with it.
+    /// The engine is hard-paused on a rate limit that has not ended: the merge
+    /// waits with it. (`resumes_at` is only ever set while paused; the slower
+    /// `rate_limited` poll state is a slow-down, not a stop.)
     fn rate_limited_now(&self) -> bool {
         let snap = self.snapshot.borrow();
         let Some(snap) = snap.as_ref() else {
             return false;
         };
-        snap.poll.state == PollState::RateLimited
-            && snap.poll.resumes_at.is_none_or(|t| t > self.clock.now())
+        snap.poll.state == PollState::Paused
+            && snap.poll.resumes_at.is_some_and(|t| t > self.clock.now())
     }
 
     /// The PR `repo#number` in the latest snapshot, whatever its lifecycle.

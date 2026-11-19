@@ -499,6 +499,15 @@ mod verbs {
                 },
             ),
             (
+                "frame-authored-pr-merge.json",
+                ClientMsg::AuthoredPrMerge {
+                    request_id: "r7".into(),
+                    repo: "thehammer/nostromo".into(),
+                    number: 458,
+                    expected_head_sha_short: "0123abcd".into(),
+                },
+            ),
+            (
                 "frame-authored-pr-unlink.json",
                 ClientMsg::AuthoredPrLink {
                     request_id: "r6".into(),
@@ -566,6 +575,20 @@ mod verbs {
                     result: AuthoredPrResult::Ok(Done {}),
                 },
             ),
+            (
+                "frame-authored-pr-merge-result.json",
+                ServerMsg::AuthoredPrMergeResult {
+                    request_id: "r7".into(),
+                    result: AuthoredPrResult::Ok(Done {}),
+                },
+            ),
+            (
+                "frame-authored-pr-merge-result-error.json",
+                ServerMsg::AuthoredPrMergeResult {
+                    request_id: "r7".into(),
+                    result: AuthoredPrResult::err("perri_stale"),
+                },
+            ),
         ]
     }
 
@@ -594,6 +617,126 @@ mod verbs {
         }
         for (name, msg) in server_frames() {
             check(name, &msg);
+        }
+    }
+}
+
+// ── Perri's verdict on a row ─────────────────────────────────────────────────
+
+mod perri {
+    use super::*;
+
+    const FRAME: &str = "frame-authored-prs-perri.json";
+
+    fn verdict_row(
+        number: u64,
+        short: Option<&str>,
+        perri: Option<(Verdict, bool, Option<&str>)>,
+    ) -> AuthoredPr {
+        let mut row = base_row("thehammer/nostromo", number, "A change", Group::Ready);
+        row.head_sha_short = short.map(str::to_owned);
+        row.perri = perri.map(|(verdict, for_current_head, by)| PerriRow {
+            verdict,
+            at: at(14, 11, 45),
+            by: by.map(str::to_owned),
+            for_current_head,
+        });
+        row
+    }
+
+    /// A row for each way Perri can have spoken, and one it has not.
+    fn frame() -> ServerMsg {
+        let mut snap = snapshot();
+        snap.prs = vec![
+            verdict_row(
+                1,
+                Some("0123abcd"),
+                Some((Verdict::Approved, true, Some("perri:cody-pr-1"))),
+            ),
+            verdict_row(
+                2,
+                Some("4567ef01"),
+                Some((Verdict::ChangesRequested, true, None)),
+            ),
+            verdict_row(
+                3,
+                Some("89abcdef"),
+                Some((Verdict::Comment, false, Some("perri"))),
+            ),
+            verdict_row(
+                4,
+                Some("23456789"),
+                Some((Verdict::Approved, false, Some("perri"))),
+            ),
+            verdict_row(5, Some("abcdef01"), None),
+            verdict_row(6, None, None),
+        ];
+        snap.total_open = 6;
+        snap.shown = 6;
+        ServerMsg::AuthoredPrs { snapshot: snap }
+    }
+
+    fn rendered_frame() -> String {
+        let mut text = serde_json::to_string_pretty(&frame()).unwrap();
+        text.push('\n');
+        text
+    }
+
+    #[test]
+    fn the_frame_with_perris_verdicts_matches_its_golden_file_and_round_trips() {
+        let want = rendered_frame();
+        let path = fixture_path(FRAME);
+        if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
+            std::fs::write(&path, &want).unwrap();
+            return;
+        }
+        let have = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("{FRAME} is missing ({e}); UPDATE_GOLDEN=1 cargo test --test authored_prs_wire_golden")
+        });
+        assert_eq!(have, want, "{FRAME} no longer matches what serde produces");
+        let back: ServerMsg = serde_json::from_str(&have).unwrap();
+        assert_eq!(
+            serde_json::to_value(&back).unwrap(),
+            serde_json::to_value(frame()).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_row_says_the_short_head_and_the_verdict_and_never_a_note_or_a_full_sha() {
+        let v: serde_json::Value = serde_json::to_value(frame()).unwrap();
+        let rows = v["snapshot"]["prs"].as_array().unwrap();
+        assert_eq!(rows[0]["head_sha_short"], "0123abcd");
+        assert_eq!(rows[0]["perri"]["verdict"], "approved");
+        assert_eq!(rows[0]["perri"]["for_current_head"], true);
+        assert_eq!(rows[0]["perri"]["by"], "perri:cody-pr-1");
+        assert_eq!(rows[1]["perri"]["verdict"], "changes_requested");
+        assert!(rows[1]["perri"].get("by").is_none(), "no name: no key");
+        assert_eq!(rows[2]["perri"]["verdict"], "comment");
+        assert_eq!(rows[3]["perri"]["for_current_head"], false);
+        assert!(rows[4].get("perri").is_none());
+        assert!(rows[5].get("perri").is_none() && rows[5].get("head_sha_short").is_none());
+        let text = serde_json::to_string(&v).unwrap();
+        assert!(!text.contains("note"), "a note is on the wire");
+        assert!(
+            !regex::Regex::new(r"[0-9a-f]{40}").unwrap().is_match(&text),
+            "a full SHA is on the wire"
+        );
+    }
+
+    /// An old daemon's row has neither key: it must still decode, with both absent.
+    #[test]
+    fn the_existing_golden_rows_have_no_perri_keys_and_still_decode() {
+        let text = golden_text();
+        assert!(!text.contains("\"perri\"") && !text.contains("head_sha_short"));
+        let msg: ServerMsg = serde_json::from_str(&text).unwrap();
+        match msg {
+            ServerMsg::AuthoredPrs { snapshot } => {
+                assert!(snapshot
+                    .prs
+                    .iter()
+                    .all(|p| p.perri.is_none() && p.head_sha_short.is_none()));
+            }
+            other => panic!("{other:?}"),
         }
     }
 }
