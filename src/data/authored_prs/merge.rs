@@ -65,7 +65,8 @@ pub struct MergeBook {
 #[derive(Default)]
 struct BookState {
     in_flight: HashSet<String>,
-    answers: VecDeque<(String, AuthoredPrResult<Done>)>,
+    /// `(request id, PR, answer)`: an id answers only for the PR it first named.
+    answers: VecDeque<(String, String, AuthoredPrResult<Done>)>,
 }
 
 /// Releases the PR's in-flight mark when dropped, even if the task is.
@@ -88,7 +89,11 @@ impl Drop for InFlight<'_> {
 impl MergeBook {
     fn begin<'a>(&'a self, request_id: &str, pr: &str) -> BeginOutcome<'a> {
         let mut g = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((_, r)) = g.answers.iter().find(|(id, _)| id == request_id) {
+        if let Some((_, _, r)) = g
+            .answers
+            .iter()
+            .find(|(id, key, _)| id == request_id && key == pr)
+        {
             return BeginOutcome::Again(r.clone());
         }
         if !g.in_flight.insert(pr.to_owned()) {
@@ -100,9 +105,10 @@ impl MergeBook {
         })
     }
 
-    fn remember(&self, request_id: &str, result: &AuthoredPrResult<Done>) {
+    fn remember(&self, request_id: &str, pr: &str, result: &AuthoredPrResult<Done>) {
         let mut g = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        g.answers.push_back((request_id.to_owned(), result.clone()));
+        g.answers
+            .push_back((request_id.to_owned(), pr.to_owned(), result.clone()));
         while g.answers.len() > REMEMBERED_MERGES {
             g.answers.pop_front();
         }
@@ -141,7 +147,7 @@ impl AuthoredPrActions {
             Ok(()) => AuthoredPrResult::Ok(Done {}),
             Err(code) => AuthoredPrResult::err(code),
         };
-        self.merges.remember(request_id, &result);
+        self.merges.remember(request_id, &pr, &result);
         result
     }
 

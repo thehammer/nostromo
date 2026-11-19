@@ -164,8 +164,10 @@ failure has its own code:
    network failure or any other status `unreachable`.
 
 Nothing GitHub says (a message, a title) is forwarded to the client or logged: the answer is `ok` or a code.
-One `request_id` gets one answer (a repeat returns the first, whatever it was; a new press needs a new id), and a
-request for a PR whose merge is still running is refused `busy`. On success the daemon logs one line (repo,
+One `request_id` gets one answer for the PR it named (a repeat returns the first, whatever it was, so a transient
+`rate_limited` or `unreachable` is remembered too and a new press needs a new id; the same id naming another PR is
+a new request), and a request for a PR whose merge is still running is refused `busy`, including a repeat of the
+running request's own id (`busy` is not remembered, so retrying after it finishes returns the first answer). On success the daemon logs one line (repo,
 number, short head, who asked; no token, title or body) and asks the engine to read that PR again, so the row
 turns merged without waiting for the next poll. The codes: `ok`, `not_found`, `not_open`, `draft`,
 `not_approved`, `checks_not_green`, `not_mergeable`, `blocked`, `behind`, `head_changed`, `perri_not_approved`,

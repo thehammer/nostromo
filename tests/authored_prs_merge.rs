@@ -887,6 +887,20 @@ async fn a_failure_is_remembered_for_its_request_id_and_a_new_id_asks_afresh() {
 }
 
 #[tokio::test]
+async fn a_request_id_answers_only_for_the_pr_it_first_named() {
+    let mut rig = start(vec![ready_pr(1), ready_pr(2)]).await;
+    record(&mut rig, 1, &sha('a'), Verdict::Approved).await;
+    let first = rig.merge("r1", REPO, 1, &short('a')).await;
+    assert_eq!(code_of(&first), "ok", "{first:?}");
+
+    // The same id for another PR is a new request, judged on its own facts
+    // (PR 2 has no Perri verdict): it is not told that the first one merged.
+    let other = rig.merge("r1", REPO, 2, &short('a')).await;
+    assert_eq!(code_of(&other), "perri_not_approved", "{other:?}");
+    assert_eq!(rig.fake.merges().len(), 1);
+}
+
+#[tokio::test]
 async fn a_second_merge_of_a_pr_being_merged_is_busy_another_pr_is_not_blocked_and_busy_is_not_remembered(
 ) {
     let mut rig = start(vec![ready_pr(1), ready_pr(2)]).await;
