@@ -1005,6 +1005,11 @@ class NostromodClient {
         features?.contains(authoredPrsNotifyFeature) == true
     }
 
+    /// Does a daemon that advertised `features` send Perri's verdict on rows (`authored_prs_perri_v1`)?
+    static func supportsAuthoredPrsPerri(features: [String]?) -> Bool {
+        features?.contains(authoredPrsPerriFeature) == true
+    }
+
     /// Does a daemon that advertised `features` take the Merge verb (`authored_prs_merge_v1`)?
     static func supportsAuthoredPrsMerge(features: [String]?) -> Bool {
         features?.contains(authoredPrsMergeFeature) == true
@@ -1213,6 +1218,12 @@ class NostromodClient {
     var daemonAdvertisesAuthoredPrsNotify: Bool {
         sendLock.lock(); defer { sendLock.unlock() }
         return NostromodClient.supportsAuthoredPrsNotify(features: advertisedFeatures)
+    }
+
+    /// Whether the connection's last `welcome` advertised `authored_prs_perri_v1`.
+    var daemonAdvertisesAuthoredPrsPerri: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return NostromodClient.supportsAuthoredPrsPerri(features: advertisedFeatures)
     }
 
     /// Whether the connection's last `welcome` advertised `authored_prs_merge_v1`.

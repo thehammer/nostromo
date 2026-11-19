@@ -1,0 +1,172 @@
+import Foundation
+
+// What the PR Overview says about Perri's verdict and the Merge button, as pure functions of a row, a clock and
+// the attempt the person made. The daemon enforces every rule again when it merges: this only decides what to
+// offer and how to word it. Nothing here sends anything.
+
+// MARK: - Perri's badge
+
+/// `Perri ✓`, `Perri ✓ older`, `Perri ✗` or `Perri comments`: the verdict on an open PR, never by colour alone.
+public struct AuthoredPrPerriBadge: Equatable, Sendable {
+    public enum Kind: Equatable, Sendable { case approved, olderApproval, changesRequested, comments }
+    public var kind: Kind
+    /// What the badge says, glyph included.
+    public var text: String
+    public var tooltip: String
+    public var accessibilityLabel: String
+    /// True only for an approval of an older version: it is not an approval of this one, so it is quieter.
+    public var isMuted: Bool
+}
+
+// MARK: - Merge button
+
+/// What one attempt to merge a row has come to. `head` is the head short sha of the row the person saw.
+public enum AuthoredPrMergeProgress: Equatable, Sendable {
+    case merging
+    case merged
+    case failed(AuthoredPrMergeCode)
+}
+
+public struct AuthoredPrMergeAttempt: Equatable, Sendable {
+    public var head: String
+    public var progress: AuthoredPrMergeProgress
+    public init(head: String, progress: AuthoredPrMergeProgress) {
+        self.head = head
+        self.progress = progress
+    }
+}
+
+/// The one-step confirmation: what will happen, for the row as the person saw it. The request carries
+/// `expectedHeadShaShort`, the head in this very text, never a newer one.
+public struct AuthoredPrMergeConfirmation: Equatable, Sendable {
+    public var repo: String
+    public var number: Int
+    public var expectedHeadShaShort: String
+    public var message: String
+    public var confirmTitle: String { "Merge" }
+    public var cancelTitle: String { "Cancel" }
+}
+
+public struct AuthoredPrMergeButton: Equatable, Sendable {
+    public enum State: Equatable, Sendable {
+        /// Every rule holds: pressing it leads to the confirmation.
+        case ready
+        /// Shown but off; `reason` says why.
+        case unavailable
+        case merging
+        case merged
+    }
+    public var state: State
+    public var title: String
+    public var isEnabled: Bool { state == .ready }
+    /// Only when `.unavailable`.
+    public var reason: String?
+    public var tooltip: String
+    public var accessibilityLabel: String
+    /// Only when `.ready`: nothing that is not ready can lead to a merge.
+    public var confirmation: AuthoredPrMergeConfirmation?
+}
+
+// MARK: - Rules
+
+extension AuthoredPrsPresentation {
+
+    /// The most of a PR's title the confirmation says.
+    static let confirmationTitleLimit = 80
+
+    // MARK: Badge
+
+    /// Perri's verdict on `pr` as a badge; nil when there is none worth showing (no verdict, one this build does not
+    /// know, a non-approval of an older version, or a PR that is not open).
+    public static func perriBadge(_ pr: AuthoredPr, now: Date) -> AuthoredPrPerriBadge? {
+        guard pr.lifecycle == .open, let perri = pr.perri else { return nil }
+        let when = perri.at.map { " \(age(from: $0, now: now)) ago" } ?? ""
+        let who = perri.by.map { " by \($0)" } ?? ""
+        let head = pr.headShaShort.map { " · head \($0)" } ?? ""
+        func tip(_ verb: String) -> String { verb + when + who + head }
+        switch (perri.verdict, perri.forCurrentHead) {
+        case (.approved, true):
+            return AuthoredPrPerriBadge(kind: .approved, text: "Perri ✓", tooltip: tip("Approved"),
+                                        accessibilityLabel: "Perri approved this version", isMuted: false)
+        case (.approved, false):
+            return AuthoredPrPerriBadge(
+                kind: .olderApproval, text: "Perri ✓ older",
+                tooltip: "Approved" + when + who + " for an older version of this PR. A new push needs a new review.",
+                accessibilityLabel: "Perri approved an older version", isMuted: true)
+        case (.changesRequested, true):
+            return AuthoredPrPerriBadge(kind: .changesRequested, text: "Perri ✗", tooltip: tip("Changes requested"),
+                                        accessibilityLabel: "Perri requested changes", isMuted: false)
+        case (.comment, true):
+            return AuthoredPrPerriBadge(kind: .comments, text: "Perri comments", tooltip: tip("Commented"),
+                                        accessibilityLabel: "Perri left comments", isMuted: false)
+        default:
+            return nil
+        }
+    }
+
+    // MARK: Button
+
+    /// The Merge button of a READY-group open row, enabled only when `mergeReadiness` says `.ready`; nil elsewhere.
+    /// `attempt` overlays the button while a merge is running or done; a failed attempt does not change it (the
+    /// failure is a notice, see `mergeNotice`).
+    public static func mergeButton(_ pr: AuthoredPr, attempt: AuthoredPrMergeAttempt? = nil) -> AuthoredPrMergeButton? {
+        guard pr.lifecycle == .open, pr.group == .ready else { return nil }
+        let n = pr.number
+        switch attempt?.progress {
+        case .merging?:
+            return AuthoredPrMergeButton(state: .merging, title: "Merging…", reason: nil, tooltip: "Merging this PR",
+                                         accessibilityLabel: "Merge PR \(n), merging", confirmation: nil)
+        case .merged?:
+            return AuthoredPrMergeButton(state: .merged, title: "Merged", reason: nil, tooltip: "Merged",
+                                         accessibilityLabel: "Merged", confirmation: nil)
+        case .failed?, nil:
+            break
+        }
+        guard let reason = mergeDisabledReason(pr) else {
+            return AuthoredPrMergeButton(
+                state: .ready, title: "Merge", reason: nil,
+                tooltip: "Squash and merge into \(pr.baseRef ?? "the base branch"). You will be asked to confirm.",
+                accessibilityLabel: "Merge PR \(n)", confirmation: mergeConfirmation(pr))
+        }
+        return AuthoredPrMergeButton(state: .unavailable, title: "Merge", reason: reason, tooltip: reason,
+                                     accessibilityLabel: "Merge, unavailable: \(reason)", confirmation: nil)
+    }
+
+    /// Why the Merge button is off, in words; nil when `mergeReadiness` is `.ready`.
+    static func mergeDisabledReason(_ pr: AuthoredPr) -> String? {
+        switch mergeReadiness(pr) {
+        case .ready: return nil
+        case .draft: return "Draft"
+        case .checksNotGreen: return "Checks not green"
+        case .humanApprovalMissing: return "Waiting for human approval"
+        case .perriNotApproved(.none): return "Needs Perri's review"
+        case .perriNotApproved(.olderVersion):
+            // An older approval is the only verdict worth calling "approved": any other one says nothing now.
+            return pr.perri?.verdict == .approved ? "Perri approved an older version" : "Needs Perri's review"
+        case .perriNotApproved(.changesRequested): return "Perri requested changes"
+        case .mergedOrClosed: return "No longer open"
+        }
+    }
+
+    /// The confirmation for a row that may be merged now; nil otherwise or without a head to carry.
+    static func mergeConfirmation(_ pr: AuthoredPr) -> AuthoredPrMergeConfirmation? {
+        guard mergeReadiness(pr) == .ready, let head = pr.headShaShort else { return nil }
+        var title = AuthoredPrsText.clean(pr.title, max: Int.max)
+        if title.count > confirmationTitleLimit { title = String(title.prefix(confirmationTitleLimit)) + "…" }
+        let checks = pr.checks.state == .passing ? "green" : "none"
+        let message = "Squash and merge #\(pr.number) \(title) into \(pr.baseRef ?? "the base branch")? "
+            + "Head \(head). Perri approved. Human approval: yes. Checks: \(checks)."
+        return AuthoredPrMergeConfirmation(repo: pr.repo, number: pr.number, expectedHeadShaShort: head, message: message)
+    }
+
+    // MARK: Notice
+
+    /// The words of a failed attempt, while they are about this row: the PR is open and still at the head the
+    /// attempt was made at. `head_changed` is the exception: it is about the head having changed, so it stays
+    /// through the change (until the person dismisses it or tries again).
+    public static func mergeNotice(_ pr: AuthoredPr, attempt: AuthoredPrMergeAttempt?) -> String? {
+        guard pr.lifecycle == .open, case .failed(let code)? = attempt?.progress, let attempt else { return nil }
+        guard code == .headChanged || attempt.head == pr.headShaShort else { return nil }
+        return AuthoredPrsMergeWords.failure(code)
+    }
+}

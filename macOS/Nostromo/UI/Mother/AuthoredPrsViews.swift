@@ -28,6 +28,13 @@ enum AuthoredPrsPalette {
     static let merged = dynamic(dark: Theme.attention, light: NSColor(red: 0.45, green: 0.2, blue: 0.7, alpha: 1))
     static let link = dynamic(dark: Theme.followBlue, light: NSColor(red: 0.1, green: 0.35, blue: 0.8, alpha: 1))
     static let warning = dynamic(dark: Theme.amber, light: NSColor(red: 0.62, green: 0.42, blue: 0, alpha: 1))
+    /// Perri's badge. Each is at least 4.5:1 over `background` in both appearances (a test measures it); the glyph
+    /// and the words, never the colour alone, say which verdict it is.
+    static let perriApproved = passing
+    /// An approval of an older version: the same as the muted text, so it reads as quieter than a current one.
+    static let perriMuted = muted
+    static let perriChanges = dynamic(dark: NSColor(red: 1, green: 0.42, blue: 0.42, alpha: 1),
+                                      light: NSColor(red: 0.75, green: 0.1, blue: 0.1, alpha: 1))
 
     static func statusColor(_ kind: AuthoredPrRowModel.StatusKind) -> NSColor {
         switch kind {
@@ -286,15 +293,30 @@ final class AuthoredPrRowView: NSView {
     let toldLabel = plainLabel(font: .systemFont(ofSize: 11), color: AuthoredPrsPalette.muted, truncates: false)
     /// Tell <focus>, Choose focus… or Start a session…: only on a fixable row, and only when the daemon can hand off.
     let tellButton = NSButton()
-    /// The detail lines end at the row's edge, or at the button when there is one.
-    private var detailEdge: [NSLayoutConstraint] = []
-    private var detailBesideButton: [NSLayoutConstraint] = []
+    /// `Perri ✓`: Perri's verdict, never truncated, at the end of the review line.
+    let perriLabel = plainLabel(font: .systemFont(ofSize: 11, weight: .semibold), color: AuthoredPrsPalette.muted, truncates: false)
+    /// Merge (or Merging…, Merged): only on an open READY row, and only when the daemon can merge. Its width is
+    /// the same in every state, so the row does not shift as the state changes.
+    let mergeButton = NSButton()
+    /// Why the last merge failed, in the place of the owner line, with a way to dismiss it.
+    let noticeLabel = plainLabel(font: .systemFont(ofSize: 11), color: AuthoredPrsPalette.warning)
+    let noticeDismissButton = NSButton()
+    private let noticeStack = NSStackView()
+    private let lastStack = NSStackView()
+    /// Where the detail lines end: the row's edge, or the visible button.
+    private var trailingEdge: [NSLayoutConstraint] = []
+
+    static let mergeButtonWidth: CGFloat = 78
 
     private(set) var model: AuthoredPrRowModel?
     /// Called with the Mother job id when its link is pressed.
     var onOpenJob: ((String) -> Void)?
     /// Called when the row's button is pressed (the current event is the click).
     var onTell: ((AuthoredPrRowModel) -> Void)?
+    /// Called when Merge is pressed (or VoiceOver's Merge action runs).
+    var onMerge: ((AuthoredPrRowModel) -> Void)?
+    /// Called when the merge notice's dismiss button is pressed.
+    var onDismissMergeNotice: ((AuthoredPrRowModel) -> Void)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -327,8 +349,45 @@ final class AuthoredPrRowView: NSView {
         tellButton.setContentCompressionResistancePriority(.required, for: .horizontal)
         tellButton.setContentHuggingPriority(.required, for: .horizontal)
         tellButton.isHidden = true
-        let last = NSStackView(views: [baseLabel, ownerPrefixLabel, jobButton, ownerSuffixLabel, toldLabel])
-        for stack in [first, last] {
+
+        perriLabel.setContentCompressionResistancePriority(.init(999), for: .horizontal)
+        perriLabel.setContentHuggingPriority(.required, for: .horizontal)
+        perriLabel.isHidden = true
+        mergeButton.bezelStyle = .rounded
+        mergeButton.controlSize = .small
+        mergeButton.font = .systemFont(ofSize: 11)
+        mergeButton.lineBreakMode = .byClipping
+        mergeButton.target = self
+        mergeButton.action = #selector(mergePressed)
+        // Merge has no key equivalent, here or anywhere.
+        mergeButton.keyEquivalent = ""
+        mergeButton.translatesAutoresizingMaskIntoConstraints = false
+        mergeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        mergeButton.setContentHuggingPriority(.required, for: .horizontal)
+        mergeButton.setAccessibilityIdentifier("authored-pr-merge")
+        mergeButton.isHidden = true
+
+        noticeLabel.setContentCompressionResistancePriority(.init(250), for: .horizontal)
+        noticeLabel.isHidden = true
+        noticeDismissButton.isBordered = false
+        noticeDismissButton.title = "✕"
+        noticeDismissButton.font = .systemFont(ofSize: 11, weight: .semibold)
+        noticeDismissButton.contentTintColor = AuthoredPrsPalette.muted
+        noticeDismissButton.attributedTitle = NSAttributedString(string: "✕", attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: AuthoredPrsPalette.muted])
+        noticeDismissButton.target = self
+        noticeDismissButton.action = #selector(dismissNoticePressed)
+        noticeDismissButton.translatesAutoresizingMaskIntoConstraints = false
+        noticeDismissButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        noticeDismissButton.setContentHuggingPriority(.required, for: .horizontal)
+        noticeDismissButton.setAccessibilityLabel("Dismiss merge message")
+        noticeDismissButton.toolTip = "Dismiss"
+        noticeDismissButton.isHidden = true
+
+        let last = lastStack
+        last.setViews([baseLabel, ownerPrefixLabel, jobButton, ownerSuffixLabel, toldLabel], in: .leading)
+        noticeStack.setViews([noticeLabel, noticeDismissButton], in: .leading)
+        for stack in [first, last, noticeStack] {
             stack.orientation = .horizontal
             stack.alignment = .centerY
             stack.distribution = .fill
@@ -337,22 +396,17 @@ final class AuthoredPrRowView: NSView {
         }
         first.spacing = 6
         last.spacing = 0
+        noticeStack.spacing = 6
         last.detachesHiddenViews = true
+        noticeStack.detachesHiddenViews = true
+        noticeStack.isHidden = true
         addSubview(checksLabel)
         addSubview(reviewLabel)
+        addSubview(perriLabel)
         addSubview(tellButton)
+        addSubview(mergeButton)
 
         let side = Self.sidePadding, indent = side + Self.detailIndent
-        detailEdge = [
-            checksLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -side),
-            reviewLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -side),
-            last.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -side),
-        ]
-        detailBesideButton = [
-            checksLabel.trailingAnchor.constraint(equalTo: tellButton.leadingAnchor, constant: -8),
-            reviewLabel.trailingAnchor.constraint(equalTo: tellButton.leadingAnchor, constant: -8),
-            last.trailingAnchor.constraint(equalTo: tellButton.leadingAnchor, constant: -8),
-        ]
         NSLayoutConstraint.activate([
             first.topAnchor.constraint(equalTo: topAnchor, constant: Self.topPadding),
             first.leadingAnchor.constraint(equalTo: leadingAnchor, constant: side),
@@ -366,20 +420,30 @@ final class AuthoredPrRowView: NSView {
             reviewLabel.topAnchor.constraint(equalTo: checksLabel.bottomAnchor),
             reviewLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: indent),
             reviewLabel.heightAnchor.constraint(equalToConstant: Self.lineHeight),
+            // The verdict follows the review text and never truncates: the review line gives way to it.
+            perriLabel.leadingAnchor.constraint(equalTo: reviewLabel.trailingAnchor, constant: 8),
+            perriLabel.centerYAnchor.constraint(equalTo: reviewLabel.centerYAnchor),
 
             last.topAnchor.constraint(equalTo: reviewLabel.bottomAnchor),
             last.leadingAnchor.constraint(equalTo: leadingAnchor, constant: indent),
             last.heightAnchor.constraint(equalToConstant: Self.lineHeight),
             last.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.bottomPadding),
+            noticeStack.topAnchor.constraint(equalTo: last.topAnchor),
+            noticeStack.leadingAnchor.constraint(equalTo: last.leadingAnchor),
+            noticeStack.heightAnchor.constraint(equalTo: last.heightAnchor),
 
             tellButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -side),
             tellButton.centerYAnchor.constraint(equalTo: reviewLabel.centerYAnchor),
+            mergeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -side),
+            mergeButton.centerYAnchor.constraint(equalTo: reviewLabel.centerYAnchor),
+            mergeButton.widthAnchor.constraint(equalToConstant: Self.mergeButtonWidth),
 
             // A repo chip never truncates, except a pathological owner/name past half the row.
             repoChip.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: 0.5),
             draftBadge.heightAnchor.constraint(equalToConstant: AuthoredPrsChipView.height),
             repoChip.heightAnchor.constraint(equalToConstant: AuthoredPrsChipView.height),
         ])
+        updateTrailingEdge(beside: nil)
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -434,24 +498,110 @@ final class AuthoredPrRowView: NSView {
         } else {
             tellButton.isHidden = true
         }
-        NSLayoutConstraint.deactivate(tellButton.isHidden ? detailBesideButton : detailEdge)
-        NSLayoutConstraint.activate(tellButton.isHidden ? detailEdge : detailBesideButton)
+
+        configurePerri(model.perriBadge)
+        configureMerge(model.mergeButton)
+        configureNotice(model.mergeNotice)
+        // Never both: Tell is on a row that needs you, Merge on one that is ready.
+        let sideButton: NSButton? = !mergeButton.isHidden ? mergeButton : (!tellButton.isHidden ? tellButton : nil)
+        updateTrailingEdge(beside: sideButton)
 
         setAccessibilityElement(true)
         setAccessibilityRole(.row)
         setAccessibilityLabel(model.accessibilityLabel)
-        // The row is one element; its button is the one child that is an element of its own.
-        let children: [Any] = tellButton.isHidden ? [] : [tellButton]
+        // The row is one element; its buttons are the children that are elements of their own.
+        var children: [Any] = []
+        if !tellButton.isHidden { children.append(tellButton) }
+        if !mergeButton.isHidden { children.append(mergeButton) }
+        if !noticeDismissButton.isHidden { children.append(noticeDismissButton) }
         setAccessibilityChildren(children)
+        var actions: [NSAccessibilityCustomAction] = []
+        if model.mergeButton?.isEnabled == true {
+            actions.append(NSAccessibilityCustomAction(name: "Merge") { [weak self] in
+                self?.mergePressed()
+                return true
+            })
+        }
+        if model.mergeNotice != nil {
+            actions.append(NSAccessibilityCustomAction(name: "Dismiss merge message") { [weak self] in
+                self?.dismissNoticePressed()
+                return true
+            })
+        }
         if let job = model.ownerJobId {
-            setAccessibilityCustomActions([NSAccessibilityCustomAction(name: "Show Mother job \(job)") { [weak self] in
+            actions.append(NSAccessibilityCustomAction(name: "Show Mother job \(job)") { [weak self] in
                 self?.jobPressed()
                 return true
-            }])
-        } else {
-            setAccessibilityCustomActions(nil)
+            })
         }
+        setAccessibilityCustomActions(actions.isEmpty ? nil : actions)
         needsLayout = true
+    }
+
+    private func configurePerri(_ badge: AuthoredPrPerriBadge?) {
+        guard let badge else {
+            perriLabel.isHidden = true
+            perriLabel.stringValue = ""
+            perriLabel.toolTip = nil
+            return
+        }
+        perriLabel.isHidden = false
+        perriLabel.stringValue = badge.text
+        perriLabel.textColor = Self.perriColor(badge)
+        perriLabel.toolTip = badge.tooltip
+        perriLabel.setAccessibilityLabel(badge.accessibilityLabel)
+    }
+
+    private static func perriColor(_ badge: AuthoredPrPerriBadge) -> NSColor {
+        switch badge.kind {
+        case .approved: return AuthoredPrsPalette.perriApproved
+        case .olderApproval: return AuthoredPrsPalette.perriMuted
+        case .changesRequested: return AuthoredPrsPalette.perriChanges
+        case .comments: return AuthoredPrsPalette.text
+        }
+    }
+
+    private func configureMerge(_ merge: AuthoredPrMergeButton?) {
+        guard let merge else {
+            mergeButton.isHidden = true
+            return
+        }
+        mergeButton.isHidden = false
+        mergeButton.title = merge.title
+        mergeButton.isEnabled = merge.isEnabled
+        mergeButton.toolTip = merge.tooltip
+        mergeButton.setAccessibilityLabel(merge.accessibilityLabel)
+    }
+
+    private func configureNotice(_ notice: String?) {
+        let shown = notice != nil
+        noticeLabel.stringValue = notice ?? ""
+        noticeLabel.toolTip = notice
+        noticeLabel.isHidden = !shown
+        noticeDismissButton.isHidden = !shown
+        noticeStack.isHidden = !shown
+        // The notice takes the owner line's place; the row does not grow.
+        lastStack.isHidden = shown
+    }
+
+    /// The detail lines end at the row's edge, or at the visible button. The verdict follows the review text and
+    /// stays inside the same edge.
+    private func updateTrailingEdge(beside button: NSButton?) {
+        NSLayoutConstraint.deactivate(trailingEdge)
+        let edge = button?.leadingAnchor ?? trailingAnchor
+        let gap: CGFloat = button == nil ? -Self.sidePadding : -8
+        var constraints = [
+            checksLabel.trailingAnchor.constraint(equalTo: edge, constant: gap),
+            lastStack.trailingAnchor.constraint(equalTo: edge, constant: gap),
+            noticeStack.trailingAnchor.constraint(equalTo: edge, constant: gap),
+        ]
+        if perriLabel.isHidden {
+            constraints.append(reviewLabel.trailingAnchor.constraint(equalTo: edge, constant: gap))
+        } else {
+            constraints.append(perriLabel.trailingAnchor.constraint(lessThanOrEqualTo: edge, constant: gap))
+        }
+        trailingEdge = constraints
+        NSLayoutConstraint.activate(constraints)
     }
 
     @objc private func jobPressed() {
@@ -460,6 +610,14 @@ final class AuthoredPrRowView: NSView {
 
     @objc private func tellPressed() {
         if let model { onTell?(model) }
+    }
+
+    @objc private func mergePressed() {
+        if let model { onMerge?(model) }
+    }
+
+    @objc private func dismissNoticePressed() {
+        if let model { onDismissMergeNotice?(model) }
     }
 }
 

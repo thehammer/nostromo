@@ -69,12 +69,15 @@ protocol AuthoredPrHandoffTransport: AnyObject {
 
 /// The live transport: frames out through the daemon client, answers matched back by request id. A request
 /// the daemon does not answer in `timeout` seconds, or that a dropped connection orphans, answers `.unreachable`.
-final class AuthoredPrHandoffTransportLive: AuthoredPrHandoffTransport {
+final class AuthoredPrHandoffTransportLive: AuthoredPrHandoffTransport, AuthoredPrMergeTransport {
     var supported: () -> Bool
     var sendPreview: (ClientAuthoredPrPreviewRequest) -> Void
     var sendNotify: (ClientAuthoredPrNotify) -> Void
     var sendStart: (ClientAuthoredPrStartSession) -> Void
     var sendLink: (ClientAuthoredPrLink) -> Void
+    /// The daemon advertised `authored_prs_merge_v1` and the link is up.
+    var mergeSupported: () -> Bool
+    var sendMerge: (ClientAuthoredPrMerge) -> Void
     let timeout: TimeInterval
 
     private var pending: [String: (AuthoredPrAnswerFrame?) -> Void] = [:]
@@ -84,16 +87,21 @@ final class AuthoredPrHandoffTransportLive: AuthoredPrHandoffTransport {
          sendPreview: @escaping (ClientAuthoredPrPreviewRequest) -> Void,
          sendNotify: @escaping (ClientAuthoredPrNotify) -> Void,
          sendStart: @escaping (ClientAuthoredPrStartSession) -> Void,
-         sendLink: @escaping (ClientAuthoredPrLink) -> Void) {
+         sendLink: @escaping (ClientAuthoredPrLink) -> Void,
+         mergeSupported: @escaping () -> Bool = { false },
+         sendMerge: @escaping (ClientAuthoredPrMerge) -> Void = { _ in }) {
         self.timeout = timeout
         self.supported = supported
         self.sendPreview = sendPreview
         self.sendNotify = sendNotify
         self.sendStart = sendStart
         self.sendLink = sendLink
+        self.mergeSupported = mergeSupported
+        self.sendMerge = sendMerge
     }
 
     var isAvailable: Bool { supported() }
+    var isMergeAvailable: Bool { mergeSupported() }
 
     /// An answer frame from the daemon.
     func deliver(_ frame: AuthoredPrAnswerFrame) {
@@ -150,6 +158,17 @@ final class AuthoredPrHandoffTransportLive: AuthoredPrHandoffTransport {
             if case .link(_, let answer)? = frame { done(answer) } else { done(.unreachable) }
         }
         sendLink(ClientAuthoredPrLink(requestId: id, repo: repo, number: number, tag: tag))
+    }
+
+    /// The Merge verb. A merge answers only for the request it sent: any other kind of frame under its id, a
+    /// timeout and a lost connection are all `.unreachable` (the merge is not known to have happened).
+    func merge(repo: String, number: Int, expectedHeadShaShort: String,
+               done: @escaping (AuthoredPrAnswer<AuthoredPrDone>) -> Void) {
+        let id = UUID().uuidString
+        register(id) { frame in
+            if case .merge(_, let answer)? = frame { done(answer) } else { done(.unreachable) }
+        }
+        sendMerge(ClientAuthoredPrMerge(requestId: id, repo: repo, number: number, expectedHeadShaShort: expectedHeadShaShort))
     }
 }
 

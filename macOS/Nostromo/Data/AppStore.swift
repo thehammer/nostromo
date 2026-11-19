@@ -51,6 +51,12 @@ class AppStore: ObservableObject {
     /// Whether the last `welcome` advertised `authored_prs_notify_v1`: the Overview's buttons, picker and
     /// pills appear only then. False leaves the read-only Overview.
     @Published private(set) var authoredPrsNotifySupported = false
+    /// Whether the last `welcome` advertised `authored_prs_perri_v1` (rows carry Perri's verdict and their head).
+    /// The Perri badge appears only then.
+    @Published private(set) var authoredPrsPerriSupported = false
+    /// Whether the last `welcome` advertised `authored_prs_merge_v1`. The Merge button appears only then (and
+    /// only with Perri's verdicts: without them it could never be enabled).
+    @Published private(set) var authoredPrsMergeSupported = false
     /// Whether the daemon link is up. While `.reconnecting` the last snapshot stays on screen, dimmed.
     @Published private(set) var authoredPrsConnection: AuthoredPrsConnection = .connected
     /// The hand-off verbs on the daemon connection. Available only while the link is up.
@@ -61,7 +67,13 @@ class AppStore: ObservableObject {
         sendPreview: { [weak self] in self?.client.sendAuthoredPrPreview($0) },
         sendNotify: { [weak self] in self?.client.sendAuthoredPrNotify($0) },
         sendStart: { [weak self] in self?.client.sendAuthoredPrStartSession($0) },
-        sendLink: { [weak self] in self?.client.sendAuthoredPrLink($0) })
+        sendLink: { [weak self] in self?.client.sendAuthoredPrLink($0) },
+        mergeSupported: { [weak self] in
+            self?.authoredPrsMergeSupported == true && self?.authoredPrsConnection == .connected
+        },
+        sendMerge: { [weak self] in self?.client.sendAuthoredPrMerge($0) })
+    /// The Merge button's confirmation, the merge request and what each row's attempt has come to.
+    private(set) lazy var authoredPrMerger = AuthoredPrMerger(transport: authoredPrHandoffTransport)
     /// Opens the preview, picker or sheet for a PR row and carries a send through to its focus.
     private(set) lazy var authoredPrHandoff = AuthoredPrHandoff(
         transport: authoredPrHandoffTransport,
@@ -757,7 +769,9 @@ class AppStore: ObservableObject {
                 if !connected { self?.daemonDisconnected() }
                 if connected, let self {
                     self.authoredPrsConnectionStarted(supported: self.client.daemonAdvertisesAuthoredPrs,
-                                                      notify: self.client.daemonAdvertisesAuthoredPrsNotify)
+                                                      notify: self.client.daemonAdvertisesAuthoredPrsNotify,
+                                                      perri: self.client.daemonAdvertisesAuthoredPrsPerri,
+                                                      merge: self.client.daemonAdvertisesAuthoredPrsMerge)
                 }
                 // Tells every chip whether the daemon is reachable, and on a new connection
                 // asks for the model catalogue and the per-agent defaults.
@@ -1607,16 +1621,19 @@ class AppStore: ObservableObject {
     func daemonDisconnectedForTesting() { daemonDisconnected() }
 
     /// Test seam: a connection came up whose `welcome` did or did not advertise `authored_prs_v1`.
-    func daemonConnectedForTesting(authoredPrs supported: Bool, notify: Bool = false) {
-        authoredPrsConnectionStarted(supported: supported, notify: notify)
+    func daemonConnectedForTesting(authoredPrs supported: Bool, notify: Bool = false, perri: Bool = false,
+                                   merge: Bool = false) {
+        authoredPrsConnectionStarted(supported: supported, notify: notify, perri: perri, merge: merge)
     }
 
     /// Ask the daemon for a full reconcile of the author's PRs now (⟳, ⌘R in the Overview).
     func requestAuthoredPrsRefresh() { authoredPrsRefreshSender() }
 
-    private func authoredPrsConnectionStarted(supported: Bool, notify: Bool) {
+    private func authoredPrsConnectionStarted(supported: Bool, notify: Bool, perri: Bool = false, merge: Bool = false) {
         if authoredPrsSupported != supported { authoredPrsSupported = supported }
         if authoredPrsNotifySupported != (supported && notify) { authoredPrsNotifySupported = supported && notify }
+        if authoredPrsPerriSupported != (supported && perri) { authoredPrsPerriSupported = supported && perri }
+        if authoredPrsMergeSupported != (supported && merge) { authoredPrsMergeSupported = supported && merge }
         // A daemon that no longer lists PRs cannot clear what it raised: the pills go with the list.
         if !supported { needsYouCoordinator.setProducer(AuthoredPrNeedsYouProducer.name, items: []) }
         if authoredPrsConnection != .connected { authoredPrsConnection = .connected }
@@ -1628,6 +1645,8 @@ class AppStore: ObservableObject {
         authoredPrs = nil
         authoredPrsSupported = false
         authoredPrsNotifySupported = false
+        authoredPrsPerriSupported = false
+        authoredPrsMergeSupported = false
         needsYouCoordinator.setProducer(AuthoredPrNeedsYouProducer.name, items: [])
         authoredPrsConnection = .connected
         authoredPrsRefreshSender = {}
