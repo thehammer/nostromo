@@ -11,9 +11,20 @@
 //! it, like the Teri, Fred, Mother and Huey tools), so a record never comes
 //! from a network peer. No free-form fields: an unknown argument is refused.
 //!
-//! Errors: `invalid_args` (with a fixed `detail`), `unidentified_caller` (no
-//! focus to attribute the record to), `not_supported` (no daemon, or the
-//! authored-PR list is off).
+//! The caller must be a **registered** focus (its tag is in the focus registry);
+//! the record says which (`by` is `<agent>:<tag>`). The tag is self-declared: a
+//! local process on the user's account can still claim a registered one, so the
+//! record shows who, it does not prove who. The merge's real gates are the
+//! user's click, GitHub's CLEAN state and branch protection.
+//!
+//! An `approved` is only recorded for the head the daemon holds for the PR (one
+//! refresh is asked for when it differs); `changes_requested` and `comment` can
+//! only block, so they are recorded for any head, flagged `for_current_head`.
+//!
+//! Errors: `invalid_args` (with a fixed `detail`), `unidentified_caller` (the
+//! caller is no registered focus), `pr_unknown`, `head_not_current` (an
+//! `approved` for a commit the daemon does not hold as the PR's head),
+//! `not_supported` (no daemon, or the authored-PR list is off).
 
 use serde_json::{json, Value};
 
@@ -62,29 +73,37 @@ pub async fn record_verdict(state: &McpSharedState, args: &Value, pty_id: Option
         Some(_) => return invalid("note must be a string"),
     };
 
-    let Some(tag) = pty_id.filter(|t| !t.is_empty()) else {
-        return json!({
-            "error": "unidentified_caller",
-            "detail": "a verdict is recorded for the calling focus; no focus could be identified"
-        });
-    };
     let Some(daemon) = &state.daemon else {
         return json!({ "error": "not_supported", "detail": "requires nostromd" });
+    };
+    // The caller is a registered focus: a tag that matches none (a stray local
+    // process claiming a name) records nothing. Self-declared, so this is a
+    // record of who, not a proof of who (see the module docs).
+    let focus = pty_id.filter(|t| !t.is_empty()).and_then(|tag| {
+        let mgr = daemon.session_mgr.lock().unwrap();
+        mgr.focus_registry().into_iter().find(|f| f.tag == tag)
+    });
+    let Some(focus) = focus else {
+        return json!({
+            "error": "unidentified_caller",
+            "detail": "a verdict is recorded for a registered focus; the caller is none"
+        });
     };
     let actions = daemon.session_mgr.lock().unwrap().authored_pr_actions();
     let Some(actions) = actions else {
         return json!({ "error": "not_supported", "detail": "the authored-PR list is off" });
     };
 
-    let agent = crate::mcp::tool_policy::resolve_agent_name(state, pty_id)
-        .await
-        .filter(|a| !a.is_empty());
-    let by = match agent {
-        Some(a) => format!("{a}:{tag}"),
-        None => tag.to_owned(),
+    let by = if focus.agent_name.is_empty() {
+        focus.tag.clone()
+    } else {
+        format!("{}:{}", focus.agent_name, focus.tag)
     };
-    match actions.record_verdict(repo, number, head_sha, verdict, Some(&by), note) {
-        Ok(matches) => json!({
+    match actions
+        .record_verdict(repo, number, head_sha, verdict, Some(&by), note)
+        .await
+    {
+        Ok(for_current_head) => json!({
             "ok": true,
             "recorded": {
                 "repo": repo.to_ascii_lowercase(),
@@ -92,9 +111,14 @@ pub async fn record_verdict(state: &McpSharedState, args: &Value, pty_id: Option
                 "head_sha": head_sha,
                 "verdict": verdict.as_str(),
             },
-            "matches_current_head": match matches {
-                Some(m) => json!(m),
-                None => json!("unknown"),
+            "for_current_head": for_current_head,
+        }),
+        Err(code @ ("pr_unknown" | "head_not_current")) => json!({
+            "error": code,
+            "detail": match code {
+                "pr_unknown" => "the PR is not in the daemon's list of open PRs",
+                _ => "the daemon does not hold that commit as the PR's head; \
+                      an approval is only recorded for the current head",
             },
         }),
         Err(_) => invalid("not a valid record"),

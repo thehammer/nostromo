@@ -2,10 +2,12 @@
 //! real Unix socket, the real tool dispatch, and the verdict store the Merge
 //! verb reads.
 //!
-//! * A good record is acknowledged and says whether the head is the one the
-//!   daemon knows the PR to be at (`true`, `false`, or `"unknown"`).
-//! * Anything off (repo, PR number, head, verdict, note, an unknown argument, no
-//!   caller) is refused and nothing is recorded.
+//! * A good record is acknowledged and says whether it is for the head the
+//!   daemon knows the PR to be at (`for_current_head`).
+//! * An `approved` is only taken for that head (after one refresh); a
+//!   `changes_requested` or `comment` is taken for any head, flagged.
+//! * Anything off (repo, PR number, head, verdict, note, an unknown argument, a
+//!   caller that is no registered focus) is refused and nothing is recorded.
 //! * It only records: no request ever goes to GitHub.
 //! * A session a network peer is steering is not offered the tool, is refused
 //!   when it calls it anyway, and nothing is recorded.
@@ -20,7 +22,7 @@ use nostromo::data::authored_prs::verdicts::{Verdict, VerdictStore};
 use nostromo::data::authored_prs::{AuthoredPrActions, AuthoredPrsSource, Deps, TokioClock};
 use nostromo::data::relay_client::RelayStatus;
 use nostromo::ipc::pane_registry::PaneRegistry;
-use nostromo::ipc::protocol::ServerMsg;
+use nostromo::ipc::protocol::{FocusMeta, ServerMsg};
 use nostromo::ipc::SessionManager;
 use nostromo::mcp::{DaemonMcpBackend, McpServer, McpSharedState, PerriDaemonState};
 use serde_json::{json, Value};
@@ -33,7 +35,10 @@ use wiremock::MockServer;
 const TOOL: &str = "perri.record_verdict";
 const REPO: &str = "canary-org/canary-repo";
 const N: u64 = 424242;
+/// A registered focus (the harness registers it).
 const TAG: &str = "cody-ok";
+/// Nobody registered: any local process can claim a name.
+const STRANGER: &str = "cody-stranger";
 const NET_TAG: &str = "cody-net";
 
 fn sha(c: char) -> String {
@@ -113,6 +118,24 @@ fn snapshot(prs: Vec<AuthoredPr>) -> AuthoredPrsSnapshot {
     }
 }
 
+fn focus_meta(tag: &str) -> FocusMeta {
+    FocusMeta {
+        no_codebase: None,
+        tag: tag.into(),
+        display_name: tag.into(),
+        agent_name: "cody".into(),
+        project_name: None,
+        org: None,
+        is_built_in: false,
+        session_summary: None,
+        label: None,
+        project_path: None,
+        select_for_client: None,
+        initial_model: None,
+        initial_effort: None,
+    }
+}
+
 // ── the harness ───────────────────────────────────────────────────────────────
 
 struct Harness {
@@ -122,7 +145,7 @@ struct Harness {
     /// A GitHub that is never mounted on: the daemon's client points at it, so
     /// any request the tool made would be seen here.
     github: MockServer,
-    _feed: watch::Sender<Option<AuthoredPrsSnapshot>>,
+    feed: Arc<watch::Sender<Option<AuthoredPrsSnapshot>>>,
     _engine: tokio::task::JoinHandle<()>,
     _jobs: watch::Sender<Vec<nostromo::mother::MotherJob>>,
 }
@@ -165,7 +188,8 @@ async fn harness(actions_wired: bool) -> Harness {
             dir.path().join("agents"),
             Arc::new(TokioClock::new(Utc::now())),
         )
-        .with_merge(Arc::clone(&verdicts), Arc::new(Mutex::new(Some(api))));
+        .with_merge(Arc::clone(&verdicts), Arc::new(Mutex::new(Some(api))))
+        .with_refresh_wait(Duration::from_millis(400));
         session_mgr
             .lock()
             .unwrap()
@@ -191,6 +215,11 @@ async fn harness(actions_wired: bool) -> Harness {
         terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
     };
     let state = McpSharedState::for_daemon(backend);
+    // The focuses that exist; `STRANGER` is not one of them.
+    session_mgr
+        .lock()
+        .unwrap()
+        .set_focus_registry(vec![focus_meta(TAG), focus_meta(NET_TAG)]);
     // A session a network peer has been steering.
     session_mgr
         .lock()
@@ -202,7 +231,7 @@ async fn harness(actions_wired: bool) -> Harness {
         dir,
         verdicts,
         github,
-        _feed: feed,
+        feed: Arc::new(feed),
         _engine: engine.task,
         _jobs: jobs_tx,
     }
@@ -312,23 +341,23 @@ fn good(head: &str, verdict: &str) -> Value {
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn a_good_record_is_acknowledged_and_says_whether_the_head_is_the_current_one() {
+async fn a_good_record_is_acknowledged_and_says_whether_it_is_for_the_current_head() {
     let h = harness(true).await;
     let mut s = connect(&h, Some(TAG)).await;
 
     // The head the daemon knows the PR to be at.
     let r = s.call(good(&sha('a'), "approved")).await;
     assert_eq!(r["ok"], true, "{r}");
-    assert_eq!(r["matches_current_head"], true, "{r}");
+    assert_eq!(r["for_current_head"], true, "{r}");
     assert_eq!(r["recorded"]["repo"], REPO);
     assert_eq!(r["recorded"]["pr"], N);
     assert_eq!(r["recorded"]["head_sha"], sha('a').as_str());
     assert_eq!(r["recorded"]["verdict"], "approved");
 
-    // Another head of the same PR.
+    // Another head of the same PR: it can only block, so it is taken, flagged.
     let r = s.call(good(&sha('b'), "changes_requested")).await;
     assert_eq!(r["ok"], true, "{r}");
-    assert_eq!(r["matches_current_head"], false, "{r}");
+    assert_eq!(r["for_current_head"], false, "{r}");
 
     // A PR the daemon does not have in its list.
     let r = s
@@ -338,7 +367,7 @@ async fn a_good_record_is_acknowledged_and_says_whether_the_head_is_the_current_
         )
         .await;
     assert_eq!(r["ok"], true, "a 200 character note is allowed: {r}");
-    assert_eq!(r["matches_current_head"], "unknown", "{r}");
+    assert_eq!(r["for_current_head"], false, "{r}");
 
     // The repo is acknowledged in lower case, as it is kept.
     let r = s
@@ -348,20 +377,22 @@ async fn a_good_record_is_acknowledged_and_says_whether_the_head_is_the_current_
         )
         .await;
     assert_eq!(r["recorded"]["repo"], REPO, "{r}");
-    assert_eq!(r["matches_current_head"], true, "{r}");
+    assert_eq!(r["for_current_head"], true, "{r}");
 
     // What the Merge verb will read.
     let rec = h.verdicts.for_head(REPO, N, &sha('b')).expect("recorded");
     assert_eq!(rec.verdict, Verdict::ChangesRequested);
-    assert!(
-        rec.by.as_deref().is_some_and(|b| b.contains(TAG)),
-        "the record says which focus made it: {:?}",
-        rec.by
-    );
     assert_eq!(
-        h.verdicts.for_head(REPO, N, &sha('a')).unwrap().verdict,
-        Verdict::Comment,
-        "the newest verdict for a head wins"
+        rec.by.as_deref(),
+        Some("cody:cody-ok"),
+        "the record says which registered focus made it"
+    );
+    let newest = h.verdicts.for_head(REPO, N, &sha('a')).unwrap();
+    assert_eq!(newest.verdict, Verdict::Comment, "the newest verdict wins");
+    assert_eq!(
+        newest.replaced.map(|p| p.verdict),
+        Some(Verdict::Approved),
+        "and what it replaced is kept"
     );
 }
 
@@ -468,6 +499,107 @@ async fn a_caller_the_daemon_cannot_identify_records_nothing() {
     let r = anon.call(good(&sha('a'), "approved")).await;
     assert_eq!(r["error"], "unidentified_caller", "{r}");
     assert!(h.verdicts.is_empty());
+}
+
+#[tokio::test]
+async fn a_caller_that_is_no_registered_focus_records_nothing() {
+    let h = harness(true).await;
+    // Any local process can open the socket and claim a name.
+    let mut stranger = connect(&h, Some(STRANGER)).await;
+    for verdict in ["approved", "changes_requested", "comment"] {
+        let r = stranger.call(good(&sha('a'), verdict)).await;
+        assert_eq!(r["error"], "unidentified_caller", "{verdict}: {r}");
+        assert!(r.get("ok").is_none(), "{r}");
+    }
+    assert!(h.verdicts.is_empty());
+
+    // Control: a registered focus is taken.
+    let mut known = connect(&h, Some(TAG)).await;
+    assert_eq!(known.call(good(&sha('a'), "approved")).await["ok"], true);
+    assert_eq!(h.verdicts.len(), 1);
+}
+
+#[tokio::test]
+async fn an_approval_of_a_commit_the_daemon_does_not_hold_is_refused_and_nothing_is_recorded() {
+    let h = harness(true).await;
+    let mut s = connect(&h, Some(TAG)).await;
+
+    // A commit nobody has pushed: pre-approval.
+    let r = s.call(good(&sha('b'), "approved")).await;
+    assert_eq!(r["error"], "head_not_current", "{r}");
+    assert!(r.get("ok").is_none(), "{r}");
+    // A PR that is not in the list.
+    let r = s
+        .call(
+            json!({"repo": "other-org/other-repo", "pr": 7, "head_sha": sha('a'),
+                     "verdict": "approved"}),
+        )
+        .await;
+    assert_eq!(r["error"], "pr_unknown", "{r}");
+    assert!(h.verdicts.is_empty(), "something was recorded");
+
+    // The commit becomes the head: nothing is waiting for it.
+    let mut moved = pr();
+    moved.head_sha_short = Some("bbbbbbbb".into());
+    h.feed.send(Some(snapshot(vec![moved]))).unwrap();
+    assert!(h.verdicts.for_head(REPO, N, &sha('b')).is_none());
+}
+
+#[tokio::test]
+async fn a_push_the_poll_has_not_seen_is_refreshed_once_and_then_accepted() {
+    let h = harness(true).await;
+    let mut s = connect(&h, Some(TAG)).await;
+    // The daemon reads the PR again a moment after it is asked to.
+    let feed = h.feed.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut moved = pr();
+        moved.head_sha_short = Some("bbbbbbbb".into());
+        feed.send(Some(snapshot(vec![moved]))).unwrap();
+    });
+    let r = s.call(good(&sha('b'), "approved")).await;
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["for_current_head"], true, "{r}");
+    assert_eq!(
+        h.verdicts.for_head(REPO, N, &sha('b')).unwrap().verdict,
+        Verdict::Approved
+    );
+}
+
+#[tokio::test]
+async fn a_refresh_that_still_shows_another_head_refuses_the_approval() {
+    let h = harness(true).await;
+    let mut s = connect(&h, Some(TAG)).await;
+    // The refresh shows `bbbb…`; the caller approved `cccc…`.
+    let feed = h.feed.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut moved = pr();
+        moved.head_sha_short = Some("bbbbbbbb".into());
+        feed.send(Some(snapshot(vec![moved]))).unwrap();
+    });
+    let r = s.call(good(&sha('c'), "approved")).await;
+    assert_eq!(r["error"], "head_not_current", "{r}");
+    assert!(h.verdicts.is_empty());
+}
+
+#[tokio::test]
+async fn a_blocking_verdict_for_a_commit_the_daemon_does_not_hold_is_recorded_flagged() {
+    let h = harness(true).await;
+    let mut s = connect(&h, Some(TAG)).await;
+    for (verdict, head) in [("changes_requested", 'b'), ("comment", 'c')] {
+        let r = s.call(good(&sha(head), verdict)).await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["for_current_head"], false, "{r}");
+        assert!(h.verdicts.for_head(REPO, N, &sha(head)).is_some());
+    }
+    // A later approval cannot overrule it for that head without being current.
+    let r = s.call(good(&sha('b'), "approved")).await;
+    assert_eq!(r["error"], "head_not_current", "{r}");
+    assert_eq!(
+        h.verdicts.for_head(REPO, N, &sha('b')).unwrap().verdict,
+        Verdict::ChangesRequested
+    );
 }
 
 #[tokio::test]

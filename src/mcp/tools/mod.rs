@@ -592,7 +592,7 @@ pub fn tool_descriptors() -> Vec<Value> {
         }),
         json!({
             "name": "perri.record_verdict",
-            "description": "Record Perri's verdict on one commit of a pull request, so the Mother pane's Overview can tell whether the commit about to be merged is the one Perri approved. It only records: it never merges and never talks to GitHub. A verdict is for `head_sha` exactly; a new push is a new head and the old verdict no longer applies to it. Recording again for the same head replaces the earlier verdict. Returns { ok, recorded: { repo, pr, head_sha, verdict }, matches_current_head } where `matches_current_head` is true, false or \"unknown\" (the daemon does not have the PR in its list, or does not know its head yet). Refused for a session a network peer is steering. Errors: invalid_args (bad repo, pr, head_sha, verdict, an over-long note, or an unknown argument), unidentified_caller, not_supported.",
+            "description": "Record Perri's verdict on one commit of a pull request, so the Mother pane's Overview can tell whether the commit about to be merged is the one Perri approved. It only records: it never merges and never talks to GitHub. A verdict is for `head_sha` exactly; a new push is a new head and the old verdict no longer applies to it. Recording again for the same head replaces the earlier verdict. An `approved` is only recorded for the head the daemon holds for the PR (if it differs, the PR is read once more; a miss is refused), so a commit cannot be approved before it is pushed; `changes_requested` and `comment` are recorded for any head. The caller must be a registered focus. Returns { ok, recorded: { repo, pr, head_sha, verdict }, for_current_head }. Refused for a session a network peer is steering. Errors: invalid_args (bad repo, pr, head_sha, verdict, an over-long note, or an unknown argument), unidentified_caller (the caller is no registered focus), pr_unknown, head_not_current, not_supported.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -600,7 +600,7 @@ pub fn tool_descriptors() -> Vec<Value> {
                     "pr": { "type": "integer", "description": "PR number (> 0)" },
                     "head_sha": { "type": "string", "description": "The full head commit the verdict is for: 40 lowercase hex digits" },
                     "verdict": { "type": "string", "enum": ["approved", "changes_requested", "comment"] },
-                    "note": { "type": "string", "description": "Optional plain-text note, at most 200 characters. Control characters are dropped. Shown nowhere as markup." }
+                    "note": { "type": "string", "description": "Optional plain-text note, at most 200 characters. Control and invisible characters are dropped. Shown nowhere as markup." }
                 },
                 "required": ["repo", "pr", "head_sha", "verdict"],
                 "additionalProperties": false

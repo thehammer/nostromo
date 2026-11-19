@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use chrono::Duration as Chrono;
 use nostromo::data::authored_prs::snapshot::{Lifecycle, PollState};
-use nostromo::data::authored_prs::verdicts::Verdict;
+use nostromo::data::authored_prs::verdicts::{Verdict, VerdictRecord};
 use nostromo::ipc::{
     codec::{read_frame, write_frame},
     decisions::DecisionRegistry,
@@ -108,9 +108,31 @@ async fn start(prs: Vec<FakePr>) -> Rig {
 /// Perri's verdict on `head`, recorded the way the MCP tool records it, with
 /// the engine given time to publish it.
 async fn record(rig: &mut Rig, number: u64, head: &str, verdict: Verdict) {
-    rig.actions
-        .record_verdict(REPO, number, head, verdict, Some("perri"), None)
+    let current = rig
+        .row(REPO, number)
+        .and_then(|p| p.head_sha_short)
+        .is_some_and(|short| head.starts_with(&short));
+    if current || verdict != Verdict::Approved {
+        rig.actions
+            .record_verdict(REPO, number, head, verdict, Some("perri"), None)
+            .await
+            .expect("a valid record");
+    } else {
+        // An approval of a head the daemon does not hold is refused by the tool
+        // (see `mcp_perri_record_verdict`); the merge's own check is tested
+        // against what such a record would be: one made while that head was current.
+        let rec = VerdictRecord::new(
+            REPO,
+            number,
+            head,
+            verdict,
+            chrono::Utc::now(),
+            Some("perri"),
+            None,
+        )
         .expect("a valid record");
+        rig.verdicts.record(rec);
+    }
     rig.run(secs(3), Duration::from_millis(500)).await;
 }
 
@@ -767,13 +789,14 @@ async fn githubs_answer_to_the_merge_is_a_code_and_none_of_its_words_or_the_pr_r
         assert!(!answers.contains(secret), "{secret} reached an answer");
     }
     let text = log.text();
+    // The repo and number are in the refusal's audit line, on purpose; nothing
+    // else of the PR or of GitHub's answer is.
     for secret in [
         "CANARY-ERROR-BODY",
         "github.com/canary-org",
-        REPO,
-        "424242",
         TITLE,
         TOKEN,
+        sha('a').as_str(),
     ] {
         assert!(!text.contains(secret), "{secret} reached a log:\n{text}");
     }
@@ -781,6 +804,43 @@ async fn githubs_answer_to_the_merge_is_a_code_and_none_of_its_words_or_the_pr_r
         !text.contains("authored-pr merged"),
         "a failed merge is not logged as merged"
     );
+    assert_eq!(
+        text.lines()
+            .filter(|l| l.contains("authored-pr merge refused"))
+            .count(),
+        table.len(),
+        "one audit line per refused attempt:\n{text}"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_merge_leaves_one_audit_line_with_the_code_and_who_asked() {
+    let (log, _guard) = logs();
+    let mut rig = start(vec![ready_pr(N)]).await;
+    // Perri has not approved: refused.
+    let answer = rig.merge("r1", REPO, N, &short('a')).await;
+    assert_eq!(code_of(&answer), "perri_not_approved", "{answer:?}");
+    // A repeated request id is an echo, not a second attempt.
+    let again = rig.merge("r1", REPO, N, &short('a')).await;
+    assert_eq!(code_of(&again), "perri_not_approved");
+    // A PR that is not in the list.
+    let answer = rig.merge("r2", REPO, N + 5, &short('a')).await;
+    assert_eq!(code_of(&answer), "not_found", "{answer:?}");
+
+    let text = log.text();
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("authored-pr merge refused"))
+        .collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines[0].contains("perri_not_approved"), "{}", lines[0]);
+    assert!(lines[0].contains(REPO) && lines[0].contains(&N.to_string()));
+    assert!(lines[0].contains(&short('a')), "{}", lines[0]);
+    assert!(lines[0].contains("test-operator"), "{}", lines[0]);
+    assert!(lines[1].contains("not_found"), "{}", lines[1]);
+    for secret in [TITLE, TOKEN, sha('a').as_str()] {
+        assert!(!text.contains(secret), "{secret} reached a log:\n{text}");
+    }
 }
 
 #[tokio::test]
@@ -1114,6 +1174,7 @@ async fn real_time_rig() -> Rig {
     wait_for("the PR to be listed", || rig.row(REPO, N).is_some()).await;
     rig.actions
         .record_verdict(REPO, N, &sha('a'), Verdict::Approved, Some("perri"), None)
+        .await
         .unwrap();
     wait_for("the verdict to show", || {
         rig.row(REPO, N).is_some_and(|p| p.perri.is_some())

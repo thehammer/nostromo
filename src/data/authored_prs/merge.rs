@@ -19,7 +19,8 @@
 //! forwarded or logged. One request id gets one answer, and a second request for
 //! a PR whose merge is still in flight is refused `busy`. The one log line, on
 //! success, names the repo, the number and the short head: the audit trail of
-//! an irreversible action (no token, title or body).
+//! an irreversible action (no token, title or body). A refused attempt gets one
+//! audit line too, with its code and who asked (`operator-app:<client_id>`).
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
@@ -29,7 +30,7 @@ use super::classify::{classify, is_human, RawPr};
 use super::github::{ApiError, MergeError, Target};
 use super::links::key_string;
 use super::snapshot::{valid_repo, AuthoredPr, ChecksState, Lifecycle, PollState, ReviewState};
-use super::verdicts::{is_full_sha, short_sha, Verdict};
+use super::verdicts::{is_full_sha, plain_text, short_sha, Verdict};
 use super::wire::{AuthoredPrResult, Done};
 
 /// How many answers are remembered, for a repeated request id.
@@ -121,6 +122,25 @@ enum BeginOutcome<'a> {
     Go(InFlight<'a>),
 }
 
+/// The audit line for a merge attempt that did not merge: the repo, the number,
+/// the head the app showed (short), who asked and the code. What the client sent
+/// is shown only when it is the shape it must be (a client cannot put text in a
+/// log line); never a token, title or anything GitHub said.
+fn log_refusal(repo: &str, number: u64, head_short: &str, by: &str, code: &str) {
+    let head = Some(head_short)
+        .filter(|h| h.len() == 8 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        .unwrap_or("invalid");
+    let repo = if valid_repo(repo) { repo } else { "invalid" };
+    tracing::info!(
+        repo = %repo,
+        number,
+        head = %head,
+        by = %plain_text(by, 80),
+        code,
+        "authored-pr merge refused"
+    );
+}
+
 fn refuse(code: &'static str) -> Result<(), &'static str> {
     Err(code)
 }
@@ -140,12 +160,18 @@ impl AuthoredPrActions {
         let _in_flight = match self.merges.begin(request_id, &pr) {
             BeginOutcome::Again(first) => return first,
             // Not remembered: it is not the first answer to anything.
-            BeginOutcome::Busy => return AuthoredPrResult::err("busy"),
+            BeginOutcome::Busy => {
+                log_refusal(repo, number, expected_head_short, by, "busy");
+                return AuthoredPrResult::err("busy");
+            }
             BeginOutcome::Go(guard) => guard,
         };
         let result = match self.merge_once(repo, number, expected_head_short, by).await {
             Ok(()) => AuthoredPrResult::Ok(Done {}),
-            Err(code) => AuthoredPrResult::err(code),
+            Err(code) => {
+                log_refusal(repo, number, expected_head_short, by, code);
+                AuthoredPrResult::err(code)
+            }
         };
         self.merges.remember(request_id, &pr, &result);
         result
@@ -219,7 +245,7 @@ impl AuthoredPrActions {
             repo = %row.repo,
             number,
             head = %&head[..8],
-            by,
+            by = %plain_text(by, 80),
             "authored-pr merged"
         );
         // The row turns merged on the next read: ask for it now.
@@ -250,7 +276,7 @@ impl AuthoredPrActions {
     }
 
     /// The PR `repo#number` in the latest snapshot, whatever its lifecycle.
-    fn row_any(&self, repo: &str, number: u64) -> Option<AuthoredPr> {
+    pub(super) fn row_any(&self, repo: &str, number: u64) -> Option<AuthoredPr> {
         let snap = self.snapshot.borrow();
         snap.as_ref()?
             .prs

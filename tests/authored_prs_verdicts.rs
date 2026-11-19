@@ -49,9 +49,10 @@ fn perri_of(rig: &Rig) -> Option<PerriRow> {
     rig.row(REPO, N).and_then(|p| p.perri)
 }
 
-fn say(rig: &Rig, head: &str, verdict: Verdict, note: Option<&str>) {
+async fn say(rig: &Rig, head: &str, verdict: Verdict, note: Option<&str>) {
     rig.actions
         .record_verdict(REPO, N, head, verdict, Some("perri"), note)
+        .await
         .expect("a valid record");
 }
 
@@ -123,10 +124,11 @@ async fn a_row_has_no_perri_until_a_verdict_is_recorded_for_its_pr() {
             REPO,
             N + 1,
             &sha('a'),
-            Verdict::Approved,
+            Verdict::Comment,
             Some("perri"),
             None,
         )
+        .await
         .unwrap();
     rig.run(secs(3), Duration::from_millis(500)).await;
     assert_eq!(perri_of(&rig), None);
@@ -137,7 +139,7 @@ async fn a_verdict_for_the_current_head_shows_as_current_and_publishes_without_w
 {
     let mut rig = start_with(pr_at(&sha('a'))).await;
     let started = rig.elapsed;
-    say(&rig, &sha('a'), Verdict::Approved, None);
+    say(&rig, &sha('a'), Verdict::Approved, None).await;
 
     let seen = rig
         .run_until(secs(20), Duration::from_millis(250), |r| {
@@ -156,7 +158,7 @@ async fn a_verdict_for_the_current_head_shows_as_current_and_publishes_without_w
     assert_eq!(perri.by.as_deref(), Some("perri"));
 
     // Saying something else about the same head replaces it.
-    say(&rig, &sha('a'), Verdict::ChangesRequested, None);
+    say(&rig, &sha('a'), Verdict::ChangesRequested, None).await;
     rig.run_until(secs(20), Duration::from_millis(250), |r| {
         perri_of(r).is_some_and(|p| p.verdict == Verdict::ChangesRequested)
     })
@@ -168,7 +170,7 @@ async fn a_verdict_for_the_current_head_shows_as_current_and_publishes_without_w
 #[tokio::test]
 async fn after_a_new_push_the_old_verdict_is_an_older_version_and_never_current() {
     let mut rig = start_with(pr_at(&sha('a'))).await;
-    say(&rig, &sha('a'), Verdict::Approved, None);
+    say(&rig, &sha('a'), Verdict::Approved, None).await;
     rig.run(secs(3), Duration::from_millis(500)).await;
     assert!(perri_of(&rig).unwrap().for_current_head);
 
@@ -181,14 +183,14 @@ async fn after_a_new_push_the_old_verdict_is_an_older_version_and_never_current(
     );
 
     // Perri looks at the new head: that is the one shown.
-    say(&rig, &sha('b'), Verdict::ChangesRequested, None);
+    say(&rig, &sha('b'), Verdict::ChangesRequested, None).await;
     rig.run(secs(3), Duration::from_millis(500)).await;
     let perri = perri_of(&rig).unwrap();
     assert_eq!(perri.verdict, Verdict::ChangesRequested);
     assert!(perri.for_current_head);
 
     // And once it approves the new head, that is current too.
-    say(&rig, &sha('b'), Verdict::Approved, None);
+    say(&rig, &sha('b'), Verdict::Approved, None).await;
     rig.run(secs(3), Duration::from_millis(500)).await;
     let perri = perri_of(&rig).unwrap();
     assert_eq!(perri.verdict, Verdict::Approved);
@@ -203,7 +205,7 @@ async fn after_a_new_push_the_old_verdict_is_an_older_version_and_never_current(
 #[tokio::test]
 async fn when_the_daemon_does_not_know_the_head_no_verdict_counts_as_current() {
     let mut rig = start_with(pr_at("sha-not-a-commit")).await;
-    say(&rig, &sha('a'), Verdict::Approved, None);
+    say(&rig, &sha('a'), Verdict::Comment, None).await;
     rig.run(secs(3), Duration::from_millis(500)).await;
     let perri = perri_of(&rig).expect("the verdict is shown");
     assert!(!perri.for_current_head, "{perri:?}");
@@ -216,10 +218,10 @@ async fn when_the_daemon_does_not_know_the_head_no_verdict_counts_as_current() {
 #[tokio::test]
 async fn the_wire_carries_no_note_and_no_full_sha_however_the_verdicts_change() {
     let mut rig = start_with(pr_at(&sha('a'))).await;
-    say(&rig, &sha('a'), Verdict::Approved, Some(NOTE));
+    say(&rig, &sha('a'), Verdict::Approved, Some(NOTE)).await;
     rig.run(secs(3), Duration::from_millis(500)).await;
     push(&mut rig, &sha('b'), 5).await;
-    say(&rig, &sha('b'), Verdict::Comment, Some(NOTE));
+    say(&rig, &sha('b'), Verdict::Comment, Some(NOTE)).await;
     rig.run(secs(3), Duration::from_millis(500)).await;
     assert!(perri_of(&rig).is_some());
 
@@ -259,6 +261,7 @@ async fn control_characters_are_stripped_from_the_note_and_the_name_and_both_are
             Some(name.as_str()),
             Some("line one\nline\ttwo\u{0}\u{1b}[2J end"),
         )
+        .await
         .unwrap();
     let rec = rig.verdicts.for_head(REPO, N, &sha('a')).unwrap();
     let note = rec.note.unwrap();
@@ -279,6 +282,7 @@ async fn control_characters_are_stripped_from_the_note_and_the_name_and_both_are
             None,
             Some("\n\t\u{7}"),
         )
+        .await
         .unwrap();
     assert_eq!(
         rig.verdicts.for_head(REPO, N, &sha('b')).unwrap().note,
@@ -286,9 +290,36 @@ async fn control_characters_are_stripped_from_the_note_and_the_name_and_both_are
     );
 }
 
+/// `record_verdict` as the tool calls it, to its answer (the engine and fake
+/// keep running while it waits for its one refresh).
+async fn try_record(
+    rig: &mut Rig,
+    repo: &str,
+    number: u64,
+    head: &str,
+    verdict: Verdict,
+) -> Result<bool, &'static str> {
+    let actions = std::sync::Arc::clone(&rig.actions);
+    let (repo, head) = (repo.to_owned(), head.to_owned());
+    let task = tokio::spawn(async move {
+        actions
+            .record_verdict(&repo, number, &head, verdict, Some("perri"), None)
+            .await
+    });
+    // Virtual time moves in small steps, so the engine reads the PR meanwhile.
+    let mut steps = 0;
+    while !task.is_finished() {
+        rig.run(Duration::from_millis(500), Duration::from_millis(250))
+            .await;
+        steps += 1;
+        assert!(steps < 100, "the record never answered");
+    }
+    task.await.expect("the record panicked")
+}
+
 #[tokio::test]
 async fn a_record_that_is_not_valid_is_refused_and_nothing_is_kept() {
-    let rig = start_with(pr_at(&sha('a'))).await;
+    let mut rig = start_with(pr_at(&sha('a'))).await;
     let ok = sha('a');
     for (what, repo, number, head) in [
         ("no slash", "canary-repo", N, ok.clone()),
@@ -301,27 +332,93 @@ async fn a_record_that_is_not_valid_is_refused_and_nothing_is_kept() {
         ("a head that is not hex", REPO, N, "g".repeat(40)),
         ("no head", REPO, N, String::new()),
     ] {
-        let r =
-            rig.actions
-                .record_verdict(repo, number, &head, Verdict::Approved, Some("perri"), None);
-        assert!(r.is_err(), "{what} was accepted");
+        let r = try_record(&mut rig, repo, number, &head, Verdict::Approved).await;
+        assert_eq!(r, Err("invalid"), "{what} was accepted");
     }
     assert!(rig.verdicts.is_empty(), "something was kept");
 }
 
 #[tokio::test]
 async fn recording_says_whether_the_head_is_the_one_the_daemon_knows() {
-    let rig = start_with(pr_at(&sha('a'))).await;
-    let record = |repo: &str, number: u64, head: String| {
-        rig.actions
-            .record_verdict(repo, number, &head, Verdict::Comment, None, None)
-            .unwrap()
-    };
-    assert_eq!(record(REPO, N, sha('a')), Some(true));
-    assert_eq!(record(REPO, N, sha('b')), Some(false));
-    assert_eq!(record(&REPO.to_uppercase(), N, sha('a')), Some(true));
-    assert_eq!(record(REPO, N + 1, sha('a')), None, "not in the list");
-    assert_eq!(record("other-org/other-repo", N, sha('a')), None);
+    let mut rig = start_with(pr_at(&sha('a'))).await;
+    // An approval needs the current head; the others record anywhere and say.
+    let r = try_record(&mut rig, REPO, N, &sha('a'), Verdict::Approved).await;
+    assert_eq!(r, Ok(true));
+    let r = try_record(&mut rig, REPO, N, &sha('b'), Verdict::Comment).await;
+    assert_eq!(r, Ok(false));
+    let upper = REPO.to_uppercase();
+    let r = try_record(&mut rig, &upper, N, &sha('a'), Verdict::Approved).await;
+    assert_eq!(r, Ok(true), "the repo is compared without case");
+    let r = try_record(&mut rig, REPO, N + 1, &sha('a'), Verdict::Comment).await;
+    assert_eq!(r, Ok(false), "not in the list");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// An approval is only taken for the head the daemon holds
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn an_approval_of_a_head_the_daemon_has_not_seen_is_refused_and_nothing_is_kept() {
+    let mut rig = start_with(pr_at(&sha('a'))).await;
+    // A commit nobody has pushed.
+    let r = try_record(&mut rig, REPO, N, &sha('b'), Verdict::Approved).await;
+    assert_eq!(r, Err("head_not_current"));
+    // A PR the daemon does not have.
+    let r = try_record(&mut rig, REPO, N + 1, &sha('a'), Verdict::Approved).await;
+    assert_eq!(r, Err("pr_unknown"));
+    assert!(rig.verdicts.is_empty(), "something was kept");
+
+    // Pushing that commit afterwards finds no pre-approval waiting for it.
+    push(&mut rig, &sha('b'), 5).await;
+    assert_eq!(rig.verdicts.for_head(REPO, N, &sha('b')), None);
+    assert_eq!(perri_of(&rig), None);
+}
+
+#[tokio::test]
+async fn a_fresh_push_the_poll_has_not_seen_is_read_once_and_then_accepted() {
+    let mut rig = start_with(pr_at(&sha('a'))).await;
+    // GitHub moves to `b`; the daemon's list still says `a`.
+    rig.fake.edit(REPO, N, |p| {
+        p.head_sha = sha('b');
+        p.updated_at = t0() + Chrono::minutes(5);
+    });
+    assert_eq!(
+        rig.row(REPO, N).and_then(|p| p.head_sha_short).as_deref(),
+        Some(&sha('a')[..8])
+    );
+    let r = try_record(&mut rig, REPO, N, &sha('b'), Verdict::Approved).await;
+    assert_eq!(r, Ok(true), "the refresh showed the new head");
+    let rec = rig.verdicts.for_head(REPO, N, &sha('b')).expect("recorded");
+    assert_eq!(rec.verdict, Verdict::Approved);
+}
+
+#[tokio::test]
+async fn a_refresh_that_still_shows_another_head_refuses_the_approval() {
+    let mut rig = start_with(pr_at(&sha('a'))).await;
+    // GitHub is at `b`, the caller says `c`: the refresh cannot help.
+    rig.fake.edit(REPO, N, |p| {
+        p.head_sha = sha('b');
+        p.updated_at = t0() + Chrono::minutes(5);
+    });
+    let r = try_record(&mut rig, REPO, N, &sha('c'), Verdict::Approved).await;
+    assert_eq!(r, Err("head_not_current"));
+    assert!(rig.verdicts.is_empty());
+}
+
+#[tokio::test]
+async fn a_changes_requested_for_a_head_the_daemon_has_not_seen_is_recorded_not_current() {
+    let mut rig = start_with(pr_at(&sha('a'))).await;
+    for (verdict, head) in [(Verdict::ChangesRequested, 'b'), (Verdict::Comment, 'c')] {
+        let r = try_record(&mut rig, REPO, N, &sha(head), verdict).await;
+        assert_eq!(r, Ok(false), "{verdict:?}");
+        assert_eq!(
+            rig.verdicts.for_head(REPO, N, &sha(head)).unwrap().verdict,
+            verdict
+        );
+    }
+    // A PR the daemon does not list, too: it can only block.
+    let r = try_record(&mut rig, REPO, N + 1, &sha('a'), Verdict::ChangesRequested).await;
+    assert_eq!(r, Ok(false));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -334,9 +431,9 @@ async fn a_verdict_survives_a_restart_in_a_private_file_with_no_temporary_left_b
     fake.put(pr_at(&sha('a')));
     let mut first = Rig::start(fake.clone(), RigOpts::default()).await;
     first.visible_and_settled().await;
-    say(&first, &sha('a'), Verdict::Approved, Some("kept"));
-    say(&first, &sha('a'), Verdict::ChangesRequested, Some("kept"));
-    say(&first, &sha('a'), Verdict::Approved, Some("kept"));
+    say(&first, &sha('a'), Verdict::Approved, Some("kept")).await;
+    say(&first, &sha('a'), Verdict::ChangesRequested, Some("kept")).await;
+    say(&first, &sha('a'), Verdict::Approved, Some("kept")).await;
     first.run(secs(3), Duration::from_millis(500)).await;
 
     // The file: private, and the directory holds no leftover temporary.

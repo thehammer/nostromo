@@ -125,15 +125,26 @@ live only in the conversation; it is now a record.
 **The verdict store** (`verdicts.rs`). `<state_root>/perri-verdicts.json`, mode 0600, written atomically
 (temp file + rename). One record per `repo + number + head_sha` (the full 40-hex head): `verdict`
 (`approved` | `changes_requested` | `comment`), `at`, `by` (the recording agent and focus, at most 80 chars) and
-an optional plain-text `note` (at most 200 chars, control characters dropped; never markup, never on the board
-row, never logged). The newest verdict for a head wins; the newest 500 records are kept. The file is read
+an optional plain-text `note` (at most 200 chars; control and invisible/format characters (Unicode `Cf`: bidi
+overrides and isolates, zero-width characters, marks) are dropped from `by` and `note` before the cut; never markup,
+never on the board row, never logged). The newest verdict for a head wins; when it replaces a *different* verdict
+for the same head, that one's verdict, `by` and `at` are kept one level deep as `replaced` (so the Mac can later say
+"approved by X, previously changes requested by Y"; not on the wire yet, the row shows only the newest). The newest
+500 records are kept. The file is read
 leniently: unknown fields are ignored, a record that does not validate (bad repo, number, SHA or verdict) is
 dropped, and a file that does not parse starts the store empty (its bytes are kept as a backup) and is not fatal.
 
 **Recording** is the MCP tool `perri.record_verdict` (see `docs/mcp/tools.md`). It only records. Any session of
-the operator's own focuses may call it; a session a network peer is steering is refused (the tool is withheld,
-like the Teri/Fred/Mother/Huey tools). Its result says whether the head matches the one the daemon knows
-(`matches_current_head: true | false | "unknown"`).
+a **registered** focus may call it (a tag that matches no focus is `unidentified_caller`); a session a network peer
+is steering is refused (the tool is withheld, like the Teri/Fred/Mother/Huey tools). An `approved` is only taken
+for the head the daemon holds for the PR: if the PR is unknown or its head differs, the PR is read once more and
+the check repeated, and a miss is refused (`pr_unknown`, `head_not_current`), so a commit cannot be approved before
+it is pushed. A `changes_requested` or `comment` can only block, so it is taken for any head. The result says
+`for_current_head: true | false`.
+
+*Trust model.* The caller's tag is self-declared: the record shows **who** (`by`, `<agent>:<tag>`), it does not prove
+who. A local process on the user's account can still claim a registered tag. The real gates of a merge are the
+user's own click, GitHub's `CLEAN` state and branch protection; the record is one more input, not a credential.
 
 **Row fields** (additive, absent when empty, so an older Mac decodes the frame unchanged): `head_sha_short` (the
 first 8 hex digits of the engine's in-memory head; the full SHA never leaves the daemon) and
@@ -168,7 +179,7 @@ One `request_id` gets one answer for the PR it named (a repeat returns the first
 `rate_limited` or `unreachable` is remembered too and a new press needs a new id; the same id naming another PR is
 a new request), and a request for a PR whose merge is still running is refused `busy`, including a repeat of the
 running request's own id (`busy` is not remembered, so retrying after it finishes returns the first answer). On success the daemon logs one line (repo,
-number, short head, who asked; no token, title or body) and asks the engine to read that PR again, so the row
+number, short head, who asked; no token, title or body), a refused attempt logs one too (the same plus the code), and it asks the engine to read that PR again, so the row
 turns merged without waiting for the next poll. The codes: `ok`, `not_found`, `not_open`, `draft`,
 `not_approved`, `checks_not_green`, `not_mergeable`, `blocked`, `behind`, `head_changed`, `perri_not_approved`,
 `perri_stale`, `token_cannot_merge`, `rate_limited`, `unreachable`, `busy`, `not_permitted`.
@@ -181,7 +192,7 @@ allows merging.
 Counts, durations, error classes and posture changes only. Never a title, branch,
 check name, login, repo, PR number, URL or token. The relay client's event line is
 `github-relay: event {type}`. The head branch and the full SHA stay in memory. The one exception is the audit line
-of a successful merge, `authored-pr merged`, which names the repo, the number, the first 8 hex of the head and who
+of a merge attempt, `authored-pr merged` or `authored-pr merge refused` (with its code), which names the repo, the number, the first 8 hex of the head and who
 asked (no token, title or body). Nothing logs a Perri note, or a verdict's repo, number or SHA.
 
 ## Wire
