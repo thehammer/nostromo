@@ -5,9 +5,9 @@ import Foundation
 
 /// The header: the count, each source's freshness in words, and what refresh may do.
 public struct AuthoredPrsHeaderModel: Equatable, Sendable {
-    /// `My open PRs · 14`.
+    /// `My open PRs · 14`, or `My open PRs · 3 of 14` while a filter is on.
     public var countText: String
-    /// The number in `countText`.
+    /// The number in `countText`: every open PR, whatever the filter shows.
     public var count: Int
     /// `live`, `catching up…`, …
     public var carefeed: String
@@ -95,15 +95,19 @@ public struct AuthoredPrsGroupModel: Equatable, Sendable, Identifiable {
     public var group: AuthoredPrGroup
     /// `NEEDS YOU`.
     public var title: String
-    /// Every row in the group, shown or not.
+    /// Every row in the group, shown or not (with a filter on, every row that matches it).
     public var count: Int
+    /// The group's size before a filter; nil when none is on.
+    public var unfilteredCount: Int? = nil
     public var rows: [AuthoredPrRowModel]
     /// Rows past the cap, behind `Show N more`.
     public var hiddenCount: Int
     public var id: AuthoredPrGroup { group }
     public var showMoreTitle: String? { hiddenCount > 0 ? "Show \(hiddenCount) more" : nil }
+    /// `3`, or `2 of 3` while a filter is on.
+    public var countText: String { unfilteredCount.map { "\(count) of \($0)" } ?? "\(count)" }
     /// `Needs you, 3`, as VoiceOver reads the heading.
-    public var accessibilityLabel: String { "\(title.prefix(1))\(title.dropFirst().lowercased()), \(count)" }
+    public var accessibilityLabel: String { "\(title.prefix(1))\(title.dropFirst().lowercased()), \(countText)" }
 }
 
 public enum AuthoredPrsPresentation {
@@ -139,7 +143,9 @@ public enum AuthoredPrsPresentation {
 
     // MARK: Header
 
-    public static func header(_ snapshot: AuthoredPrsSnapshot, now: Date, timeZone: TimeZone) -> AuthoredPrsHeaderModel {
+    /// `matchedOpen` is the open PRs a filter lets through, nil when none is on. The model's `count` is always the total.
+    public static func header(_ snapshot: AuthoredPrsSnapshot, now: Date, timeZone: TimeZone,
+                              matchedOpen: Int? = nil) -> AuthoredPrsHeaderModel {
         let count = snapshot.prs.filter { $0.lifecycle == .open }.count
         let carefeed = carefeedWords(snapshot, timeZone: timeZone)
         let others = otherReposWords(snapshot.poll, now: now, timeZone: timeZone)
@@ -161,7 +167,7 @@ public enum AuthoredPrsPresentation {
         case nil: break
         }
         return AuthoredPrsHeaderModel(
-            countText: "My open PRs · \(count)", count: count, carefeed: carefeed, otherRepos: others,
+            countText: "My open PRs · \(matchedOpen.map { "\($0) of \(count)" } ?? "\(count)")", count: count, carefeed: carefeed, otherRepos: others,
             freshness: "Carefeed: \(carefeed) · Other repos: \(others)",
             showing: showing, asOf: asOf, refreshDisabledReason: blocked)
     }
@@ -229,10 +235,12 @@ public enum AuthoredPrsPresentation {
 
     // MARK: Groups and rows
 
-    public static func groups(_ prs: [AuthoredPr], showAll: Set<AuthoredPrGroup> = [],
+    /// `unfiltered` is every PR before a filter chose `prs`: it gives each group its size before the filter and
+    /// keeps a repo chip's wording from changing when the filter hides the repo it shared a name with.
+    public static func groups(_ prs: [AuthoredPr], unfiltered: [AuthoredPr]? = nil, showAll: Set<AuthoredPrGroup> = [],
                               now: Date, timeZone: TimeZone, handoff: Bool = false,
                               tellable: Set<String>? = nil) -> [AuthoredPrsGroupModel] {
-        let chips = repoChips(prs)
+        let chips = repoChips(unfiltered ?? prs)
         return AuthoredPrGroup.displayOrder.compactMap { group in
             let members = prs.filter { $0.group == group }
             guard !members.isEmpty else { return nil }
@@ -240,6 +248,7 @@ public enum AuthoredPrsPresentation {
             let shown = members.prefix(limit)
             return AuthoredPrsGroupModel(
                 group: group, title: groupTitle(group), count: members.count,
+                unfilteredCount: unfiltered.map { all in all.filter { $0.group == group }.count },
                 rows: shown.map { row($0, chip: chips[$0.repo] ?? $0.repo, now: now, handoff: handoff, tellable: tellable) },
                 hiddenCount: members.count - shown.count)
         }

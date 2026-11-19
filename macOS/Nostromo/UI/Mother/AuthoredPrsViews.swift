@@ -210,7 +210,7 @@ final class AuthoredPrsGroupHeaderView: NSView {
 
     func configure(_ group: AuthoredPrsGroupModel) {
         titleLabel.stringValue = group.title
-        countPill.text = "\(group.count)"
+        countPill.text = group.countText
         setAccessibilityElement(true)
         setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
         setAccessibilityLabel(group.accessibilityLabel)

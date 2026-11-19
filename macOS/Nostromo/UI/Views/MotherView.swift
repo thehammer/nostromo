@@ -461,6 +461,8 @@ class MotherView: NSView {
     private var overviewSupported = false
     /// Whether the job list has its pinned Overview row.
     var hasPinnedOverviewRow: Bool { jobList.hasOverviewRow }
+    /// The open-PR count in the pinned Overview row's pill; nil when there is no row.
+    var pinnedOverviewCount: Int? { jobList.overviewOpenCount }
 
     /// The Overview row was selected (or ⌘0 asked for it): no job is selected any more.
     func showOverview() {
@@ -1215,6 +1217,7 @@ private final class MotherJobList: NSView {
         didSet { viewModel.onSelectOverview = onSelectOverview }
     }
     var hasOverviewRow: Bool { viewModel.overviewCount != nil }
+    var overviewOpenCount: Int? { viewModel.overviewCount }
     func setOverview(openCount: Int?) {
         if viewModel.overviewCount != openCount { viewModel.overviewCount = openCount }
     }

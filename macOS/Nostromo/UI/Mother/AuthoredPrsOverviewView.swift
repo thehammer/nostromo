@@ -89,14 +89,20 @@ final class AuthoredPrsOutlineView: NSOutlineView {
 final class AuthoredPrsMessageView: NSView {
     let titleLabel = NSTextField(wrappingLabelWithString: "")
     let detailLabel = NSTextField(wrappingLabelWithString: "")
+    /// `Show all`, only under a filter that matches nothing.
+    let showAllButton = NSButton(title: "Show all", target: nil, action: nil)
+    var onShowAll: (() -> Void)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
+        showAllButton.target = self
+        showAllButton.action = #selector(showAllPressed)
+        showAllButton.isHidden = true
         titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
         titleLabel.textColor = AuthoredPrsPalette.text
         detailLabel.font = .systemFont(ofSize: 12)
         detailLabel.textColor = AuthoredPrsPalette.muted
-        let stack = NSStackView(views: [titleLabel, detailLabel])
+        let stack = NSStackView(views: [titleLabel, detailLabel, showAllButton])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 6
@@ -117,7 +123,10 @@ final class AuthoredPrsMessageView: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func show(title: String, detail: String?) {
+    @objc private func showAllPressed() { onShowAll?() }
+
+    func show(title: String, detail: String?, offersShowAll: Bool = false) {
+        showAllButton.isHidden = !offersShowAll
         titleLabel.stringValue = title
         detailLabel.stringValue = detail ?? ""
         detailLabel.isHidden = detail == nil
@@ -195,6 +204,11 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     private(set) var hoveredId: String?
     /// The daemon advertised `authored_prs_notify_v1`: rows get their button and told line.
     private(set) var handoffAvailable = false
+    /// The Repo and Session pop-ups' selection. It only chooses which rows show: the header total, the pinned
+    /// row's pill, the sidebar pills and notifications all read the full snapshot.
+    private(set) var filter: AuthoredPrsFilterSelection
+    private let filterStore: AuthoredPrsFilterStore
+    private var shownFilterResult: AuthoredPrsFilterResult?
     private var showAll: Set<AuthoredPrGroup> = []
     private var collapsed: Set<AuthoredPrGroup> = []
     private var skeletonDeadline: Date
@@ -210,6 +224,8 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     // MARK: Views
 
     let header = AuthoredPrsHeaderView()
+    let filterStrip = AuthoredPrsFilterStripView()
+    private var stripHeight: NSLayoutConstraint!
     let outline = AuthoredPrsOutlineView()
     private let scroll = NSScrollView()
     private let message = AuthoredPrsMessageView()
@@ -219,9 +235,11 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     // MARK: Init
 
     init(frame: NSRect = .zero, clock: @escaping () -> Date = Date.init, timeZone: TimeZone = .current,
-         store: AppStore? = AppStore.shared) {
+         store: AppStore? = AppStore.shared, filterDefaults: UserDefaults = AuthoredPrsFilterStore.defaults) {
         self.clock = clock
         self.timeZone = timeZone
+        filterStore = AuthoredPrsFilterStore(defaults: filterDefaults)
+        filter = filterStore.load()
         skeletonDeadline = clock().addingTimeInterval(Self.skeletonSeconds)
         super.init(frame: frame)
         build()
@@ -270,16 +288,23 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
         message.translatesAutoresizingMaskIntoConstraints = false
         skeleton.translatesAutoresizingMaskIntoConstraints = false
         header.onRefresh = { [weak self] in self?.refresh() }
+        filterStrip.onChange = { [weak self] selection in self?.setFilter(selection) }
+        message.onShowAll = { [weak self] in self?.setFilter(.all) }
 
-        for v in [header, scroll, message, skeleton] as [NSView] { addSubview(v) }
+        for v in [header, filterStrip, scroll, message, skeleton] as [NSView] { addSubview(v) }
+        stripHeight = filterStrip.heightAnchor.constraint(equalToConstant: 0)
         headerHeight = header.heightAnchor.constraint(equalToConstant: AuthoredPrsHeaderView.height(noteCount: 0))
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: topAnchor),
             header.leadingAnchor.constraint(equalTo: leadingAnchor),
             header.trailingAnchor.constraint(equalTo: trailingAnchor),
             headerHeight,
+            filterStrip.topAnchor.constraint(equalTo: header.bottomAnchor),
+            filterStrip.leadingAnchor.constraint(equalTo: leadingAnchor),
+            filterStrip.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stripHeight,
         ] + [scroll, message, skeleton].flatMap { body -> [NSLayoutConstraint] in
-            [body.topAnchor.constraint(equalTo: header.bottomAnchor), body.leadingAnchor.constraint(equalTo: leadingAnchor),
+            [body.topAnchor.constraint(equalTo: filterStrip.bottomAnchor), body.leadingAnchor.constraint(equalTo: leadingAnchor),
              body.trailingAnchor.constraint(equalTo: trailingAnchor), body.bottomAnchor.constraint(equalTo: bottomAnchor)]
         })
     }
@@ -392,10 +417,14 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
                 message.show(title: "Waiting for Nostromo to report your PRs…", detail: nil)
                 show(.message)
             }
+            applyFilterStrip(filterResult, visible: false)
             scroll.alphaValue = 1
             return
         }
-        let model = AuthoredPrsPresentation.header(snapshot, now: now, timeZone: timeZone)
+        let result = filterResult
+        let showsList = AuthoredPrsPresentation.body(snapshot) == .list && !displayed.isEmpty
+        let matchedOpen = filter.isActive && showsList ? result.prs.filter { $0.lifecycle == .open }.count : nil
+        let model = AuthoredPrsPresentation.header(snapshot, now: now, timeZone: timeZone, matchedOpen: matchedOpen)
         var notes: [AuthoredPrsHeaderView.Note] = []
         if connection == .reconnecting { notes.append(.init(text: AuthoredPrsPresentation.reconnectingText, isWarning: true)) }
         if let showing = model.showing { notes.append(.init(text: showing)) }
@@ -415,11 +444,42 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
             if displayed.isEmpty {
                 message.show(title: AuthoredPrsPresentation.emptyText, detail: nil)
                 show(.message)
+            } else if case .noMatch(let text) = result.emptyState {
+                message.show(title: text, detail: nil, offersShowAll: true)
+                show(.message)
             } else {
                 show(.list)
             }
         }
+        applyFilterStrip(result, visible: showsList)
         scroll.alphaValue = (connection == .reconnecting || model.asOf != nil) ? 0.5 : 1
+    }
+
+    /// The strip shows with the list, and stays above a `no match` message so the reader can change it.
+    private func applyFilterStrip(_ result: AuthoredPrsFilterResult, visible: Bool) {
+        filterStrip.isHidden = !visible
+        stripHeight.constant = visible ? AuthoredPrsFilterStripView.height : 0
+        // Rebuilding the pop-ups every tick would close a menu the reader has open.
+        if visible, shownFilterResult.map({ !Self.sameStrip($0, result) }) ?? true { filterStrip.apply(result) }
+        shownFilterResult = visible ? result : nil
+    }
+
+    private static func sameStrip(_ a: AuthoredPrsFilterResult, _ b: AuthoredPrsFilterResult) -> Bool {
+        a.selection == b.selection && a.repoEntries == b.repoEntries && a.sessionEntries == b.sessionEntries
+    }
+
+    private var filterResult: AuthoredPrsFilterResult { AuthoredPrsFilter.apply(displayed, selection: filter) }
+
+    /// The reader picked a repo or a session (or Clear, or Show all). Remembered across launches. The scroll
+    /// goes back to the top: the rows under the old position are not the rows under the new one.
+    func setFilter(_ selection: AuthoredPrsFilterSelection) {
+        guard selection != filter else { return }
+        filter = selection
+        filterStore.save(selection)
+        rebuildRows()
+        refreshChrome()
+        scroll.contentView.scroll(to: .zero)
+        scroll.reflectScrolledClipView(scroll.contentView)
     }
 
     private enum Body { case skeleton, message, list }
@@ -437,7 +497,8 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     // MARK: Outline contents
 
     private var groupModels: [AuthoredPrsGroupModel] {
-        AuthoredPrsPresentation.groups(displayed, showAll: showAll, now: clock(), timeZone: timeZone,
+        AuthoredPrsPresentation.groups(filterResult.prs, unfiltered: filter.isActive ? displayed : nil,
+                                       showAll: showAll, now: clock(), timeZone: timeZone,
                                        handoff: handoffAvailable,
                                        tellable: handoff.map { Set($0.openFocuses().map(\.tag)) })
     }
