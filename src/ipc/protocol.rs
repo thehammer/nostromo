@@ -1310,6 +1310,14 @@ pub const FEATURE_AUTHORED_PRS: &str = "authored_prs_v1";
 /// and link, plus the additive `told` and `pill` fields on each row.
 pub const FEATURE_AUTHORED_PRS_NOTIFY: &str = "authored_prs_notify_v1";
 
+/// Perri's verdict on a PR's head: the additive `head_sha_short` and `perri`
+/// fields on each row of the author's PR list.
+pub const FEATURE_AUTHORED_PRS_PERRI: &str = "authored_prs_perri_v1";
+
+/// The guarded Merge verb (`authored_pr_merge`, answered with
+/// `authored_pr_merge_result`).
+pub const FEATURE_AUTHORED_PRS_MERGE: &str = "authored_prs_merge_v1";
+
 /// The optional capability advertised in `Welcome.features`: this daemon takes
 /// `tracker_edit` (the pane edits the board as the user) and answers with
 /// `tracker_edit_result`. The Mac shows its edit controls only when present.
@@ -2404,6 +2412,18 @@ pub enum ClientMsg {
         number: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tag: Option<String>,
+    },
+    /// Squash-merge the PR now, through GitHub, when a human approved, GitHub
+    /// says it is clean and Perri approved its current head. `expected_head_sha_short`
+    /// is the head the app showed (first 8 hex digits). Answered with
+    /// `ServerMsg::AuthoredPrMergeResult`, a code only. Verified app only; the
+    /// Mac sends it after a human gesture and the daemon enforces every rule
+    /// itself.
+    AuthoredPrMerge {
+        request_id: String,
+        repo: String,
+        number: u64,
+        expected_head_sha_short: String,
     },
 }
 
@@ -3640,6 +3660,13 @@ pub enum ServerMsg {
     },
     /// Targeted answer to `AuthoredPrLink`.
     AuthoredPrLinkResult {
+        request_id: String,
+        result: crate::data::authored_prs::wire::AuthoredPrResult<
+            crate::data::authored_prs::wire::Done,
+        >,
+    },
+    /// Targeted answer to `AuthoredPrMerge`: `ok` or a code, never GitHub's words.
+    AuthoredPrMergeResult {
         request_id: String,
         result: crate::data::authored_prs::wire::AuthoredPrResult<
             crate::data::authored_prs::wire::Done,

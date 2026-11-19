@@ -160,6 +160,8 @@ fn pr() -> AuthoredPr {
         },
         told: None,
         pill: true,
+        head_sha_short: None,
+        perri: None,
         attention_key: "attention-1".into(),
     }
 }

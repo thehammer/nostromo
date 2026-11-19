@@ -41,11 +41,11 @@ use super::{
     },
     protocol::{
         ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, ServerMsg,
-        SessionAction, Topic, TrackerEditError, FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_NOTIFY,
-        FEATURE_CONVERSATION_HISTORY, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN,
-        FEATURE_SLASH_COMMANDS, FEATURE_TERMINAL_STAGING_ONLY, FEATURE_TRACKER_ACK_DROPPED,
-        FEATURE_TRACKER_CONFLICT_IDS, FEATURE_TRACKER_EDIT, MAX_FRAME_LEN, MIN_CLIENT_VERSION,
-        PROTOCOL_VERSION,
+        SessionAction, Topic, TrackerEditError, FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_MERGE,
+        FEATURE_AUTHORED_PRS_NOTIFY, FEATURE_AUTHORED_PRS_PERRI, FEATURE_CONVERSATION_HISTORY,
+        FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_SLASH_COMMANDS,
+        FEATURE_TERMINAL_STAGING_ONLY, FEATURE_TRACKER_ACK_DROPPED, FEATURE_TRACKER_CONFLICT_IDS,
+        FEATURE_TRACKER_EDIT, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
     session_manager::{ModelRequestOutcome, ResendTrigger, SessionManager, SwitchRequest},
 };
@@ -577,8 +577,10 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
     ];
     if mgr.authored_prs().is_some() {
         features.push(FEATURE_AUTHORED_PRS.to_string());
+        features.push(FEATURE_AUTHORED_PRS_PERRI.to_string());
         if mgr.authored_pr_actions().is_some() {
             features.push(FEATURE_AUTHORED_PRS_NOTIFY.to_string());
+            features.push(FEATURE_AUTHORED_PRS_MERGE.to_string());
         }
     }
     ServerMsg::Welcome {
@@ -2851,11 +2853,18 @@ fn handle_client_msg(
         msg @ (ClientMsg::AuthoredPrPreviewRequest { .. }
         | ClientMsg::AuthoredPrNotify { .. }
         | ClientMsg::AuthoredPrStartSession { .. }
-        | ClientMsg::AuthoredPrLink { .. })
+        | ClientMsg::AuthoredPrLink { .. }
+        | ClientMsg::AuthoredPrMerge { .. })
             if trust != PeerTrust::OperatorApp =>
         {
-            log_authored_pr_refusal(&msg, "not_operator_app");
-            let _ = targeted_tx.send(authored_pr_refusal_reply(&msg, "not_operator_app"));
+            // The merge verb answers `not_permitted`; the others `not_operator_app`.
+            let code = if matches!(msg, ClientMsg::AuthoredPrMerge { .. }) {
+                "not_permitted"
+            } else {
+                "not_operator_app"
+            };
+            log_authored_pr_refusal(&msg, code);
+            let _ = targeted_tx.send(authored_pr_refusal_reply(&msg, code));
         }
 
         ClientMsg::AuthoredPrPreviewRequest {
@@ -2957,6 +2966,28 @@ fn handle_client_msg(
                 None => AuthoredPrResult::err("unavailable"),
             };
             let _ = targeted_tx.send(ServerMsg::AuthoredPrLinkResult { request_id, result });
+        }
+
+        ClientMsg::AuthoredPrMerge {
+            request_id,
+            repo,
+            number,
+            expected_head_sha_short,
+        } => {
+            let actions = session_mgr.lock().unwrap().authored_pr_actions();
+            let tx = targeted_tx.clone();
+            let by = format!("operator-app:{client_id}");
+            tokio::spawn(async move {
+                let result = match actions {
+                    Some(a) => {
+                        a.merge(&request_id, &repo, number, &expected_head_sha_short, &by)
+                            .await
+                    }
+                    None => AuthoredPrResult::err("unreachable"),
+                };
+                debug!(code = authored_pr_code(&result), "authored-pr merge answered");
+                let _ = tx.send(ServerMsg::AuthoredPrMergeResult { request_id, result });
+            });
         }
 
         ClientMsg::AuthoredPrsDemand { level } => {
@@ -4057,6 +4088,10 @@ fn authored_pr_refusal_reply(msg: &ClientMsg, code: &str) -> ServerMsg {
             request_id: request_id.clone(),
             result: AuthoredPrResult::err(code),
         },
+        ClientMsg::AuthoredPrMerge { request_id, .. } => ServerMsg::AuthoredPrMergeResult {
+            request_id: request_id.clone(),
+            result: AuthoredPrResult::err(code),
+        },
         _ => ServerMsg::Error {
             message: code.to_owned(),
         },
@@ -4071,6 +4106,7 @@ fn log_authored_pr_refusal(msg: &ClientMsg, code: &str) {
         ClientMsg::AuthoredPrNotify { .. } => "notify",
         ClientMsg::AuthoredPrStartSession { .. } => "start_session",
         ClientMsg::AuthoredPrLink { .. } => "link",
+        ClientMsg::AuthoredPrMerge { .. } => "merge",
         _ => return,
     };
     warn!(verb, code, "authored-pr verb refused");
@@ -4098,7 +4134,8 @@ fn network_refusal_reply(msg: &ClientMsg) -> ServerMsg {
         ClientMsg::AuthoredPrPreviewRequest { .. }
         | ClientMsg::AuthoredPrNotify { .. }
         | ClientMsg::AuthoredPrStartSession { .. }
-        | ClientMsg::AuthoredPrLink { .. } => {
+        | ClientMsg::AuthoredPrLink { .. }
+        | ClientMsg::AuthoredPrMerge { .. } => {
             authored_pr_refusal_reply(msg, "requires_secure_connection")
         }
         ClientMsg::WorkSend { request_id, .. } | ClientMsg::FredSeed { request_id, .. } => {
@@ -5173,11 +5210,21 @@ mod authored_prs_tests {
         mgr.configure_authored_prs(board);
         let after = features_of(&mgr);
         assert!(after.iter().any(|f| f == "authored_prs_v1"), "{after:?}");
+        // The rows carry Perri's verdict whenever the list is on; the hand-off
+        // verbs and the merge verb are not on until the actions are configured.
+        assert!(
+            after.iter().any(|f| f == "authored_prs_perri_v1"),
+            "{after:?}"
+        );
+        assert!(
+            !after.iter().any(|f| f == "authored_prs_merge_v1"),
+            "{after:?}"
+        );
         // Everything advertised before is still advertised.
         for f in &before {
             assert!(after.contains(f), "{f} went missing");
         }
-        assert_eq!(after.len(), before.len() + 1);
+        assert_eq!(after.len(), before.len() + 2);
     }
 
     #[test]

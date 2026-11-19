@@ -8,20 +8,26 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::watch;
 
 use super::links::{key_string, AuthoredPrStore};
 use super::memory::FocusMemory;
+use super::merge::MergeBook;
 use super::notice::{compose, digest, PrFacts};
 use super::ownership::PrKey;
 use super::snapshot::{AuthoredPr, AuthoredPrsSnapshot, Lifecycle, OwnerKind, ReviewState};
+use super::verdicts::{short_sha, Verdict, VerdictRecord, VerdictStore};
 use super::wire::{AuthoredPrResult, LastTold, StartOk};
 use super::working_copy::{find_transcript, first_cwd, working_copy_at};
-use super::{Clock, DemandBoard};
+use super::{ApiSlot, Clock, DemandBoard, HeadBook};
 use crate::mother::origin::SessionHistory;
 
 const REMEMBERED_STARTS: usize = 64;
+/// How long a verdict for a head the daemon does not hold waits for the PR to
+/// be read again.
+const REFRESH_WAIT: Duration = Duration::from_secs(4);
 /// How long a delivered preview stays spent, and how many are remembered.
 const SENT_TTL_SECS: i64 = 600;
 const REMEMBERED_SENDS: usize = 64;
@@ -37,12 +43,23 @@ struct SentMark {
 
 pub struct AuthoredPrActions {
     board: Arc<DemandBoard>,
-    snapshot: watch::Receiver<Option<AuthoredPrsSnapshot>>,
+    pub(super) snapshot: watch::Receiver<Option<AuthoredPrsSnapshot>>,
     store: Arc<AuthoredPrStore>,
     memory: Arc<FocusMemory>,
     projects_root: PathBuf,
     agents_dir: PathBuf,
-    clock: Arc<dyn Clock>,
+    pub(super) clock: Arc<dyn Clock>,
+    /// Perri's verdicts on PR heads.
+    pub(super) verdicts: Arc<VerdictStore>,
+    /// The engine's GitHub client: the Merge verb uses the same token.
+    pub(super) api: ApiSlot,
+    /// The full heads the engine holds. Without it (a test that feeds the
+    /// snapshot itself) only the row's first 8 digits are compared.
+    heads: Option<HeadBook>,
+    /// Merges in flight and answered.
+    pub(super) merges: MergeBook,
+    /// How long `record_verdict` waits for its one refresh to show up.
+    refresh_wait: Duration,
     starts: Mutex<VecDeque<(String, AuthoredPrResult<StartOk>)>>,
     /// Previews already sent, so a replayed send (a dropped connection and a
     /// second press) delivers nothing. A new preview of the PR re-arms it.
@@ -75,6 +92,30 @@ impl AuthoredPrActions {
             agents_dir,
             clock,
         )
+        .with_merge(Arc::clone(&handle.verdicts), Arc::clone(&handle.api))
+        .with_heads(Arc::clone(&handle.heads))
+    }
+
+    /// Compare a verdict's head with the engine's full head, not just the 8
+    /// digits a row carries.
+    pub fn with_heads(mut self, heads: HeadBook) -> Self {
+        self.heads = Some(heads);
+        self
+    }
+
+    /// Share Perri's verdicts and the engine's GitHub client with the verbs
+    /// (`from_parts` starts with an empty verdict store and no client).
+    pub fn with_merge(mut self, verdicts: Arc<VerdictStore>, api: ApiSlot) -> Self {
+        self.verdicts = verdicts;
+        self.api = api;
+        self
+    }
+
+    /// Wait `wait` (not the default few seconds) for the refresh a verdict for
+    /// an unseen head asks for.
+    pub fn with_refresh_wait(mut self, wait: Duration) -> Self {
+        self.refresh_wait = wait;
+        self
     }
 
     /// The same from its parts, for a test that feeds the snapshot itself.
@@ -95,6 +136,11 @@ impl AuthoredPrActions {
             projects_root,
             agents_dir,
             clock,
+            verdicts: Arc::new(VerdictStore::in_memory()),
+            api: Arc::new(Mutex::new(None)),
+            heads: None,
+            merges: MergeBook::default(),
+            refresh_wait: REFRESH_WAIT,
             starts: Mutex::new(VecDeque::new()),
             sent: Mutex::new(VecDeque::new()),
             start_gate: tokio::sync::Mutex::new(()),
@@ -118,6 +164,104 @@ impl AuthoredPrActions {
                     && p.lifecycle == Lifecycle::Open
             })
             .cloned()
+    }
+
+    pub fn verdicts(&self) -> &Arc<VerdictStore> {
+        &self.verdicts
+    }
+
+    /// Record Perri's verdict on `head_sha` of `repo#number`. It only records:
+    /// it never merges and never talks to GitHub.
+    ///
+    /// An `approved` is only taken for the head the daemon holds for the PR
+    /// (the first 8 hex digits the row carries): a verdict for a commit nobody
+    /// has pushed, or the daemon has not seen, would count the moment that
+    /// commit became the head. When the head does not match, the PR is asked
+    /// to be read once (the poll can lag a fresh push) and the check is made
+    /// again; still no match is refused. A `changes_requested` or `comment`
+    /// can only block, so it is recorded either way, and the answer says
+    /// whether it is for the current head.
+    ///
+    /// Ok: whether the verdict is for the PR's current head. Error: a code,
+    /// `invalid` (`repo`, `number` or `head_sha` is not valid), `pr_unknown`
+    /// (the PR is not in the daemon's list) or `head_not_current`.
+    pub async fn record_verdict(
+        &self,
+        repo: &str,
+        number: u64,
+        head_sha: &str,
+        verdict: Verdict,
+        by: Option<&str>,
+        note: Option<&str>,
+    ) -> Result<bool, &'static str> {
+        let rec = VerdictRecord::new(repo, number, head_sha, verdict, self.clock.now(), by, note)
+            .ok_or("invalid")?;
+        let mut current = self.is_current_head(repo, number, head_sha);
+        if current != Some(true) && verdict == Verdict::Approved {
+            self.refresh_pr(repo, number, head_sha).await;
+            current = self.is_current_head(repo, number, head_sha);
+        }
+        if current != Some(true) && verdict == Verdict::Approved {
+            return Err(match current {
+                None => "pr_unknown",
+                Some(_) => "head_not_current",
+            });
+        }
+        self.verdicts.record(rec);
+        // The row shows the verdict: publish (the engine reads the PR again).
+        self.board.pr_changed(PrKey {
+            repo: repo.to_ascii_lowercase(),
+            number,
+        });
+        Ok(current == Some(true))
+    }
+
+    /// Is `head_sha` the head the snapshot holds for `repo#number`? `None`: the
+    /// PR is not in the snapshot.
+    fn is_current_head(&self, repo: &str, number: u64, head_sha: &str) -> Option<bool> {
+        let row = self.row_any(repo, number)?;
+        Some(match &self.heads {
+            Some(book) => {
+                let key = PrKey {
+                    repo: row.repo.to_ascii_lowercase(),
+                    number,
+                };
+                let book = book.lock().unwrap_or_else(|e| e.into_inner());
+                book.get(&key).is_some_and(|held| held == head_sha)
+            }
+            None => match (row.head_sha_short.as_deref(), short_sha(head_sha)) {
+                (Some(held), Some(given)) => held == given,
+                _ => false,
+            },
+        })
+    }
+
+    /// Ask the engine to read the PR now and wait (a few seconds at most) for
+    /// the snapshot to show `head_sha` for it. A PR not in the list asks for a
+    /// full reconcile instead: it may be new.
+    async fn refresh_pr(&self, repo: &str, number: u64, head_sha: &str) {
+        let mut rx = self.snapshot.clone();
+        // Whatever is in the snapshot now was checked already.
+        rx.mark_unchanged();
+        if self.is_current_head(repo, number, head_sha) == Some(true) {
+            return;
+        }
+        if self.row_any(repo, number).is_some() {
+            self.board.pr_changed(PrKey {
+                repo: repo.to_ascii_lowercase(),
+                number,
+            });
+        } else {
+            self.board.refresh();
+        }
+        let _ = tokio::time::timeout(self.refresh_wait, async {
+            while rx.changed().await.is_ok() {
+                if self.is_current_head(repo, number, head_sha) == Some(true) {
+                    return;
+                }
+            }
+        })
+        .await;
     }
 
     /// Compose the message from the current facts. Error: a wire code.
@@ -152,7 +296,7 @@ impl AuthoredPrActions {
         })
     }
 
-    fn changed(&self, row: &AuthoredPr) {
+    pub(super) fn changed(&self, row: &AuthoredPr) {
         self.board.pr_changed(PrKey {
             repo: row.repo.to_ascii_lowercase(),
             number: row.number,

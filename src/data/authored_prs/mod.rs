@@ -18,11 +18,13 @@ mod engine;
 pub mod github;
 pub mod links;
 pub mod memory;
+pub mod merge;
 pub mod notice;
 pub mod ownership;
 mod safe_read;
 pub mod snapshot;
 pub mod usage;
+pub mod verdicts;
 pub mod wire;
 pub mod working_copy;
 
@@ -231,10 +233,25 @@ pub struct Deps {
     pub state_root: Option<PathBuf>,
 }
 
+/// The GitHub client the engine currently holds (it can find a token after it
+/// started), shared with the merge verb so both use the one token.
+pub type ApiSlot = Arc<Mutex<Option<github::Api>>>;
+
+/// The full head commit of each PR the engine holds, as of its last publish.
+/// In memory, shared with the verbs only: it never reaches the wire or a log
+/// (a row carries only the first 8 digits).
+pub type HeadBook = Arc<Mutex<HashMap<PrKey, String>>>;
+
 pub struct AuthoredPrsHandle {
     pub demand: Arc<DemandBoard>,
     pub store: Arc<links::AuthoredPrStore>,
     pub memory: Arc<memory::FocusMemory>,
+    /// Perri's verdicts on PR heads.
+    pub verdicts: Arc<verdicts::VerdictStore>,
+    /// The engine's GitHub client, for the merge verb.
+    pub api: ApiSlot,
+    /// The full heads the engine holds, for `perri.record_verdict`.
+    pub heads: HeadBook,
     /// The latest snapshot; `None` until the engine publishes its first.
     pub snapshot: watch::Receiver<Option<AuthoredPrsSnapshot>>,
     pub task: tokio::task::JoinHandle<()>,
@@ -247,23 +264,42 @@ impl AuthoredPrsSource {
     pub fn spawn(deps: Deps) -> AuthoredPrsHandle {
         let (demand, inputs) = DemandBoard::new();
         let (tx, rx) = watch::channel(None);
-        let (store, memory) = match &deps.state_root {
+        let (store, memory, verdicts) = match &deps.state_root {
             Some(root) => (
                 Arc::new(links::AuthoredPrStore::open(root)),
                 Arc::new(memory::FocusMemory::open(root)),
+                Arc::new(verdicts::VerdictStore::open(root)),
             ),
             None => (
                 Arc::new(links::AuthoredPrStore::in_memory()),
                 Arc::new(memory::FocusMemory::in_memory()),
+                Arc::new(verdicts::VerdictStore::in_memory()),
             ),
         };
+        let api: ApiSlot = Arc::new(Mutex::new(None));
+        let heads: HeadBook = Arc::new(Mutex::new(HashMap::new()));
         let task = tokio::spawn(
-            engine::Engine::new(deps, inputs, tx, Arc::clone(&store), Arc::clone(&memory)).run(),
+            engine::Engine::new(
+                deps,
+                inputs,
+                tx,
+                engine::Shared {
+                    store: Arc::clone(&store),
+                    memory: Arc::clone(&memory),
+                    verdicts: Arc::clone(&verdicts),
+                    api: Arc::clone(&api),
+                    heads: Arc::clone(&heads),
+                },
+            )
+            .run(),
         );
         AuthoredPrsHandle {
             demand,
             store,
             memory,
+            verdicts,
+            api,
+            heads,
             snapshot: rx,
             task,
         }

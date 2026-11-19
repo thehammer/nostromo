@@ -111,6 +111,8 @@ fn failing_pr() -> AuthoredPr {
         owner: owner(OwnerKind::Linked, "alpha"),
         told: None,
         pill: true,
+        head_sha_short: None,
+        perri: None,
         attention_key: "attention-1".into(),
     }
 }

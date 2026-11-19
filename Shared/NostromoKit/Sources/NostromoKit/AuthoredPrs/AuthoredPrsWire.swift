@@ -51,6 +51,12 @@ public enum AuthoredPrOwnerKind: String, LenientWireEnum, Sendable {
     static var unknownCase: Self { .unknown }
 }
 
+/// Perri's verdict on a PR's head commit (`authored_prs_perri_v1`).
+public enum AuthoredPrPerriVerdict: String, LenientWireEnum, Sendable {
+    case approved, changesRequested = "changes_requested", comment, unknown
+    static var unknownCase: Self { .unknown }
+}
+
 /// How a focus came to be a candidate owner.
 public enum AuthoredPrVia: String, LenientWireEnum, Sendable {
     case motherJob = "mother_job", linked, onBranch = "on_branch", unknown
@@ -74,6 +80,10 @@ public enum AuthoredPrsBounds {
 /// Display-safe text: control, format (bidi) and line-separator characters removed (a newline or tab
 /// becomes a space), trimmed, and cut to `max` characters.
 public enum AuthoredPrsText {
+    /// Exactly eight lowercase hex digits: the form of `head_sha_short` and `expected_head_sha_short`.
+    public static func isShortSha(_ s: String) -> Bool {
+        s.utf8.count == 8 && s.utf8.allSatisfy { ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x61 && $0 <= 0x66) }
+    }
     public static func clean(_ raw: String, max: Int) -> String {
         var out = String.UnicodeScalarView()
         for scalar in raw.unicodeScalars {
@@ -269,6 +279,29 @@ extension AuthoredPrOwner: Decodable {
     }
 }
 
+/// What Perri said about this PR. `forCurrentHead` is false when the verdict is for an older version of
+/// the PR (a push since): it then never counts as approval. The note and the full SHA stay in the daemon.
+public struct AuthoredPrPerri: Equatable, Sendable {
+    public var verdict: AuthoredPrPerriVerdict
+    public var at: Date?
+    public var by: String?
+    public var forCurrentHead: Bool
+    public init(verdict: AuthoredPrPerriVerdict, at: Date? = nil, by: String? = nil, forCurrentHead: Bool) {
+        self.verdict = verdict; self.at = at; self.by = by; self.forCurrentHead = forCurrentHead
+    }
+}
+extension AuthoredPrPerri: Decodable {
+    private enum K: String, CodingKey { case verdict, at, by, forCurrentHead = "for_current_head" }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: K.self)
+        verdict = c.lenient(.verdict, AuthoredPrPerriVerdict.self)
+        at = c.date(.at)
+        by = c.string(.by, max: AuthoredPrsBounds.name).flatMap { $0.isEmpty ? nil : $0 }
+        // Absent means "not for the current head": never read as approval of it.
+        forCurrentHead = c.flag(.forCurrentHead)
+    }
+}
+
 public struct AuthoredPr: Equatable, Sendable, Identifiable {
     public var repo: String
     public var number: Int
@@ -291,6 +324,11 @@ public struct AuthoredPr: Equatable, Sendable, Identifiable {
     public var told: AuthoredPrTold?
     /// The daemon says this PR needs the user and its known, open owner has not been told: one waiting pill.
     public var pill: Bool
+    /// The first 8 hex digits of the PR's head commit (`authored_prs_perri_v1`); nil when the daemon does not
+    /// know it. What the Merge request echoes back as `expected_head_sha_short`.
+    public var headShaShort: String?
+    /// Perri's verdict, when one was recorded for this PR (`authored_prs_perri_v1`).
+    public var perri: AuthoredPrPerri?
 
     public var id: String { "\(repo)#\(number)" }
 
@@ -300,8 +338,9 @@ public struct AuthoredPr: Equatable, Sendable, Identifiable {
                 checks: AuthoredPrChecks = AuthoredPrChecks(state: .none),
                 review: AuthoredPrReview = AuthoredPrReview(state: .none),
                 newComments: Int = 0, unresolvedThreads: Int = 0, threadsTruncated: Bool = false,
-                owner: AuthoredPrOwner = .unknown, told: AuthoredPrTold? = nil, pill: Bool = false) {
-        self.told = told; self.pill = pill
+                owner: AuthoredPrOwner = .unknown, told: AuthoredPrTold? = nil, pill: Bool = false,
+                headShaShort: String? = nil, perri: AuthoredPrPerri? = nil) {
+        self.told = told; self.pill = pill; self.headShaShort = headShaShort; self.perri = perri
         self.repo = repo; self.number = number; self.url = url; self.title = title; self.draft = draft
         self.updatedAt = updatedAt; self.group = group; self.lifecycle = lifecycle; self.endedAt = endedAt
         self.baseRef = baseRef; self.detailsUnavailable = detailsUnavailable; self.checks = checks
@@ -314,7 +353,7 @@ extension AuthoredPr: Decodable {
         case repo, number, url, title, draft, updatedAt = "updated_at", group, lifecycle, endedAt = "ended_at"
         case baseRef = "base_ref", detailsUnavailable = "details_unavailable", checks, review
         case newComments = "new_comments", unresolvedThreads = "unresolved_threads", threadsTruncated = "threads_truncated", owner
-        case told, pill
+        case told, pill, headShaShort = "head_sha_short", perri
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)
@@ -338,6 +377,10 @@ extension AuthoredPr: Decodable {
         owner = (try? c.decodeIfPresent(AuthoredPrOwner.self, forKey: .owner)).flatMap { $0 } ?? .unknown
         told = (try? c.decodeIfPresent(AuthoredPrTold.self, forKey: .told)).flatMap { $0 }
         pill = c.flag(.pill)
+        // Echoed back in a merge request, so only exactly eight lowercase hex digits count.
+        headShaShort = (try? c.decodeIfPresent(String.self, forKey: .headShaShort)).flatMap { $0 }
+            .flatMap { AuthoredPrsText.isShortSha($0) ? $0 : nil }
+        perri = (try? c.decodeIfPresent(AuthoredPrPerri.self, forKey: .perri)).flatMap { $0 }
     }
 }
 

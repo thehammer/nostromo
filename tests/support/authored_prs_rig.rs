@@ -20,6 +20,13 @@
 //! check output the real query never asks for, so a test can prove none of it
 //! reaches the snapshot.
 //!
+//! The merge verb is served too: `PUT /repos/{owner}/{name}/pulls/{n}/merge`
+//! is answered like GitHub does (200 and the PR flips to merged; 409 when the
+//! `sha` sent is not the head; 405 when the PR is not open), unless a test forces
+//! a status (`Fake::force("merge", ..)`) or a delay (`Fake::delay_merge`). The
+//! GraphQL answer carries `mergeable` and `mergeStateStatus` only when the query
+//! asks for them, as the merge's own read does.
+//!
 //! Beyond the paused clock, a test can jump the engine's *wall* clock (a Mac
 //! waking from sleep, an NTP step) without moving tokio's monotonic clock
 //! (`RigOpts::wall_jump`), hand the engine a token resolver
@@ -41,9 +48,11 @@ use tokio::sync::{mpsc, watch};
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+use nostromo::data::authored_prs::verdicts::VerdictStore;
+use nostromo::data::authored_prs::wire::{AuthoredPrResult, Done};
 use nostromo::data::authored_prs::{
-    AuthoredPrsSnapshot, AuthoredPrsSource, Clock, DemandBoard, Deps, FocusInfo, TokenResolver,
-    TokioClock,
+    ApiSlot, AuthoredPrActions, AuthoredPrsSnapshot, AuthoredPrsSource, Clock, DemandBoard, Deps,
+    FocusInfo, TokenResolver, TokioClock,
 };
 use nostromo::data::github_client::GithubClient;
 use nostromo::data::relay_client::{QueueSignal, RelayEvent, RelayStatus};
@@ -111,6 +120,11 @@ pub struct FakePr {
     /// Overrides the rollup's `contexts.totalCount` (GitHub's count is of every
     /// check, the nodes are only the first page).
     pub contexts_total: Option<u32>,
+    /// `MERGEABLE`, `CONFLICTING` or `UNKNOWN`; sent only when the query asks
+    /// for `mergeable` (the merge's own read).
+    pub mergeable: String,
+    /// `CLEAN`, `BEHIND`, `BLOCKED`, ...; sent only when the query asks for it.
+    pub merge_state_status: String,
 }
 
 impl FakePr {
@@ -143,6 +157,8 @@ impl FakePr {
             cross_repo: false,
             rollup_state: None,
             contexts_total: None,
+            mergeable: "MERGEABLE".to_owned(),
+            merge_state_status: "CLEAN".to_owned(),
         }
     }
 
@@ -187,6 +203,20 @@ impl FakePr {
             .push(("CHANGES_REQUESTED".into(), login.into(), "User".into()));
         self
     }
+    /// An approving review by a bot account.
+    pub fn approved_by_bot(mut self, login: &str) -> Self {
+        self.reviews
+            .push(("APPROVED".into(), login.into(), "Bot".into()));
+        self
+    }
+    pub fn mergeable(mut self, m: &str) -> Self {
+        self.mergeable = m.to_owned();
+        self
+    }
+    pub fn merge_state(mut self, s: &str) -> Self {
+        self.merge_state_status = s.to_owned();
+        self
+    }
     pub fn review_requested_of(mut self, login: &str) -> Self {
         self.requests
             .push(json!({"requestedReviewer": {"__typename": "User", "login": login}}));
@@ -228,6 +258,8 @@ pub enum Kind {
     Search,
     Graphql,
     Org,
+    /// `PUT /repos/{owner}/{name}/pulls/{n}/merge`.
+    Merge,
     Other,
 }
 
@@ -252,6 +284,7 @@ impl Req {
             "/search/issues" => Kind::Search,
             "/graphql" => Kind::Graphql,
             p if p.starts_with("/organizations/") => Kind::Org,
+            p if is_merge_path(p) => Kind::Merge,
             _ => Kind::Other,
         }
     }
@@ -293,6 +326,11 @@ pub struct State {
     /// Statuses for the next GraphQL requests, one each, in order (`200` is a
     /// normal answer); once used up GraphQL answers normally again.
     pub graphql_script: std::collections::VecDeque<u16>,
+    /// How long a merge request is held before it is answered (real time: the
+    /// fake runs on its own thread).
+    pub merge_delay: Option<Duration>,
+    /// A merge that succeeds turns the PR merged (GitHub does).
+    pub merge_marks_merged: bool,
 }
 
 #[derive(Clone)]
@@ -300,11 +338,16 @@ pub struct Fake {
     pub state: Arc<Mutex<State>>,
 }
 
+fn is_merge_path(path: &str) -> bool {
+    path.starts_with("/repos/") && path.contains("/pulls/") && path.ends_with("/merge")
+}
+
 fn kind_name(path: &str) -> &'static str {
     match path {
         "/user" => "user",
         "/search/issues" => "search",
         "/graphql" => "graphql",
+        p if is_merge_path(p) => "merge",
         _ => "other",
     }
 }
@@ -320,6 +363,7 @@ fn pr_graphql(pr: &FakePr, query: &str) -> Value {
         .unwrap()
         .is_match(query);
     let asks_cross_repo = query.contains("isCrossRepository");
+    let asks_merge_state = query.contains("mergeStateStatus");
     let mut nodes: Vec<Value> = pr
         .checks
         .iter()
@@ -377,6 +421,10 @@ fn pr_graphql(pr: &FakePr, query: &str) -> Value {
     });
     if asks_cross_repo {
         out["isCrossRepository"] = json!(pr.cross_repo);
+    }
+    if asks_merge_state {
+        out["mergeable"] = json!(pr.mergeable);
+        out["mergeStateStatus"] = json!(pr.merge_state_status);
     }
     out
 }
@@ -525,6 +573,57 @@ fn respond(state: &Arc<Mutex<State>>, req: &Request) -> ResponseTemplate {
             entry.status = 200;
             ResponseTemplate::new(200).set_body_json(json!({"data": Value::Object(data)}))
         }
+        "merge" => {
+            // `/repos/{owner}/{name}/pulls/{n}/merge`
+            let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+            let (repo, number) = match parts.as_slice() {
+                ["repos", owner, name, "pulls", n, "merge"] => {
+                    (format!("{owner}/{name}"), n.parse::<u64>().unwrap_or(0))
+                }
+                _ => (String::new(), 0),
+            };
+            let sent_sha = serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|v| v["sha"].as_str().map(str::to_owned));
+            let marks = st.merge_marks_merged;
+            let delay = st.merge_delay;
+            let found = st
+                .prs
+                .iter_mut()
+                .find(|p| p.repo.eq_ignore_ascii_case(&repo) && p.number == number);
+            let mut t = match found {
+                None => {
+                    entry.status = 404;
+                    ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"}))
+                }
+                Some(p) if p.state != "OPEN" => {
+                    entry.status = 405;
+                    ResponseTemplate::new(405)
+                        .set_body_json(json!({"message": "Pull Request is not mergeable"}))
+                }
+                Some(p) if sent_sha.as_deref().is_some_and(|s| s != p.head_sha) => {
+                    entry.status = 409;
+                    ResponseTemplate::new(409)
+                        .set_body_json(json!({"message": "Head branch was modified"}))
+                }
+                Some(p) => {
+                    entry.status = 200;
+                    let head = p.head_sha.clone();
+                    if marks {
+                        p.state = "MERGED".into();
+                        p.merged = true;
+                        p.in_search = false;
+                    }
+                    ResponseTemplate::new(200).set_body_json(
+                        json!({"merged": true, "sha": head, "message": "Pull Request successfully merged"}),
+                    )
+                }
+            };
+            if let Some(d) = delay {
+                t = t.set_delay(d);
+            }
+            t
+        }
         _ if path.starts_with("/organizations/") => {
             let id: u64 = path
                 .rsplit('/')
@@ -565,6 +664,8 @@ impl Fake {
                 etags: true,
                 graphql_body: None,
                 graphql_script: std::collections::VecDeque::new(),
+                merge_delay: None,
+                merge_marks_merged: true,
             })),
         }
     }
@@ -638,6 +739,21 @@ impl Fake {
     /// Answer every GraphQL request `200` with `body` (`None`: back to normal).
     pub fn force_graphql_body(&self, body: Option<Value>) {
         self.lock().graphql_body = body;
+    }
+
+    /// Hold every merge request this long (real time) before answering it.
+    pub fn delay_merge(&self, d: Option<Duration>) {
+        self.lock().merge_delay = d;
+    }
+
+    /// Every merge request (`PUT .../merge`) seen so far.
+    pub fn merges(&self) -> Vec<Req> {
+        self.lock()
+            .log
+            .iter()
+            .filter(|r| r.kind() == Kind::Merge)
+            .cloned()
+            .collect()
     }
 
     pub fn set_sso(&self, header: Option<&str>) {
@@ -795,6 +911,15 @@ pub struct Rig {
     pub demand: Arc<DemandBoard>,
     pub store: Arc<nostromo::data::authored_prs::links::AuthoredPrStore>,
     pub memory: Arc<nostromo::data::authored_prs::memory::FocusMemory>,
+    /// Perri's verdicts, shared with the engine and the verbs.
+    pub verdicts: Arc<VerdictStore>,
+    /// The engine's GitHub client, as the merge verb sees it.
+    pub api: ApiSlot,
+    /// The verbs over this engine (the merge verb among them), on the engine's
+    /// own clock.
+    pub actions: Arc<AuthoredPrActions>,
+    /// The engine's wall clock.
+    pub clock: Arc<dyn Clock>,
     /// Where the engine keeps links, told records and the focus memory.
     pub state_root: PathBuf,
     pub snap: watch::Receiver<Option<AuthoredPrsSnapshot>>,
@@ -882,6 +1007,13 @@ impl Rig {
         };
         let state_root = state_root.unwrap_or_else(|| dir.path().join("state"));
         std::fs::create_dir_all(&state_root).unwrap();
+        let clock: Arc<dyn Clock> = match &opts.wall_jump {
+            Some(jump) => Arc::new(JumpClock {
+                base: TokioClock::new(t0()),
+                jump: jump.clone(),
+            }),
+            None => Arc::new(TokioClock::new(t0())),
+        };
         let handle = AuthoredPrsSource::spawn(Deps {
             state_root: Some(state_root.clone()),
             api_base: server.uri(),
@@ -893,20 +1025,31 @@ impl Rig {
             jobs_rx,
             focuses: provider,
             projects_root: projects.clone(),
-            clock: match &opts.wall_jump {
-                Some(jump) => Arc::new(JumpClock {
-                    base: TokioClock::new(t0()),
-                    jump: jump.clone(),
-                }),
-                None => Arc::new(TokioClock::new(t0())),
-            },
+            clock: Arc::clone(&clock),
         });
+        let actions = Arc::new(
+            AuthoredPrActions::from_parts(
+                Arc::clone(&handle.demand),
+                handle.snapshot.clone(),
+                Arc::clone(&handle.store),
+                Arc::clone(&handle.memory),
+                projects.clone(),
+                dir.path().join("agents"),
+                Arc::clone(&clock),
+            )
+            .with_merge(Arc::clone(&handle.verdicts), Arc::clone(&handle.api))
+            .with_heads(Arc::clone(&handle.heads)),
+        );
         let mut rig = Rig {
             fake,
             server,
             demand: handle.demand,
             store: handle.store,
             memory: handle.memory,
+            verdicts: handle.verdicts,
+            api: handle.api,
+            actions,
+            clock,
             state_root,
             snap: handle.snapshot,
             relay_tx,
@@ -1037,6 +1180,54 @@ impl Rig {
                 spawn_cwd: Some(cwd),
                 project_path: None,
             });
+    }
+
+    // ── the merge verb ────────────────────────────────────────────────────
+
+    /// Start `merge` on the rig's verbs without waiting for it.
+    pub fn spawn_merge(
+        &self,
+        request_id: &str,
+        repo: &str,
+        number: u64,
+        expected_short: &str,
+    ) -> tokio::task::JoinHandle<AuthoredPrResult<Done>> {
+        let actions = Arc::clone(&self.actions);
+        let (id, repo, short) = (
+            request_id.to_owned(),
+            repo.to_owned(),
+            expected_short.to_owned(),
+        );
+        tokio::spawn(async move {
+            actions
+                .merge(&id, &repo, number, &short, "test-operator")
+                .await
+        })
+    }
+
+    /// Let the engine and fake run, without moving the clock, until `task`
+    /// is done; its output. (Awaiting it directly would idle the runtime, and a
+    /// paused clock would jump ahead while the response is on the wire.)
+    pub async fn drive<T>(&mut self, task: tokio::task::JoinHandle<T>) -> T {
+        let mut spins = 0u32;
+        while !task.is_finished() {
+            self.settle().await;
+            spins += 1;
+            assert!(spins < 20_000, "the task did not finish");
+        }
+        task.await.expect("the task panicked")
+    }
+
+    /// `merge` as one verb call, driven to its answer.
+    pub async fn merge(
+        &mut self,
+        request_id: &str,
+        repo: &str,
+        number: u64,
+        expected_short: &str,
+    ) -> AuthoredPrResult<Done> {
+        let task = self.spawn_merge(request_id, repo, number, expected_short);
+        self.drive(task).await
     }
 
     // ── inputs ────────────────────────────────────────────────────────────
@@ -1213,4 +1404,12 @@ pub fn capture_logs() -> (Captured, tracing::subscriber::DefaultGuard) {
         .with_writer(move || writer.clone())
         .finish();
     (captured, tracing::subscriber::set_default(subscriber))
+}
+
+/// The code of a verb answer (`ok` for success).
+pub fn code_of(result: &AuthoredPrResult<Done>) -> String {
+    match result {
+        AuthoredPrResult::Ok(_) => "ok".to_owned(),
+        AuthoredPrResult::Err(e) => e.code.clone(),
+    }
 }

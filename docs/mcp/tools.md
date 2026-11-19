@@ -755,6 +755,41 @@ Source: `src/mcp/tools/perri_mutators.rs`
 
 ---
 
+### `perri.record_verdict`
+
+Record Perri's verdict on one commit of a pull request, so the Mother pane's Overview can tell whether the
+commit about to be merged is the one Perri approved (see "Perri's verdict and the Merge verb" in
+`docs/authored-prs.md`). It **only records**: it never merges and never talks to GitHub. Requires `nostromd`
+with the authored-PR list on.
+
+**Input**: `{ "repo": "owner/name", "pr": 123, "head_sha": "<40 lowercase hex>", "verdict": "approved" |
+"changes_requested" | "comment", "note"?: "<at most 200 chars>" }`. No other argument is accepted. `repo` must be
+a valid `owner/name`, `pr` a positive integer, `head_sha` the full head commit (a short or upper-case SHA is
+refused), and a `note` longer than 200 characters is refused. The note is plain text; control characters are
+dropped and it is never rendered as markup or put on the board row.
+
+**Output**: `{ "ok": true, "recorded": { "repo", "pr", "head_sha", "verdict" }, "for_current_head": true | false }`.
+`for_current_head` says whether `head_sha` is the head the daemon holds for the PR. An `approved` is only recorded
+when it is: if the PR is unknown or the head differs, the PR is read once more (up to a few seconds) and the check
+repeated; a miss is refused, so a commit cannot be approved before it is pushed. A `changes_requested` or `comment`
+can only block and is recorded for any head (`for_current_head: false` for one the daemon does not hold). A verdict
+is for `head_sha` exactly: a later push is a new head and the old verdict no longer applies to it. Recording again
+for the same head replaces the earlier verdict (the replaced one is kept, one level, as `replaced`).
+
+**Who may call it**: any session of a **registered** focus (the record carries the focus's agent name and tag,
+control and invisible characters dropped, capped at 80 characters, as `by`). The tag is self-declared, so `by` shows
+who and proves nothing. A session a network peer is steering does not see the tool and is refused at dispatch
+(`Forbidden`), like the Teri, Fred, Mother and Huey tools.
+
+**Errors**: `invalid_args` (a bad `repo`, `pr`, `head_sha`, `verdict` or `note`, or an unknown argument),
+`unidentified_caller` (the caller's tag matches no registered focus), `pr_unknown` and `head_not_current` (an
+`approved` for a PR the daemon does not list, or for a commit that is not its head), `not_supported` (no daemon, or
+the authored-PR list is off).
+
+Source: `src/mcp/tools/perri_verdict.rs`
+
+---
+
 ### `mother.enqueue_job`
 
 Enqueue a plan file as a new Mother job (`mother add`).

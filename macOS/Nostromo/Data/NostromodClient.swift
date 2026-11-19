@@ -1005,6 +1005,11 @@ class NostromodClient {
         features?.contains(authoredPrsNotifyFeature) == true
     }
 
+    /// Does a daemon that advertised `features` take the Merge verb (`authored_prs_merge_v1`)?
+    static func supportsAuthoredPrsMerge(features: [String]?) -> Bool {
+        features?.contains(authoredPrsMergeFeature) == true
+    }
+
     /// The `welcome.features` entry that says the daemon keeps the private conversation history.
     static let conversationHistoryFeature = "conversation_history_v1"
 
@@ -1208,6 +1213,19 @@ class NostromodClient {
     var daemonAdvertisesAuthoredPrsNotify: Bool {
         sendLock.lock(); defer { sendLock.unlock() }
         return NostromodClient.supportsAuthoredPrsNotify(features: advertisedFeatures)
+    }
+
+    /// Whether the connection's last `welcome` advertised `authored_prs_merge_v1`.
+    var daemonAdvertisesAuthoredPrsMerge: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return NostromodClient.supportsAuthoredPrsMerge(features: advertisedFeatures)
+    }
+
+    /// The Merge verb. Written only to a daemon that advertised `authored_prs_merge_v1`, and only ever after a
+    /// human gesture (the daemon cannot see one and enforces its own rules anyway).
+    func sendAuthoredPrMerge(_ msg: ClientAuthoredPrMerge) {
+        guard daemonAdvertisesAuthoredPrsMerge else { return }
+        send(msg, type: "authored_pr_merge")
     }
 
     /// The hand-off verbs. Each is written only to a daemon that advertised `authored_prs_notify_v1`.
@@ -2267,7 +2285,7 @@ class NostromodClient {
             }
 
         case "authored_pr_preview", "authored_pr_notify_result", "authored_pr_start_session_result",
-             "authored_pr_link_result":
+             "authored_pr_link_result", "authored_pr_merge_result":
             if let frame = AuthoredPrAnswerFrame.decode(raw) {
                 return .authoredPrAnswer(frame)
             } else {

@@ -176,6 +176,15 @@ pub struct RawPr {
     pub comments: Nodes<RawComment>,
     #[serde(default)]
     pub reviews: Nodes<RawReviewEvent>,
+    /// `MERGEABLE`, `CONFLICTING` or `UNKNOWN`. Only the merge's own read asks
+    /// for it; empty otherwise.
+    #[serde(default)]
+    pub mergeable: String,
+    /// GitHub's own verdict on whether the PR may be merged right now (`CLEAN`,
+    /// `HAS_HOOKS`, `BLOCKED`, `BEHIND`, `DIRTY`, `UNSTABLE`, `UNKNOWN`, `DRAFT`).
+    /// Only the merge's own read asks for it; empty otherwise.
+    #[serde(default, rename = "mergeStateStatus")]
+    pub merge_state_status: String,
 }
 
 /// What the classifier concludes about one PR. Everything the wire row needs

@@ -791,7 +791,8 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::AuthoredPrPreview { .. }
         | ServerMsg::AuthoredPrNotifyResult { .. }
         | ServerMsg::AuthoredPrStartSessionResult { .. }
-        | ServerMsg::AuthoredPrLinkResult { .. } => ServerClass::LocalOnly,
+        | ServerMsg::AuthoredPrLinkResult { .. }
+        | ServerMsg::AuthoredPrMergeResult { .. } => ServerClass::LocalOnly,
         // A focus's model is withheld exactly like its transcript.
         ServerMsg::SessionModelState(state) => ServerClass::Focus(&state.tag),
 
@@ -921,6 +922,10 @@ pub fn is_refusal(msg: &ServerMsg) -> bool {
             ..
         }
         | ServerMsg::AuthoredPrLinkResult {
+            result: AuthoredPrResult::Err(e),
+            ..
+        }
+        | ServerMsg::AuthoredPrMergeResult {
             result: AuthoredPrResult::Err(e),
             ..
         } => is_secure_refusal(&e.code),
@@ -1150,7 +1155,10 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::AuthoredPrPreviewRequest { .. }
         | ClientMsg::AuthoredPrNotify { .. }
         | ClientMsg::AuthoredPrStartSession { .. }
-        | ClientMsg::AuthoredPrLink { .. } => NetworkPolicy::Refused,
+        | ClientMsg::AuthoredPrLink { .. }
+        // Merging a PR, irreversibly, with the operator's GitHub token: the
+        // verified app only.
+        | ClientMsg::AuthoredPrMerge { .. } => NetworkPolicy::Refused,
     }
 }
 
@@ -1272,7 +1280,8 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::AuthoredPrPreviewRequest { .. }
         | ClientMsg::AuthoredPrNotify { .. }
         | ClientMsg::AuthoredPrStartSession { .. }
-        | ClientMsg::AuthoredPrLink { .. } => false,
+        | ClientMsg::AuthoredPrLink { .. }
+        | ClientMsg::AuthoredPrMerge { .. } => false,
     }
 }
 
@@ -2253,6 +2262,12 @@ mod tests {
                 number: 1,
                 tag: Some("x1".into()),
             },
+            ClientMsg::AuthoredPrMerge {
+                request_id: "r".into(),
+                repo: "o/r".into(),
+                number: 1,
+                expected_head_sha_short: "abcdef12".into(),
+            },
             ClientMsg::ConversationHistoryGet {
                 request_id: "r".into(),
             },
@@ -2426,7 +2441,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 93;
+    const CLIENT_MSG_VARIANTS: usize = 94;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2524,6 +2539,7 @@ mod tests {
             ClientMsg::AuthoredPrStartSession { .. } => 90,
             ClientMsg::AuthoredPrLink { .. } => 91,
             ClientMsg::TrackerEdit { .. } => 92,
+            ClientMsg::AuthoredPrMerge { .. } => 93,
         }
     }
 
@@ -2568,9 +2584,9 @@ mod tests {
         // 77 with `TerminalFollowInviteStagingOnly` (S3a); 78 with `SessionCommandsGet`;
         // 80 with the two authored-PR verbs; 87 with the seven conversation-history verbs; 88 with the rename;
         // 92 with the four authored-PR hand-off verbs (preview, notify, start session, link);
-        // 93 with `TrackerEdit` (T3a).
-        assert_eq!(CLIENT_MSG_VARIANTS, 93);
-        assert_eq!(every_client_msg().len(), 93);
+        // 93 with `TrackerEdit` (T3a); 94 with `AuthoredPrMerge`.
+        assert_eq!(CLIENT_MSG_VARIANTS, 94);
+        assert_eq!(every_client_msg().len(), 94);
     }
 
     #[test]
