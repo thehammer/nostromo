@@ -48,6 +48,10 @@ final class TestBundleSetup: NSObject {
             }
             method_setImplementation(m, imp_implementationWithBlock(block))
         }
+        // The Overview's saved filter must never come from, or go to, the developer's own preferences.
+        let suite = "nostromo.tests.authoredPrsFilter"
+        UserDefaults().removePersistentDomain(forName: suite)
+        if let defaults = UserDefaults(suiteName: suite) { AuthoredPrsFilterStore.defaults = defaults }
         return true
     }()
 
