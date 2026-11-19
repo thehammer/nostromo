@@ -78,6 +78,8 @@ fn base_row(repo: &str, number: u64, title: &str, group: Group) -> AuthoredPr {
         owner: Owner::unknown(),
         told: None,
         pill: false,
+        head_sha_short: None,
+        perri: None,
         attention_key: String::new(),
     }
 }

@@ -13,12 +13,14 @@ use tokio::sync::watch;
 
 use super::links::{key_string, AuthoredPrStore};
 use super::memory::FocusMemory;
+use super::merge::MergeBook;
 use super::notice::{compose, digest, PrFacts};
 use super::ownership::PrKey;
 use super::snapshot::{AuthoredPr, AuthoredPrsSnapshot, Lifecycle, OwnerKind, ReviewState};
+use super::verdicts::{short_sha, Verdict, VerdictRecord, VerdictStore};
 use super::wire::{AuthoredPrResult, LastTold, StartOk};
 use super::working_copy::{find_transcript, first_cwd, working_copy_at};
-use super::{Clock, DemandBoard};
+use super::{ApiSlot, Clock, DemandBoard};
 use crate::mother::origin::SessionHistory;
 
 const REMEMBERED_STARTS: usize = 64;
@@ -37,12 +39,18 @@ struct SentMark {
 
 pub struct AuthoredPrActions {
     board: Arc<DemandBoard>,
-    snapshot: watch::Receiver<Option<AuthoredPrsSnapshot>>,
+    pub(super) snapshot: watch::Receiver<Option<AuthoredPrsSnapshot>>,
     store: Arc<AuthoredPrStore>,
     memory: Arc<FocusMemory>,
     projects_root: PathBuf,
     agents_dir: PathBuf,
-    clock: Arc<dyn Clock>,
+    pub(super) clock: Arc<dyn Clock>,
+    /// Perri's verdicts on PR heads.
+    pub(super) verdicts: Arc<VerdictStore>,
+    /// The engine's GitHub client: the Merge verb uses the same token.
+    pub(super) api: ApiSlot,
+    /// Merges in flight and answered.
+    pub(super) merges: MergeBook,
     starts: Mutex<VecDeque<(String, AuthoredPrResult<StartOk>)>>,
     /// Previews already sent, so a replayed send (a dropped connection and a
     /// second press) delivers nothing. A new preview of the PR re-arms it.
@@ -75,6 +83,15 @@ impl AuthoredPrActions {
             agents_dir,
             clock,
         )
+        .with_merge(Arc::clone(&handle.verdicts), Arc::clone(&handle.api))
+    }
+
+    /// Share Perri's verdicts and the engine's GitHub client with the verbs
+    /// (`from_parts` starts with an empty verdict store and no client).
+    pub fn with_merge(mut self, verdicts: Arc<VerdictStore>, api: ApiSlot) -> Self {
+        self.verdicts = verdicts;
+        self.api = api;
+        self
     }
 
     /// The same from its parts, for a test that feeds the snapshot itself.
@@ -95,6 +112,9 @@ impl AuthoredPrActions {
             projects_root,
             agents_dir,
             clock,
+            verdicts: Arc::new(VerdictStore::in_memory()),
+            api: Arc::new(Mutex::new(None)),
+            merges: MergeBook::default(),
             starts: Mutex::new(VecDeque::new()),
             sent: Mutex::new(VecDeque::new()),
             start_gate: tokio::sync::Mutex::new(()),
@@ -118,6 +138,46 @@ impl AuthoredPrActions {
                     && p.lifecycle == Lifecycle::Open
             })
             .cloned()
+    }
+
+    pub fn verdicts(&self) -> &Arc<VerdictStore> {
+        &self.verdicts
+    }
+
+    /// Record Perri's verdict on `head_sha` of `repo#number`. It only records:
+    /// it never merges and never talks to GitHub. Returns whether the head is
+    /// the one the daemon knows the PR to be at (`None`: it does not know).
+    /// Error: a code (`invalid`) when `repo`, `number` or `head_sha` is not
+    /// valid.
+    pub fn record_verdict(
+        &self,
+        repo: &str,
+        number: u64,
+        head_sha: &str,
+        verdict: Verdict,
+        by: Option<&str>,
+        note: Option<&str>,
+    ) -> Result<Option<bool>, &'static str> {
+        let rec = VerdictRecord::new(repo, number, head_sha, verdict, self.clock.now(), by, note)
+            .ok_or("invalid")?;
+        let matches = self
+            .snapshot
+            .borrow()
+            .as_ref()
+            .and_then(|s| {
+                s.prs
+                    .iter()
+                    .find(|p| p.number == number && p.repo.eq_ignore_ascii_case(repo))
+            })
+            .and_then(|p| p.head_sha_short.as_deref())
+            .map(|short| short_sha(head_sha).as_deref() == Some(short));
+        self.verdicts.record(rec);
+        // The row shows the verdict: publish (the engine reads the PR again).
+        self.board.pr_changed(PrKey {
+            repo: repo.to_ascii_lowercase(),
+            number,
+        });
+        Ok(matches)
     }
 
     /// Compose the message from the current facts. Error: a wire code.
@@ -152,7 +212,7 @@ impl AuthoredPrActions {
         })
     }
 
-    fn changed(&self, row: &AuthoredPr) {
+    pub(super) fn changed(&self, row: &AuthoredPr) {
         self.board.pr_changed(PrKey {
             repo: row.repo.to_ascii_lowercase(),
             number: row.number,

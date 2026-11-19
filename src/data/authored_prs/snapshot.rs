@@ -3,11 +3,14 @@
 //! Every string that came from GitHub is sanitised with `one_line` and bounded
 //! when a row is built (in the engine's `build`); the
 //! types here only carry the result. Kit decodes leniently, so every optional
-//! field is skipped when absent. The in-memory head branch and SHA are not
-//! fields of anything in this file, on purpose: they never reach the wire.
+//! field is skipped when absent. The in-memory head branch and the full head SHA are not
+//! fields of anything in this file, on purpose: they never reach the wire (a row
+//! carries `head_sha_short`, eight hex digits, and nothing more of it).
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+pub use super::verdicts::Verdict;
 
 pub const MAX_PRS: usize = 100;
 pub const MAX_TITLE: usize = 300;
@@ -230,6 +233,20 @@ pub struct Told {
     pub at: DateTime<Utc>,
 }
 
+/// Perri's verdict on this PR, as the row shows it: the newest one for the
+/// current head when there is one, else the newest one for an older head (the
+/// app says "approved an older version"). The note and the full SHA stay in
+/// the daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerriRow {
+    pub verdict: Verdict,
+    pub at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    /// The verdict is for the commit the PR is at now.
+    pub for_current_head: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthoredPr {
     /// `owner/name`.
@@ -262,6 +279,12 @@ pub struct AuthoredPr {
     /// been told about the current state: the Mac raises one waiting pill.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pill: bool,
+    /// The first 8 hex digits of the PR's head commit, when the daemon knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha_short: Option<String>,
+    /// Perri's verdict, when one was recorded for this PR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perri: Option<PerriRow>,
     /// A hash of the facts a notify recorded; stays in the daemon.
     #[serde(skip)]
     pub attention_key: String,
@@ -453,6 +476,8 @@ mod tests {
             owner: Owner::unknown(),
             told: None,
             pill: false,
+            head_sha_short: None,
+            perri: None,
             attention_key: String::new(),
         };
         let v = serde_json::to_value(&pr).unwrap();

@@ -22,8 +22,9 @@ use super::notice::attention_key;
 use super::ownership::{self, Link, OpenFocus, PrKey, WorkingCopy};
 use super::snapshot::*;
 use super::usage::{Record, UsageLog};
+use super::verdicts::{short_sha, VerdictStore};
 use super::working_copy::{SessionRef, WorkingCopies};
-use super::{Clock, DemandInputs, Deps, FocusInfo, FocusProvider, TokenResolver};
+use super::{ApiSlot, Clock, DemandInputs, Deps, FocusInfo, FocusProvider, TokenResolver};
 use crate::data::github_client::GithubClient;
 use crate::data::relay_client::{QueueSignal, RelayEvent, RelayStatus};
 use crate::data::work::untrusted::one_line;
@@ -81,8 +82,18 @@ enum Source {
     Relay,
 }
 
+/// What the engine shares with the verbs.
+pub(super) struct Shared {
+    pub store: Arc<AuthoredPrStore>,
+    pub memory: Arc<FocusMemory>,
+    pub verdicts: Arc<VerdictStore>,
+    pub api: ApiSlot,
+}
+
 pub(super) struct Engine {
     api: Option<Api>,
+    api_slot: ApiSlot,
+    verdicts: Arc<VerdictStore>,
     api_base: String,
     clock: Arc<dyn Clock>,
     relay_status: Arc<RelayStatus>,
@@ -167,15 +178,23 @@ impl Engine {
         deps: Deps,
         inputs: DemandInputs,
         out: watch::Sender<Option<AuthoredPrsSnapshot>>,
-        store: Arc<AuthoredPrStore>,
-        memory: Arc<FocusMemory>,
+        shared: Shared,
     ) -> Self {
+        let Shared {
+            store,
+            memory,
+            verdicts,
+            api: api_slot,
+        } = shared;
         let (api, token) = match &deps.github {
             Some(c) => (Some(make_api(c, &deps.api_base)), TokenState::Connected),
             None => (None, TokenState::Missing),
         };
+        *api_slot.lock().unwrap_or_else(|e| e.into_inner()) = api.clone();
         Engine {
             api,
+            api_slot,
+            verdicts,
             api_base: deps.api_base,
             clock: deps.clock,
             relay_status: deps.relay_status,
@@ -556,7 +575,9 @@ impl Engine {
             .flatten();
         if let Some(c) = found {
             info!("authored-prs: a GitHub token is available now");
-            self.api = Some(make_api(&c, &self.api_base));
+            let api = make_api(&c, &self.api_base);
+            *self.api_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(api.clone());
+            self.api = Some(api);
             self.token = TokenState::Connected;
             self.mark_publish(now);
         }
@@ -1438,6 +1459,7 @@ impl Engine {
                     && told_rec
                         .as_ref()
                         .is_none_or(|t| t.attention_key != key_hash);
+                let perri = self.perri_row(&p.repo, p.number, p.head_sha.as_deref());
                 AuthoredPr {
                     repo: p.repo.clone(),
                     number: p.number,
@@ -1458,6 +1480,8 @@ impl Engine {
                     owner,
                     told,
                     pill,
+                    head_sha_short: p.head_sha.as_deref().and_then(short_sha),
+                    perri,
                     attention_key: key_hash,
                 }
             })
@@ -1501,6 +1525,22 @@ impl Engine {
             prs: rows,
             usage: self.usage.view(now),
         }
+    }
+
+    /// Perri's verdict as the row shows it: the newest one for the current head,
+    /// else the newest one for an older head, marked as such.
+    fn perri_row(&self, repo: &str, number: u64, head: Option<&str>) -> Option<PerriRow> {
+        let for_head = head.and_then(|h| self.verdicts.for_head(repo, number, h));
+        let (rec, current) = match for_head {
+            Some(r) => (r, true),
+            None => (self.verdicts.newest(repo, number)?, false),
+        };
+        Some(PerriRow {
+            verdict: rec.verdict,
+            at: rec.at,
+            by: rec.by,
+            for_current_head: current,
+        })
     }
 
     fn publish(

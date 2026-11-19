@@ -16,7 +16,7 @@ use serde::Deserialize;
 
 use super::budget::{parse_retry_after, RateObs, Resource};
 use super::classify::RawPr;
-use super::snapshot::safe_segment;
+use super::snapshot::{safe_segment, valid_repo};
 
 pub const USER_AGENT: &str = "nostromd authored-prs";
 
@@ -320,7 +320,19 @@ impl Api {
     /// One GraphQL detail batch, at most [`MAX_ALIASES`] PRs. Result `i` is
     /// the `i`th target's PR, or `None` when GitHub gave none (no access, gone).
     pub async fn detail(&self, targets: &[Target]) -> Result<DetailBatch, Failure> {
-        let query = detail_query(targets);
+        self.run_detail(detail_query(targets), targets.len()).await
+    }
+
+    /// One PR as the merge needs it, read right now: the detail fields plus
+    /// `mergeable` and `mergeStateStatus`. `None` when GitHub gave none.
+    pub async fn detail_for_merge(&self, target: &Target) -> Result<Option<RawPr>, Failure> {
+        let batch = self
+            .run_detail(merge_query(std::slice::from_ref(target)), 1)
+            .await?;
+        Ok(batch.prs.into_iter().next().flatten())
+    }
+
+    async fn run_detail(&self, query: String, count: usize) -> Result<DetailBatch, Failure> {
         let req = self
             .http
             .post(format!("{}/graphql", self.base))
@@ -368,7 +380,7 @@ impl Api {
             .pointer("/rateLimit/cost")
             .and_then(|c| c.as_u64())
             .unwrap_or(1);
-        let prs = (0..targets.len())
+        let prs = (0..count)
             .map(|i| {
                 data.get(format!("p{i}"))
                     .and_then(|r| r.get("pullRequest"))
@@ -382,6 +394,64 @@ impl Api {
             prs,
         })
     }
+
+    /// Squash-merge the PR, and only if its head is still `sha`
+    /// (`PUT /repos/{repo}/pulls/{number}/merge`). The body is the method and
+    /// the SHA and nothing else: no admin or bypass parameter, no commit
+    /// message. GitHub's reply text is never read: only the status says what
+    /// happened.
+    pub async fn merge(&self, repo: &str, number: u64, sha: &str) -> Result<(), MergeError> {
+        if !valid_repo(repo) {
+            return Err(MergeError::NotFound);
+        }
+        let resp = self
+            .http
+            .put(format!("{}/repos/{repo}/pulls/{number}/merge", self.base))
+            .headers(self.headers())
+            .json(&serde_json::json!({ "merge_method": "squash", "sha": sha }))
+            .send()
+            .await
+            .map_err(|_| MergeError::Transport)?;
+        let status = resp.status().as_u16();
+        let meta = read_meta(resp.headers());
+        let retry_after = header_str(resp.headers(), "retry-after").and_then(parse_retry_after);
+        let exhausted = meta.rate.is_some_and(|(_, o)| o.remaining == 0);
+        Err(match status {
+            200..=299 => return Ok(()),
+            401 => MergeError::Unauthorized,
+            429 => MergeError::RateLimited,
+            // A 403 is a limit when GitHub says so, and a token without the
+            // right to merge otherwise.
+            403 if retry_after.is_some() || exhausted => MergeError::RateLimited,
+            403 => MergeError::Forbidden,
+            404 => MergeError::NotFound,
+            405 => MergeError::NotAllowed,
+            409 => MergeError::HeadMoved,
+            422 => MergeError::Unmergeable,
+            _ => MergeError::Transport,
+        })
+    }
+}
+
+/// Why a merge request did not merge. No variant carries any response text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeError {
+    /// 401.
+    Unauthorized,
+    /// 403 that is not a rate limit: the token may not merge here.
+    Forbidden,
+    /// 404.
+    NotFound,
+    /// 405: GitHub says the PR is not mergeable now (a protection rule).
+    NotAllowed,
+    /// 409: the head is no longer the SHA that was sent.
+    HeadMoved,
+    /// 422.
+    Unmergeable,
+    /// 429, or a 403 that carries a limit.
+    RateLimited,
+    /// No answer, or an unexpected status.
+    Transport,
 }
 
 pub struct SearchResult {
@@ -432,6 +502,30 @@ fn repo_from_url(url: &str) -> Option<String> {
 /// logins only: never `body`, `bodyText`, `bodyHTML`, or a check's `output`,
 /// `summary` or `text`.
 pub fn detail_query(targets: &[Target]) -> String {
+    query_with(targets, "")
+}
+
+/// The detail query plus `mergeable` and `mergeStateStatus`: what the merge reads
+/// right before it acts. Never sent by the poll, so the poll's cost is unchanged.
+pub fn merge_query(targets: &[Target]) -> String {
+    query_with(targets, " mergeable mergeStateStatus")
+}
+
+const FRAGMENT: &str = "fragment AuthoredPr on PullRequest {
+  number title isDraft state merged updatedAt{EXTRA}
+  author { __typename login }
+  baseRefName headRefName headRefOid isCrossRepository
+  repository { nameWithOwner defaultBranchRef { name } }
+  commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) { totalCount nodes { __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
+  latestOpinionatedReviews(first: 20) { nodes { state author { __typename login } } }
+  reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { slug organization { login } } ... on Bot { login } } } }
+  reviewThreads(first: 100) { totalCount nodes { isResolved } }
+  comments(last: 100) { nodes { createdAt author { __typename login } } }
+  reviews(last: 50) { nodes { submittedAt author { __typename login } comments { totalCount } } }
+}
+";
+
+fn query_with(targets: &[Target], extra_fields: &str) -> String {
     let mut q =
         String::from("query AuthoredPrDetail {\n  rateLimit { cost remaining limit resetAt }\n");
     for (i, t) in targets.iter().take(MAX_ALIASES).enumerate() {
@@ -445,20 +539,6 @@ pub fn detail_query(targets: &[Target]) -> String {
         }
     }
     q.push_str("}\n");
-    q.push_str(
-        "fragment AuthoredPr on PullRequest {
-  number title isDraft state merged updatedAt
-  author { __typename login }
-  baseRefName headRefName headRefOid isCrossRepository
-  repository { nameWithOwner defaultBranchRef { name } }
-  commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) { totalCount nodes { __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
-  latestOpinionatedReviews(first: 20) { nodes { state author { __typename login } } }
-  reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { slug organization { login } } ... on Bot { login } } } }
-  reviewThreads(first: 100) { totalCount nodes { isResolved } }
-  comments(last: 100) { nodes { createdAt author { __typename login } } }
-  reviews(last: 50) { nodes { submittedAt author { __typename login } comments { totalCount } } }
-}
-",
-    );
+    q.push_str(&FRAGMENT.replacen("{EXTRA}", extra_fields, 1));
     q
 }

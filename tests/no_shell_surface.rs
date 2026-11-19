@@ -84,6 +84,7 @@ const SHELL_WRITE_CLASSIFICATION: &[(&str, ShellWrite, &str)] = &[
     ("perri.clear_current_pr", Never, "clears the current PR"),
     ("perri.set_selected_index", Never, "sets a selection"),
     ("perri.get_selected_index", Never, "reads a selection"),
+    ("perri.record_verdict", Never, "records a verdict in a store; no shell, no GitHub"),
     ("mother.enqueue_job", Never, "queues an unattended job; no shell of the user's"),
     ("mother.cancel_job", Never, "cancels a job"),
     ("mother.archive_job", Never, "archives a job"),

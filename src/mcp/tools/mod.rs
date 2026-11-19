@@ -19,6 +19,7 @@ pub mod mother_mutators;
 pub mod nostromo_meta;
 pub mod perri;
 pub mod perri_mutators;
+pub mod perri_verdict;
 pub mod refresh_pane;
 pub mod remote_shell;
 pub mod render_state;
@@ -590,6 +591,22 @@ pub fn tool_descriptors() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "perri.record_verdict",
+            "description": "Record Perri's verdict on one commit of a pull request, so the Mother pane's Overview can tell whether the commit about to be merged is the one Perri approved. It only records: it never merges and never talks to GitHub. A verdict is for `head_sha` exactly; a new push is a new head and the old verdict no longer applies to it. Recording again for the same head replaces the earlier verdict. Returns { ok, recorded: { repo, pr, head_sha, verdict }, matches_current_head } where `matches_current_head` is true, false or \"unknown\" (the daemon does not have the PR in its list, or does not know its head yet). Refused for a session a network peer is steering. Errors: invalid_args (bad repo, pr, head_sha, verdict, an over-long note, or an unknown argument), unidentified_caller, not_supported.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo": { "type": "string", "description": "Repository in 'owner/repo' format" },
+                    "pr": { "type": "integer", "description": "PR number (> 0)" },
+                    "head_sha": { "type": "string", "description": "The full head commit the verdict is for: 40 lowercase hex digits" },
+                    "verdict": { "type": "string", "enum": ["approved", "changes_requested", "comment"] },
+                    "note": { "type": "string", "description": "Optional plain-text note, at most 200 characters. Control characters are dropped. Shown nowhere as markup." }
+                },
+                "required": ["repo", "pr", "head_sha", "verdict"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "perri.get_selected_index",
             "description": "Returns the selected PR index in Perri's queue list (see perri.set_selected_index for what \"selected\" means on each host).",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
@@ -791,6 +808,8 @@ fn is_network_withheld_tool(name: &str) -> bool {
         || name == REQUEST_FOLLOW_TOOL
         || name == READ_TERMINAL_SCREEN_TOOL
         || name == TERMINAL_STAGING_TOOL
+        // Perri's verdict gates a merge: never recorded on a network peer's say.
+        || name == RECORD_VERDICT_TOOL
         || ["fred.", "teri.", "mother.", "huey."]
             .iter()
             .any(|prefix| name.starts_with(prefix))
@@ -816,6 +835,8 @@ pub fn cancels_on_disconnect(name: &str) -> bool {
     name == REQUEST_REMOTE_SHELL_TOOL || name == REQUEST_FOLLOW_TOOL
 }
 
+/// The tool that records Perri's verdict on a PR head.
+const RECORD_VERDICT_TOOL: &str = "perri.record_verdict";
 /// The tool that opens a terminal pane.
 const OPEN_TERMINAL_TOOL: &str = "nostromo.open_terminal";
 /// The tool that asks the user for a remote shell.
@@ -1218,6 +1239,10 @@ async fn dispatch_inner(
             perri_mutators::set_selected_index(state, &args, pty_id).await
         }
         "perri.get_selected_index" => perri_mutators::get_selected_index(state, pty_id).await,
+        "perri.record_verdict" => {
+            let args = arguments.cloned().unwrap_or_default();
+            perri_verdict::record_verdict(state, &args, pty_id).await
+        }
 
         // ── Phase 3: Mother mutations ──────────────────────────────────────
         "mother.enqueue_job" => {
@@ -1383,7 +1408,12 @@ mod tests {
         // Exact tool names that are allowed to trip the heuristic, each with the
         // reason. Adding a name here is a deliberate review decision; a NEW
         // tool must not be silently allowed.
-        let allowed: &[(&str, &str)] = &[];
+        let allowed: &[(&str, &str)] = &[(
+            "perri.record_verdict",
+            "records Perri's code-review verdict on a PR head in a store; it answers no permission \
+             or approval request and grants nothing (the merge verb reads the record, and is not \
+             an MCP tool)",
+        )];
 
         let mut offenders = Vec::new();
         for d in tool_descriptors() {
