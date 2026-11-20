@@ -95,6 +95,9 @@ final class AuthoredPrMerger {
         }
         guard permit(event, control, "merge") else { return }
 
+        // Starting a new attempt: whatever the last one said is old news (a `head_changed` notice would otherwise
+        // outlive every later head).
+        if case .failed? = attempts[model.id]?.progress { attempts[model.id] = nil }
         closePresented(notify: false)
         let session = AuthoredPrMergeSession(confirmation: confirmation, permit: { [weak self] event, control, action in
             self?.permit(event, control, action) ?? false
@@ -118,13 +121,14 @@ final class AuthoredPrMerger {
         changes.send()
     }
 
-    /// The rows the Overview now shows. A confirmation whose row is gone, no longer ready or at another head is
-    /// cancelled: what the person read is not what the row says now.
+    /// The rows the Overview now shows. A confirmation whose row is gone, no longer ready, at another head or
+    /// aimed at another base is cancelled: what the person read is not what the row says now. (A retitle or a new
+    /// comment is not: nothing the sentence says has changed.)
     func rowsDidChange(_ rows: [AuthoredPrRowModel]) {
         guard let session = presented, let id = presentedRowId else { return }
-        let row = rows.first { $0.id == id }
-        let head = row?.mergeButton?.state == .ready ? row?.mergeButton?.confirmation?.expectedHeadShaShort : nil
-        guard head != session.confirmation.expectedHeadShaShort else { return }
+        let now = rows.first { $0.id == id }.flatMap { $0.mergeButton?.state == .ready ? $0.mergeButton?.confirmation : nil }
+        let read = session.confirmation
+        guard now?.expectedHeadShaShort != read.expectedHeadShaShort || now?.base != read.base else { return }
         session.cancel()
     }
 
@@ -141,11 +145,14 @@ final class AuthoredPrMerger {
     }
 
     private func send(_ confirmation: AuthoredPrMergeConfirmation, rowId: String) {
+        let head = confirmation.expectedHeadShaShort
         guard transport.isMergeAvailable else {
+            // The link dropped (or the daemon went) while the person was reading: say so rather than close in silence.
             mergeLog.notice("authored-pr merge not sent: unavailable")
+            attempts[rowId] = AuthoredPrMergeAttempt(head: head, progress: .failed(.unreachable))
+            changes.send()
             return
         }
-        let head = confirmation.expectedHeadShaShort
         attempts[rowId] = AuthoredPrMergeAttempt(head: head, progress: .merging)
         changes.send()
         transport.merge(repo: confirmation.repo, number: confirmation.number, expectedHeadShaShort: head) { [weak self] answer in

@@ -42,6 +42,9 @@ public struct AuthoredPrMergeConfirmation: Equatable, Sendable {
     public var repo: String
     public var number: Int
     public var expectedHeadShaShort: String
+    /// The branch the sentence says it merges into (nil: it says "the base branch"). A retarget while the
+    /// confirmation is open makes the sentence untrue, though the head has not moved.
+    public var base: String?
     public var message: String
     public var confirmTitle: String { "Merge" }
     public var cancelTitle: String { "Cancel" }
@@ -156,7 +159,8 @@ extension AuthoredPrsPresentation {
         let checks = pr.checks.state == .passing ? "green" : "none"
         let message = "Squash and merge #\(pr.number) \(title) into \(pr.baseRef ?? "the base branch")? "
             + "Head \(head). Perri approved. Human approval: yes. Checks: \(checks)."
-        return AuthoredPrMergeConfirmation(repo: pr.repo, number: pr.number, expectedHeadShaShort: head, message: message)
+        return AuthoredPrMergeConfirmation(repo: pr.repo, number: pr.number, expectedHeadShaShort: head, base: pr.baseRef,
+                                           message: message)
     }
 
     // MARK: Notice

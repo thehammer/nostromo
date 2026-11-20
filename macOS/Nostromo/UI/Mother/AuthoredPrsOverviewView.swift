@@ -233,6 +233,8 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     private var cancellables = Set<AnyCancellable>()
     private var mergerObservation: AnyCancellable?
     private var notifyingMerger = false
+    /// The attempts the rows on screen were built from.
+    private var shownAttempts: [String: AuthoredPrMergeAttempt] = [:]
 
     // MARK: Views
 
@@ -544,6 +546,7 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     }
 
     private func rebuildRows() {
+        shownAttempts = merger?.attempts ?? [:]
         let selected = selectedRowId
         var newRowNodes: [String: OverviewNode] = [:]
         var tops: [OverviewNode] = []
@@ -591,7 +594,10 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
 
     /// An attempt moved on, or a confirmation opened or closed: the rows say so.
     private func mergerChanged() {
-        guard !notifyingMerger else { return }
+        guard !notifyingMerger, let merger else { return }
+        // Opening or closing a confirmation changes nothing a row shows: rebuilding then would replace the row
+        // view the popover is pointing at.
+        guard merger.attempts != shownAttempts else { return }
         rebuildRows()
     }
 

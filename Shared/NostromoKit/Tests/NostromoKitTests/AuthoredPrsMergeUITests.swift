@@ -449,6 +449,14 @@ final class AuthoredPrsMergeConfirmationTests: XCTestCase {
         XCTAssertFalse(c.message.contains("\u{202E}") || c.message.contains("\u{7}") || c.message.contains("\n"))
     }
 
+    func testTheConfirmationRemembersTheBaseItNamed() throws {
+        XCTAssertEqual(try confirmation(pr(baseRef: "main")).base, "main")
+        XCTAssertEqual(try confirmation(pr(baseRef: "release/2026-11")).base, "release/2026-11")
+        XCTAssertNil(try confirmation(pr(baseRef: nil)).base, "the sentence says the base branch")
+        XCTAssertNotEqual(try confirmation(pr(baseRef: "main")), try confirmation(pr(baseRef: "release")),
+                          "a retarget is a different confirmation")
+    }
+
     func testTheMessageNamesThePrByNumberAndNeverTheRepoOrTheUrl() throws {
         let c = try confirmation(pr(77, title: "Seventy-seven"))
         XCTAssertTrue(c.message.hasPrefix("Squash and merge #77 Seventy-seven into main?"), c.message)

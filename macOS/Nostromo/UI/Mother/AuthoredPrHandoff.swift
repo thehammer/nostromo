@@ -79,6 +79,9 @@ final class AuthoredPrHandoffTransportLive: AuthoredPrHandoffTransport, Authored
     var mergeSupported: () -> Bool
     var sendMerge: (ClientAuthoredPrMerge) -> Void
     let timeout: TimeInterval
+    /// How long a merge may wait for its answer: longer than the others, since GitHub's merge can be slow, and a
+    /// timeout leaves the person not knowing whether it happened. Defaults to `timeout`.
+    let mergeTimeout: TimeInterval
 
     private var pending: [String: (AuthoredPrAnswerFrame?) -> Void] = [:]
 
@@ -89,8 +92,10 @@ final class AuthoredPrHandoffTransportLive: AuthoredPrHandoffTransport, Authored
          sendStart: @escaping (ClientAuthoredPrStartSession) -> Void,
          sendLink: @escaping (ClientAuthoredPrLink) -> Void,
          mergeSupported: @escaping () -> Bool = { false },
-         sendMerge: @escaping (ClientAuthoredPrMerge) -> Void = { _ in }) {
+         sendMerge: @escaping (ClientAuthoredPrMerge) -> Void = { _ in },
+         mergeTimeout: TimeInterval? = nil) {
         self.timeout = timeout
+        self.mergeTimeout = mergeTimeout ?? timeout
         self.supported = supported
         self.sendPreview = sendPreview
         self.sendNotify = sendNotify
@@ -116,9 +121,9 @@ final class AuthoredPrHandoffTransportLive: AuthoredPrHandoffTransport, Authored
         for done in all.values { done(nil) }
     }
 
-    private func register(_ id: String, _ done: @escaping (AuthoredPrAnswerFrame?) -> Void) {
+    private func register(_ id: String, timeout: TimeInterval? = nil, _ done: @escaping (AuthoredPrAnswerFrame?) -> Void) {
         pending[id] = done
-        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + (timeout ?? self.timeout)) { [weak self] in
             guard let done = self?.pending.removeValue(forKey: id) else { return }
             done(nil)
         }
@@ -165,7 +170,7 @@ final class AuthoredPrHandoffTransportLive: AuthoredPrHandoffTransport, Authored
     func merge(repo: String, number: Int, expectedHeadShaShort: String,
                done: @escaping (AuthoredPrAnswer<AuthoredPrDone>) -> Void) {
         let id = UUID().uuidString
-        register(id) { frame in
+        register(id, timeout: mergeTimeout) { frame in
             if case .merge(_, let answer)? = frame { done(answer) } else { done(.unreachable) }
         }
         sendMerge(ClientAuthoredPrMerge(requestId: id, repo: repo, number: number, expectedHeadShaShort: expectedHeadShaShort))

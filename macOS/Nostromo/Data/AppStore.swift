@@ -71,7 +71,8 @@ class AppStore: ObservableObject {
         mergeSupported: { [weak self] in
             self?.authoredPrsMergeSupported == true && self?.authoredPrsConnection == .connected
         },
-        sendMerge: { [weak self] in self?.client.sendAuthoredPrMerge($0) })
+        sendMerge: { [weak self] in self?.client.sendAuthoredPrMerge($0) },
+        mergeTimeout: 45)
     /// The Merge button's confirmation, the merge request and what each row's attempt has come to.
     private(set) lazy var authoredPrMerger = AuthoredPrMerger(transport: authoredPrHandoffTransport)
     /// Opens the preview, picker or sheet for a PR row and carries a send through to its focus.

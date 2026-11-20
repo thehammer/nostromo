@@ -1557,3 +1557,139 @@ final class AuthoredPrMergeScrollSafetyTests: MouseQueueTestCase {
         try assertHeld(before, rig, hovered: hovered, "a snapshot cancelled the confirmation")
     }
 }
+
+// MARK: - Edge cases found in review
+
+/// A base retargeted under an open confirmation, a link that dropped while the person read, a merge's own timeout,
+/// a stale notice at the next press, and a confirmation that survives the list being rebuilt under it.
+final class AuthoredPrMergeReviewFixTests: MouseQueueTestCase {
+
+    private var rigs: [MergeRig] = []
+    private var overviewRigs: [MergeOverviewRig] = []
+
+    override func tearDown() {
+        rigs.forEach { $0.close() }
+        overviewRigs.forEach { $0.close() }
+        rigs = []
+        overviewRigs = []
+        super.tearDown()
+    }
+
+    private func makeRig() -> MergeRig {
+        let rig = MergeRig(allowEverything: true)
+        rigs.append(rig)
+        return rig
+    }
+
+    func testTheConfirmationRemembersTheBaseItSaid() throws {
+        XCTAssertEqual(MF.row(MF.readyPr(baseRef: "main")).mergeButton?.confirmation?.base, "main")
+        XCTAssertEqual(MF.row(MF.readyPr(baseRef: "release/2026-11")).mergeButton?.confirmation?.base, "release/2026-11")
+        XCTAssertNil(MF.row(MF.readyPr(baseRef: nil)).mergeButton?.confirmation?.base)
+    }
+
+    func testARetargetedBaseCancelsTheConfirmationEvenThoughTheHeadDidNotMove() throws {
+        let rig = makeRig()
+        let pr = MF.readyPr(458, baseRef: "main")
+        rig.activate(MF.row(pr))
+        XCTAssertNotNil(rig.session, "precondition")
+
+        // Same head, still ready, but the PR now targets another branch: the sentence the person read is untrue.
+        rig.merger.rowsDidChange([MF.row(MF.readyPr(458, baseRef: "release/2026-11"))])
+
+        XCTAssertNil(rig.merger.presented, "cancelled")
+        XCTAssertTrue(rig.transport.calls.isEmpty)
+    }
+
+    func testABaseThatAppearsOrGoesCancelsTheConfirmationToo() throws {
+        for (was, now) in [(String?.none, "main"), ("main", String?.none)] {
+            let rig = makeRig()
+            rig.activate(MF.row(MF.readyPr(458, baseRef: was)))
+            rig.merger.rowsDidChange([MF.row(MF.readyPr(458, baseRef: now))])
+            XCTAssertNil(rig.merger.presented, "\(String(describing: was)) -> \(String(describing: now))")
+        }
+    }
+
+    func testAConfirmWhileTheLinkIsDownLeavesAFailureOnTheRowNotSilence() throws {
+        let rig = makeRig()
+        let pr = MF.readyPr()
+        rig.activate(MF.row(pr))
+        rig.transport.isMergeAvailable = false
+
+        rig.confirm()
+
+        XCTAssertTrue(rig.transport.calls.isEmpty, "nothing was sent")
+        XCTAssertEqual(rig.merger.attempts[pr.id]?.progress, AuthoredPrMergeProgress.failed(.unreachable),
+                       "the row says so, instead of the confirmation closing and nothing more")
+        XCTAssertNil(rig.merger.presented)
+    }
+
+    func testPressingMergeClearsTheOldNoticeSoAHeadChangedNoticeDoesNotOutliveTheNextAttempt() throws {
+        let rig = makeRig()
+        let pr = MF.readyPr(458, head: MF.headA)
+        rig.mergeAndWait(pr)
+        rig.transport.answer(.failed(code: "head_changed"))
+        XCTAssertEqual(rig.merger.attempts[pr.id]?.progress, AuthoredPrMergeProgress.failed(.headChanged), "precondition")
+
+        // The person comes back and presses Merge on the new head, then cancels: the old news is gone.
+        let again = MF.row(MF.pushed(pr, to: MF.headB, perriReviewedIt: true))
+        rig.activate(again)
+        rig.session?.cancel()
+
+        XCTAssertNil(rig.merger.attempts[pr.id], "a new press starts a new attempt: the old notice is not left standing")
+    }
+
+    func testAMergeHasItsOwnTimeoutAndTheOthersKeepTheirs() throws {
+        let sent = LiveMergeSent()
+        let transport = AuthoredPrHandoffTransportLive(
+            timeout: 0.05, supported: { true },
+            sendPreview: { _ in sent.other += 1 }, sendNotify: { _ in sent.other += 1 },
+            sendStart: { _ in sent.other += 1 }, sendLink: { _ in sent.other += 1 },
+            mergeSupported: { true }, sendMerge: { sent.merges.append($0) }, mergeTimeout: 30)
+        var merge: [AuthoredPrAnswer<AuthoredPrDone>] = []
+        var link: [AuthoredPrAnswer<AuthoredPrDone>] = []
+        transport.merge(repo: "o/r", number: 1, expectedHeadShaShort: "0123abcd") { merge.append($0) }
+        transport.link(repo: "o/r", number: 1, tag: "t") { link.append($0) }
+
+        let passed = expectation(description: "the short timeout passed")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { passed.fulfill() }
+        wait(for: [passed], timeout: 5)
+
+        XCTAssertEqual(link, [.unreachable], "the hand-off verbs time out at the short timeout")
+        XCTAssertTrue(merge.isEmpty, "a merge is given longer: GitHub's merge can be slow")
+        transport.deliver(.merge(requestId: try XCTUnwrap(sent.merges.first).requestId, .ok(AuthoredPrDone())))
+        XCTAssertEqual(merge, [.ok(AuthoredPrDone())], "and its answer still gets through")
+    }
+
+    /// The list is rebuilt under a confirmation by an unrelated snapshot or a clock tick; the row view the
+    /// confirmation was opened from may be replaced, so it must not be what the popover hangs on.
+    func testOpeningAConfirmationDoesNotRebuildTheListUnderIt() throws {
+        let pr = MF.readyPr(), other = MF.readyPr(459)
+        let rig = MergeOverviewRig([pr, other])
+        overviewRigs.append(rig)
+        let before = try rig.rowView(pr)
+
+        try rig.press(pr)
+        XCTAssertNotNil(rig.merger.presented, "precondition")
+        rig.overview.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(try rig.rowView(pr) === before, "opening a confirmation changes nothing a row shows: the row view stays")
+        rig.merger.presented?.cancel()
+        XCTAssertTrue(try rig.rowView(pr) === before, "and neither does cancelling it")
+    }
+
+    func testAnAttemptThatChangesWhatARowShowsDoesRebuildIt() throws {
+        let pr = MF.readyPr()
+        let rig = MergeOverviewRig([pr])
+        overviewRigs.append(rig)
+        try rig.mergeAndWait(pr)
+        XCTAssertEqual(try rig.buttonTitle(pr), "Merging…", "the rows follow the attempts")
+        rig.answer(.ok(AuthoredPrDone()))
+        XCTAssertEqual(try rig.buttonTitle(pr), "Merged")
+    }
+}
+
+/// What a live transport sent, for the test above.
+private final class LiveMergeSent {
+    var merges: [ClientAuthoredPrMerge] = []
+    var other = 0
+}

@@ -25,7 +25,13 @@ enum AuthoredPrMergeUI {
         pop.delegate = delegate
         popover = pop
         popoverDelegate = delegate
-        pop.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        // Pointed at the list, at the row's rectangle, rather than at the row's own view: a rebuilt list replaces
+        // the row views, and a popover whose view has gone would close, cancelling what the person is reading.
+        if let list = anchor.enclosingScrollView?.documentView, anchor !== list {
+            pop.show(relativeTo: anchor.convert(anchor.bounds, to: list), of: list, preferredEdge: .minY)
+        } else {
+            pop.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        }
     }
 
     static func dismiss() {
