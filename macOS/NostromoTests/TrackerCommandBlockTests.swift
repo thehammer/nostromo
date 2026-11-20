@@ -185,11 +185,11 @@ final class TrackerCommandBlockTests: XCTestCase {
         for id in ids {
             let row = try h.row(id)
             XCTAssertNotNil(row.commandBlock, "\(id) hosts a command block")
-            assertNoRunAffordance(namesInTree(row).filter { name in
-                // The row's own text is the board's data: the title of the item, not a control.
-                name != row.mainText?.string
-            }.filter { name in !(row.commandBlock?.displayedText.contains(name) ?? false) },
-                                  allowing: ["Ran it"])
+            // The row's own text is the board's data (an item's title), not a control.
+            let data = Set(row.textViews.map(\.string))
+            assertNoRunAffordance(namesInTree(row).filter { !data.contains($0) }.filter {
+                !(row.commandBlock?.displayedText.contains($0) ?? false)
+            })
             func walk(_ items: [NSMenuItem]) {
                 for item in items {
                     assertNoRunAffordance([item.title])
