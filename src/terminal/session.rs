@@ -214,7 +214,7 @@ impl TerminalSession {
 
     /// `argv` (no shell) in `cwd`, with `env` on top of the scrubbed daemon
     /// environment. Used by tests.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     pub(crate) fn spawn_argv(
         argv: &[String],
         cwd: &Path,
@@ -535,8 +535,7 @@ impl TerminalSession {
 
     /// Bytes ever written to the PTY master: every write goes through the one
     /// writer thread, which counts them. Zero for a terminal nobody typed into.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn input_bytes_written(&self) -> u64 {
+    pub fn input_bytes_written(&self) -> u64 {
         self.input_bytes_written.load(Ordering::SeqCst)
     }
 
