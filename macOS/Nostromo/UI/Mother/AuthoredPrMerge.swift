@@ -99,6 +99,10 @@ final class AuthoredPrMerger {
         case .failed?, nil: break
         }
         guard permit(event, control, "merge") else {
+            // A refusal never wipes the daemon's own reason for the last failure at this head (an app-control client
+            // could otherwise erase "your token cannot merge").
+            if case .failed(let code)? = attempts[model.id]?.progress, code != .gestureRefused,
+               attempts[model.id]?.head == confirmation.expectedHeadShaShort { return }
             attempts[model.id] = AuthoredPrMergeAttempt(head: confirmation.expectedHeadShaShort,
                                                         progress: .failed(.gestureRefused))
             changes.send()
@@ -140,10 +144,11 @@ final class AuthoredPrMerger {
     func rowsDidChange(_ rows: [AuthoredPrRowModel], from reporter: AnyObject? = nil) {
         guard let session = presented, let id = presentedRowId else { return }
         let row = rows.first { $0.id == id }
-        if row == nil, reporter !== presentedBy { return }
+        if row == nil, presentedBy != nil, reporter !== presentedBy { return }   // a gone opener cannot cancel: then any window may
         let now = row.flatMap { $0.mergeButton?.state == .ready ? $0.mergeButton?.confirmation : nil }
         let read = session.confirmation
-        guard now?.expectedHeadShaShort != read.expectedHeadShaShort || now?.base != read.base else { return }
+        guard now?.expectedHeadShaShort != read.expectedHeadShaShort || now?.base != read.base
+                || now?.approval != read.approval else { return }
         session.cancel()
     }
 

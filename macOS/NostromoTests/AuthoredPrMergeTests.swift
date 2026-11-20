@@ -126,6 +126,32 @@ final class AuthoredPrMergerTests: MouseQueueTestCase {
         XCTAssertNotNil(rig.session)
     }
 
+    func testARefusedPressKeepsTheDaemonsReasonForTheLastFailureAtThisHead() throws {
+        let rig = makeRig(allowEverything: true)
+        let pr = MF.readyPr()
+        rig.mergeAndWait(pr)
+        rig.transport.answer(.failed(code: "token_cannot_merge"))
+        let before = try XCTUnwrap(rig.merger.attempts[pr.id], "precondition: the daemon's reason is on the row")
+        XCTAssertNotEqual(before.progress, .failed(.gestureRefused))
+
+        rig.merger.permit = { _, _, _ in false }
+        rig.merger.activate(MF.row(pr), anchor: rig.control, event: nil, control: rig.control)
+
+        XCTAssertEqual(rig.merger.attempts[pr.id], before, "a refused press does not overwrite why the last merge failed")
+    }
+
+    func testWithoutAnOpeningWindowAnyWindowSeeingTheRowGoneCancels() throws {
+        let rig = makeRig()
+        let model = MF.row(MF.readyPr())
+        rig.activate(model)   // opened with no owner: the opening Overview is gone, or never named
+        XCTAssertNotNil(rig.session, "precondition")
+
+        rig.merger.rowsDidChange([], from: NSObject())
+
+        XCTAssertNil(rig.merger.presented, "nobody is left who could cancel it, so any window that no longer has the row may")
+        XCTAssertTrue(rig.transport.calls.isEmpty)
+    }
+
     func testARefusedPressNeverTouchesAMergeThatIsRunningOrDone() throws {
         let rig = makeRig(allowEverything: true)
         let pr = MF.readyPr()
@@ -1845,6 +1871,19 @@ final class AuthoredPrMergeTwoWindowTests: MouseQueueTestCase {
             XCTAssertNil(rig.merger.presented, "\(what): cancelled, whichever window saw it")
             XCTAssertTrue(rig.transport.calls.isEmpty, what)
         }
+    }
+
+    func testTheRecorderOfTheApprovalChangingWhileTheConfirmationIsOpenCancelsIt() throws {
+        let pr = MF.readyPr(458)
+        let rig = makeRig([pr])
+        try rig.press(pr)
+        XCTAssertNotNil(rig.merger.presented, "precondition: it says Perri approved")
+
+        // The same head, the same verdict, now recorded by another focus: the sentence the person read is untrue.
+        rig.apply([MF.readyPr(458, perri: MF.verdict(by: "cody:focus-x"))])
+
+        XCTAssertNil(rig.merger.presented, "what the person read about who approved is no longer what the row says")
+        XCTAssertTrue(rig.transport.calls.isEmpty)
     }
 
     func testTheWindowThatOpenedItStillCancelsWhenItsRowIsGone() throws {

@@ -76,6 +76,9 @@ public struct AuthoredPrMergeConfirmation: Equatable, Sendable {
     /// confirmation is open makes the sentence untrue, though the head has not moved.
     public var base: String?
     public var message: String
+    /// Who approved, as the sentence says it ("Perri approved." / "Approval recorded by X, not by Perri."): the same
+    /// head can be re-recorded by another focus while the confirmation is open, which makes the sentence untrue.
+    public var approval: String = ""
     public var confirmTitle: String { "Merge" }
     public var cancelTitle: String { "Cancel" }
 }
@@ -211,7 +214,7 @@ extension AuthoredPrsPresentation {
         let message = "Squash and merge #\(pr.number) \(title) into \(pr.baseRef ?? "the base branch")? "
             + "Head \(head). \(approvalSentence(pr.perri)) Human approval: yes. Checks: \(checks)."
         return AuthoredPrMergeConfirmation(repo: pr.repo, number: pr.number, expectedHeadShaShort: head, base: pr.baseRef,
-                                           message: message)
+                                           message: message, approval: approvalSentence(pr.perri))
     }
 
     /// The most of a recorder's name the confirmation says.

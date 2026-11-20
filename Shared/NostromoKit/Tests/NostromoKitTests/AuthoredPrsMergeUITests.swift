@@ -398,6 +398,17 @@ final class AuthoredPrsMergeConfirmationTests: XCTestCase {
         XCTAssertNotEqual(try confirmation(pr(head: "0aaaaaaa")), try confirmation(pr(head: "0bbbbbbb")))
     }
 
+    func testTheConfirmationCarriesWhoApprovedSoARerecordedApprovalIsADifferentConfirmation() throws {
+        let perri = try confirmation(pr(perri: verdict(by: "perri:cody-pr-1")))
+        let cody = try confirmation(pr(perri: verdict(by: "cody:focus-x")))
+        let nobody = try confirmation(pr(perri: verdict(by: nil)))
+        XCTAssertEqual(perri.approval, "Perri approved.")
+        XCTAssertEqual(cody.approval, "Approval recorded by cody:focus-x, not by Perri.")
+        XCTAssertEqual(nobody.approval, "Approval recorder unknown, not confirmed as Perri.")
+        XCTAssertNotEqual(perri, cody, "the app compares these to cancel a confirmation whose sentence went untrue")
+        XCTAssertTrue(cody.message.contains(cody.approval), "the sentence the person reads is the one carried")
+    }
+
     func testAPrWithNoBaseSaysTheBaseBranch() throws {
         let c = try confirmation(pr(baseRef: nil))
         XCTAssertEqual(c.message, "Squash and merge #458 Fix the thing into the base branch? Head 0123abcd. Perri approved. Human approval: yes. Checks: green.")
