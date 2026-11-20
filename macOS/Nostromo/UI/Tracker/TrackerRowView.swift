@@ -190,12 +190,17 @@ final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
     /// The item's fold control (nil on a row with nothing under the fold).
     private(set) var disclosureButton: TrackerDisclosureButton?
     private var hazardEdge: NSView?
+    /// A staged command's block (display-only: Copy and Ran it, nothing that runs).
+    private(set) var commandBlock: TrackerCommandBlockView?
+    /// Where the command block's Copy writes (tests inject their own).
+    private let commandPasteboard: NSPasteboard
     private let highlightLayer = CALayer()
 
     private var measured: (width: CGFloat, height: CGFloat)?
 
-    init(row: TrackerRow) {
+    init(row: TrackerRow, commandPasteboard: NSPasteboard = .general) {
         self.row = row
+        self.commandPasteboard = commandPasteboard
         super.init(frame: .zero)
         wantsLayer = true
         highlightLayer.backgroundColor = TrackerTheme.changeHighlight.cgColor
@@ -230,6 +235,7 @@ final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
         if !linkChips.isEmpty { parts.append(linkChips.map { $0.link.text }.joined(separator: " · ")) }
         if let staleFootnote { parts.append(staleFootnote.stringValue) }
         if let proseView { parts.append(proseView.plainText) }
+        if let commandBlock { parts.append(commandBlock.displayedText) }
         parts += badges.map(\.stringValue)
         if let timeLabel, !timeLabel.stringValue.isEmpty { parts.append(timeLabel.stringValue) }
         return parts.joined(separator: " ")
@@ -647,6 +653,12 @@ final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
             detailsEditor.frame = NSRect(x: textX, y: y, width: blockWidth, height: eh)
             y += eh
         }
+        if let commandBlock {
+            y += 4
+            let ch = commandBlock.height(forWidth: blockWidth)
+            commandBlock.frame = NSRect(x: textX, y: y, width: blockWidth, height: ch)
+            y += ch
+        }
         if let leadText {
             y += 2
             let lh = leadText.height(forWidth: blockWidth)
@@ -754,6 +766,7 @@ final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
         hasChipLine = false
         disclosure = nil
         hazardEdge = nil
+        commandBlock = nil
         measured = nil
         layer?.backgroundColor = nil
 
@@ -938,6 +951,16 @@ final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
                 addSubview(prose)
                 proseView = prose
             }
+        }
+        if item.isCommand, let command = item.command {
+            // The row already carries the environment badge in its right column.
+            let block = TrackerCommandBlockView(command: command, env: item.env, ran: item.ran,
+                                                canMarkRan: editingEnabled && item.canMarkRan,
+                                                showsEnvBadge: false, pasteboard: commandPasteboard)
+            let itemId = item.id
+            block.onRanIt = { [weak self] in self?.onTick?(itemId) }
+            addSubview(block)
+            commandBlock = block
         }
         hasChipLine = !item.links.isEmpty || item.bound != nil
         for (index, link) in item.links.enumerated() {

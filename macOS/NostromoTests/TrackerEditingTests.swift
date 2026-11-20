@@ -301,9 +301,11 @@ final class TrackerEditingTests: XCTestCase {
         let row = try h.row(command)
         XCTAssertNil(row.tickButton)
         XCTAssertFalse(row.editMenuItems().contains { $0.title == "Status" })
-        h.pane.tick(item: command)
         h.pane.setStatus(item: command, to: "done")
-        XCTAssertTrue(h.sent.isEmpty)
+        XCTAssertTrue(h.sent.isEmpty, "the status menu never applies to a command")
+        // The tick of a command is the command block's "Ran it" (a human action; T4).
+        h.pane.tick(item: command)
+        XCTAssertEqual(h.sent.map(\.ops), [[.status(id: command, status: "done")]])
     }
 
     // MARK: - The title editor

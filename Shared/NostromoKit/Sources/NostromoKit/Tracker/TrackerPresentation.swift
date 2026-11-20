@@ -352,6 +352,11 @@ public struct TrackerItemRow: Equatable {
     /// The environment is one a mistake there hurts (`PROD`, `CANADA`, `DEMO`, `ENV?`).
     public let isHazard: Bool
     public let kind: TrackerItemKindWire
+    /// The staged command as the daemon sent it (nil on a plain item). Untrusted text: draw
+    /// `TrackerCommandText.displayed(_:)`, never this.
+    public let command: String?
+    /// The user ticked "Ran it" (or edited `[x]` into the file).
+    public let ran: Bool
     /// The item's exact markdown in the file.
     public let source: String
     /// The task text as stored, raw markdown (what an editor opens with).
@@ -371,6 +376,10 @@ public struct TrackerItemRow: Equatable {
     /// (its status follows its source).
     public var isTickable: Bool { kind == .item && bound == nil }
     public var isStatusEditable: Bool { isTickable }
+    /// A staged command: the pane shows its command block instead of a tick.
+    public var isCommand: Bool { kind == .command && command != nil }
+    /// "Ran it" applies: a human action on a command (the pane's Tick; an agent can never do it).
+    public var canMarkRan: Bool { isCommand }
     /// "Status follows Mother job" for a bound item, nil otherwise.
     public var boundTooltip: String? {
         bound.map { "Status follows \(TrackerConflictText.sourceLabel($0.source))" }
@@ -772,6 +781,8 @@ public enum TrackerPresenter {
             envBadge: wire.env.flatMap(TrackerEnvBadge.text),
             isHazard: wire.env.map(TrackerEnvBadge.isHazard) ?? false,
             kind: wire.kind,
+            command: wire.command,
+            ran: wire.ran,
             source: wire.source,
             editText: wire.text,
             editNote: wire.note,
@@ -808,6 +819,39 @@ extension TrackerStatusWire {
         case .done: return "done"
         case .unknown(let raw): return raw
         }
+    }
+}
+
+/// What the command block draws and Copy copies. The daemon refuses hostile command text; the Mac
+/// still treats whatever arrives as untrusted: it keeps line feeds and tabs, drops every other control,
+/// format (bidi, zero-width, BOM) and line/paragraph-separator character, and caps the length.
+public enum TrackerCommandText {
+    public static let maxScalars = 8_000
+
+    public static func displayed(_ raw: String) -> String {
+        var out = String.UnicodeScalarView()
+        var count = 0
+        for scalar in raw.unicodeScalars {
+            if count >= maxScalars { break }
+            switch scalar {
+            case "\n", "\t":
+                break
+            default:
+                switch scalar.properties.generalCategory {
+                case .control, .format, .lineSeparator, .paragraphSeparator: continue
+                default: break
+                }
+            }
+            out.append(scalar)
+            count += 1
+        }
+        return String(out)
+    }
+
+    /// "3 lines" for a command of more than one line, nil for one line.
+    public static func lineBadge(_ displayed: String) -> String? {
+        let lines = displayed.split(separator: "\n", omittingEmptySubsequences: false).count
+        return lines > 1 ? "\(lines) lines" : nil
     }
 }
 

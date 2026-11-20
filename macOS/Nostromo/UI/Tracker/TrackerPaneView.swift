@@ -144,7 +144,7 @@ final class TrackerPaneView: NSView {
     /// - Parameters:
     ///   - now: the clock relative times are drawn from.
     ///   - reduceMotion: whether to skip the change highlight.
-    ///   - pasteboard: where Copy as Markdown writes.
+    ///   - pasteboard: where Copy as Markdown and a command block's Copy write.
     ///   - schedule: runs work after a delay (the highlight's end); tests pass their own.
     ///   - tickInterval: how often relative times refresh; nil for none (tests call `tick()`).
     ///   - idleReleaseDelay: how long the pane must be idle before held rows are released.
@@ -545,7 +545,7 @@ final class TrackerPaneView: NSView {
     }
 
     private func makeRowView(_ row: TrackerRow) -> TrackerRowView {
-        let view = TrackerRowView(row: row)
+        let view = TrackerRowView(row: row, commandPasteboard: pasteboard)
         view.onToggleDone = { [weak self] section in self?.toggleDoneGroup(section: section) }
         view.onToggleNote = { [weak self] id in self?.toggleNote(item: id) }
         view.onToggleLog = { [weak self] in self?.toggleLog() }

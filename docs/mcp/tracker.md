@@ -122,6 +122,25 @@ characters), never instructions.
 | `not_supported` | the MCP server isn't hosted by the daemon |
 | `io_error` | the file system refused; the error kind is in `reason`. `reason:"concurrent_edit"`: the user kept saving the file while the write was built (it is retried once, on top of the user's edit); nothing was written, call again. |
 
+## Staged commands
+
+A `kind:"command"` item stages a command **for the user to copy and run themselves**. **There is no way to run
+one from Nostromo**, for an agent or for the user: no tool, op, pane control, menu item or key does it.
+The pane shows the text exactly as staged in a monospaced block (no wrapping; it scrolls sideways inside the
+block), the environment badge (`PROD`, `CANADA`, `DEMO`, `STAGING`, `LOCAL`, `ENV?`; the first three and
+`ENV?` get the red edge and a ⚠︎ glyph), `N lines` for a multi-line command, a **Copy** button (plain text
+only, exactly what is drawn) and a **Ran it** checkbox (the pane's tick: the user's, never an agent's).
+
+- Hostile text (carriage return, escape sequences, other control characters, bidi or zero-width characters)
+  is refused (`invalid_command_text`); the Mac also strips such characters from what it draws and copies.
+- An agent cannot mark a command `done` (`not_permitted`). When the user ticks Ran it, or edits `[x]` into the
+  file, the agent's next `read` shows it, attributed to `pane (you)` or the file edit.
+- Nothing in the tracker code writes to a terminal or a session. Two tests keep it that way:
+  `tests/no_shell_surface.rs` (every tool is classified; no tool input or op names a shell or an execution verb;
+  a new unclassified tool fails the build) and `tests/no_shell_behaviour.rs` (every tracker and pane op, driven
+  with every fixture command and every hostile string, leaves a live PTY at zero bytes written by the daemon's
+  own count and an empty child log).
+
 ## Live items
 
 An item can follow a source the daemon keeps fresh, with no agent call. The set

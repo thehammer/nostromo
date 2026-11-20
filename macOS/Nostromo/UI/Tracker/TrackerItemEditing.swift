@@ -154,7 +154,7 @@ final class TrackerItemEditing {
 
     /// The tick: done, or (on a done item) the status it had before this pane ticked it, else todo.
     func tick(_ item: TrackerItemRow, base: TrackerBase) {
-        guard item.isTickable else { return }
+        guard item.isTickable || item.canMarkRan else { return }
         if item.isDone {
             setStatus(item, to: statusBeforeTick[item.id] ?? "todo", base: base, name: "Tick")
         } else {
@@ -164,7 +164,7 @@ final class TrackerItemEditing {
     }
 
     func setStatus(_ item: TrackerItemRow, to status: String, base: TrackerBase, name: String = "Status") {
-        guard item.isStatusEditable, status != item.status.wireName else { return }
+        guard item.isStatusEditable || (item.canMarkRan && name == "Tick"), status != item.status.wireName else { return }
         perform([.status(id: item.id, status: status)], inverse: [.status(id: item.id, status: item.status.wireName)],
                 name: name, base: base)
     }

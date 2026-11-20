@@ -56,7 +56,7 @@ enum AppControlTracker {
             return ["held": state, "held_reason": reason, "model_section": section.map { $0 as Any } ?? NSNull(),
                     "shown_section": shown.map { $0 as Any } ?? NSNull(),
                     "shown_expanded": shownExpanded[item.id] ?? (item.isExpanded),
-                    "tickable": editEnabled && item.isTickable,
+                    "tickable": editEnabled && (item.isTickable || item.canMarkRan),
                     "status_editable": editEnabled && item.isStatusEditable,
                     "editing": editing[item.id] ?? "none"]
         }
@@ -159,6 +159,17 @@ enum AppControlTracker {
     }
 
     static func itemJSON(_ item: TrackerItemRow, folded: Bool, state: [String: Any], stub: String? = nil) -> [String: Any] {
+        var json = baseItemJSON(item, folded: folded, state: state, stub: stub)
+        // The command block's fields, as drawn (never the raw text), so `tracker show` stays honest.
+        json["kind"] = item.isCommand ? "command" : "item"
+        let shown = item.command.map { TrackerCommandText.displayed($0) }
+        json["command"] = shown.map { $0 as Any } ?? NSNull()
+        json["command_lines"] = shown.flatMap { TrackerCommandText.lineBadge($0) }.map { $0 as Any } ?? NSNull()
+        json["ran"] = item.ran
+        return json
+    }
+
+    private static func baseItemJSON(_ item: TrackerItemRow, folded: Bool, state: [String: Any], stub: String? = nil) -> [String: Any] {
         [
             "id": item.id,
             "text": item.text,
