@@ -431,6 +431,7 @@ final class AuthoredPrRowView: NSView {
             noticeStack.topAnchor.constraint(equalTo: last.topAnchor),
             noticeStack.leadingAnchor.constraint(equalTo: last.leadingAnchor),
             noticeStack.heightAnchor.constraint(equalTo: last.heightAnchor),
+            noticeLabel.heightAnchor.constraint(equalToConstant: Self.lineHeight),
 
             tellButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -side),
             tellButton.centerYAnchor.constraint(equalTo: reviewLabel.centerYAnchor),
@@ -502,7 +503,9 @@ final class AuthoredPrRowView: NSView {
         configurePerri(model.perriBadge)
         configureMerge(model.mergeButton)
         configureNotice(model.mergeNotice)
-        // Never both: Tell is on a row that needs you, Merge on one that is ready.
+        // Never both: Tell is on a row that needs you, Merge on one that is ready. A model that somehow carries
+        // both shows the Merge button only: the view does not trust the model to keep them apart.
+        if !mergeButton.isHidden { tellButton.isHidden = true }
         let sideButton: NSButton? = !mergeButton.isHidden ? mergeButton : (!tellButton.isHidden ? tellButton : nil)
         updateTrailingEdge(beside: sideButton)
 
