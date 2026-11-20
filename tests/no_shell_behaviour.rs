@@ -275,20 +275,25 @@ fn upserts_with(text: &str, id: &str) -> Vec<Value> {
 }
 
 #[tokio::test]
-async fn driving_every_tracker_op_with_every_command_and_hostile_string_writes_no_byte_to_the_pty() {
+async fn driving_every_tracker_op_with_every_command_and_hostile_string_writes_no_byte_to_the_pty()
+{
     let w = World::new();
     let pty = w.pty(TAG);
     assert_eq!(pty.session.input_bytes_written(), 0, "a fresh PTY");
 
-    let opened = w.tool(json!({"op": "open", "topic": "no-shell", "sections": ["now", "next"]})).await;
+    let opened = w
+        .tool(json!({"op": "open", "topic": "no-shell", "sections": ["now", "next"]}))
+        .await;
     assert_eq!(opened["ok"], json!(true), "{opened}");
 
     // Every fixture command is staged, accepted and stored exactly as given.
     for (i, (name, command)) in commands().iter().enumerate() {
         let id = format!("cmd-{i}");
         let res = w
-            .tool(json!({"op": "upsert", "id": id, "section": "now", "text": format!("Stage {name}"),
-                         "kind": "command", "command": command, "env": "prod"}))
+            .tool(
+                json!({"op": "upsert", "id": id, "section": "now", "text": format!("Stage {name}"),
+                         "kind": "command", "command": command, "env": "prod"}),
+            )
             .await;
         assert_eq!(res["ok"], json!(true), "{name} must be accepted: {res}");
         let view = w.registry.board_view(TAG).expect("board");
@@ -296,7 +301,9 @@ async fn driving_every_tracker_op_with_every_command_and_hostile_string_writes_n
             .nodes
             .iter()
             .find_map(|n| match n {
-                nostromo::tracker::view::ViewNode::Item(item) if item.id == id => Some(item.clone()),
+                nostromo::tracker::view::ViewNode::Item(item) if item.id == id => {
+                    Some(item.clone())
+                }
                 _ => None,
             })
             .unwrap_or_else(|| panic!("{name}: item not on the board"));
@@ -304,10 +311,14 @@ async fn driving_every_tracker_op_with_every_command_and_hostile_string_writes_n
         assert!(!stored.ran, "{name}: staging never marks a command run");
     }
     // The agent still cannot mark one done, and every other status is fine.
-    let refused = w.tool(json!({"op": "status", "id": "cmd-0", "status": "done"})).await;
+    let refused = w
+        .tool(json!({"op": "status", "id": "cmd-0", "status": "done"}))
+        .await;
     assert_eq!(refused["error"], json!("not_permitted"), "{refused}");
     for status in ["todo", "in-progress", "blocked", "needs-you"] {
-        let res = w.tool(json!({"op": "status", "id": "cmd-0", "status": status})).await;
+        let res = w
+            .tool(json!({"op": "status", "id": "cmd-0", "status": status}))
+            .await;
         assert_eq!(res["ok"], json!(true), "{status}: {res}");
     }
 
@@ -325,7 +336,10 @@ async fn driving_every_tracker_op_with_every_command_and_hostile_string_writes_n
     for (name, text) in hostile() {
         for (n, args) in upserts_with(&text, "victim").into_iter().enumerate() {
             let res = w.tool(args.clone()).await;
-            assert!(res.get("ok").is_some(), "{name}/{n}: an answer, not a crash: {res}");
+            assert!(
+                res.get("ok").is_some(),
+                "{name}/{n}: an answer, not a crash: {res}"
+            );
         }
     }
     // Clean items so the ops below have something real to act on.
@@ -343,16 +357,43 @@ async fn driving_every_tracker_op_with_every_command_and_hostile_string_writes_n
     }
 
     // Every pane op (T3a), including the user's "Ran it" tick, with hostile text too.
-    assert!(w.pane(vec![pane_status("cmd-1", "done")]), "the user may tick a command");
+    assert!(
+        w.pane(vec![pane_status("cmd-1", "done")]),
+        "the user may tick a command"
+    );
     for (_, text) in hostile() {
         w.pane(vec![
-            TrackerPaneOp::Add { section: "now".into(), title: text.clone(), body: Some(text.clone()), before: None, after: None },
-            TrackerPaneOp::Edit { id: "cmd-2".into(), title: Some(text.clone()), text: None, body: Some(text.clone()) },
-            TrackerPaneOp::RestoreText { id: "cmd-2".into(), text: text.clone() },
-            TrackerPaneOp::Restore { source: format!("- [ ] {text}\n"), section: "now".into(), before: None, after: None },
+            TrackerPaneOp::Add {
+                section: "now".into(),
+                title: text.clone(),
+                body: Some(text.clone()),
+                before: None,
+                after: None,
+            },
+            TrackerPaneOp::Edit {
+                id: "cmd-2".into(),
+                title: Some(text.clone()),
+                text: None,
+                body: Some(text.clone()),
+            },
+            TrackerPaneOp::RestoreText {
+                id: "cmd-2".into(),
+                text: text.clone(),
+            },
+            TrackerPaneOp::Restore {
+                source: format!("- [ ] {text}\n"),
+                section: "now".into(),
+                before: None,
+                after: None,
+            },
         ]);
     }
-    w.pane(vec![TrackerPaneOp::Move { id: "cmd-3".into(), section: "next".into(), before: None, after: None }]);
+    w.pane(vec![TrackerPaneOp::Move {
+        id: "cmd-3".into(),
+        section: "next".into(),
+        before: None,
+        after: None,
+    }]);
     w.pane(vec![TrackerPaneOp::ClearBadge { id: "cmd-3".into() }]);
     w.pane(vec![TrackerPaneOp::AckDropped { id: "cmd-3".into() }]);
     w.pane(vec![pane_status("cmd-1", "todo")]);
@@ -368,11 +409,18 @@ async fn driving_every_tracker_op_with_every_command_and_hostile_string_writes_n
     let _ = w.rx.lock().unwrap().try_recv();
 
     // The daemon's own count of bytes written to the PTY master: zero. The child received nothing.
-    assert_eq!(pty.session.input_bytes_written(), 0, "the daemon wrote to the PTY");
+    assert_eq!(
+        pty.session.input_bytes_written(),
+        0,
+        "the daemon wrote to the PTY"
+    );
     std::thread::sleep(Duration::from_millis(200));
     assert!(pty.log().is_empty(), "the child received {:?}", pty.log());
     // No agent session was reached either: none was ever started, and no tracker op started one.
-    assert!(w.sessions.lock().unwrap().list().is_empty(), "a tracker op reached a session");
+    assert!(
+        w.sessions.lock().unwrap().list().is_empty(),
+        "a tracker op reached a session"
+    );
 }
 
 #[test]
@@ -413,10 +461,18 @@ fn the_tracker_code_names_nothing_that_writes_to_a_terminal_or_a_session() {
         std::fs::read_dir(root.join("src/mcp/tools"))
             .unwrap()
             .map(|e| e.unwrap().path())
-            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("tracker")),
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("tracker")
+            }),
     );
     let mut found = Vec::new();
-    for file in files.into_iter().filter(|p| p.extension().is_some_and(|e| e == "rs")) {
+    for file in files
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "rs"))
+    {
         let text = std::fs::read_to_string(&file).unwrap();
         // Production code (before `#[cfg(test)]`) may run `git` with a null stdin, but may name none of these.
         let production = text.split("#[cfg(test)]").next().unwrap();

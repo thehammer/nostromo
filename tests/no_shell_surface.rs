@@ -367,13 +367,13 @@ fn the_tracker_op_enum_is_exactly_the_seven_board_ops() {
     want.sort_unstable();
     assert_eq!(ops, want, "a new tracker op needs a no-shell review");
     // The per-item `ops` batch carries the same verbs, minus open/read.
-    let mut batch: Vec<&str> =
-        descriptor["inputSchema"]["properties"]["ops"]["items"]["properties"]["op"]["enum"]
-            .as_array()
-            .expect("batch op enum")
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
+    let mut batch: Vec<&str> = descriptor["inputSchema"]["properties"]["ops"]["items"]
+        ["properties"]["op"]["enum"]
+        .as_array()
+        .expect("batch op enum")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
     batch.sort_unstable();
     assert_eq!(batch, ["log", "move", "remove", "status", "upsert"]);
 }

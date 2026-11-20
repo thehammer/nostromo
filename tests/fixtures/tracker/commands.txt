@@ -43,3 +43,8 @@ hostile_word_joiner	echo a\u{2060}b
 hostile_bom	\u{feff}echo hi
 hostile_line_separator	echo a\u{2028}b
 hostile_paragraph_separator	echo a\u{2029}b
+hostile_hangul_filler	echo a\u{3164}b
+hostile_hangul_choseong_filler	echo a\u{115f}b
+hostile_halfwidth_hangul_filler	echo a\u{ffa0}b
+hostile_braille_blank	echo a\u{2800}b
+hostile_combining_grapheme_joiner	echo a\u{34f}b

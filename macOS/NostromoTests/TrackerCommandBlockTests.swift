@@ -228,7 +228,7 @@ final class TrackerCommandBlockTests: XCTestCase {
     }
 
     func testWhatIsDrawnAndCopiedHasNoControlBidiOrZeroWidthCharacterWhateverArrives() {
-        let hostile = "echo a\u{1b}[31mb\u{9b}c\r\u{202e}d\u{200b}e\u{feff}f\u{7}g\u{2028}h\nsecond\tline"
+        let hostile = "echo a\u{1b}[31mb\u{9b}c\r\u{202e}d\u{200b}e\u{feff}f\u{7}g\u{2028}h\u{3164}\u{2800}\nsecond\tline"
         let board = pasteboard()
         let view = block(hostile, board: board)
         XCTAssertEqual(view.displayedText, "echo a[31mbcdefgh\nsecond\tline")

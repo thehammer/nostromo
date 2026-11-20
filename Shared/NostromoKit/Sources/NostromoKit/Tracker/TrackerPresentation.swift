@@ -827,6 +827,7 @@ extension TrackerStatusWire {
 /// format (bidi, zero-width, BOM) and line/paragraph-separator character, and caps the length.
 public enum TrackerCommandText {
     public static let maxScalars = 8_000
+    private static let invisiblePadding: Set<UInt32> = [0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0x034F]
 
     public static func displayed(_ raw: String) -> String {
         var out = String.UnicodeScalarView()
@@ -841,6 +842,9 @@ public enum TrackerCommandText {
                 case .control, .format, .lineSeparator, .paragraphSeparator: continue
                 default: break
                 }
+                // Blank-looking padding that could hide text off the block's edge (the daemon refuses
+                // these too: `is_invisible`).
+                if invisiblePadding.contains(scalar.value) { continue }
             }
             out.append(scalar)
             count += 1
