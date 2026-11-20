@@ -187,6 +187,34 @@ turns merged without waiting for the next poll. The codes: `ok`, `not_found`, `n
 Not verified by tests, because it needs the real thing: a merge on a real PR, and whether a real token's scope
 allows merging.
 
+**In the Mac app** (slice C). Rows show Perri's verdict and, in the READY group, a Merge button. Nothing appears
+without the matching feature: the badge needs `authored_prs_perri_v1`, the button needs that and
+`authored_prs_merge_v1` (an older daemon gets no half-working control).
+
+- **Badge** on every open row that has a worth-showing verdict: `Perri ✓` (approved, for the current head),
+  `Perri ✓ older` (approved an earlier head: muted, and a new push needs a new review), `Perri ✗` (changes
+  requested), `Perri comments`. No verdict, an unknown one, or a non-approval of an older head: no badge. The
+  tooltip says when, by whom and the head; VoiceOver says "Perri approved this version" and so on.
+- **Button** on open READY rows. Enabled only when `mergeReadiness` is `.ready`: a human approved, checks are
+  green (or there are none) and Perri approved the head the row shows. Otherwise it is shown off with the first
+  reason (`Draft`, `Checks not green`, `Waiting for human approval`, `Needs Perri's review`, `Perri approved an
+  older version`, `Perri requested changes`) in its tooltip, its VoiceOver label and at the end of the row's
+  review line.
+- **Press** is a human gesture (`HumanGesture.permit`, like the hand-off buttons): a synthesised or Accessibility
+  press does nothing. It opens a one-step confirmation: `Squash and merge #458 <title> into <base>? Head
+  0123abcd. Perri approved. Human approval: yes. Checks: green.` (title cleaned and capped at 80 characters).
+  Cancel is the default button (Return cancels), Merge has no key equivalent and is gesture-checked again,
+  Escape cancels. The confirmation is cancelled when a snapshot changes that row's head or makes it not ready.
+- **Confirm** sends one `authored_pr_merge` carrying the head short sha **of the row the person pressed on**,
+  never a newer snapshot's. The row says `Merging…` (a second press opens nothing), then `Merged` or a notice in
+  place of its owner line with a dismiss button. The row never regroups on the strength of our own request; only
+  the next snapshot moves it. A notice is the words of the daemon's code (an unknown code is a generic `The merge
+  failed`, never success) and stays until dismissed, the row's head changes (not for `head_changed`, which is
+  about exactly that), a new attempt starts or the PR is no longer open.
+- No new key equivalents; the context menu has no Merge item; Return on a row never merges. VoiceOver gets a
+  `Merge` custom action only while the button is enabled, and `Dismiss merge message` while a notice shows.
+- There is no admin merge and no hidden path to one: the transport has the one verb and the one request shape.
+
 ## What is logged
 
 Counts, durations, error classes and posture changes only. Never a title, branch,
