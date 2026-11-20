@@ -35,6 +35,19 @@
 //        -> testAnAttemptNeverMovesARowBetweenGroups
 //   9. A merge code worded as another, or the daemon's string shown
 //        -> testEveryMergeCodeHasItsExactWords
+//  10. A verdict recorded by an agent other than `perri` (or by nobody the app can name) badged, spoken or
+//      confirmed as Perri's
+//      a. `recorder` ignoring the agent part
+//        -> testAnApprovalRecordedByCodyIs..., testEveryKindOfBadgeNamesAnotherRecorder...,
+//           testTheAgentNameIsMatchedExactly... (and their hostile twins)
+//      b. the altered-value check dropped, so `per<ZWSP>ri:x` (or a cut, edge-spaced or bidi value) reads as perri
+//        -> AuthoredPrsHostileRecorderTests (AuthoredPrsMergeTests.swift): testAZeroWidthCharacterInsidePerri...,
+//           testBidiAndControlCharacters..., testAnEdgeSpace..., testAValueCutForLength...
+//      c. the credit dropped from the confirmation sentence only
+//        -> testAnApprovalRecordedByCodyIs..., testAValueThatIsNotAgentColonTag..., testAVeryLongCodyValueStaysBounded...
+//      d. the credit dropped from the spoken label only
+//        -> testAnApprovalRecordedByCodyIs..., testEveryKindOfBadgeSaysRecorderUnknown...,
+//           testNoVerdictKindSpeaksAsPerriForAHostileRecorder
 
 import XCTest
 @testable import NostromoKit
@@ -46,7 +59,7 @@ private let utc = TimeZone(identifier: "UTC")!
 
 /// Perri's verdict, five minutes old by default.
 private func verdict(_ verdict: AuthoredPrPerriVerdict = .approved, current: Bool = true, minutesAgo: Int? = 5,
-                     by: String? = "perri-1") -> AuthoredPrPerri {
+                     by: String? = "perri:cody-pr-1") -> AuthoredPrPerri {
     AuthoredPrPerri(verdict: verdict, at: minutesAgo.map { t0.addingTimeInterval(-Double($0) * 60) }, by: by,
                     forCurrentHead: current)
 }
@@ -79,7 +92,7 @@ private func attempt(_ progress: AuthoredPrMergeProgress, head: String = "0123ab
 
 private let allCodes: [AuthoredPrMergeCode] = [
     .notFound, .notOpen, .draft, .notApproved, .checksNotGreen, .notMergeable, .blocked, .behind, .headChanged,
-    .perriNotApproved, .perriStale, .tokenCannotMerge, .rateLimited, .unreachable, .busy, .notPermitted, .unknown,
+    .perriNotApproved, .perriStale, .tokenCannotMerge, .rateLimited, .unreachable, .busy, .notPermitted, .gestureRefused, .unknown,
 ]
 
 // MARK: - The Perri badge
@@ -92,7 +105,7 @@ final class AuthoredPrsPerriBadgeTests: XCTestCase {
         XCTAssertEqual(b.text, "Perri ✓")
         XCTAssertFalse(b.isMuted, "a current approval is shown at full strength")
         XCTAssertEqual(b.accessibilityLabel, "Perri approved this version")
-        XCTAssertEqual(b.tooltip, "Approved 5m ago by perri-1 · head 0123abcd")
+        XCTAssertEqual(b.tooltip, "Approved 5m ago by perri:cody-pr-1 · head 0123abcd")
     }
 
     func testAnApprovalOfAnOlderHeadIsMutedSaysOlderAndThatANewPushNeedsANewReview() throws {
@@ -101,7 +114,7 @@ final class AuthoredPrsPerriBadgeTests: XCTestCase {
         XCTAssertEqual(b.text, "Perri ✓ older")
         XCTAssertTrue(b.isMuted, "an old approval is not a current one: it is quieter")
         XCTAssertEqual(b.accessibilityLabel, "Perri approved an older version")
-        XCTAssertEqual(b.tooltip, "Approved 5m ago by perri-1 for an older version of this PR. A new push needs a new review.")
+        XCTAssertEqual(b.tooltip, "Approved 5m ago by perri:cody-pr-1 for an older version of this PR. A new push needs a new review.")
     }
 
     func testChangesRequestedOfThisHeadIsPerriCross() throws {
@@ -110,7 +123,7 @@ final class AuthoredPrsPerriBadgeTests: XCTestCase {
         XCTAssertEqual(b.text, "Perri ✗")
         XCTAssertFalse(b.isMuted)
         XCTAssertEqual(b.accessibilityLabel, "Perri requested changes")
-        XCTAssertEqual(b.tooltip, "Changes requested 5m ago by perri-1 · head 0123abcd")
+        XCTAssertEqual(b.tooltip, "Changes requested 5m ago by perri:cody-pr-1 · head 0123abcd")
     }
 
     func testACommentOfThisHeadIsPerriComments() throws {
@@ -119,7 +132,7 @@ final class AuthoredPrsPerriBadgeTests: XCTestCase {
         XCTAssertEqual(b.text, "Perri comments")
         XCTAssertFalse(b.isMuted)
         XCTAssertEqual(b.accessibilityLabel, "Perri left comments")
-        XCTAssertEqual(b.tooltip, "Commented 5m ago by perri-1 · head 0123abcd")
+        XCTAssertEqual(b.tooltip, "Commented 5m ago by perri:cody-pr-1 · head 0123abcd")
     }
 
     func testColourIsNeverTheOnlySignalTheGlyphIsInTheText() throws {
@@ -168,7 +181,7 @@ final class AuthoredPrsPerriBadgeTests: XCTestCase {
             XCTAssertTrue(b.tooltip.contains("\(words) ago"), "\(minutes) min: \(b.tooltip)")
         }
         let tooltip = try XCTUnwrap(badge(pr(perri: verdict(.approved, minutesAgo: 120)))).tooltip
-        XCTAssertEqual(tooltip, "Approved \(AuthoredPrsPresentation.age(from: t0.addingTimeInterval(-7200), now: t0)) ago by perri-1 · head 0123abcd",
+        XCTAssertEqual(tooltip, "Approved \(AuthoredPrsPresentation.age(from: t0.addingTimeInterval(-7200), now: t0)) ago by perri:cody-pr-1 · head 0123abcd",
                        "the same words the row's age uses")
     }
 
@@ -180,12 +193,12 @@ final class AuthoredPrsPerriBadgeTests: XCTestCase {
 
         let noWhen = try XCTUnwrap(badge(pr(perri: verdict(.approved, minutesAgo: nil)))).tooltip
         XCTAssertFalse(noWhen.contains("ago"), noWhen)
-        XCTAssertTrue(noWhen.contains("perri-1"), noWhen)
+        XCTAssertTrue(noWhen.contains("perri:cody-pr-1"), noWhen)
         XCTAssertTrue(noWhen.contains("0123abcd"), noWhen)
 
         let noHead = try XCTUnwrap(badge(pr(perri: verdict(.approved), head: nil))).tooltip
         XCTAssertFalse(noHead.contains("head"), noHead)
-        XCTAssertTrue(noHead.hasPrefix("Approved 5m ago by perri-1"), noHead)
+        XCTAssertTrue(noHead.hasPrefix("Approved 5m ago by perri:cody-pr-1"), noHead)
 
         let bare = try XCTUnwrap(badge(pr(perri: verdict(.changesRequested, minutesAgo: nil, by: nil), head: nil))).tooltip
         XCTAssertTrue(bare.hasPrefix("Changes requested"), bare)
@@ -522,6 +535,12 @@ final class AuthoredPrsMergeNoticeTests: XCTestCase {
 
 final class AuthoredPrsMergeFailureWordsTests: XCTestCase {
 
+    func testNoWireCodeIsTheLocalGestureRefusal() {
+        for wire in ["gesture_refused", "gestureRefused", "refused", "", "merge_was_refused"] {
+            XCTAssertNotEqual(AuthoredPrMergeCode(wire: wire), .gestureRefused, "\(wire): only this app's own refusal is that")
+        }
+    }
+
     func testEveryMergeCodeHasItsExactWords() {
         let table: [(AuthoredPrMergeCode, String)] = [
             (.notFound, "This PR is no longer in your list, so it wasn't merged"),
@@ -540,6 +559,7 @@ final class AuthoredPrsMergeFailureWordsTests: XCTestCase {
             (.unreachable, "GitHub or Nostromo isn't reachable: check the PR before trying again"),
             (.busy, "A merge of this PR is already running"),
             (.notPermitted, "Nostromo refused the request"),
+            (.gestureRefused, "Merge was refused: use the button"),
             (.unknown, "The merge failed"),
         ]
         XCTAssertEqual(table.count, allCodes.count, "every code is in the table")
@@ -793,5 +813,161 @@ final class AuthoredPrsMergeGroupsTests: XCTestCase {
         XCTAssertEqual(plain.map(\.count), merged.map(\.count))
         XCTAssertEqual(plain.map(\.hiddenCount), merged.map(\.hiddenCount))
         XCTAssertEqual(plain.map { $0.rows.map(\.id) }, merged.map { $0.rows.map(\.id) })
+    }
+}
+
+
+// MARK: - Who recorded the verdict
+
+/// The daemon writes `by` as `<agent>:<tag>` and any registered focus may record a verdict, so "Perri" is said
+/// only when the agent part is exactly `perri`. Hostile values go through the real decoder in
+/// AuthoredPrsHostileRecorderTests (AuthoredPrsMergeTests.swift).
+final class AuthoredPrsRecorderTests: XCTestCase {
+
+    private let unknownBadge = "Perri ✓ (recorder unknown)"
+    private let unknownLabel = "Approval of this version, recorder unknown"
+    private let unknownSentence = "Approval recorder unknown, not confirmed as Perri."
+
+    private func message(_ perri: AuthoredPrPerri?) throws -> String {
+        try XCTUnwrap(try XCTUnwrap(button(pr(perri: perri))).confirmation, "the row is ready").message
+    }
+
+    private func assertNoInvisibleScalars(_ text: String, _ what: String, file: StaticString = #filePath, line: UInt = #line) {
+        for scalar in text.unicodeScalars {
+            let category = scalar.properties.generalCategory
+            XCTAssertFalse(category == .control || category == .format || category == .lineSeparator || category == .paragraphSeparator,
+                           "\(what): U+\(String(scalar.value, radix: 16)) in \(text.debugDescription)", file: file, line: line)
+        }
+    }
+
+    // perri
+
+    func testAVerdictRecordedByPerriKeepsEveryBadgeLabelAndTheShortConfirmation() throws {
+        for by in ["perri:cody-pr-1", "perri:x", "perri:a:b"] {
+            XCTAssertEqual(try XCTUnwrap(badge(pr(perri: verdict(.approved, by: by)))).text, "Perri ✓", by)
+            XCTAssertEqual(try XCTUnwrap(badge(pr(perri: verdict(.approved, by: by)))).accessibilityLabel,
+                           "Perri approved this version", by)
+            XCTAssertEqual(try XCTUnwrap(badge(pr(perri: verdict(.approved, current: false, by: by)))).text, "Perri ✓ older", by)
+            XCTAssertEqual(try XCTUnwrap(badge(pr(perri: verdict(.changesRequested, by: by)))).text, "Perri ✗", by)
+            XCTAssertEqual(try XCTUnwrap(badge(pr(perri: verdict(.comment, by: by)))).text, "Perri comments", by)
+            XCTAssertEqual(try message(verdict(.approved, by: by)),
+                           "Squash and merge #458 Fix the thing into main? Head 0123abcd. Perri approved. Human approval: yes. Checks: green.", by)
+        }
+    }
+
+    // another agent
+
+    func testAnApprovalRecordedByCodyIsBadgedSpokenAndConfirmedAsCodysNotPerris() throws {
+        let b = try XCTUnwrap(badge(pr(perri: verdict(.approved, by: "cody:focus-x"))))
+        XCTAssertEqual(b.kind, .approved)
+        XCTAssertEqual(b.text, "Perri ✓ (by cody)")
+        XCTAssertEqual(b.accessibilityLabel, "Approval of this version recorded by cody, not by Perri")
+        XCTAssertEqual(b.tooltip, "Approved 5m ago by cody:focus-x · head 0123abcd")
+        XCTAssertEqual(try message(verdict(.approved, by: "cody:focus-x")),
+                       "Squash and merge #458 Fix the thing into main? Head 0123abcd. Approval recorded by cody:focus-x, not by Perri. Human approval: yes. Checks: green.")
+    }
+
+    func testEveryKindOfBadgeNamesAnotherRecorderAndNeverSpeaksAsPerri() throws {
+        let cases: [(AuthoredPrPerri, AuthoredPrPerriBadge.Kind, String)] = [
+            (verdict(.approved, by: "cody:focus-x"), .approved, "Perri ✓ (by cody)"),
+            (verdict(.approved, current: false, by: "cody:focus-x"), .olderApproval, "Perri ✓ older (by cody)"),
+            (verdict(.changesRequested, by: "cody:focus-x"), .changesRequested, "Perri ✗ (by cody)"),
+            (verdict(.comment, by: "cody:focus-x"), .comments, "Perri comments (by cody)"),
+        ]
+        for (perri, kind, text) in cases {
+            let b = try XCTUnwrap(badge(pr(perri: perri)), text)
+            XCTAssertEqual(b.kind, kind, text)
+            XCTAssertEqual(b.text, text)
+            XCTAssertTrue(b.accessibilityLabel.contains("cody"), b.accessibilityLabel)
+            XCTAssertTrue(b.accessibilityLabel.hasSuffix("recorded by cody, not by Perri"), b.accessibilityLabel)
+            XCTAssertFalse(b.accessibilityLabel.hasPrefix("Perri "), "the spoken words must not begin as Perri's: \(b.accessibilityLabel)")
+        }
+    }
+
+    func testAnOlderApprovalRecordedByCodyIsStillMutedAndSaysOlder() throws {
+        let b = try XCTUnwrap(badge(pr(perri: verdict(.approved, current: false, by: "cody:focus-x"))))
+        XCTAssertTrue(b.isMuted)
+        XCTAssertTrue(b.accessibilityLabel.contains("older version"), b.accessibilityLabel)
+        XCTAssertTrue(b.tooltip.contains("A new push needs a new review."), b.tooltip)
+    }
+
+    func testTheAgentNameIsMatchedExactlySoAnotherCaseOrALongerNameIsNotPerri() throws {
+        for by in ["Perri:x", "PERRI:x", "perri2:x", "perri.x:y", "xperri:y", "perri_:y"] {
+            let b = try XCTUnwrap(badge(pr(perri: verdict(.approved, by: by))), by)
+            XCTAssertTrue(b.text.hasPrefix("Perri ✓ (by "), "\(by): \(b.text)")
+            XCTAssertFalse(b.accessibilityLabel.hasPrefix("Perri approved"), "\(by): \(b.accessibilityLabel)")
+            XCTAssertFalse(try message(verdict(.approved, by: by)).contains("Perri approved."), by)
+        }
+    }
+
+    func testALongAgentNameIsCutInTheBadgeWithAnEllipsisButKeptInTheConfirmation() throws {
+        let agent = String(repeating: "a", count: 30)
+        let b = try XCTUnwrap(badge(pr(perri: verdict(.approved, by: "\(agent):t"))))
+        XCTAssertEqual(b.text, "Perri ✓ (by \(String(repeating: "a", count: 16))…)")
+        XCTAssertTrue(try message(verdict(.approved, by: "\(agent):t")).contains("Approval recorded by \(agent):t, not by Perri."))
+        // 40 is the longest name read as a name.
+        let edge = String(repeating: "b", count: 40)
+        XCTAssertTrue(try XCTUnwrap(badge(pr(perri: verdict(.approved, by: "\(edge):t")))).text.hasPrefix("Perri ✓ (by "))
+        XCTAssertEqual(try XCTUnwrap(badge(pr(perri: verdict(.approved, by: "\(edge)b:t")))).text, unknownBadge, "41 is not a name")
+    }
+
+    func testTheConfirmationCapsAVeryLongRecorderAndStaysBounded() throws {
+        let by = "cody:" + String(repeating: "x", count: 500)
+        let m = try message(verdict(.approved, by: by))
+        XCTAssertTrue(m.contains("Approval recorded by cody:" + String(repeating: "x", count: 55) + "…, not by Perri."), m)
+        XCTAssertLessThan(m.count, 300, "a recorder's name cannot swell the sentence the person acts on")
+        let b = try XCTUnwrap(badge(pr(perri: verdict(.approved, by: by))))
+        XCTAssertEqual(b.text, "Perri ✓ (by cody)")
+    }
+
+    // unknown
+
+    func testAValueThatIsNotAgentColonTagIsRecorderUnknownEverywhere() throws {
+        for by in ["perri-1", "perri", "perri:", ":tag", ":", "", "no colon at all", "a b:tag", "pérri:x", "cody/x:y",
+                   "cody :x", String(repeating: "a", count: 41) + ":t"] {
+            let b = try XCTUnwrap(badge(pr(perri: verdict(.approved, by: by))), by)
+            XCTAssertEqual(b.text, unknownBadge, by.debugDescription)
+            XCTAssertEqual(b.accessibilityLabel, unknownLabel, by.debugDescription)
+            XCTAssertEqual(try message(verdict(.approved, by: by)),
+                           "Squash and merge #458 Fix the thing into main? Head 0123abcd. \(unknownSentence) Human approval: yes. Checks: green.",
+                           by.debugDescription)
+        }
+    }
+
+    func testAnAbsentRecorderIsRecorderUnknownEverywhereAndTheTooltipSaysSo() throws {
+        let b = try XCTUnwrap(badge(pr(perri: verdict(.approved, by: nil))))
+        XCTAssertEqual(b.text, unknownBadge)
+        XCTAssertEqual(b.accessibilityLabel, unknownLabel)
+        XCTAssertEqual(b.tooltip, "Approved 5m ago (recorder unknown) · head 0123abcd")
+        XCTAssertEqual(try message(verdict(.approved, by: nil)),
+                       "Squash and merge #458 Fix the thing into main? Head 0123abcd. \(unknownSentence) Human approval: yes. Checks: green.")
+    }
+
+    func testEveryKindOfBadgeSaysRecorderUnknownWhenNobodyIsNamed() throws {
+        let cases: [(AuthoredPrPerri, String)] = [
+            (verdict(.approved, by: nil), "Perri ✓ (recorder unknown)"),
+            (verdict(.approved, current: false, by: "perri-1"), "Perri ✓ older (recorder unknown)"),
+            (verdict(.changesRequested, by: "perri"), "Perri ✗ (recorder unknown)"),
+            (verdict(.comment, by: nil), "Perri comments (recorder unknown)"),
+        ]
+        for (perri, text) in cases {
+            let b = try XCTUnwrap(badge(pr(perri: perri)), text)
+            XCTAssertEqual(b.text, text)
+            XCTAssertTrue(b.accessibilityLabel.hasSuffix(", recorder unknown"), b.accessibilityLabel)
+            XCTAssertFalse(b.accessibilityLabel.hasPrefix("Perri "), b.accessibilityLabel)
+        }
+    }
+
+    func testAPresentRecorderStillShowsInTheTooltipAsItAlwaysDid() throws {
+        XCTAssertTrue(try XCTUnwrap(badge(pr(perri: verdict(.approved, by: "perri-1")))).tooltip.contains(" by perri-1"))
+    }
+
+    func testNothingInvisibleReachesTheBadgeLabelOrSentenceForBenignRecorders() throws {
+        for by in ["perri:cody-pr-1", "cody:focus-x", "perri-1", nil] {
+            let b = try XCTUnwrap(badge(pr(perri: verdict(.approved, by: by))))
+            assertNoInvisibleScalars(b.text, "text")
+            assertNoInvisibleScalars(b.accessibilityLabel, "label")
+            assertNoInvisibleScalars(try message(verdict(.approved, by: by)), "confirmation")
+        }
     }
 }

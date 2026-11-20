@@ -288,6 +288,9 @@ public enum AuthoredPrsHandoffWords {
 public enum AuthoredPrMergeCode: Equatable, Sendable {
     case notFound, notOpen, draft, notApproved, checksNotGreen, notMergeable, blocked, behind, headChanged
     case perriNotApproved, perriStale, tokenCannotMerge, rateLimited, unreachable, busy, notPermitted
+    /// Not from the daemon (no wire spelling maps to it): this app declined the press because no person's gesture
+    /// was behind it, so nothing was sent.
+    case gestureRefused
     case unknown
 
     public init(wire code: String) {
@@ -346,6 +349,7 @@ public enum AuthoredPrsMergeWords {
         case .unreachable: return "GitHub or Nostromo isn't reachable: check the PR before trying again"
         case .busy: return "A merge of this PR is already running"
         case .notPermitted: return "Nostromo refused the request"
+        case .gestureRefused: return "Merge was refused: use the button"
         case .unknown: return "The merge failed"
         }
     }

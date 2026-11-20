@@ -77,6 +77,8 @@ final class AuthoredPrMerger {
     private(set) var attempts: [String: AuthoredPrMergeAttempt] = [:]
     private(set) var presented: AuthoredPrMergeSession?
     private var presentedRowId: String?
+    /// The Overview that opened the confirmation (weak: a closed window is no owner), see `rowsDidChange`.
+    private weak var presentedBy: AnyObject?
 
     init(transport: AuthoredPrMergeTransport, permit: @escaping AuthoredPrGesture.Permit = AuthoredPrGesture.live) {
         self.transport = transport
@@ -84,16 +86,24 @@ final class AuthoredPrMerger {
     }
 
     /// The row's Merge button, or its VoiceOver action. Opens the confirmation for the row as the person saw it;
-    /// it never sends. Does nothing for a refused gesture, an older daemon, a button that is not ready, or a row
-    /// whose merge is already running or done.
-    func activate(_ model: AuthoredPrRowModel, anchor: NSView, event: NSEvent?, control: NSView) {
+    /// it never sends. Does nothing for an older daemon, a button that is not ready, or a row whose merge is
+    /// already running or done. A refused gesture opens nothing and says so on the row ("Merge was refused: use
+    /// the button"), rather than nothing at all: VoiceOver can leave a stale event behind the Merge action.
+    /// `owner` is the Overview whose press it was.
+    func activate(_ model: AuthoredPrRowModel, anchor: NSView, event: NSEvent?, control: NSView,
+                  owner: AnyObject? = nil) {
         guard transport.isMergeAvailable, let button = model.mergeButton, button.state == .ready,
               let confirmation = button.confirmation else { return }
         switch attempts[model.id]?.progress {
         case .merging?, .merged?: return
         case .failed?, nil: break
         }
-        guard permit(event, control, "merge") else { return }
+        guard permit(event, control, "merge") else {
+            attempts[model.id] = AuthoredPrMergeAttempt(head: confirmation.expectedHeadShaShort,
+                                                        progress: .failed(.gestureRefused))
+            changes.send()
+            return
+        }
 
         // Starting a new attempt: whatever the last one said is old news (a `head_changed` notice would otherwise
         // outlive every later head).
@@ -110,6 +120,7 @@ final class AuthoredPrMerger {
         }
         presented = session
         presentedRowId = rowId
+        presentedBy = owner
         present(session, anchor)
         changes.send()
     }
@@ -121,12 +132,16 @@ final class AuthoredPrMerger {
         changes.send()
     }
 
-    /// The rows the Overview now shows. A confirmation whose row is gone, no longer ready, at another head or
+    /// The rows `reporter` (an Overview) now shows. A confirmation whose row is no longer ready, at another head or
     /// aimed at another base is cancelled: what the person read is not what the row says now. (A retitle or a new
-    /// comment is not: nothing the sentence says has changed.)
-    func rowsDidChange(_ rows: [AuthoredPrRowModel]) {
+    /// comment is not: nothing the sentence says has changed.) The merger is shared by every Overview, and one
+    /// that does not show the row (another filter, the row behind "Show more", a window just opened) says nothing
+    /// about it: only the Overview that opened the confirmation may cancel it for a row it no longer has.
+    func rowsDidChange(_ rows: [AuthoredPrRowModel], from reporter: AnyObject? = nil) {
         guard let session = presented, let id = presentedRowId else { return }
-        let now = rows.first { $0.id == id }.flatMap { $0.mergeButton?.state == .ready ? $0.mergeButton?.confirmation : nil }
+        let row = rows.first { $0.id == id }
+        if row == nil, reporter !== presentedBy { return }
+        let now = row.flatMap { $0.mergeButton?.state == .ready ? $0.mergeButton?.confirmation : nil }
         let read = session.confirmation
         guard now?.expectedHeadShaShort != read.expectedHeadShaShort || now?.base != read.base else { return }
         session.cancel()
@@ -140,6 +155,7 @@ final class AuthoredPrMerger {
         old.cancel()
         presented = nil
         presentedRowId = nil
+        presentedBy = nil
         dismiss()
         if notify { changes.send() }
     }

@@ -91,7 +91,8 @@ final class AuthoredPrMergerTests: MouseQueueTestCase {
             XCTAssertNil(rig.session, "\(kind): nothing opened")
             XCTAssertTrue(rig.shown.isEmpty, "\(kind): nothing was shown")
             XCTAssertTrue(rig.transport.calls.isEmpty, "\(kind): nothing was asked of the daemon")
-            XCTAssertTrue(rig.merger.attempts.isEmpty, "\(kind): nothing is pending")
+            XCTAssertEqual(rig.merger.attempts, [model.id: AuthoredPrMergeAttempt(head: MF.headA, progress: .failed(.gestureRefused))],
+                           "\(kind): nothing is pending; the row says the press was refused")
         }
         // The same call with a person's click does open it: the refusals above were the gesture check.
         rig.activate(model)
@@ -104,6 +105,61 @@ final class AuthoredPrMergerTests: MouseQueueTestCase {
         rig.merger.activate(MF.row(MF.readyPr()), anchor: rig.control, event: nil, control: rig.control)
         XCTAssertNil(rig.session)
         XCTAssertTrue(rig.transport.calls.isEmpty)
+    }
+
+    // MARK: A refused press says so, and the gesture gate is not weakened
+
+    func testARefusedPressLeavesAWordOnTheRowAndAPersonsPressClearsIt() throws {
+        let rig = makeRig()
+        let model = MF.row(MF.readyPr())
+        let event = try NotAHumanGesture.staleEvent.event(in: rig.window)
+        rig.merger.activate(model, anchor: rig.control, event: event, control: rig.control)
+
+        let attempt = try XCTUnwrap(rig.merger.attempts[model.id], "a refusal is not silent")
+        XCTAssertEqual(attempt.progress, .failed(.gestureRefused))
+        XCTAssertEqual(AuthoredPrsPresentation.mergeNotice(MF.readyPr(), attempt: attempt), "Merge was refused: use the button")
+        XCTAssertNil(rig.session)
+        XCTAssertTrue(rig.transport.calls.isEmpty)
+
+        rig.activate(model)   // a person's click: a new attempt, the old word is gone
+        XCTAssertNil(rig.merger.attempts[model.id])
+        XCTAssertNotNil(rig.session)
+    }
+
+    func testARefusedPressNeverTouchesAMergeThatIsRunningOrDone() throws {
+        let rig = makeRig(allowEverything: true)
+        let pr = MF.readyPr()
+        rig.mergeAndWait(pr)
+        rig.merger.permit = { _, _, _ in false }
+        rig.merger.activate(MF.row(pr), anchor: rig.control, event: nil, control: rig.control)
+        XCTAssertEqual(rig.merger.attempts[pr.id]?.progress, .merging, "still waiting for the answer to the one request")
+        rig.transport.answer(.ok(AuthoredPrDone()))
+        rig.merger.activate(MF.row(pr), anchor: rig.control, event: nil, control: rig.control)
+        XCTAssertEqual(rig.merger.attempts[pr.id]?.progress, .merged)
+        XCTAssertEqual(rig.transport.calls.count, 1)
+    }
+
+    /// A person's own click, while the app-control socket is running a request, is not a person's gesture: an agent
+    /// that drives the socket can land its request while a real event is "current". Both the button and the
+    /// confirmation's Merge refuse, and nothing is sent.
+    func testAnAppControlRequestInProgressRefusesEvenAPersonsEventAtTheButtonAndTheConfirmation() throws {
+        let rig = makeRig()
+        let model = MF.row(MF.readyPr())
+        SyntheticInputGate.begin()
+        var ended = false
+        defer { if !ended { SyntheticInputGate.end() } }
+        rig.merger.activate(model, anchor: rig.control, event: MF.human(in: rig.window), control: rig.control)
+        XCTAssertNil(rig.session, "the button opened nothing")
+        XCTAssertEqual(rig.merger.attempts[model.id]?.progress, .failed(.gestureRefused))
+        SyntheticInputGate.end(); ended = true
+
+        rig.activate(model)
+        let session = try XCTUnwrap(rig.session, "precondition: a person opened it")
+        SyntheticInputGate.begin()
+        defer { SyntheticInputGate.end() }
+        session.confirm(event: MF.human(in: rig.window), control: rig.control)
+        XCTAssertTrue(rig.transport.calls.isEmpty, "Merge in the confirmation sent nothing")
+        XCTAssertTrue(rig.session === session, "and the confirmation is still open")
     }
 
     func testAnUnavailableButtonOpensNothingWhateverTheGesture() {
@@ -495,6 +551,13 @@ final class AuthoredPrMergeConfirmationViewTests: MouseQueueTestCase {
         XCTAssertFalse(APT.hasLink(vc.messageLabel.attributedStringValue), "no link is made out of it")
     }
 
+    func testTheConfirmationSaysWhoRecordedAnApprovalThatWasNotPerris() throws {
+        let (_, _, vc) = try open(MF.readyPr(perri: MF.verdict(by: "cody:focus-x")))
+        XCTAssertTrue(vc.messageLabel.stringValue.contains("Approval recorded by cody:focus-x, not by Perri."),
+                      vc.messageLabel.stringValue)
+        XCTAssertFalse(vc.messageLabel.stringValue.contains("Perri approved."), "it does not say Perri approved")
+    }
+
     func testAPrTitleWithMarkupIsShownAsTextNotRendered() throws {
         let title = "**bold** <b>x</b> [a link](https://example.com) `code`"
         let (_, session, vc) = try open(MF.readyPr(title: title))
@@ -742,7 +805,7 @@ final class AuthoredPrMergeOverviewTests: MouseQueueTestCase {
 
         XCTAssertFalse(row.perriLabel.isHidden)
         XCTAssertEqual(row.perriLabel.stringValue, "Perri ✓")
-        XCTAssertEqual(row.perriLabel.toolTip, "Approved 5m ago by perri-1 · head 0aaaaaaa")
+        XCTAssertEqual(row.perriLabel.toolTip, "Approved 5m ago by perri:cody-pr-1 · head 0aaaaaaa")
         XCTAssertEqual(row.perriLabel.accessibilityLabel(), "Perri approved this version")
         XCTAssertTrue(try XCTUnwrap(row.accessibilityLabel()).hasSuffix(", Perri approved this version"), "VoiceOver hears the verdict")
 
@@ -894,14 +957,18 @@ final class AuthoredPrMergeOverviewTests: MouseQueueTestCase {
     func testTheRowsButtonDoesNothingForEveryInputThatIsNotAHumanGesture() throws {
         let pr = MF.readyPr()
         let rig = makeRig([pr], allowEverything: false)
-        let row = try rig.rowView(pr)
-        let model = try XCTUnwrap(row.model)
+        // A refused press now leaves a word on the row, which rebuilds the row: each press below goes to the row
+        // as it is NOW (a person only ever clicks the live button, never one the rebuild replaced).
         for kind in NotAHumanGesture.allCases {
+            let row = try rig.rowView(pr)
+            let model = try XCTUnwrap(row.model)
             let event = try kind.event(in: rig.window)
             rig.merger.activate(model, anchor: row, event: event, control: row.mergeButton)
             XCTAssertNil(rig.merger.presented, "\(kind): nothing opened")
             XCTAssertTrue(rig.transport.calls.isEmpty, "\(kind): nothing was asked of the daemon")
         }
+        let row = try rig.rowView(pr)
+        let model = try XCTUnwrap(row.model)
         rig.merger.activate(model, anchor: row, event: MF.human(in: rig.window), control: row.mergeButton)
         XCTAssertNotNil(rig.merger.presented, "a person's click is accepted")
     }
@@ -913,6 +980,7 @@ final class AuthoredPrMergeOverviewTests: MouseQueueTestCase {
         try rig.press(pr)   // `performClick`: the action runs with whatever `NSApp.currentEvent` is (none, or not this window's click)
         XCTAssertNil(rig.merger.presented)
         XCTAssertTrue(rig.transport.calls.isEmpty)
+        XCTAssertEqual(try rig.noticeText(pr), "Merge was refused: use the button", "the row says so instead of nothing happening")
     }
 
     func testReturnNeverMergesOrOpensAConfirmation() throws {
@@ -1202,6 +1270,9 @@ final class AuthoredPrMergeOverviewTests: MouseQueueTestCase {
         let again = try XCTUnwrap(try guarded.rowView(pr).accessibilityCustomActions()?.first { $0.name == "Merge" })
         _ = again.handler?()
         XCTAssertNil(guarded.merger.presented, "with no person behind the press the gesture check refuses it")
+        XCTAssertTrue(guarded.transport.calls.isEmpty)
+        XCTAssertEqual(try guarded.noticeText(pr), "Merge was refused: use the button",
+                       "a refused VoiceOver action tells the person what to do instead of nothing")
     }
 
     // MARK: Snapshots under an open confirmation
@@ -1692,4 +1763,100 @@ final class AuthoredPrMergeReviewFixTests: MouseQueueTestCase {
 private final class LiveMergeSent {
     var merges: [ClientAuthoredPrMerge] = []
     var other = 0
+}
+
+
+// MARK: - More than one Overview
+
+/// One merger serves every Overview (one per Mother window). An Overview that does not show the row in an open
+/// confirmation (another filter, the row behind "Show more", a window just opened) must not cancel it; a real change
+/// of the row still does, whichever Overview sees it.
+final class AuthoredPrMergeTwoWindowTests: MouseQueueTestCase {
+
+    private var rigs: [MergeOverviewRig] = []
+    private var secondWindows: [NSWindow] = []
+
+    override func tearDown() {
+        secondWindows.forEach { $0.contentView = nil; $0.close() }
+        rigs.forEach { $0.close() }
+        secondWindows = []
+        rigs = []
+        super.tearDown()
+    }
+
+    private func makeRig(_ prs: [AuthoredPr]) -> MergeOverviewRig {
+        let rig = MergeOverviewRig(prs)
+        rigs.append(rig)
+        return rig
+    }
+
+    /// Another window's Overview over the same merger, showing `prs`.
+    private func openSecondOverview(sharing rig: MergeOverviewRig, showing prs: [AuthoredPr]) -> AuthoredPrsOverviewView {
+        let window = GestureFixtures.offscreenWindow(size: NSSize(width: 700, height: 700))
+        secondWindows.append(window)
+        let overview = AuthoredPrsOverviewView(clock: rig.clock.read, timeZone: APT.utc, store: nil)
+        window.contentView = overview
+        overview.layoutSubtreeIfNeeded()
+        overview.merger = rig.merger
+        overview.setPerriAvailable(true)
+        overview.setMergeAvailable(true)
+        overview.apply(snapshot: APT.snapshot(prs), connection: .connected)
+        overview.layoutSubtreeIfNeeded()
+        return overview
+    }
+
+    func testAnotherWindowThatDoesNotShowTheRowLeavesTheConfirmationOpen() throws {
+        let pr = MF.readyPr(458), other = MF.readyPr(459)
+        let rig = makeRig([pr, other])
+        try rig.press(pr)
+        let session = try XCTUnwrap(rig.merger.presented, "precondition")
+
+        // A window opened now, with a list that has no #458, and then snapshots arriving in it.
+        let second = openSecondOverview(sharing: rig, showing: [other])
+        XCTAssertTrue(rig.merger.presented === session, "opening a window does not cancel what is being read in another")
+        second.apply(snapshot: APT.snapshot([other, MF.readyPr(460)]), connection: .connected)
+        second.apply(snapshot: APT.snapshot([]), connection: .connected)
+        XCTAssertTrue(rig.merger.presented === session, "nor does its list changing")
+        XCTAssertTrue(rig.transport.calls.isEmpty)
+
+        // The confirmation still works.
+        rig.confirm()
+        XCTAssertEqual(rig.transport.calls, [RecordingMergeTransport.Call(repo: MF.repo, number: 458, head: MF.headA)])
+    }
+
+    func testARealChangeOfTheRowSeenFromAnotherWindowStillCancels() throws {
+        let changes: [(String, AuthoredPr)] = [
+            ("the head moved", MF.pushed(MF.readyPr(458), to: MF.headB, perriReviewedIt: true)),
+            ("Perri's approval is gone", MF.readyPr(458, perri: nil)),
+            ("checks went red", MF.readyPr(458, checks: AuthoredPrChecks(state: .failing, failed: 1))),
+            ("the human approval was withdrawn", MF.readyPr(458, review: AuthoredPrReview(state: .changesRequested))),
+            ("it became a draft", MF.readyPr(458, group: .draft, draft: true)),
+        ]
+        for (what, changed) in changes {
+            let pr = MF.readyPr(458)
+            let rig = makeRig([pr])
+            let second = openSecondOverview(sharing: rig, showing: [pr])
+            try rig.press(pr)
+            XCTAssertNotNil(rig.merger.presented, "\(what): precondition")
+
+            // Only the other window hears of it first (as when the first window's list is held still).
+            second.apply(snapshot: APT.snapshot([changed]), connection: .connected)
+
+            XCTAssertNil(rig.merger.presented, "\(what): cancelled, whichever window saw it")
+            XCTAssertTrue(rig.transport.calls.isEmpty, what)
+        }
+    }
+
+    func testTheWindowThatOpenedItStillCancelsWhenItsRowIsGone() throws {
+        let pr = MF.readyPr(458), other = MF.readyPr(459)
+        let rig = makeRig([pr, other])
+        _ = openSecondOverview(sharing: rig, showing: [pr, other])
+        try rig.press(pr)
+        XCTAssertNotNil(rig.merger.presented, "precondition")
+
+        rig.apply([other])
+
+        XCTAssertNil(rig.merger.presented, "the row the person read is gone from the window they read it in")
+        XCTAssertTrue(rig.transport.calls.isEmpty)
+    }
 }

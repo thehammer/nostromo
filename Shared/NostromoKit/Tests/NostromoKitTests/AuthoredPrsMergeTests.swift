@@ -92,10 +92,10 @@ final class AuthoredPrsPerriRowTests: XCTestCase {
                              ("changes_requested", .changesRequested),
                              ("comment", .comment)] {
             let perri = try XCTUnwrap(try decodeRow(["perri": ["verdict": wire, "for_current_head": true,
-                                                              "at": "2026-11-14T11:45:00Z", "by": "perri"]]).perri)
+                                                              "at": "2026-11-14T11:45:00Z", "by": "perri:cody-pr-1"]]).perri)
             XCTAssertEqual(perri.verdict, want, wire)
             XCTAssertTrue(perri.forCurrentHead)
-            XCTAssertEqual(perri.by, "perri")
+            XCTAssertEqual(perri.by, "perri:cody-pr-1")
             XCTAssertEqual(perri.at, ISO8601DateFormatter().date(from: "2026-11-14T11:45:00Z"))
         }
     }
@@ -459,5 +459,142 @@ final class AuthoredPrsMergeReadinessTests: XCTestCase {
                                "\(lifecycle) draft:\(draft) \(c) \(r) \(String(describing: v)) head:\(String(describing: head))")
             } }
         } } } }
+    }
+}
+
+
+// MARK: - A hostile `by`, through the real decoder
+
+/// What a hostile or sloppy `by` on the wire becomes in the badge, its spoken label and the confirmation. Each
+/// row is decoded by the real decoder: the spoof `per<ZWSP>ri:x` is only caught if the decoder's cleaning is
+/// not allowed to turn it into a plain `perri:x`.
+final class AuthoredPrsHostileRecorderTests: XCTestCase {
+
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private struct Shown {
+        var text: String
+        var label: String
+        var tooltip: String
+        var message: String
+    }
+
+    /// A READY, green, human-approved row whose verdict has the given wire `by`, decoded then presented.
+    private func shown(by: Any?, verdict: String = "approved") throws -> Shown {
+        var wire: [String: Any] = ["verdict": verdict, "for_current_head": true]
+        if let by { wire["by"] = by }
+        let decoded = try XCTUnwrap(try decodeRow(["perri": wire]).perri)
+        let pr = AuthoredPr(repo: "o/r", number: 1, url: "https://github.com/o/r/pull/1", title: "T", draft: false,
+                            updatedAt: nil, group: .ready, lifecycle: .open,
+                            checks: AuthoredPrChecks(state: .passing), review: AuthoredPrReview(state: .approved),
+                            headShaShort: "0123abcd", perri: decoded)
+        let badge = try XCTUnwrap(AuthoredPrsPresentation.perriBadge(pr, now: now))
+        // Only an approval of this head can be merged, so only it has a confirmation.
+        let message = AuthoredPrsPresentation.mergeButton(pr)?.confirmation?.message ?? ""
+        return Shown(text: badge.text, label: badge.accessibilityLabel, tooltip: badge.tooltip, message: message)
+    }
+
+    private func assertNoInvisibleScalars(_ s: Shown, _ what: String, file: StaticString = #filePath, line: UInt = #line) {
+        for (name, text) in [("text", s.text), ("label", s.label), ("message", s.message)] {
+            for scalar in text.unicodeScalars {
+                let category = scalar.properties.generalCategory
+                XCTAssertFalse(category == .control || category == .format || category == .lineSeparator
+                                || category == .paragraphSeparator,
+                               "\(what) \(name): U+\(String(scalar.value, radix: 16)) in \(text.debugDescription)",
+                               file: file, line: line)
+            }
+        }
+    }
+
+    private func assertUnknownAndNotPerri(_ s: Shown, _ what: String, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(s.text, "Perri ✓ (recorder unknown)", what, file: file, line: line)
+        XCTAssertEqual(s.label, "Approval of this version, recorder unknown", what, file: file, line: line)
+        XCTAssertTrue(s.message.contains("Approval recorder unknown, not confirmed as Perri."), "\(what): \(s.message)",
+                      file: file, line: line)
+        XCTAssertFalse(s.message.contains("Perri approved."), what, file: file, line: line)
+        assertNoInvisibleScalars(s, what, file: file, line: line)
+    }
+
+    func testAPlainPerriRecordIsPerriAndAPlainCodyRecordIsCody() throws {
+        let perri = try shown(by: "perri:cody-pr-1")
+        XCTAssertEqual(perri.text, "Perri ✓")
+        XCTAssertEqual(perri.label, "Perri approved this version")
+        XCTAssertTrue(perri.message.contains("Head 0123abcd. Perri approved. Human approval: yes."), perri.message)
+
+        let cody = try shown(by: "cody:focus-x")
+        XCTAssertEqual(cody.text, "Perri ✓ (by cody)")
+        XCTAssertEqual(cody.label, "Approval of this version recorded by cody, not by Perri")
+        XCTAssertTrue(cody.message.contains("Approval recorded by cody:focus-x, not by Perri."), cody.message)
+    }
+
+    func testAnAbsentOrUnparseableWireValueIsRecorderUnknown() throws {
+        for by: Any? in [nil, "perri", "perri-1", "perri:", ":x", "", "   ", NSNull(), 42, ["perri:x"]] {
+            assertUnknownAndNotPerri(try shown(by: by), "\(String(describing: by))")
+        }
+    }
+
+    func testAZeroWidthCharacterInsidePerriCannotSpoofPerri() throws {
+        for spoof in ["per\u{200B}ri:x", "p\u{200D}erri:x", "perri\u{200B}:x", "\u{FEFF}perri:x", "perri:\u{200B}x",
+                      "pe\u{2060}rri:cody-pr-1"] {
+            assertUnknownAndNotPerri(try shown(by: spoof), spoof.debugDescription)
+        }
+    }
+
+    func testBidiAndControlCharactersMakeTheRecorderUnknown() throws {
+        for hostile in ["perri\u{202E}:x", "\u{202E}perri:x", "perri:\u{202E}x", "perri:x\u{2066}", "perri:x\u{2067}y",
+                        "perri:x\ny", "perri:x\r\ny", "perri:x\ty", "pe\u{0}rri:x", "perri:\u{7}x", "perri:x\u{85}y",
+                        "perri:x\u{2028}y", "perri:x\u{2029}y", "perri:x\u{7F}"] {
+            assertUnknownAndNotPerri(try shown(by: hostile), hostile.debugDescription)
+        }
+    }
+
+    func testAnEdgeSpaceMakesTheRecorderUnknown() throws {
+        for padded in [" perri:x", "perri:x ", "\tperri:cody-pr-1"] {
+            assertUnknownAndNotPerri(try shown(by: padded), padded.debugDescription)
+        }
+    }
+
+    func testAValueCutForLengthIsRecorderUnknownEvenWhenItStartsAsPerri() throws {
+        let over = AuthoredPrsBounds.name + 1
+        for by in ["perri:" + String(repeating: "x", count: over), "cody:" + String(repeating: "y", count: 500),
+                   "perri:" + String(repeating: "x", count: 114 + 1)] {
+            assertUnknownAndNotPerri(try shown(by: by), "\(by.count) chars")
+        }
+        // Exactly at the bound nothing is cut, so it is read as written.
+        let exact = "perri:" + String(repeating: "x", count: AuthoredPrsBounds.name - 6)
+        XCTAssertEqual(try shown(by: exact).text, "Perri ✓")
+    }
+
+    func testAnAgentPartOverFortyCharactersIsRecorderUnknown() throws {
+        let long = String(repeating: "a", count: 60) + ":x"
+        assertUnknownAndNotPerri(try shown(by: long), "60-character agent")
+        let s = try shown(by: String(repeating: "a", count: 41) + ":x")
+        assertUnknownAndNotPerri(s, "41-character agent")
+    }
+
+    func testAVeryLongCodyValueStaysBoundedInEveryPlaceItIsShown() throws {
+        for by in ["cody:" + String(repeating: "x", count: 500), "cody:" + String(repeating: "x", count: 100)] {
+            let s = try shown(by: by)
+            XCTAssertLessThan(s.text.count, 40, s.text)
+            XCTAssertLessThan(s.label.count, 100, s.label)
+            XCTAssertLessThan(s.message.count, 300, s.message)
+            XCTAssertLessThan(s.tooltip.count, 300, s.tooltip)
+            assertNoInvisibleScalars(s, "\(by.count) chars")
+            XCTAssertFalse(s.message.contains("Perri approved."))
+        }
+        // A long benign one that fits is named, and cut at sixty in the sentence.
+        let s = try shown(by: "cody:" + String(repeating: "x", count: 100))
+        XCTAssertEqual(s.text, "Perri ✓ (by cody)")
+        XCTAssertTrue(s.message.contains("Approval recorded by cody:" + String(repeating: "x", count: 55) + "…, not by Perri."), s.message)
+    }
+
+    func testNoVerdictKindSpeaksAsPerriForAHostileRecorder() throws {
+        for verdict in ["approved", "changes_requested", "comment"] {
+            let s = try shown(by: "per\u{200B}ri:x", verdict: verdict)
+            XCTAssertTrue(s.text.hasSuffix("(recorder unknown)"), s.text)
+            XCTAssertTrue(s.label.hasSuffix(", recorder unknown"), s.label)
+            XCTAssertFalse(s.label.hasPrefix("Perri "), s.label)
+            assertNoInvisibleScalars(s, verdict)
+        }
     }
 }

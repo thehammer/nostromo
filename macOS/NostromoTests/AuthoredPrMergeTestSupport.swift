@@ -55,7 +55,7 @@ enum MF {
 
     /// Perri's verdict, five minutes old by default.
     static func verdict(_ verdict: AuthoredPrPerriVerdict = .approved, current: Bool = true, minutesAgo: Int? = 5,
-                        by: String? = "perri-1") -> AuthoredPrPerri {
+                        by: String? = "perri:cody-pr-1") -> AuthoredPrPerri {
         AuthoredPrPerri(verdict: verdict, at: minutesAgo.map { APT.t0.addingTimeInterval(-Double($0) * 60) },
                         by: by, forCurrentHead: current)
     }

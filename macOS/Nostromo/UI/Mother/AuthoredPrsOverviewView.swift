@@ -588,7 +588,7 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
         merger?.rowsDidChange(rowNodes.values.compactMap { node in
             if case .row(let model) = node.kind { return model }
             return nil
-        })
+        }, from: self)
         notifyingMerger = false
     }
 
@@ -815,7 +815,7 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     /// It never sends: only the confirmation's Merge does.
     private func merge(_ model: AuthoredPrRowModel) {
         guard let merger, let rowView = rowView(forRowId: model.id) else { return }
-        merger.activate(model, anchor: rowView, event: NSApp.currentEvent, control: rowView.mergeButton)
+        merger.activate(model, anchor: rowView, event: NSApp.currentEvent, control: rowView.mergeButton, owner: self)
     }
 
     /// Return on the selected row: the same as its button, when it has one.
