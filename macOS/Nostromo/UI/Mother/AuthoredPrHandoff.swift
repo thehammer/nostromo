@@ -69,13 +69,19 @@ protocol AuthoredPrHandoffTransport: AnyObject {
 
 /// The live transport: frames out through the daemon client, answers matched back by request id. A request
 /// the daemon does not answer in `timeout` seconds, or that a dropped connection orphans, answers `.unreachable`.
-final class AuthoredPrHandoffTransportLive: AuthoredPrHandoffTransport {
+final class AuthoredPrHandoffTransportLive: AuthoredPrHandoffTransport, AuthoredPrMergeTransport {
     var supported: () -> Bool
     var sendPreview: (ClientAuthoredPrPreviewRequest) -> Void
     var sendNotify: (ClientAuthoredPrNotify) -> Void
     var sendStart: (ClientAuthoredPrStartSession) -> Void
     var sendLink: (ClientAuthoredPrLink) -> Void
+    /// The daemon advertised `authored_prs_merge_v1` and the link is up.
+    var mergeSupported: () -> Bool
+    var sendMerge: (ClientAuthoredPrMerge) -> Void
     let timeout: TimeInterval
+    /// How long a merge may wait for its answer: longer than the others, since GitHub's merge can be slow, and a
+    /// timeout leaves the person not knowing whether it happened. Defaults to `timeout`.
+    let mergeTimeout: TimeInterval
 
     private var pending: [String: (AuthoredPrAnswerFrame?) -> Void] = [:]
 
@@ -84,16 +90,23 @@ final class AuthoredPrHandoffTransportLive: AuthoredPrHandoffTransport {
          sendPreview: @escaping (ClientAuthoredPrPreviewRequest) -> Void,
          sendNotify: @escaping (ClientAuthoredPrNotify) -> Void,
          sendStart: @escaping (ClientAuthoredPrStartSession) -> Void,
-         sendLink: @escaping (ClientAuthoredPrLink) -> Void) {
+         sendLink: @escaping (ClientAuthoredPrLink) -> Void,
+         mergeSupported: @escaping () -> Bool = { false },
+         sendMerge: @escaping (ClientAuthoredPrMerge) -> Void = { _ in },
+         mergeTimeout: TimeInterval? = nil) {
         self.timeout = timeout
+        self.mergeTimeout = mergeTimeout ?? timeout
         self.supported = supported
         self.sendPreview = sendPreview
         self.sendNotify = sendNotify
         self.sendStart = sendStart
         self.sendLink = sendLink
+        self.mergeSupported = mergeSupported
+        self.sendMerge = sendMerge
     }
 
     var isAvailable: Bool { supported() }
+    var isMergeAvailable: Bool { mergeSupported() }
 
     /// An answer frame from the daemon.
     func deliver(_ frame: AuthoredPrAnswerFrame) {
@@ -108,9 +121,9 @@ final class AuthoredPrHandoffTransportLive: AuthoredPrHandoffTransport {
         for done in all.values { done(nil) }
     }
 
-    private func register(_ id: String, _ done: @escaping (AuthoredPrAnswerFrame?) -> Void) {
+    private func register(_ id: String, timeout: TimeInterval? = nil, _ done: @escaping (AuthoredPrAnswerFrame?) -> Void) {
         pending[id] = done
-        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + (timeout ?? self.timeout)) { [weak self] in
             guard let done = self?.pending.removeValue(forKey: id) else { return }
             done(nil)
         }
@@ -150,6 +163,17 @@ final class AuthoredPrHandoffTransportLive: AuthoredPrHandoffTransport {
             if case .link(_, let answer)? = frame { done(answer) } else { done(.unreachable) }
         }
         sendLink(ClientAuthoredPrLink(requestId: id, repo: repo, number: number, tag: tag))
+    }
+
+    /// The Merge verb. A merge answers only for the request it sent: any other kind of frame under its id, a
+    /// timeout and a lost connection are all `.unreachable` (the merge is not known to have happened).
+    func merge(repo: String, number: Int, expectedHeadShaShort: String,
+               done: @escaping (AuthoredPrAnswer<AuthoredPrDone>) -> Void) {
+        let id = UUID().uuidString
+        register(id, timeout: mergeTimeout) { frame in
+            if case .merge(_, let answer)? = frame { done(answer) } else { done(.unreachable) }
+        }
+        sendMerge(ClientAuthoredPrMerge(requestId: id, repo: repo, number: number, expectedHeadShaShort: expectedHeadShaShort))
     }
 }
 

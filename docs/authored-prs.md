@@ -187,6 +187,45 @@ turns merged without waiting for the next poll. The codes: `ok`, `not_found`, `n
 Not verified by tests, because it needs the real thing: a merge on a real PR, and whether a real token's scope
 allows merging.
 
+**In the Mac app** (slice C). Rows show Perri's verdict and, in the READY group, a Merge button. Nothing appears
+without the matching feature: the badge needs `authored_prs_perri_v1`, the button needs that and
+`authored_prs_merge_v1` (an older daemon gets no half-working control).
+
+- **Badge** on every open row that has a worth-showing verdict: `Perri ✓` (approved, for the current head),
+  `Perri ✓ older` (approved an earlier head: muted, and a new push needs a new review), `Perri ✗` (changes
+  requested), `Perri comments`. No verdict, an unknown one, or a non-approval of an older head: no badge. The
+  tooltip says when, by whom and the head; VoiceOver says "Perri approved this version" and so on. Any registered
+  focus can record a verdict, so when the recorder (the agent part of `by`, `<agent>:<tag>`) is not `perri` the
+  badge reads `Perri ✓ (by cody)`, VoiceOver says "Approval of this version recorded by cody, not by Perri", and
+  an absent or unparseable `by` (or one the decoder had to clean) reads `(recorder unknown)`. The agent name must
+  be ASCII `[A-Za-z0-9._-]`, at most 40 characters, so a hidden character inside "perri" cannot pass as Perri.
+- **Button** on open READY rows. Enabled only when `mergeReadiness` is `.ready`: a human approved, checks are
+  green (or there are none) and Perri approved the head the row shows. Otherwise it is shown off with the first
+  reason (`Draft`, `Checks not green`, `Waiting for human approval`, `Needs Perri's review`, `Perri approved an
+  older version`, `Perri requested changes`) in its tooltip, its VoiceOver label and at the end of the row's
+  review line.
+- **Press** is a human gesture (`HumanGesture.permit`, like the hand-off buttons): a synthesised or Accessibility
+  press opens nothing and sends nothing, and the row says `Merge was refused: use the button` (VoiceOver can leave
+  a stale event behind the Merge action; the gate is not weakened). A refusal never overwrites the daemon's reason
+  for the last failure at that head, and a person's press clears the note. A person's press opens a one-step
+  confirmation: `Squash and merge #458 <title> into <base>? Head 0123abcd. Perri approved. Human approval: yes.
+  Checks: green.` (title cleaned and capped at 80 characters). When the approval was recorded by anyone but Perri
+  the sentence says `Approval recorded by cody:focus-x, not by Perri.` (or `Approval recorder unknown, not
+  confirmed as Perri.`). Cancel is the default button (Return cancels), Merge has no key equivalent and is
+  gesture-checked again, Escape cancels. The confirmation is cancelled when a snapshot changes that row's head,
+  base or the approval sentence, or makes it not ready. The merger is shared by every Overview (one per Mother
+  window): only the Overview that opened the confirmation may cancel it for a row it no longer shows (another
+  filter, "Show more", a window just opened say nothing about it); if that Overview is gone, any window may.
+- **Confirm** sends one `authored_pr_merge` carrying the head short sha **of the row the person pressed on**,
+  never a newer snapshot's. The row says `Merging…` (a second press opens nothing), then `Merged` or a notice in
+  place of its owner line with a dismiss button. The row never regroups on the strength of our own request; only
+  the next snapshot moves it. A notice is the words of the daemon's code (an unknown code is a generic `The merge
+  failed`, never success) and stays until dismissed, the row's head changes (not for `head_changed`, which is
+  about exactly that), a new attempt starts or the PR is no longer open.
+- No new key equivalents; the context menu has no Merge item; Return on a row never merges. VoiceOver gets a
+  `Merge` custom action only while the button is enabled, and `Dismiss merge message` while a notice shows.
+- There is no admin merge and no hidden path to one: the transport has the one verb and the one request shape.
+
 ## What is logged
 
 Counts, durations, error classes and posture changes only. Never a title, branch,

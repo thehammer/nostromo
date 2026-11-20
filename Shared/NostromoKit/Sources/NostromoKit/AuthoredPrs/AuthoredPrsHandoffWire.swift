@@ -288,6 +288,9 @@ public enum AuthoredPrsHandoffWords {
 public enum AuthoredPrMergeCode: Equatable, Sendable {
     case notFound, notOpen, draft, notApproved, checksNotGreen, notMergeable, blocked, behind, headChanged
     case perriNotApproved, perriStale, tokenCannotMerge, rateLimited, unreachable, busy, notPermitted
+    /// Not from the daemon (no wire spelling maps to it): this app declined the press because no person's gesture
+    /// was behind it, so nothing was sent.
+    case gestureRefused
     case unknown
 
     public init(wire code: String) {
@@ -325,27 +328,29 @@ extension AuthoredPrAnswer where Value == AuthoredPrDone {
     }
 }
 
-/// The words for a merge code. The daemon never sends prose.
+/// The words for a merge code, as one sentence a notice on the row can carry. The daemon never sends prose.
 public enum AuthoredPrsMergeWords {
     public static func failure(_ code: AuthoredPrMergeCode) -> String {
         switch code {
-        case .notFound: return "Couldn't merge: this PR is no longer in the list"
-        case .notOpen: return "Couldn't merge: this PR is no longer open"
-        case .draft: return "Couldn't merge: this PR is a draft"
-        case .notApproved: return "Couldn't merge: no human reviewer has approved it"
-        case .checksNotGreen: return "Couldn't merge: checks aren't green"
-        case .notMergeable: return "Couldn't merge: GitHub says it can't be merged (conflicts?)"
-        case .blocked: return "Couldn't merge: GitHub's branch protection blocks it"
-        case .behind: return "Couldn't merge: the branch is behind its base"
-        case .headChanged: return "Couldn't merge: the PR changed. Look again"
-        case .perriNotApproved: return "Couldn't merge: Perri hasn't approved this version"
-        case .perriStale: return "Couldn't merge: Perri approved an older version"
-        case .tokenCannotMerge: return "Couldn't merge: the GitHub token may not merge here"
-        case .rateLimited: return "Couldn't merge: GitHub is rate limiting. Try again later"
-        case .unreachable: return "Couldn't merge: GitHub or Nostromo isn't reachable"
+        case .notFound: return "This PR is no longer in your list, so it wasn't merged"
+        case .notOpen: return "This PR is no longer open, so it wasn't merged"
+        case .draft: return "This PR is a draft, so it wasn't merged"
+        case .notApproved: return "No human reviewer has approved it, so it wasn't merged"
+        case .checksNotGreen: return "Checks aren't green, so it wasn't merged"
+        case .notMergeable: return "GitHub says it can't be merged (conflicts?)"
+        case .blocked: return "GitHub's branch protection blocked it"
+        case .behind: return "The branch is behind its base: update it first"
+        case .headChanged: return "The PR changed since you looked: review it again"
+        case .perriNotApproved: return "Perri hasn't approved this version"
+        case .perriStale: return "Perri approved an older version: it needs a new review"
+        case .tokenCannotMerge: return "Your GitHub token cannot merge"
+        case .rateLimited: return "GitHub is rate limiting: try again later"
+        // The request may have gone through before the connection or GitHub failed to answer.
+        case .unreachable: return "GitHub or Nostromo isn't reachable: check the PR before trying again"
         case .busy: return "A merge of this PR is already running"
-        case .notPermitted: return "Couldn't merge: Nostromo refused the request"
-        case .unknown: return "Couldn't merge"
+        case .notPermitted: return "Nostromo refused the request"
+        case .gestureRefused: return "Merge was refused: use the button"
+        case .unknown: return "The merge failed"
         }
     }
 }

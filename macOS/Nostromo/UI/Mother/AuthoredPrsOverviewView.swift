@@ -194,6 +194,13 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     var demand: AuthoredPrsDemandReporter?
     /// The hand-off behind the row buttons; nil leaves the Overview read-only.
     var handoff: AuthoredPrHandoff?
+    /// The Merge button's confirmation and the merge itself; nil leaves rows without attempts.
+    var merger: AuthoredPrMerger? {
+        didSet {
+            mergerObservation = merger?.changes.sink { [weak self] in self?.mergerChanged() }
+            rebuildRows()
+        }
+    }
 
     // MARK: State
 
@@ -204,6 +211,10 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     private(set) var hoveredId: String?
     /// The daemon advertised `authored_prs_notify_v1`: rows get their button and told line.
     private(set) var handoffAvailable = false
+    /// The daemon advertised `authored_prs_perri_v1`: rows get Perri's badge.
+    private(set) var perriAvailable = false
+    /// The daemon advertised `authored_prs_merge_v1`: READY rows get their Merge button (with Perri's verdicts too).
+    private(set) var mergeAvailable = false
     /// The Repo and Session pop-ups' selection. It only chooses which rows show: the header total, the pinned
     /// row's pill, the sidebar pills and notifications all read the full snapshot.
     private(set) var filter: AuthoredPrsFilterSelection
@@ -220,6 +231,10 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     private var moreNodes: [AuthoredPrGroup: OverviewNode] = [:]
     private var topNodes: [OverviewNode] = []
     private var cancellables = Set<AnyCancellable>()
+    private var mergerObservation: AnyCancellable?
+    private var notifyingMerger = false
+    /// The attempts the rows on screen were built from.
+    private var shownAttempts: [String: AuthoredPrMergeAttempt] = [:]
 
     // MARK: Views
 
@@ -322,10 +337,21 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
             .store(in: &cancellables)
         demand = store.authoredPrsDemand
         handoff = store.authoredPrHandoff
+        merger = store.authoredPrMerger
         setHandoffAvailable(store.authoredPrsNotifySupported)
+        setPerriAvailable(store.authoredPrsPerriSupported)
+        setMergeAvailable(store.authoredPrsMergeSupported)
         store.$authoredPrsNotifySupported
             .dropFirst()
             .sink { [weak self] supported in self?.setHandoffAvailable(supported) }
+            .store(in: &cancellables)
+        store.$authoredPrsPerriSupported
+            .dropFirst()
+            .sink { [weak self] supported in self?.setPerriAvailable(supported) }
+            .store(in: &cancellables)
+        store.$authoredPrsMergeSupported
+            .dropFirst()
+            .sink { [weak self] supported in self?.setMergeAvailable(supported) }
             .store(in: &cancellables)
     }
 
@@ -333,6 +359,20 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     func setHandoffAvailable(_ available: Bool) {
         guard available != handoffAvailable else { return }
         handoffAvailable = available
+        rebuildRows()
+    }
+
+    /// The daemon sends (or no longer sends) Perri's verdict: rows are rebuilt with or without the badge.
+    func setPerriAvailable(_ available: Bool) {
+        guard available != perriAvailable else { return }
+        perriAvailable = available
+        rebuildRows()
+    }
+
+    /// The daemon can (or can no longer) merge: rows are rebuilt with or without their Merge button.
+    func setMergeAvailable(_ available: Bool) {
+        guard available != mergeAvailable else { return }
+        mergeAvailable = available
         rebuildRows()
     }
 
@@ -500,10 +540,13 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
         AuthoredPrsPresentation.groups(filterResult.prs, unfiltered: filter.isActive ? displayed : nil,
                                        showAll: showAll, now: clock(), timeZone: timeZone,
                                        handoff: handoffAvailable,
-                                       tellable: handoff.map { Set($0.openFocuses().map(\.tag)) })
+                                       tellable: handoff.map { Set($0.openFocuses().map(\.tag)) },
+                                       perri: perriAvailable, merge: mergeAvailable && merger != nil,
+                                       mergeAttempts: merger?.attempts ?? [:])
     }
 
     private func rebuildRows() {
+        shownAttempts = merger?.attempts ?? [:]
         let selected = selectedRowId
         var newRowNodes: [String: OverviewNode] = [:]
         var tops: [OverviewNode] = []
@@ -539,6 +582,23 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
             if index >= 0 { outline.selectRowIndexes([index], byExtendingSelection: false) }
         }
         isReloading = false
+        // A confirmation about a row that is no longer what the person read is cancelled. That is the merger
+        // saying it changed: the rows it would be told to rebuild are the ones just built.
+        notifyingMerger = true
+        merger?.rowsDidChange(rowNodes.values.compactMap { node in
+            if case .row(let model) = node.kind { return model }
+            return nil
+        }, from: self)
+        notifyingMerger = false
+    }
+
+    /// An attempt moved on, or a confirmation opened or closed: the rows say so.
+    private func mergerChanged() {
+        guard !notifyingMerger, let merger else { return }
+        // Opening or closing a confirmation changes nothing a row shows: rebuilding then would replace the row
+        // view the popover is pointing at.
+        guard merger.attempts != shownAttempts else { return }
+        rebuildRows()
     }
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
@@ -593,6 +653,8 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
             }()
             view.onOpenJob = { [weak self] in self?.onOpenJob($0) }
             view.onTell = { [weak self] model in self?.tell(model) }
+            view.onMerge = { [weak self] model in self?.merge(model) }
+            view.onDismissMergeNotice = { [weak self] model in self?.merger?.dismissNotice(rowId: model.id) }
             view.configure(model)
             return view
         case .more(let group, let title):
@@ -747,6 +809,13 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     private func tell(_ model: AuthoredPrRowModel) {
         guard let handoff, let rowView = rowView(forRowId: model.id) else { return }
         handoff.activate(model, anchor: rowView, event: NSApp.currentEvent, control: rowView.tellButton)
+    }
+
+    /// Merge was pressed (or VoiceOver's Merge action ran): open the confirmation, after the human-gesture check.
+    /// It never sends: only the confirmation's Merge does.
+    private func merge(_ model: AuthoredPrRowModel) {
+        guard let merger, let rowView = rowView(forRowId: model.id) else { return }
+        merger.activate(model, anchor: rowView, event: NSApp.currentEvent, control: rowView.mergeButton, owner: self)
     }
 
     /// Return on the selected row: the same as its button, when it has one.

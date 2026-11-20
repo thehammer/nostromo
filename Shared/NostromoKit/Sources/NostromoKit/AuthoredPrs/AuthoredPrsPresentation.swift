@@ -65,6 +65,14 @@ public struct AuthoredPrRowModel: Equatable, Sendable, Identifiable {
     public var tellButton: AuthoredPrTellButton?
     /// `Told Cody 1m ago`, when someone was told and the daemon can hand off.
     public var toldText: String?
+    /// The first 8 hex digits of the PR's head commit, when the daemon sends it. A merge carries this row's own.
+    public var headShaShort: String?
+    /// Perri's verdict, only when the daemon advertises `authored_prs_perri_v1` and there is one worth showing.
+    public var perriBadge: AuthoredPrPerriBadge?
+    /// The Merge button, only on an open READY row and only when the daemon can both report Perri's verdict and merge.
+    public var mergeButton: AuthoredPrMergeButton?
+    /// Why the last attempt to merge this row failed, until dismissed or the row changes.
+    public var mergeNotice: String?
 
     public enum StatusKind: Equatable, Sendable { case passing, failing, pending, none, merged, closed }
 
@@ -239,7 +247,8 @@ public enum AuthoredPrsPresentation {
     /// keeps a repo chip's wording from changing when the filter hides the repo it shared a name with.
     public static func groups(_ prs: [AuthoredPr], unfiltered: [AuthoredPr]? = nil, showAll: Set<AuthoredPrGroup> = [],
                               now: Date, timeZone: TimeZone, handoff: Bool = false,
-                              tellable: Set<String>? = nil) -> [AuthoredPrsGroupModel] {
+                              tellable: Set<String>? = nil, perri: Bool = false, merge: Bool = false,
+                              mergeAttempts: [String: AuthoredPrMergeAttempt] = [:]) -> [AuthoredPrsGroupModel] {
         let chips = repoChips(unfiltered ?? prs)
         return AuthoredPrGroup.displayOrder.compactMap { group in
             let members = prs.filter { $0.group == group }
@@ -249,7 +258,10 @@ public enum AuthoredPrsPresentation {
             return AuthoredPrsGroupModel(
                 group: group, title: groupTitle(group), count: members.count,
                 unfilteredCount: unfiltered.map { all in all.filter { $0.group == group }.count },
-                rows: shown.map { row($0, chip: chips[$0.repo] ?? $0.repo, now: now, handoff: handoff, tellable: tellable) },
+                rows: shown.map {
+                    row($0, chip: chips[$0.repo] ?? $0.repo, now: now, handoff: handoff, tellable: tellable,
+                        perri: perri, merge: merge, mergeAttempt: mergeAttempts[$0.id])
+                },
                 hiddenCount: members.count - shown.count)
         }
     }
@@ -277,8 +289,13 @@ public enum AuthoredPrsPresentation {
 
     /// `tellable` is the tags of the open focuses the daemon would let a notice go to (nil: not restricted). A
     /// row whose owner is not among them gets no Tell button: the daemon would refuse it.
+    ///
+    /// `perri` and `merge` are the daemon's `authored_prs_perri_v1` and `authored_prs_merge_v1`: the badge needs
+    /// the first, the Merge button needs both (without Perri's verdict on rows it could never be enabled).
+    /// `mergeAttempt` is the person's last attempt on this row, if any.
     public static func row(_ pr: AuthoredPr, chip: String? = nil, now: Date, handoff: Bool = false,
-                           tellable: Set<String>? = nil) -> AuthoredPrRowModel {
+                           tellable: Set<String>? = nil, perri: Bool = false, merge: Bool = false,
+                           mergeAttempt: AuthoredPrMergeAttempt? = nil) -> AuthoredPrRowModel {
         let chipText = chip ?? repoChips([pr])[pr.repo] ?? pr.repo
         let (kind, glyph, word) = status(pr)
         let checks = checksLine(pr.checks)
@@ -301,6 +318,17 @@ public enum AuthoredPrsPresentation {
             model.tellButton = tellButton(pr, tellable: tellable)
             model.toldText = toldText(pr.told, now: now)
             if let told = model.toldText { model.accessibilityLabel += ", \(told)" }
+        }
+        model.headShaShort = pr.headShaShort
+        if perri, let badge = perriBadge(pr, now: now) {
+            model.perriBadge = badge
+            model.accessibilityLabel += ", \(badge.accessibilityLabel)"
+        }
+        if perri, merge {
+            model.mergeButton = mergeButton(pr, attempt: mergeAttempt)
+            if let reason = model.mergeButton?.reason { model.reviewLine += " · \(reason)" }
+            model.mergeNotice = mergeNotice(pr, attempt: mergeAttempt)
+            if let notice = model.mergeNotice { model.accessibilityLabel += ", merge failed: \(notice)" }
         }
         return model
     }

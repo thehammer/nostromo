@@ -285,9 +285,14 @@ public struct AuthoredPrPerri: Equatable, Sendable {
     public var verdict: AuthoredPrPerriVerdict
     public var at: Date?
     public var by: String?
+    /// True when the wire's `by` had to be changed to be shown (a control, bidi or zero-width character, an edge
+    /// space, or a cut): such a value is never read as anybody's name, see `recorder`.
+    public var byWasAltered: Bool
     public var forCurrentHead: Bool
-    public init(verdict: AuthoredPrPerriVerdict, at: Date? = nil, by: String? = nil, forCurrentHead: Bool) {
-        self.verdict = verdict; self.at = at; self.by = by; self.forCurrentHead = forCurrentHead
+    public init(verdict: AuthoredPrPerriVerdict, at: Date? = nil, by: String? = nil, byWasAltered: Bool = false,
+                forCurrentHead: Bool) {
+        self.verdict = verdict; self.at = at; self.by = by; self.byWasAltered = byWasAltered
+        self.forCurrentHead = forCurrentHead
     }
 }
 extension AuthoredPrPerri: Decodable {
@@ -296,7 +301,11 @@ extension AuthoredPrPerri: Decodable {
         let c = try decoder.container(keyedBy: K.self)
         verdict = c.lenient(.verdict, AuthoredPrPerriVerdict.self)
         at = c.date(.at)
-        by = c.string(.by, max: AuthoredPrsBounds.name).flatMap { $0.isEmpty ? nil : $0 }
+        let cleaned = c.string(.by, max: AuthoredPrsBounds.name).flatMap { $0.isEmpty ? nil : $0 }
+        by = cleaned
+        // Compared with the raw value: cleaning must not turn `per\u{200B}ri:x` into a plain `perri:x`.
+        let raw = (try? c.decodeIfPresent(String.self, forKey: .by)).flatMap { $0 }
+        byWasAltered = cleaned != nil && cleaned != raw
         // Absent means "not for the current head": never read as approval of it.
         forCurrentHead = c.flag(.forCurrentHead)
     }
