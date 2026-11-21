@@ -113,8 +113,11 @@ final class TranscriptWidthAnchorTests: XCTestCase {
         rig.focusComposer()
         XCTAssertTrue(rig.followTail.isPinned)
         for width in widths.dropFirst() {
-            rig.changeWidth(to: width)
-            XCTAssertEqual(rig.snapshot().bottomOffsetPt, 0, accuracy: 0.5, "@\(width): at the bottom")
+            // One pass, not `settle`: a later pass would follow the tail on its own, and the width
+            // change's own pass has to land at the bottom.
+            rig.changeWidth(to: width, settle: false)
+            rig.runPass()
+            XCTAssertEqual(rig.snapshot().bottomOffsetPt, 0, accuracy: 0.5, "@\(width): at the bottom after the pass")
             XCTAssertTrue(rig.followTail.isPinned, "@\(width): still following")
             XCTAssertEqual(rig.textView.string, SafetyRig.typedText)
             XCTAssertEqual(rig.textView.selectedRange(), SafetyRig.typedSelection)
