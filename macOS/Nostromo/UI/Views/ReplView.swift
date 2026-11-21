@@ -1297,6 +1297,7 @@ class ReplView: NSView {
         guard width > 1, abs(width - laidOutWidth) > 0.5 else { return }
         laidOutWidth = width
         renderWatch.noteLegitimateReflow()   // the height is re-estimated at the new width, on purpose
+        viewport.noteWidthChange()   // name the reading position at the old width, before the re-estimate
         if virtualizer.count == session.turns.count {
             virtualizer.invalidateWidth(width, turns: session.turns)
         } else {
