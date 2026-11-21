@@ -113,6 +113,9 @@ public struct AuthoredPrMergeButton: Equatable, Sendable {
     public var accessibilityLabel: String
     /// Only when `.ready`: nothing that is not ready can lead to a merge.
     public var confirmation: AuthoredPrMergeConfirmation?
+    /// The PR goes in through a merge queue: its titles ("Add to merge queue", "In merge queue (2)") are longer, so
+    /// the row gives the button more room, the same in every state of a queue row.
+    public var isQueue: Bool = false
 }
 
 // MARK: - Rules
@@ -180,6 +183,13 @@ extension AuthoredPrsPresentation {
     /// failure is a notice, see `mergeNotice`).
     public static func mergeButton(_ pr: AuthoredPr, attempt: AuthoredPrMergeAttempt? = nil,
                                    queueSupported: Bool = false) -> AuthoredPrMergeButton? {
+        guard var button = buildMergeButton(pr, attempt: attempt, queueSupported: queueSupported) else { return nil }
+        button.isQueue = pr.mergeVia == .queue || (queueSupported && pr.queue != nil)
+        return button
+    }
+
+    private static func buildMergeButton(_ pr: AuthoredPr, attempt: AuthoredPrMergeAttempt?,
+                                         queueSupported: Bool) -> AuthoredPrMergeButton? {
         guard pr.lifecycle == .open, pr.group == .ready else { return nil }
         let n = pr.number
         let queued = pr.mergeVia == .queue

@@ -22,6 +22,7 @@ final class RecordingMergeTransport: AuthoredPrMergeTransport {
         let repo: String
         let number: Int
         let head: String
+        var via: AuthoredPrMergeVia? = nil
     }
 
     /// The daemon advertised `authored_prs_merge_v1` and is connected.
@@ -29,9 +30,9 @@ final class RecordingMergeTransport: AuthoredPrMergeTransport {
     private(set) var calls: [Call] = []
     private var waiters: [(AuthoredPrAnswer<AuthoredPrDone>) -> Void] = []
 
-    func merge(repo: String, number: Int, expectedHeadShaShort: String,
+    func merge(repo: String, number: Int, expectedHeadShaShort: String, expectedVia: AuthoredPrMergeVia?,
                done: @escaping (AuthoredPrAnswer<AuthoredPrDone>) -> Void) {
-        calls.append(Call(repo: repo, number: number, head: expectedHeadShaShort))
+        calls.append(Call(repo: repo, number: number, head: expectedHeadShaShort, via: expectedVia))
         waiters.append(done)
     }
 
@@ -61,6 +62,14 @@ enum MF {
     }
 
     /// A PR that may be merged: open, in READY, not a draft, green, approved by a human, Perri approved head A.
+    /// `readyPr` that goes in through the base branch's merge queue (`entry`: where it is in it, when it is).
+    static func queuePr(_ number: Int = 458, entry: AuthoredPrQueue? = nil, head: String? = MF.headA) -> AuthoredPr {
+        var p = readyPr(number, head: head)
+        p.mergeVia = .queue
+        p.queue = entry
+        return p
+    }
+
     static func readyPr(_ number: Int = 458, title: String = "Fix the thing", head: String? = MF.headA,
                         baseRef: String? = "main", group: AuthoredPrGroup = .ready,
                         lifecycle: AuthoredPrLifecycle = .open, draft: Bool = false,
@@ -84,9 +93,10 @@ enum MF {
     }
 
     /// The row the Overview builds for `pr` (both features on unless told otherwise).
-    static func row(_ pr: AuthoredPr, perri: Bool = true, merge: Bool = true,
+    static func row(_ pr: AuthoredPr, perri: Bool = true, merge: Bool = true, mergeQueue: Bool = false,
                     attempt: AuthoredPrMergeAttempt? = nil) -> AuthoredPrRowModel {
-        AuthoredPrsPresentation.row(pr, now: APT.t0, perri: perri, merge: merge, mergeAttempt: attempt)
+        AuthoredPrsPresentation.row(pr, now: APT.t0, perri: perri, merge: merge, mergeQueue: mergeQueue,
+                                    mergeAttempt: attempt)
     }
 
     /// Every way the button is off, with the words that say why. Each has its own number so they can share a snapshot.
@@ -214,7 +224,7 @@ final class MergeOverviewRig {
     var outline: AuthoredPrsOutlineView { overview.outline }
 
     /// `allowEverything` skips the gesture check; the gesture tests turn it off.
-    init(_ prs: [AuthoredPr], perri: Bool = true, merge: Bool = true, allowEverything: Bool = true,
+    init(_ prs: [AuthoredPr], perri: Bool = true, merge: Bool = true, mergeQueue: Bool = false, allowEverything: Bool = true,
          size: NSSize = NSSize(width: 700, height: 700)) {
         let window = GestureFixtures.offscreenWindow(size: size)
         let rig = MergeRig(window: window, allowEverything: allowEverything)
@@ -229,6 +239,7 @@ final class MergeOverviewRig {
         overview.merger = rig.merger
         overview.setPerriAvailable(perri)
         overview.setMergeAvailable(merge)
+        overview.setMergeQueueAvailable(mergeQueue)
         overview.apply(snapshot: APT.snapshot(prs), connection: .connected)
         overview.layoutSubtreeIfNeeded()
     }

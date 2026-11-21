@@ -57,6 +57,10 @@ class AppStore: ObservableObject {
     /// Whether the last `welcome` advertised `authored_prs_merge_v1`. The Merge button appears only then (and
     /// only with Perri's verdicts: without them it could never be enabled).
     @Published private(set) var authoredPrsMergeSupported = false
+    /// Whether the last `welcome` advertised `authored_prs_merge_queue_v1` (with the merge verb). Without it a row that
+    /// says it merges through a queue gets no enabled Merge button: the confirmation would say "squash and merge"
+    /// about something the daemon enqueues.
+    @Published private(set) var authoredPrsMergeQueueSupported = false
     /// Whether the daemon link is up. While `.reconnecting` the last snapshot stays on screen, dimmed.
     @Published private(set) var authoredPrsConnection: AuthoredPrsConnection = .connected
     /// The hand-off verbs on the daemon connection. Available only while the link is up.
@@ -772,7 +776,8 @@ class AppStore: ObservableObject {
                     self.authoredPrsConnectionStarted(supported: self.client.daemonAdvertisesAuthoredPrs,
                                                       notify: self.client.daemonAdvertisesAuthoredPrsNotify,
                                                       perri: self.client.daemonAdvertisesAuthoredPrsPerri,
-                                                      merge: self.client.daemonAdvertisesAuthoredPrsMerge)
+                                                      merge: self.client.daemonAdvertisesAuthoredPrsMerge,
+                                                      mergeQueue: self.client.daemonAdvertisesAuthoredPrsMergeQueue)
                 }
                 // Tells every chip whether the daemon is reachable, and on a new connection
                 // asks for the model catalogue and the per-agent defaults.
@@ -1623,18 +1628,22 @@ class AppStore: ObservableObject {
 
     /// Test seam: a connection came up whose `welcome` did or did not advertise `authored_prs_v1`.
     func daemonConnectedForTesting(authoredPrs supported: Bool, notify: Bool = false, perri: Bool = false,
-                                   merge: Bool = false) {
-        authoredPrsConnectionStarted(supported: supported, notify: notify, perri: perri, merge: merge)
+                                   merge: Bool = false, mergeQueue: Bool = false) {
+        authoredPrsConnectionStarted(supported: supported, notify: notify, perri: perri, merge: merge,
+                                     mergeQueue: mergeQueue)
     }
 
     /// Ask the daemon for a full reconcile of the author's PRs now (⟳, ⌘R in the Overview).
     func requestAuthoredPrsRefresh() { authoredPrsRefreshSender() }
 
-    private func authoredPrsConnectionStarted(supported: Bool, notify: Bool, perri: Bool = false, merge: Bool = false) {
+    private func authoredPrsConnectionStarted(supported: Bool, notify: Bool, perri: Bool = false, merge: Bool = false,
+                                              mergeQueue: Bool = false) {
         if authoredPrsSupported != supported { authoredPrsSupported = supported }
         if authoredPrsNotifySupported != (supported && notify) { authoredPrsNotifySupported = supported && notify }
         if authoredPrsPerriSupported != (supported && perri) { authoredPrsPerriSupported = supported && perri }
         if authoredPrsMergeSupported != (supported && merge) { authoredPrsMergeSupported = supported && merge }
+        let queue = supported && merge && mergeQueue
+        if authoredPrsMergeQueueSupported != queue { authoredPrsMergeQueueSupported = queue }
         // A daemon that no longer lists PRs cannot clear what it raised: the pills go with the list.
         if !supported { needsYouCoordinator.setProducer(AuthoredPrNeedsYouProducer.name, items: []) }
         if authoredPrsConnection != .connected { authoredPrsConnection = .connected }
@@ -1648,6 +1657,7 @@ class AppStore: ObservableObject {
         authoredPrsNotifySupported = false
         authoredPrsPerriSupported = false
         authoredPrsMergeSupported = false
+        authoredPrsMergeQueueSupported = false
         needsYouCoordinator.setProducer(AuthoredPrNeedsYouProducer.name, items: [])
         authoredPrsConnection = .connected
         authoredPrsRefreshSender = {}

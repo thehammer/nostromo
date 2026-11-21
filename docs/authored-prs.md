@@ -182,7 +182,7 @@ running request's own id (`busy` is not remembered, so retrying after it finishe
 number, short head, who asked; no token, title or body), a refused attempt logs one too (the same plus the code), and it asks the engine to read that PR again, so the row
 turns merged without waiting for the next poll. The codes: `ok`, `not_found`, `not_open`, `draft`,
 `not_approved`, `checks_not_green`, `not_mergeable`, `blocked`, `behind`, `head_changed`, `perri_not_approved`,
-`perri_stale`, `token_cannot_merge`, `rate_limited`, `unreachable`, `busy`, `not_permitted`.
+`perri_stale`, `token_cannot_merge`, `rate_limited`, `unreachable`, `busy`, `not_permitted`, and for the queue `queued`, `already_queued`, `queue_refused`, `queue_unknown`, `via_changed`.
 
 Not verified by tests, because it needs the real thing: a merge on a real PR, and whether a real token's scope
 allows merging.
@@ -226,6 +226,63 @@ without the matching feature: the badge needs `authored_prs_perri_v1`, the butto
   `Merge` custom action only while the button is enabled, and `Dismiss merge message` while a notice shows.
 - There is no admin merge and no hidden path to one: the transport has the one verb and the one request shape.
 
+## The merge queue (`authored_prs_merge_queue_v1`)
+
+`Carefeed/admin-portal` requires a merge queue on its base branch, and GitHub refuses a direct merge there (405,
+`blocked`). The Merge button therefore enqueues where GitHub says a queue exists, and merges directly where it does
+not (`Carefeed/referral-monitor`). The daemon never reads this from a repo list: it comes from GitHub, on every
+read.
+
+**Detection.** The poll's detail query and the merge's own live read both ask `PullRequest { id isInMergeQueue
+mergeQueue { id } mergeQueueEntry { state position } }` (field names checked against GitHub's GraphQL schema; the
+user's `gh` token can read them). `mergeQueue` is the queue of the PR's base branch: non-null means a queue is
+required. Three states are kept apart: a queue (`merge_via: queue`), no queue (`direct`), and **the key missing from
+the answer** (unknown). Unknown is never guessed: the row omits `merge_via` and the verb refuses `queue_unknown`.
+
+**Enqueue.** After every gate of the direct path (human approval, not draft, `mergeable`, checks, GitHub's
+`mergeStateStatus` clean, the head the app showed, Perri approved the **full** live head) the daemon sends
+`enqueuePullRequest(input: { pullRequestId, expectedHeadOid })` (variables `pr` and `head`) and nothing else. There
+is no `jump` (that would skip the queue: a bypass) and no admin input; the REST merge is never called on this path
+and the enqueue is never called on the direct path. `expectedHeadOid` keeps the head pin the REST `sha` gave.
+
+**`mergeStateStatus` on a queue repo.** Read on `Carefeed/admin-portal` on 2026-11-21: approved PRs with passing
+checks report `CLEAN` (5 of 60 open PRs; 8 more `CLEAN` with no review decision), others `BLOCKED`, `DIRTY` or a
+transient `UNKNOWN` (which the verb refuses `not_mergeable`; retry a moment later). `HAS_HOOKS` was not seen;
+it stays accepted. No PR was in the queue at the time, so a queued PR's own `mergeStateStatus` is unobserved: a
+PR already in the queue answers `already_queued` before that gate.
+
+**The way in must match what the person was told.** The request may carry `expected_via` (`direct` or `queue`;
+absent means `direct`, which is what an app that does not know queues says). If GitHub says another way now the
+daemon sends nothing and answers `via_changed`. So an older Mac pressing Merge on a queue repo gets `via_changed`,
+never a surprise enqueue.
+
+**Answers.** Success `queued` is `{"status":"ok","value":{"code":"queued"}}` (merged now stays `{}`). New refusal
+codes: `already_queued` (the PR is in the queue; nothing sent), `queue_refused` (GitHub declined: not ready,
+conflicts), `queue_unknown`, `via_changed`. `head_changed` (an `expectedHeadOid` mismatch), `token_cannot_merge`,
+`rate_limited`, `unreachable`, `busy` and `not_permitted` are unchanged. GitHub's text is never forwarded or logged;
+the one thing read from it is a bounded look for "head ... modified/expected" to tell a moved head from a refusal,
+and a miss falls back to `queue_refused`, which sends nothing more. Idempotency per `request_id` and the `busy` rule
+are the direct path's. The audit lines (`authored-pr queued`, `authored-pr merged`, `authored-pr merge refused`)
+carry `via=queue|direct`.
+
+**Wire (additive).** Rows: `merge_via` (`direct`|`queue`, omitted when unknown) and, while queued,
+`queue: {state, position?}` (`state` one of `queued`, `awaiting_checks`, `mergeable`, `unmergeable`, `locked`,
+`unknown`; position 1..9999). The Welcome advertises `authored_prs_merge_queue_v1` exactly where
+`authored_prs_merge_v1` is. Goldens: `frame-authored-prs-merge-queue.json`, `frame-authored-pr-merge-queue.json`,
+`frame-authored-pr-merge-result-queued.json`.
+
+**In the Mac app.** A row that says `queue` while the daemon did not advertise the feature is shown off: "Update
+Nostromo to merge into a merge queue". With the feature, a row with no `merge_via` is off too ("Waiting for GitHub to
+say how this merges"): the sentence could not be worded. Queue rows say `Add #458 <title> to the merge queue for
+<base>? Head 0123abcd. Perri approved. Human approval: yes. Checks: green.` (the recorder wording is unchanged), the
+button says "Add to merge queue", the confirmation is also cancelled by a changed `merge_via`. After `queued` (or
+`already_queued`) the row says "In merge queue" (with the position once a snapshot has it) and never regroups; a
+queued PR that was seen in the queue and later is not, while still open, shows the notice "Dropped from the merge
+queue" and the button is available again. One button width for every state, so rows do not shift.
+
+Not verified by tests, because it needs the real thing: a real enqueue on a real admin-portal PR, that the token may
+enqueue, the real queue states and positions (and a queued PR's `mergeStateStatus`), VoiceOver.
+
 ## What is logged
 
 Counts, durations, error classes and posture changes only. Never a title, branch,
@@ -253,4 +310,7 @@ asked (no token, title or body). Nothing logs a Perri note, or a verdict's repo,
 - Feature `authored_prs_merge_v1` (advertised with the hand-off verbs): `authored_pr_merge` and
   `authored_pr_merge_result` (`{request_id, result: {status: ok|err, value}}`, `LocalOnly`; `ok` carries `{}` and
   an error only `{code}`).
+- Feature `authored_prs_merge_queue_v1` (advertised with `authored_prs_merge_v1`): row fields `merge_via` and
+  `queue`, the request's `expected_via`, the answers `queued` / `already_queued` and the other queue codes (see
+  "The merge queue").
 - Golden frames: `tests/fixtures/authored_prs/frame-authored-pr*.json`.

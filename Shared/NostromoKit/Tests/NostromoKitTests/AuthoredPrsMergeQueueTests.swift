@@ -261,6 +261,24 @@ final class AuthoredPrsMergeQueueUITests: XCTestCase {
                        .unavailable)
     }
 
+    func testEveryStateOfAQueueRowIsMarkedQueueSoTheRowGivesItOneWidth() throws {
+        let entry = AuthoredPrQueue(state: .queued, position: 2)
+        let rows: [(AuthoredPr, AuthoredPrMergeAttempt?)] = [
+            (pr(via: .queue), nil),
+            (pr(via: .queue), AuthoredPrMergeAttempt(head: "0123abcd", progress: .merging)),
+            (pr(via: .queue), AuthoredPrMergeAttempt(head: "0123abcd", progress: .queued)),
+            (pr(via: .queue, queue: entry), nil),
+            (pr(via: .queue), AuthoredPrMergeAttempt(head: "0123abcd", progress: .failed(.droppedFromQueue))),
+        ]
+        for (row, attempt) in rows {
+            XCTAssertEqual(AuthoredPrsPresentation.mergeButton(row, attempt: attempt, queueSupported: true)?.isQueue, true)
+        }
+        XCTAssertEqual(AuthoredPrsPresentation.mergeButton(pr(via: .queue), queueSupported: false)?.isQueue, true)
+        for via: AuthoredPrMergeVia? in [.direct, nil] {
+            XCTAssertEqual(AuthoredPrsPresentation.mergeButton(pr(via: via), queueSupported: true)?.isQueue, false)
+        }
+    }
+
     func testTheButtonTitlesStayShortEnoughForOneWidth() throws {
         // The Mac gives every state of the button one width; the longest title must fit it (see the Mac's
         // `mergeButtonWidth` and its test).
