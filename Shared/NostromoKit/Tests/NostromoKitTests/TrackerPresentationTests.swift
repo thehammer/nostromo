@@ -1341,6 +1341,17 @@ final class TrackerCopySafetyTests: XCTestCase {
         XCTAssertEqual(TrackerMarkdown.copySection("next", in: board), TrackerMarkdown.section("next", in: board))
     }
 
+    func testACleanCRLFItemCopiesByteForByteAndALoneCarriageReturnIsDropped() throws {
+        let crlf = "- [ ] Retry <!-- #retry-1074 1760540262 -->\r\n  a note\r\n"
+        let clean = try TFx.edited { edit in try edit.updateItem("retry-1074") { $0["source"] = crlf } }
+        XCTAssertEqual(TrackerMarkdown.copyItem("retry-1074", in: clean), crlf, "CRLF stays for clean text")
+        let lone = try TFx.edited { edit in
+            try edit.updateItem("retry-1074") { $0["source"] = "- [ ] Retry\r\u{1b}[201~ x\rrm -rf /\n" }
+        }
+        let copied = TrackerMarkdown.copyItem("retry-1074", in: lone)
+        XCTAssertEqual(copied, "- [ ] Retry[201~ xrm -rf /\n", "a CR not ending a CRLF and every refused character go")
+    }
+
     func testTheRawItemApiStaysExactForUndo() throws {
         let board = try board(withheld: false)
         XCTAssertTrue(TrackerMarkdown.item("retry-1074", in: board)?.contains("\u{1b}[201~") ?? false)

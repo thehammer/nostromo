@@ -1054,11 +1054,16 @@ public enum TrackerMarkdown {
     /// What a withheld item copies as (the daemon sends the same text as its `source`).
     public static let withheldMarker = "<!-- nostromo: command withheld -->\n"
 
-    /// The text with every refused character removed (newline and tab stay).
+    /// The text with every refused character removed (newline and tab stay). A carriage return stays only
+    /// as half of a CRLF line ending, so a clean CRLF board copies byte for byte; a lone one is dropped.
     public static func copySafe(_ text: String) -> String {
+        let scalars = Array(text.unicodeScalars)
         var out = String.UnicodeScalarView()
-        for scalar in text.unicodeScalars where scalar == "\n" || scalar == "\t" || TrackerCommandText.keepsForCopy(scalar) {
-            out.append(scalar)
+        for (i, scalar) in scalars.enumerated() {
+            let crlf = scalar == "\r" && i + 1 < scalars.count && scalars[i + 1] == "\n"
+            if crlf || scalar == "\n" || scalar == "\t" || TrackerCommandText.keepsForCopy(scalar) {
+                out.append(scalar)
+            }
         }
         return String(out)
     }
@@ -1131,7 +1136,7 @@ public enum TrackerConflictText {
 
     /// A value with every character the daemon refuses in a command removed (escape, bidi, tag, NUL and the
     /// rest): a losing `command` value is drawn and spoken without them, like the command block does.
-    public static func safe(_ value: String) -> String { TrackerMarkdown.copySafe(value) }
+    public static func safe(_ value: String) -> String { TrackerMarkdown.copySafe(value.replacingOccurrences(of: "\r", with: "")) }
 
     /// A value as plain text (no quotes), cut at `maxValueChars`: what a spoken sentence uses.
     public static func plain(_ value: String, field: String) -> String {

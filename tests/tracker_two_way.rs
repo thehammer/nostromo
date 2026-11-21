@@ -2418,3 +2418,135 @@ fn text_and_restore_text_accept_bidi_zero_width_and_line_separator_characters() 
     .unwrap();
     assert_eq!(rig.item("beta").text, odd);
 }
+
+// ---------------------------------------------------------------------------
+// A command written into the board FILE with refused characters never leaves the daemon raw, by any route
+// ---------------------------------------------------------------------------
+
+const HOSTILE_COMMAND: &str = "echo a\u{1b}[201~b\u{202e}c\u{e0101}d\u{0}e\rf";
+
+fn hostile_item(id: &str) -> String {
+    format!("- [ ] Hostile {id} <!-- #{id} 1760540000 cmd -->\n  ```\n  {HOSTILE_COMMAND}\n  ```\n")
+}
+
+/// Every route a board's text takes out of the daemon: the pane's whole view (items, removed, conflicts),
+/// an agent's whole-board read, its deltas (changes, conflict entries) and the note injected before its turn.
+fn everything_on_the_wire(rig: &Rig) -> Vec<(&'static str, String)> {
+    let mut out = vec![(
+        "board view",
+        serde_json::to_string(&rig.reg.board_view(TAG_A).unwrap()).unwrap(),
+    )];
+    out.push(("whole-board read", full_board(rig, TAG_A, "x")));
+    for (tag, session, name) in [
+        (TAG_A, SESS_A, "delta for a"),
+        (TAG_B, SESS_B, "delta for b"),
+    ] {
+        if let Some(note) = rig.reg.prepare_turn_note(tag, session) {
+            out.push(("injected note", note.text));
+        }
+        out.push((
+            name,
+            serde_json::to_string(&rig.delta(tag, session)).unwrap(),
+        ));
+    }
+    out
+}
+
+fn assert_no_hostile_bytes(routes: &[(&str, String)]) {
+    for (route, json) in routes {
+        for bad in [
+            "\u{1b}",
+            "\\u001b",
+            "\u{202e}",
+            "\u{e0101}",
+            "\u{0}",
+            "\\u0000",
+            "\r",
+            "\\r",
+            "201~",
+        ] {
+            assert!(
+                !json.contains(bad),
+                "{bad:?} on the wire in {route}: {json}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_hostile_file_written_command_leaves_no_raw_byte_in_a_removed_conflict_or_any_other_route() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.save(
+        &rig.text()
+            .replacen("## Now\n", &format!("## Now\n{}", hostile_item("hos")), 1),
+    );
+    assert!(rig.text().contains("Hostile hos"), "{}", rig.text());
+    assert!(rig.item("hos").command_withheld);
+    // A person edits the title; an agent that had not seen it removes the item within ten seconds.
+    rig.pane(vec![TrackerPaneOp::Edit {
+        id: "hos".into(),
+        title: Some("Renamed".into()),
+        text: None,
+        body: None,
+    }])
+    .unwrap();
+    rig.tick(2);
+    rig.agent_b(&[Op::Remove { id: "hos".into() }]).unwrap();
+    let view = rig.reg.board_view(TAG_A).unwrap();
+    assert_eq!(view.removed_conflicts.len(), 1, "{view:?}");
+    assert_eq!(
+        view.removed_conflicts[0].source,
+        nostromo::tracker::view::WITHHELD_SOURCE
+    );
+    assert_no_hostile_bytes(&everything_on_the_wire(&rig));
+}
+
+#[test]
+fn a_hostile_file_written_command_leaves_no_raw_byte_in_a_losing_value_or_any_other_route() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.save(
+        &rig.text()
+            .replacen("## Now\n", &format!("## Now\n{}", hostile_item("hos")), 1),
+    );
+    rig.tick(2);
+    // An agent that had not read the file save sets a clean command.
+    rig.agent_b(&[Op::Upsert(Upsert {
+        id: Some("hos".into()),
+        command: Some("echo clean".into()),
+        ..Default::default()
+    })])
+    .unwrap();
+    let item = rig.item("hos");
+    let losing: Vec<_> = item
+        .conflicts
+        .iter()
+        .filter(|c| c.field == "command")
+        .collect();
+    assert_eq!(losing.len(), 1, "{:?}", item.conflicts);
+    assert_eq!(
+        losing[0].losing,
+        nostromo::tracker::view::WITHHELD_COMMAND_VALUE
+    );
+    assert_no_hostile_bytes(&everything_on_the_wire(&rig));
+}
+
+#[test]
+fn a_clean_commands_losing_value_is_still_shown() {
+    let rig = Rig::new();
+    rig.tick(100);
+    let clean = hostile_item("hos").replace(HOSTILE_COMMAND, "echo first");
+    rig.save(
+        &rig.text()
+            .replacen("## Now\n", &format!("## Now\n{clean}"), 1),
+    );
+    rig.tick(2);
+    rig.agent_b(&[Op::Upsert(Upsert {
+        id: Some("hos".into()),
+        command: Some("echo second".into()),
+        ..Default::default()
+    })])
+    .unwrap();
+    assert_eq!(rig.losers("hos", "command"), vec!["echo first"]);
+}

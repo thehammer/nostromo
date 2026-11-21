@@ -535,6 +535,95 @@ final class TrackerCommandBlockTests: XCTestCase {
         XCTAssertEqual(h.sent.count, 2)
     }
 
+    // MARK: An agent turns a ticked plain item into a command: undo and redo re-check (Perri's round 3)
+
+    private static let nowACommand: (inout TrackerBoardScript) throws -> Void = {
+        try $0.updateItem("revie-1111") {
+            $0["kind"] = "command"
+            $0["command"] = "kubectl delete ns prod"
+            $0["env"] = "prod"
+        }
+    }
+
+    /// A person ticks the plain item `revie-1111` (undoable, the daemon confirms); then an agent makes it a command.
+    private func tickedThenMadeACommand() throws -> TrackerEditHarness {
+        let h = try TrackerEditHarness(self)
+        try XCTUnwrap(try h.row("revie-1111").tickButton).performClick(nil)
+        try h.echo { try $0.setStatus("revie-1111", "done") }
+        XCTAssertTrue(h.pane.editing.undoManager.canUndo, "a plain item's tick is undoable")
+        try h.agentChange(Self.nowACommand)
+        h.rig.settle()
+        XCTAssertNotNil(try h.row("revie-1111").commandBlock, "the row is a command now")
+        return h
+    }
+
+    private func runUndo(_ h: TrackerEditHarness) {
+        SyntheticInputGate.begin()
+        defer { SyntheticInputGate.end() }
+        h.pane.focusSink()
+        _ = h.pane.sink.tryToPerform(Selector(("undo:")), with: nil)
+    }
+
+    private func runRedo(_ h: TrackerEditHarness) {
+        SyntheticInputGate.begin()
+        defer { SyntheticInputGate.end() }
+        h.pane.focusSink()
+        _ = h.pane.sink.tryToPerform(Selector(("redo:")), with: nil)
+    }
+
+    func testAnUndoOfAPlainItemsTickSendsNothingOnceAnAgentMadeItACommand() throws {
+        let h = try tickedThenMadeACommand()
+        let before = h.sent.count
+        runUndo(h)
+        XCTAssertEqual(h.sent.count, before, "no status (a prod command marked NOT run) was sent: \(h.sent.map(\.ops))")
+        XCTAssertEqual(h.pane.notice.text, "Couldn't undo: this item is a command now. Tick it on its row.")
+    }
+
+    func testARedoOfAPlainItemsTickSendsNothingOnceAnAgentMadeItACommand() throws {
+        let h = try TrackerEditHarness(self)
+        try XCTUnwrap(try h.row("revie-1111").tickButton).performClick(nil)
+        try h.echo { try $0.setStatus("revie-1111", "done") }
+        runUndo(h) // while it is still a plain item: the undo is sent
+        XCTAssertEqual(h.sent.last?.ops, [.status(id: "revie-1111", status: "todo")])
+        try h.echo { try $0.setStatus("revie-1111", "todo") }
+        XCTAssertTrue(h.pane.editing.undoManager.canRedo)
+        try h.agentChange(Self.nowACommand)
+        h.rig.settle()
+        let before = h.sent.count
+        runRedo(h)
+        XCTAssertEqual(h.sent.count, before, "no status (a prod command marked RUN) was sent: \(h.sent.map(\.ops))")
+        XCTAssertEqual(h.pane.notice.text, "Couldn't undo: this item is a command now. Tick it on its row.")
+    }
+
+    func testAPersonsClickOnTheBoxStillWorksAfterAVoidedUndo() throws {
+        let h = try tickedThenMadeACommand()
+        runUndo(h)
+        let before = h.sent.count
+        let block = try XCTUnwrap(try h.row("revie-1111").commandBlock)
+        block.permit = Self.aPersonsClick
+        block.ranItCheckbox.performClick(nil)
+        XCTAssertEqual(h.sent.count, before + 1)
+        guard case .status(let id, _)? = h.sent.last?.ops.first else { return XCTFail("the click sent no status: \(h.sent.map(\.ops))") }
+        XCTAssertEqual(id, "revie-1111", "the click on the command's own box is a person's tick and is sent")
+    }
+
+    func testRemovingAWithheldCommandRegistersNoUndoAndSaysItCannotBeRestored() throws {
+        let id = "retry-1074"
+        let h = try TrackerEditHarness(self, configure: {
+            try $0.updateItem(id) { item in
+                item.removeValue(forKey: "command")
+                item["command_withheld"] = true
+                item["source"] = "<!-- nostromo: command withheld -->\n"
+            }
+        })
+        h.pane.removeItem(id)
+        XCTAssertEqual(h.sent.map(\.ops), [[.remove(id: id)]], "the person's removal is still sent")
+        XCTAssertFalse(h.pane.editing.undoManager.canUndo, "there is nothing to restore it from")
+        h.pane.undoRemoval()
+        XCTAssertEqual(h.sent.count, 1, "the banner's Undo has nothing to put back")
+        XCTAssertEqual(h.pane.notice.text, "Removed. This command was withheld and cannot be restored from the pane.")
+    }
+
     func testUndoOfACommandItemsTitleEditOnlyRestoresItsStagedText() throws {
         let id = "retry-1074"
         let h = try TrackerEditHarness(self)

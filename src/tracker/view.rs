@@ -412,7 +412,14 @@ pub fn build(parsed: &ParsedBoard, facts: &ViewFacts) -> TrackerBoardView {
         banner: facts.banner.clone(),
         committable: facts.committable.clone(),
         hidden_by_user: facts.hidden_by_user,
-        removed_conflicts: facts.removed_conflicts.clone(),
+        removed_conflicts: facts
+            .removed_conflicts
+            .iter()
+            .map(|r| ViewRemovedConflict {
+                source: wire_removed_source(&r.source),
+                ..r.clone()
+            })
+            .collect(),
         trimmed: None,
     };
     fit_to_frame(&mut view);
@@ -464,6 +471,28 @@ fn checked_command(command: Option<&String>) -> (Option<String>, bool) {
 /// the refused command (the Mac's Copy as Markdown copies `source`), so none of it leaves the daemon.
 pub const WITHHELD_SOURCE: &str = "<!-- nostromo: command withheld -->\n";
 
+/// What a conflict's losing `command` value is on the wire when the text fails the command checks.
+pub const WITHHELD_COMMAND_VALUE: &str = "[command withheld]";
+
+/// A losing value for `field`, as it may go on the wire: a `command` text that fails the checks is the marker.
+fn wire_losing(field: &str, losing: &str) -> String {
+    if field == "command" && checked_command(Some(&losing.to_string())).1 {
+        WITHHELD_COMMAND_VALUE.to_string()
+    } else {
+        losing.to_string()
+    }
+}
+
+/// A removed item's markdown as it may go on the wire: the marker when it carries a command that fails the
+/// checks, or when it is not exactly one item (it cannot be restored from the wire, and its bytes are unknown).
+/// The daemon keeps the real text and `restore` / `resolve_conflict` use that.
+fn wire_removed_source(source: &str) -> String {
+    match super::ops::parse_restorable(source) {
+        Ok((item, _)) if !checked_command(item.command.as_ref()).1 => source.to_string(),
+        _ => WITHHELD_SOURCE.to_string(),
+    }
+}
+
 fn view_item(item: &Item, source: String, facts: &ViewFacts) -> ViewItem {
     let (command, command_withheld) = checked_command(item.command.as_ref());
     let source = if command_withheld {
@@ -492,7 +521,18 @@ fn view_item(item: &Item, source: String, facts: &ViewFacts) -> ViewItem {
         ran: false,
         command_withheld,
         bound: facts.bound.get(&item.id).cloned(),
-        conflicts: facts.conflicts.get(&item.id).cloned().unwrap_or_default(),
+        conflicts: facts
+            .conflicts
+            .get(&item.id)
+            .map(|list| {
+                list.iter()
+                    .map(|c| ViewConflict {
+                        losing: wire_losing(&c.field, &c.losing),
+                        ..c.clone()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         dropped_conflicts: facts.dropped.get(&item.id).copied().unwrap_or(0),
         sensitive: facts.sensitive.get(&item.id).map(|classes| ViewSensitive {
             classes: classes.clone(),
