@@ -2004,6 +2004,12 @@ fn the_operators_insert_delivers_exactly_the_entrys_bytes(ecs: bool, access: Fol
         w.call(A, &t, remove(&id)).unwrap();
     }
     let total: usize = commands().iter().map(String::len).sum();
+    // The writer thread counts a write only after it returns, and the child
+    // can log the bytes before that: wait for the counter to catch up, then
+    // require it to be exactly the total (never more: no byte twice).
+    wait_for("the writer to count the last entry", || {
+        t.session.input_bytes_written() >= total as u64
+    });
     assert_eq!(t.session.input_bytes_written(), total as u64);
     assert_eq!(t.session.input_bytes_accepted(), total as u64);
 }
