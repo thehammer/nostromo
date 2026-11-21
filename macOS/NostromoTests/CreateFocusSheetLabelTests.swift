@@ -5,6 +5,18 @@ import XCTest
 /// same agent in the same repo can be told apart from the moment they are made.
 final class CreateFocusSheetLabelTests: XCTestCase {
 
+    /// `rememberedTab` is process-wide: a class that ran earlier in the same process can leave the sheet opening on
+    /// another tab, where Create does not make a focus. Every test here starts from the New tab.
+    override func setUp() {
+        super.setUp()
+        CreateFocusSheet.rememberedTab = .new
+    }
+
+    override func tearDown() {
+        CreateFocusSheet.rememberedTab = .new
+        super.tearDown()
+    }
+
     // MARK: - Helpers (small copies of the RepoOrgTests patterns; those are private there)
 
     /// Lookup whose per-path completion the test controls.
@@ -152,7 +164,7 @@ final class CreateFocusSheetLabelTests: XCTestCase {
         if let text { sheet.typeLabel(text) }
         sheet.createTapped()
         g.release(2)
-        waitUntil("the create callback never fired (created \(created.count))", file: file, line: line) { created.count >= 1 }
+        waitUntil("the create callback never fired (created \(created.count), tab \(CreateFocusSheet.rememberedTab))", file: file, line: line) { created.count >= 1 }
         XCTAssertEqual(created.count, 1, file: file, line: line)
         return created.first
     }
