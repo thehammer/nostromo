@@ -137,6 +137,12 @@ pub struct FakePr {
     pub in_queue: Option<(String, Option<u64>)>,
     /// GitHub could not resolve the queue fields: `mergeQueue` is `null` beside an `errors[]` entry.
     pub queue_field_error: bool,
+    /// Whether the BASE branch has a queue (`repository.mergeQueue(branch:)`),
+    /// when it differs from the PR's own `mergeQueue` field (`has_queue`).
+    /// `None`: the two agree.
+    pub base_queue: Option<bool>,
+    /// GitHub could not resolve the base branch's queue (`null` beside an error).
+    pub base_queue_error: bool,
 }
 
 impl FakePr {
@@ -176,7 +182,30 @@ impl FakePr {
             queue_readable: true,
             in_queue: None,
             queue_field_error: false,
+            base_queue: None,
+            base_queue_error: false,
         }
+    }
+
+    /// The PR's base branch (default `main`, which is also the repo's default).
+    pub fn on_base(mut self, base: &str) -> Self {
+        self.base_ref = base.to_owned();
+        self
+    }
+
+    /// The BASE branch's own queue answer, when it differs from the PR's field:
+    /// `with_merge_queue()` + `base_has_queue(false)` is what GitHub answers for
+    /// a PR stacked on a `merge/*` branch (the PR field is `main`'s queue; the
+    /// base branch has none).
+    pub fn base_has_queue(mut self, yes: bool) -> Self {
+        self.base_queue = Some(yes);
+        self
+    }
+
+    /// GitHub cannot resolve the base branch's queue.
+    pub fn base_queue_error(mut self) -> Self {
+        self.base_queue_error = true;
+        self
     }
 
     /// GitHub answers the queue fields with `null` and an error (it could not resolve them).
@@ -471,6 +500,13 @@ fn pr_graphql(pr: &FakePr, query: &str) -> Value {
             Some((state, pos)) => json!({"state": state, "position": pos}),
             None => Value::Null,
         };
+        // `repository.mergeQueue` (no branch): the default branch's queue.
+        out["repository"]["mergeQueue"] =
+            if pr.base_queue.unwrap_or(pr.has_queue) && !pr.base_queue_error {
+                json!({"id": "MQ_base_fake"})
+            } else {
+                Value::Null
+            };
         if pr.queue_readable {
             out["mergeQueue"] = if pr.has_queue {
                 json!({"id": "MQ_fake"})
@@ -638,18 +674,55 @@ fn respond(state: &Arc<Mutex<State>>, req: &Request) -> ResponseTemplate {
                 r#"p(\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ pullRequest\(number: (\d+)\)"#,
             )
             .unwrap();
+            let base_re = regex::Regex::new(
+                r#"b(\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ mergeQueue\(branch: \$b(\d+)\)"#,
+            )
+            .unwrap();
+            let vars = serde_json::from_str::<Value>(&body)
+                .ok()
+                .map(|v| v["variables"].clone())
+                .unwrap_or(Value::Null);
             let mut data = serde_json::Map::new();
+            let mut base_errors: Vec<Value> = Vec::new();
+            for c in base_re.captures_iter(&query) {
+                let repo = format!("{}/{}", &c[2], &c[3]);
+                let branch = vars[format!("b{}", &c[4])]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned();
+                // The queue of `branch` as the PRs on it say.
+                let found = st.prs.iter().find(|p| {
+                    p.repo.eq_ignore_ascii_case(&repo) && p.base_ref == branch && p.accessible
+                });
+                let queue = found.is_some_and(|p| p.base_queue.unwrap_or(p.has_queue));
+                if found.is_some_and(|p| p.base_queue_error) {
+                    base_errors.push(json!({
+                        "type": "INTERNAL", "message": "Something went wrong",
+                        "path": [format!("b{}", &c[1]), "mergeQueue"]
+                    }));
+                }
+                data.insert(
+                    format!("b{}", &c[1]),
+                    json!({"mergeQueue": if queue { json!({"id": "MQ_branch_fake"}) } else { Value::Null }}),
+                );
+            }
+            let mut field_errors: Vec<Value> = base_errors;
             data.insert(
                 "rateLimit".into(),
                 json!({"cost": 1, "remaining": 4900, "limit": 5000, "resetAt": iso(t0())}),
             );
-            let mut field_errors: Vec<Value> = Vec::new();
             for c in re.captures_iter(&query) {
                 let repo = format!("{}/{}", &c[2], &c[3]);
                 let number: u64 = c[4].parse().unwrap();
                 let found = st.prs.iter().find(|p| {
                     p.repo.eq_ignore_ascii_case(&repo) && p.number == number && p.accessible
                 });
+                if found.is_some_and(|p| p.base_queue_error && p.base_ref == p.default_branch) {
+                    field_errors.push(json!({
+                        "type": "INTERNAL", "message": "Something went wrong",
+                        "path": [format!("p{}", &c[1]), "pullRequest", "repository", "mergeQueue"]
+                    }));
+                }
                 if found.is_some_and(|p| p.queue_field_error) {
                     field_errors.push(json!({
                         "type": "INTERNAL", "message": "Something went wrong",

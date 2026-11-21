@@ -239,11 +239,35 @@ without the matching feature: the badge needs `authored_prs_perri_v1`, the butto
 not (`Carefeed/referral-monitor`). The daemon never reads this from a repo list: it comes from GitHub, on every
 read.
 
-**Detection.** The poll's detail query and the merge's own live read both ask `PullRequest { id isInMergeQueue
-mergeQueue { id } mergeQueueEntry { state position } }` (field names checked against GitHub's GraphQL schema; the
-user's `gh` token can read them). `mergeQueue` is the queue of the PR's base branch: non-null means a queue is
-required. Three states are kept apart: a queue (`merge_via: queue`), no queue (`direct`), and **the key missing from
-the answer** (unknown). Unknown is never guessed: the row omits `merge_via` and the verb refuses `queue_unknown`.
+**Detection.** Whether a queue exists is a property of the PR's **base branch**, so the daemon reads that.
+The poll's detail query and the merge's own live read both ask `PullRequest { id isInMergeQueue mergeQueue { id }
+mergeQueueEntry { state position } repository { defaultBranchRef { name } mergeQueue { id } } }`, and, for an open
+PR whose base is not the default branch, one more request per batch: `repository { mergeQueue(branch: <base>) { id } }`
+(the branch goes in as a GraphQL variable, never into the query text). Field names are checked against GitHub's GraphQL
+schema; the user's `gh` token can read them. Two reads are kept apart:
+
+- the **base branch's queue** (the authority): `repository.mergeQueue` (the default branch) when the base is the
+  default branch, `mergeQueue(branch: <base>)` otherwise;
+- the **PR's own `mergeQueue` field**, which is NOT the base branch's queue. Read on `Carefeed/admin-portal` on
+  2026-11-21: #6423 (base `merge/f2c-family-session-facility`) and #6420 (base `merge/f2b-family-route-middleware`)
+  both answer that field with `main`'s queue, while `mergeQueue(branch:)` for those branches is `null` and
+  `GET /rules/branches/<branch>` is `[]` (`main` lists `merge_queue`). A `feature/` base (#6414) is `null` on both.
+
+Each read has three states: a queue, no queue (`null`), and **unreadable** (the key missing from the answer, or
+`null` beside a GraphQL error for it, or the second request failing). What each combination does:
+
+| base branch's queue | PR's own field | row `merge_via` | the Merge verb |
+|---|---|---|---|
+| queue | queue | `queue` | enqueues |
+| none | none | `direct` | merges directly |
+| none | queue | `direct` | merges directly, never enqueues (a stacked PR on `merge/*`: GitHub's field is `main`'s queue) |
+| queue | none | omitted | refuses `queue_unknown`, sends nothing |
+| unreadable | any | omitted | refuses `queue_unknown`, sends nothing |
+| any | unreadable | omitted | refuses `queue_unknown`, sends nothing |
+
+Unknown is never guessed, and never falls back to a direct merge or to an enqueue. The merge also requires the live
+base branch to be the one the row showed (`base_ref`); if the PR was retargeted since, the verb answers
+`via_changed` and sends nothing.
 
 **Enqueue.** After every gate of the direct path (human approval, not draft, `mergeable`, checks, GitHub's
 `mergeStateStatus` clean, the head the app showed, Perri approved the **full** live head) the daemon sends
@@ -262,12 +286,14 @@ absent means `direct`, which is what an app that does not know queues says). If 
 daemon sends nothing and answers `via_changed`. So an older Mac pressing Merge on a queue repo gets `via_changed`,
 never a surprise enqueue.
 
-**Answers.** Success `queued` is `{"status":"ok","value":{"code":"queued"}}` (merged now stays `{}`). New refusal
+**Answers.** Success `queued` is `{"status":"ok","value":{"code":"queued"}}` (merged now stays `{}`; any other success code is not understood by the app, which shows "Unexpected answer: check GitHub", never "Merged"). New refusal
 codes: `already_queued` (the PR is in the queue; nothing sent), `queue_refused` (GitHub declined: not ready,
 conflicts), `queue_unknown`, `via_changed`. `head_changed` (an `expectedHeadOid` mismatch), `token_cannot_merge`,
 `rate_limited`, `unreachable`, `busy` and `not_permitted` are unchanged. GitHub's text is never forwarded or logged;
-the one thing read from it is a bounded look for "head ... modified/expected" to tell a moved head from a refusal,
-and a miss falls back to `queue_refused`, which sends nothing more. Idempotency per `request_id` and the `busy` rule
+a refused enqueue is told apart from a moved head by GraphQL's structured error name first (`type`, or
+`extensions.code`: `STALE_HEAD`, `HEAD_OID_MISMATCH`, `EXPECTED_HEAD_OID_MISMATCH`, `HEAD_CHANGED` are head moves).
+GitHub's real names for this are unverified, so the one remaining text read is a bounded look for "head ...
+modified/expected" as a last resort; anything unrecognised is `queue_refused`, which sends nothing more. Idempotency per `request_id` and the `busy` rule
 are the direct path's. The audit lines (`authored-pr queued`, `authored-pr merged`, `authored-pr merge refused`)
 carry `via=queue|direct`.
 

@@ -125,9 +125,15 @@ final class AuthoredPrsMergeQueueWireTests: XCTestCase {
         let ok = try XCTUnwrap(try answer(["status": "ok", "value": [String: Any]()]))
         XCTAssertFalse(ok.mergeQueued)
         XCTAssertTrue(try XCTUnwrap(try answer(["status": "ok", "value": ["code": "queued"]])).mergeQueued)
-        for code: Any in ["merged", "Queued", "", 1, NSNull()] {
-            XCTAssertFalse(try XCTUnwrap(try answer(["status": "ok", "value": ["code": code]])).mergeQueued, "\(code)")
+        // Any other code on a success is an answer this build does not know: a generic failure, never a merge.
+        for code: Any in ["merged", "ok", "Queued", "", 1, NSNull()] {
+            let a = try XCTUnwrap(try answer(["status": "ok", "value": ["code": code]]), "\(code)")
+            XCTAssertFalse(a.mergeQueued, "\(code)")
+            XCTAssertEqual(a.mergeFailure, .unexpectedAnswer, "\(code) is not a merge")
+            XCTAssertEqual(a, .failed(code: "unexpected_answer"), "\(code)")
         }
+        XCTAssertEqual(AuthoredPrsMergeWords.failure(.unexpectedAnswer), "Unexpected answer: check GitHub")
+        XCTAssertNil(ok.mergeFailure, "an empty success is a merge")
         XCTAssertFalse(AuthoredPrAnswer<AuthoredPrDone>.failed(code: "queued").mergeQueued, "a failure is not a queue")
         XCTAssertEqual(AuthoredPrAnswer<AuthoredPrDone>.failed(code: "queued").mergeFailure, .unknown)
     }

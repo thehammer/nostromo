@@ -1806,3 +1806,406 @@ async fn the_verified_operator_app_is_enqueued_through_the_wire() {
     assert_eq!(rig.fake.enqueues().len(), 1);
     assert!(rig.fake.merges().is_empty());
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The merge queue follows the PR's BASE branch
+//
+// GitHub answers a PR's own `mergeQueue` field with `main`'s queue even when the
+// PR is stacked on a branch (`merge/*`) that has none. Only the base branch's
+// queue decides how the PR goes in; the PR's own field is a cross-check.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// A branch a PR is stacked on, as on Perri's real data.
+const STACKED: &str = "merge/f2c-family-session-facility";
+
+/// Every `POST /graphql` that reads a base branch's queue (the second read).
+fn base_queue_reads(rig: &Rig) -> Vec<Req> {
+    rig.fake
+        .log()
+        .into_iter()
+        .filter(|r| r.kind() == Kind::Graphql && r.graphql_query().contains("mergeQueue(branch:"))
+        .collect()
+}
+
+/// One rig over several PRs (time can be frozen once per test), Perri having
+/// approved each of them at its head.
+async fn rig_over(prs: Vec<FakePr>) -> Rig {
+    let numbers: Vec<u64> = prs.iter().map(|p| p.number).collect();
+    let mut rig = start(prs).await;
+    for n in numbers {
+        record(&mut rig, n, &sha('a'), Verdict::Approved).await;
+    }
+    rig
+}
+
+/// The merge verb answers `queue_unknown` for PR `n` however the app worded the
+/// confirmation (direct, queue, or not at all).
+async fn assert_queue_unknown(rig: &mut Rig, n: u64, what: &str) {
+    for (i, via) in [Some(MergeVia::Direct), Some(MergeVia::Queue), None]
+        .into_iter()
+        .enumerate()
+    {
+        let task = rig.spawn_merge_via(&format!("qu-{n}-{i}"), REPO, n, &short('a'), via);
+        let answer = rig.drive(task).await;
+        assert_eq!(
+            code_of(&answer),
+            "queue_unknown",
+            "{what} {via:?}: {answer:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_pr_stacked_on_a_branch_with_no_queue_merges_directly_though_its_own_field_names_a_queue()
+{
+    // Perri's real data: the PR's `mergeQueue` is main's, the base has none.
+    let pr = ready_pr(N)
+        .on_base(STACKED)
+        .with_merge_queue()
+        .base_has_queue(false);
+    let mut rig = queue_rig(pr).await;
+    let row = rig.row(REPO, N).unwrap();
+    assert_eq!(row.merge_via, Some(MergeVia::Direct), "{row:?}");
+    assert_eq!(
+        serde_json::to_value(&row).unwrap()["merge_via"],
+        "direct",
+        "on the wire too"
+    );
+
+    let answer = rig
+        .merge_via("s-1", REPO, N, &short('a'), MergeVia::Direct)
+        .await;
+    assert_eq!(code_of(&answer), "ok", "{answer:?}");
+    assert_eq!(merge_requests_for(&rig, N).len(), 1, "merged over REST");
+    assert!(rig.fake.enqueues().is_empty(), "never enqueued");
+}
+
+#[tokio::test]
+async fn a_confirmation_worded_for_a_queue_on_a_branch_that_has_none_is_via_changed_and_nothing_is_sent(
+) {
+    let pr = ready_pr(N)
+        .on_base(STACKED)
+        .with_merge_queue()
+        .base_has_queue(false);
+    let mut rig = queue_rig(pr).await;
+    let answer = rig
+        .merge_via("s-2", REPO, N, &short('a'), MergeVia::Queue)
+        .await;
+    assert_eq!(code_of(&answer), "via_changed", "{answer:?}");
+    assert!(rig.fake.merges().is_empty(), "no merge");
+    assert!(rig.fake.enqueues().is_empty(), "no enqueue");
+}
+
+#[tokio::test]
+async fn a_queue_on_the_base_that_the_prs_own_field_does_not_confirm_is_unknown_and_nothing_is_sent(
+) {
+    let cases = [(1u64, STACKED, "stacked"), (2, "main", "main")];
+    let mut rig = rig_over(
+        cases
+            .iter()
+            .map(|(n, base, _)| ready_pr(*n).on_base(base).base_has_queue(true))
+            .collect(),
+    )
+    .await;
+    for (n, _, tag) in cases {
+        let row = rig.row(REPO, n).unwrap();
+        assert_eq!(row.merge_via, None, "{tag}: the row does not guess");
+        assert!(
+            serde_json::to_value(&row)
+                .unwrap()
+                .get("merge_via")
+                .is_none(),
+            "{tag}: absent on the wire"
+        );
+        assert_queue_unknown(&mut rig, n, tag).await;
+    }
+    assert!(
+        rig.fake.merges().is_empty() && rig.fake.enqueues().is_empty(),
+        "something was sent to GitHub"
+    );
+}
+
+#[tokio::test]
+async fn a_pr_stacked_on_a_branch_with_a_queue_that_both_reads_confirm_is_enqueued_once_without_jump_or_bypass(
+) {
+    let mut rig = queue_rig(ready_pr(N).on_base("merge/x").with_merge_queue()).await;
+    assert_eq!(
+        rig.row(REPO, N).unwrap().merge_via,
+        Some(MergeVia::Queue),
+        "the row says queue"
+    );
+    let answer = rig
+        .merge_via("s-3", REPO, N, &short('a'), MergeVia::Queue)
+        .await;
+    assert_eq!(code_of(&answer), "queued", "{answer:?}");
+    assert!(rig.fake.merges().is_empty(), "never merged directly");
+    let enq = rig.fake.enqueues();
+    assert_eq!(enq.len(), 1, "{enq:?}");
+    let body: Value = serde_json::from_str(&enq[0].body).expect("a JSON body");
+    let vars: BTreeSet<&str> = body["variables"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(vars, BTreeSet::from(["head", "pr"]), "{body}");
+    assert_eq!(body["variables"]["head"], sha('a').as_str());
+    let lowered = enq[0].body.to_ascii_lowercase();
+    for banned in ["jump", "admin", "bypass", "force", "override"] {
+        assert!(!lowered.contains(banned), "{banned}: {}", enq[0].body);
+    }
+}
+
+#[tokio::test]
+async fn when_the_base_branchs_queue_cannot_be_read_nothing_is_sent_and_the_answer_is_queue_unknown(
+) {
+    // The base is the default branch (read with the PR) or another one (read by
+    // the second request), with the PR's own field naming a queue or not.
+    let mut cases = Vec::new();
+    let mut n = 0;
+    for base in ["main", STACKED] {
+        for pr_has_queue in [true, false] {
+            n += 1;
+            cases.push((n, base, pr_has_queue));
+        }
+    }
+    let mut rig = rig_over(
+        cases
+            .iter()
+            .map(|(n, base, pr_has_queue)| {
+                let pr = ready_pr(*n).on_base(base).base_queue_error();
+                if *pr_has_queue {
+                    pr.with_merge_queue()
+                } else {
+                    pr
+                }
+            })
+            .collect(),
+    )
+    .await;
+    for (n, base, pr_has_queue) in cases {
+        let tag = format!("{base}/pr-queue={pr_has_queue}");
+        let row = rig.row(REPO, n).unwrap();
+        assert_eq!(row.merge_via, None, "{tag}: the row does not guess");
+        // The rest of the row is still there: the unread queue costs nothing else.
+        assert_eq!(row.lifecycle, Lifecycle::Open, "{tag}");
+        assert_queue_unknown(&mut rig, n, &tag).await;
+    }
+    assert!(
+        rig.fake.merges().is_empty() && rig.fake.enqueues().is_empty(),
+        "something was sent to GitHub"
+    );
+}
+
+#[tokio::test]
+async fn a_failing_second_request_leaves_the_queue_unknown_not_the_poll_failed_and_the_next_read_recovers(
+) {
+    let mut rig = queue_rig(ready_pr(N).on_base("merge/x").with_merge_queue()).await;
+    assert_eq!(rig.row(REPO, N).unwrap().merge_via, Some(MergeVia::Queue));
+
+    // The next read: the PR's detail answers, the base queue read gets a 500.
+    rig.fake.script_graphql(&[200, 500]);
+    rig.fake.edit(REPO, N, |p| {
+        p.updated_at = t0() + Chrono::minutes(5);
+    });
+    rig.run_until(mins(3), secs(1), |r| {
+        r.row(REPO, N).is_some_and(|p| p.merge_via.is_none())
+    })
+    .await;
+    let row = rig.row(REPO, N).unwrap();
+    assert_eq!(row.merge_via, None, "unknown, not a guess: {row:?}");
+    assert_eq!(row.lifecycle, Lifecycle::Open, "the PR is still shown");
+    assert_eq!(row.title, TITLE);
+    let poll = rig.snapshot().unwrap().poll;
+    assert_ne!(
+        poll.state,
+        PollState::Error,
+        "the poll did not fail: {poll:?}"
+    );
+    assert!(
+        base_queue_reads(&rig).iter().any(|r| r.status == 500),
+        "the scripted failure hit the second request"
+    );
+
+    // The same failure at the verb: the live read cannot say, so nothing is sent.
+    rig.fake.script_graphql(&[200, 500]);
+    let task = rig.spawn_merge_via("f-1", REPO, N, &short('a'), Some(MergeVia::Queue));
+    let answer = rig.drive(task).await;
+    assert_eq!(code_of(&answer), "queue_unknown", "{answer:?}");
+    assert!(rig.fake.merges().is_empty() && rig.fake.enqueues().is_empty());
+
+    // GitHub answers again: the next read knows the queue.
+    rig.fake.edit(REPO, N, |p| {
+        p.updated_at = t0() + Chrono::minutes(10);
+    });
+    rig.run_until(mins(3), secs(1), |r| {
+        r.row(REPO, N)
+            .is_some_and(|p| p.merge_via == Some(MergeVia::Queue))
+    })
+    .await;
+    assert_eq!(rig.row(REPO, N).unwrap().merge_via, Some(MergeVia::Queue));
+}
+
+#[tokio::test]
+async fn a_pr_retargeted_after_the_row_was_shown_is_via_changed_and_nothing_is_sent() {
+    // (the base branch's queue, the app's wording) as the row showed it.
+    // (Each on its own branch: the fake answers a branch's queue as the PRs on it say.)
+    let cases = [(1u64, true, MergeVia::Queue), (2, false, MergeVia::Direct)];
+    let mut rig = rig_over(
+        cases
+            .iter()
+            .map(|(n, queue, _)| {
+                let pr = ready_pr(*n).on_base(&format!("merge/a{n}"));
+                if *queue {
+                    pr.with_merge_queue()
+                } else {
+                    pr
+                }
+            })
+            .collect(),
+    )
+    .await;
+    for (n, _, via) in cases {
+        assert_eq!(rig.row(REPO, n).unwrap().merge_via, Some(via));
+        // On GitHub it now targets `main` (which answers the same way as its old base
+        // did, so how it goes in has not changed, only where): the cached row is stale.
+        rig.fake.edit(REPO, n, |p| p.base_ref = "main".into());
+    }
+    for (n, queue, via) in cases {
+        let answer = rig
+            .merge_via(&format!("r-{n}"), REPO, n, &short('a'), via)
+            .await;
+        assert_eq!(code_of(&answer), "via_changed", "queue={queue}: {answer:?}");
+    }
+    assert!(rig.fake.merges().is_empty(), "merged");
+    assert!(rig.fake.enqueues().is_empty(), "enqueued");
+}
+
+#[tokio::test]
+async fn the_base_branchs_queue_is_asked_for_only_open_prs_on_other_branches_and_the_branch_travels_as_a_variable(
+) {
+    let tricky = "merge/x\"} { evil: viewer { login } } #";
+    let fake = Fake::new();
+    fake.put(ready_pr(1).on_base("merge/a").with_merge_queue());
+    fake.put(ready_pr(2).on_base(tricky));
+    fake.put(ready_pr(3)); // on main
+    let mut rig = boot(fake.clone()).await;
+
+    let reads = base_queue_reads(&rig);
+    assert!(!reads.is_empty(), "a PR on another branch needs the read");
+    for r in &reads {
+        let body: Value = serde_json::from_str(&r.body).expect("a JSON body");
+        let query = body["query"].as_str().unwrap();
+        // The branches are variables: nothing of them is in the query text.
+        for branch in ["merge/a", tricky, "evil", "viewer"] {
+            assert!(!query.contains(branch), "{branch} is in the query: {query}");
+        }
+        let vars: BTreeSet<&str> = body["variables"]
+            .as_object()
+            .expect("variables")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(vars.len(), 2, "one per PR on another branch: {body}");
+        let mut branches: Vec<&str> = body["variables"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter_map(Value::as_str)
+            .collect();
+        branches.sort_unstable();
+        assert_eq!(branches, vec!["merge/a", tricky], "not the PR on main");
+    }
+    // One request for the lot, not one each.
+    let detail_reads = rig
+        .of_kind(Kind::Graphql)
+        .iter()
+        .filter(|(_, r)| r.graphql_query().contains("pullRequest(number"))
+        .count();
+    assert!(
+        reads.len() <= detail_reads,
+        "{} vs {detail_reads}",
+        reads.len()
+    );
+
+    // Once a PR has ended it is not asked about again.
+    let mark = rig.fake.log_len();
+    fake.edit(REPO, 1, |p| {
+        p.state = "CLOSED".into();
+        p.in_search = false;
+    });
+    fake.edit(REPO, 2, |p| {
+        p.state = "CLOSED".into();
+        p.in_search = false;
+    });
+    let seen = rig
+        .run_until(mins(3), Duration::from_millis(500), |r| {
+            [1, 2]
+                .iter()
+                .all(|n| r.row(REPO, *n).map(|p| p.lifecycle) == Some(Lifecycle::Closed))
+        })
+        .await;
+    assert!(seen.is_some(), "the list never showed them as closed");
+    assert!(
+        rig.since(mark)
+            .iter()
+            .all(|r| !r.graphql_query().contains("mergeQueue(branch:")),
+        "a closed PR was asked about its base queue"
+    );
+}
+
+#[tokio::test]
+async fn a_pr_on_the_default_branch_costs_no_extra_request() {
+    let mut rig = queue_rig(queue_pr(N)).await;
+    assert!(base_queue_reads(&rig).is_empty());
+    for i in 0..3 {
+        rig.fake.edit(REPO, N, |p| {
+            p.updated_at = t0() + Chrono::minutes(5 * (i + 1));
+        });
+        rig.refresh().await;
+        rig.run(secs(5), Duration::from_millis(500)).await;
+    }
+    assert!(
+        base_queue_reads(&rig).is_empty(),
+        "a second request was sent for a PR on main"
+    );
+    // Every GraphQL request of a poll is a detail read, and nothing else.
+    for (_, r) in rig.of_kind(Kind::Graphql) {
+        assert!(
+            r.graphql_query().contains("pullRequest(number"),
+            "{}",
+            r.body
+        );
+    }
+    assert_eq!(rig.row(REPO, N).unwrap().merge_via, Some(MergeVia::Queue));
+}
+
+#[tokio::test]
+async fn a_moved_head_that_github_names_by_a_structured_code_is_head_changed_whatever_it_says() {
+    let mut rig = queue_rig(queue_pr(N)).await;
+    let refusals = [
+        json!({"type": "STALE_HEAD", "message": "Something unrelated"}),
+        json!({"extensions": {"code": "STALE_HEAD"}, "message": "Something unrelated"}),
+        json!({"type": "UNPROCESSABLE", "message": "Head branch was modified. Review the latest changes and try again."}),
+    ];
+    for (i, error) in refusals.into_iter().enumerate() {
+        rig.fake.enqueue_responds(Some((
+            200,
+            json!({"data": {"enqueuePullRequest": null}, "errors": [error.clone()]}),
+        )));
+        let answer = rig
+            .merge_via(&format!("h-{i}"), REPO, N, &short('a'), MergeVia::Queue)
+            .await;
+        assert_eq!(code_of(&answer), "head_changed", "{error}: {answer:?}");
+    }
+    // A refusal GitHub gives no head wording for is a refusal, not a moved head.
+    rig.fake.enqueue_responds(Some((
+        200,
+        json!({"data": {"enqueuePullRequest": null}, "errors": [
+            {"type": "UNPROCESSABLE", "message": "Pull request is not mergeable"}]}),
+    )));
+    let answer = rig
+        .merge_via("h-x", REPO, N, &short('a'), MergeVia::Queue)
+        .await;
+    assert_eq!(code_of(&answer), "queue_refused", "{answer:?}");
+}

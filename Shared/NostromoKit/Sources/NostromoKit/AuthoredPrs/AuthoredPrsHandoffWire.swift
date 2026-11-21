@@ -199,12 +199,15 @@ private struct PreviewValue: Decodable {
 private struct StartedValue: Decodable { let tag: String }
 private struct DoneValue: Decodable {}
 private struct MergeDoneValue: Decodable {
+    /// The string `code`, when there is one.
     let code: String?
+    /// The answer carries a `code` key at all (of any type). `{}` is "merged"; a code is only ever `queued`.
+    let hasCode: Bool
     private enum K: String, CodingKey { case code }
     init(from decoder: Decoder) throws {
-        // Anything but a string is no code: the answer is still a success.
-        code = (try? decoder.container(keyedBy: K.self))
-            .flatMap { try? $0.decodeIfPresent(String.self, forKey: .code) }.flatMap { $0 }
+        let container = try? decoder.container(keyedBy: K.self)
+        hasCode = container?.contains(.code) ?? false
+        code = container.flatMap { try? $0.decodeIfPresent(String.self, forKey: .code) }.flatMap { $0 }
     }
 }
 
@@ -265,8 +268,12 @@ public enum AuthoredPrAnswerFrame: Equatable, Sendable {
             guard let raw = parse(MergeDoneValue.self) else { return nil }
             switch raw {
             case .failed(let code): return .merge(requestId: head.request_id, .failed(code: code))
-            // Only the exact word is a queue: any other success value is a merge, as before.
-            case .ok(let v): return .merge(requestId: head.request_id, .ok(AuthoredPrDone(queued: v.code == "queued")))
+            // `{}` is a merge and the exact word `queued` is a queue. Any other code is an answer this build does
+            // not know: never shown as "Merged" (the action may already have happened), a generic failure.
+            case .ok(let v):
+                if !v.hasCode { return .merge(requestId: head.request_id, .ok(AuthoredPrDone(queued: false))) }
+                if v.code == "queued" { return .merge(requestId: head.request_id, .ok(AuthoredPrDone(queued: true))) }
+                return .merge(requestId: head.request_id, .failed(code: "unexpected_answer"))
             }
         default:
             return nil
@@ -321,6 +328,9 @@ public enum AuthoredPrMergeCode: Equatable, Sendable {
     /// Not from the daemon (no wire spelling maps to it): this app declined the press because no person's gesture
     /// was behind it, so nothing was sent.
     case gestureRefused
+    /// Not a daemon code: a success answer carrying a code this build does not know (the decoder's own spelling is
+    /// `unexpected_answer`). The action may already have happened, so it is never shown as a merge.
+    case unexpectedAnswer
     case unknown
 
     public init(wire code: String) {
@@ -344,6 +354,7 @@ public enum AuthoredPrMergeCode: Equatable, Sendable {
         case "queue_refused": self = .queueRefused
         case "queue_unknown": self = .queueUnknown
         case "via_changed": self = .viaChanged
+        case "unexpected_answer": self = .unexpectedAnswer
         // A refusal of the peer, however the daemon spelled it: this app is not allowed to merge.
         case "not_permitted", "not_operator_app", "requires_secure_connection": self = .notPermitted
         default: self = .unknown
@@ -395,6 +406,8 @@ public enum AuthoredPrsMergeWords {
         case .droppedFromQueue: return "Dropped from the merge queue"
         case .notPermitted: return "Nostromo refused the request"
         case .gestureRefused: return "Merge was refused: use the button"
+        // A success whose code this build does not know: the action may already have happened.
+        case .unexpectedAnswer: return "Unexpected answer: check GitHub"
         case .unknown: return "The merge failed"
         }
     }

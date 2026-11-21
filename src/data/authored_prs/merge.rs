@@ -22,8 +22,12 @@
 //!    The way the app worded its confirmation (`expected_via`; absent means a
 //!    direct merge) must be the way GitHub says now, or nothing is sent
 //!    (`via_changed`). If the live read cannot say whether a queue exists the
-//!    verb refuses (`queue_unknown`): it never guesses. A PR already in the
-//!    queue answers `already_queued` and nothing is sent.
+//!    verb refuses (`queue_unknown`): it never guesses. The queue is the BASE
+//!    branch's (`repository.mergeQueue(branch: <base>)`), cross-checked against
+//!    the PR's own `mergeQueue` field: no queue on the base is a direct merge,
+//!    a queue needs both reads to say so (else `queue_unknown`). The live base
+//!    branch must also be the one the row showed (else `via_changed`). A PR
+//!    already in the queue answers `already_queued` and nothing is sent.
 //!
 //! Answers are codes only. Nothing GitHub says (a message, a title) is
 //! forwarded or logged. One request id gets one answer, and a second request for
@@ -295,6 +299,12 @@ impl AuthoredPrActions {
         // Every rule holds. How GitHub takes the PR in decides the action, and it
         // must be the way the app told the person.
         let via = live.merge_via().ok_or("queue_unknown")?;
+        // The queue decision was made for the live base branch: it must be the
+        // one the row showed, or the person confirmed something else.
+        if classify(&live, None).base_ref != row.base_ref {
+            *via_label = via_word(via);
+            return refuse("via_changed");
+        }
         *via_label = via_word(via);
         if expected_via.unwrap_or(MergeVia::Direct) != via {
             return refuse("via_changed");
