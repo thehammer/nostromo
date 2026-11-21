@@ -91,12 +91,6 @@ final class CreateFocusModelPickersTests: XCTestCase {
         store.ingest(.modelDefaults(defaults: defaults, declared: declared))
     }
 
-    private func pumpMain(_ seconds: TimeInterval = 0.3) {
-        let e = expectation(description: "pump")
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { e.fulfill() }
-        wait(for: [e], timeout: 20)
-    }
-
     private func makePickers(agent: String? = nil) -> CreateFocusModelPickers {
         ingestCatalog()
         ingestDefaults()
@@ -187,7 +181,9 @@ final class CreateFocusModelPickersTests: XCTestCase {
         XCTAssertNil(pickers.selectedModel, "no defaults known yet")
 
         ingestDefaults()
-        pumpMain()
+        waitUntil("the pickers never followed the defaults that arrived (model \(String(describing: pickers.selectedModel)))") {
+            pickers.selectedModel == "opus" && pickers.selectedEffort == "high"
+        }
 
         XCTAssertEqual(pickers.selectedModel, "opus")
         XCTAssertEqual(pickers.selectedEffort, "high")
@@ -380,7 +376,8 @@ final class CreateFocusModelPickersTests: XCTestCase {
         var created: [Focus] = []
         let sheet = makeSheet { created.append($0) }
         sheet.createTapped()
-        pumpMain()
+        waitUntil("the create callback never fired (the org lookup never answered)") { !created.isEmpty }
+        drainMain()   // a stray late second create would still be counted
         XCTAssertEqual(created.count, 1)
         XCTAssertNil(created.first?.initialModel)
         XCTAssertNil(created.first?.initialEffort)
@@ -401,7 +398,7 @@ final class CreateFocusModelPickersTests: XCTestCase {
         sheet.pickers.userPickModel("opus")
         sheet.pickers.userPickEffort("xhigh")
         sheet.createTapped()
-        pumpMain()
+        waitUntil("the create callback never fired (the org lookup never answered)") { !created.isEmpty }
         XCTAssertEqual(created.first?.initialModel, "opus")
         XCTAssertEqual(created.first?.initialEffort, "xhigh")
     }
@@ -412,7 +409,7 @@ final class CreateFocusModelPickersTests: XCTestCase {
         sheet.pickers.userPickModel("haiku")
         sheet.selectAgent(at: 1)
         sheet.createTapped()
-        pumpMain()
+        waitUntil("the create callback never fired (the org lookup never answered)") { !created.isEmpty }
         XCTAssertEqual(created.first?.agentTag, "cody")
         XCTAssertEqual(created.first?.initialModel, "haiku")
         XCTAssertNil(created.first?.initialEffort)
@@ -520,12 +517,6 @@ final class ModelDefaultsViewTests: XCTestCase {
         ], stale: false, fetchedAt: nil)
     }
 
-    private func pumpMain(_ seconds: TimeInterval = 0.3) {
-        let e = expectation(description: "pump")
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { e.fulfill() }
-        wait(for: [e], timeout: 20)
-    }
-
     func testNoDefaultsFrameYetMeansNoRows() {
         XCTAssertEqual(ModelDefaultsView.rows(defaults: nil, catalog: catalog), [])
     }
@@ -576,7 +567,7 @@ final class ModelDefaultsViewTests: XCTestCase {
 
         store.ingest(.modelDefaults(defaults: ["claudia": AgentModelDefaultWire(model: "opus", effort: "high")],
                                     declared: ["claudia": "sonnet"]))
-        pumpMain()
+        waitUntil("the list never showed the confirmed default (rows \(view.rows))") { view.rows.map(\.summary) == ["Opus \u{00B7} high"] }
         XCTAssertEqual(view.rows, [ModelDefaultRow(agent: "claudia", summary: "Opus \u{00B7} high", hasDefault: true)])
     }
 
@@ -592,7 +583,7 @@ final class ModelDefaultsViewTests: XCTestCase {
                        .defaultSet(agent: "claudia", model: nil, effort: nil, clear: true, requestId: "req-1"))
 
         store.ingest(.modelDefaults(defaults: [:], declared: ["claudia": "sonnet"]))
-        pumpMain()
+        waitUntil("the row never fell back to the declared model (rows \(view.rows))") { view.rows.map(\.summary) == ["Sonnet (agent's own)"] }
         XCTAssertEqual(view.rows, [ModelDefaultRow(agent: "claudia", summary: "Sonnet (agent's own)", hasDefault: false)])
         XCTAssertTrue(view.clearButtons.isEmpty, "an agent that only declares a model has nothing to clear")
     }
@@ -616,7 +607,7 @@ final class ModelDefaultsViewTests: XCTestCase {
     func testOnceADefaultsFrameWithNothingInItArrivesTheListSaysThereAreNone() {
         let view = ModelDefaultsView(store: store)
         store.ingest(.modelDefaults(defaults: [:], declared: [:]))
-        pumpMain()
+        waitUntil("the empty state never changed from loading (\(String(describing: view.emptyStateText)))") { view.emptyStateText == "No agent defaults yet" }
         XCTAssertEqual(view.emptyStateText, "No agent defaults yet")
     }
 

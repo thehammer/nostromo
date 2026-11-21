@@ -186,6 +186,39 @@ final class AuthoredPrsFilterBarTests: XCTestCase {
         XCTAssertLessThanOrEqual(entry.count, 40 + " (1)".count, "capped like the job list's From: names")
     }
 
+    // MARK: - A snapshot while a menu is open
+
+    /// `NSPopUpButton.removeAllItems` closes an open menu, and a snapshot lands every few seconds. A count that
+    /// moves must leave the very same menu and items in place (the open menu keeps showing, now with the new
+    /// number); only a change in WHICH entries exist rebuilds them.
+    func testASnapshotThatMovesACountKeepsTheMenuAndItsItemsInPlace() {
+        let overview = makeOverview()
+        let strip = overview.filterStrip
+        let menuBefore = strip.repoPopUp.menu
+        let itemsBefore = strip.repoPopUp.itemArray.map(ObjectIdentifier.init)
+        let sessionItemsBefore = strip.sessionPopUp.itemArray.map(ObjectIdentifier.init)
+        XCTAssertEqual(titles(strip.repoPopUp), ["All (5)", "carefeed/portal (3)", "thehammer/nostromo (2)"])
+
+        overview.apply(snapshot: APT.snapshot(fixture() + [APT.pr(6, repo: Self.portal, group: .waiting)]), connection: .connected)
+
+        XCTAssertEqual(titles(strip.repoPopUp), ["All (6)", "carefeed/portal (4)", "thehammer/nostromo (2)"], "the new count shows")
+        XCTAssertTrue(strip.repoPopUp.menu === menuBefore, "the repo menu is the same menu")
+        XCTAssertEqual(strip.repoPopUp.itemArray.map(ObjectIdentifier.init), itemsBefore, "the repo items are the same items: nothing was rebuilt")
+        XCTAssertEqual(strip.sessionPopUp.itemArray.map(ObjectIdentifier.init), sessionItemsBefore, "the session items are untouched")
+    }
+
+    func testASnapshotThatChangesWhichEntriesExistRebuildsTheMenu() {
+        let overview = makeOverview()
+        let strip = overview.filterStrip
+        let itemsBefore = strip.repoPopUp.itemArray.map(ObjectIdentifier.init)
+
+        overview.apply(snapshot: APT.snapshot(fixture() + [APT.pr(6, repo: "carefeed/new-repo", group: .waiting)]), connection: .connected)
+
+        XCTAssertEqual(titles(strip.repoPopUp), ["All (6)", "carefeed/new-repo (1)", "carefeed/portal (3)", "thehammer/nostromo (2)"])
+        XCTAssertEqual(strip.repoPopUp.itemArray.count, 4)
+        XCTAssertNotEqual(Array(strip.repoPopUp.itemArray.map(ObjectIdentifier.init).prefix(itemsBefore.count)), itemsBefore)
+    }
+
     // MARK: - Nothing matches
 
     func testAFilterThatMatchesNothingSaysSoAndShowAllBringsEverythingBack() throws {
@@ -434,8 +467,13 @@ final class AuthoredPrsFilterBarTests: XCTestCase {
                 let full = try XCTUnwrap(popUp.titleOfSelectedItem)
                 let natural = (full as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11)]).width
                 XCTAssertLessThan(popUp.frame.width, natural, "\(context): '\(full)' is truncated, not allowed to push the strip wider")
-                XCTAssertEqual(popUp.toolTip, full, "\(context): the tooltip carries the full title")
-                XCTAssertTrue(popUp.itemArray.allSatisfy { $0.toolTip == $0.title }, "\(context): every entry has its title as a tooltip")
+                // The tooltip is the whole sanitised name: not the capped menu title, and not its "(n)" count.
+                let expectedFull = popUp === strip.repoPopUp ? longRepo : (longOwner.name ?? "").trimmingCharacters(in: .whitespaces)
+                XCTAssertEqual(popUp.toolTip, expectedFull, "\(context): the tooltip carries the full name")
+                XCTAssertNotEqual(popUp.toolTip, full, "\(context): and is not the capped menu title with its count")
+                XCTAssertTrue(popUp.itemArray.allSatisfy { item in
+                    item.toolTip.map { !$0.isEmpty && item.title.hasPrefix(String($0.prefix(8))) } ?? false
+                }, "\(context): every entry has its name as a tooltip")
             }
         }
     }

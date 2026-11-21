@@ -43,6 +43,16 @@ public struct AuthoredPrsFilterEntry<Selection: Hashable & Sendable>: Equatable,
     public let title: String
     /// PRs in the list that match this entry on its own (`All` is every PR).
     public let count: Int
+    /// Sanitised but NOT capped, without the count: what a tooltip shows, so a name the menu truncated can
+    /// still be read in full. Equals `title` for a name that fits.
+    public let fullTitle: String
+
+    public init(selection: Selection, title: String, count: Int, fullTitle: String? = nil) {
+        self.selection = selection
+        self.title = title
+        self.count = count
+        self.fullTitle = fullTitle ?? title
+    }
 
     /// What the menu says: `nostromo (3)`.
     public var menuTitle: String { "\(title) (\(count))" }
@@ -124,18 +134,18 @@ public enum AuthoredPrsFilter {
             return repoOK && sessionOK
         }
 
-        func repoTitle(_ name: String) -> String {
-            let title = MotherOriginDisplay.clean(name, cap: repoCap)
+        func repoTitle(_ name: String, cap: Int = repoCap) -> String {
+            let title = MotherOriginDisplay.clean(name, cap: cap)
             return title.isEmpty ? "unnamed repo" : title
         }
-        func sessionTitle(_ selection: AuthoredPrsSessionSelection) -> String {
+        func sessionTitle(_ selection: AuthoredPrsSessionSelection, cap: Int = MotherOriginDisplay.rowCap) -> String {
             switch selection {
             case .all: return "All"
             case .noSession: return noSessionTitle
             case .focus(let tag):
-                let name = MotherOriginDisplay.clean(focusNames[tag], cap: MotherOriginDisplay.rowCap)
+                let name = MotherOriginDisplay.clean(focusNames[tag], cap: cap)
                 if !name.isEmpty { return name }
-                let fallback = MotherOriginDisplay.clean(tag, cap: MotherOriginDisplay.rowCap)
+                let fallback = MotherOriginDisplay.clean(tag, cap: cap)
                 return fallback.isEmpty ? "focus" : fallback
             }
         }
@@ -144,14 +154,16 @@ public enum AuthoredPrsFilter {
         if case .repo(let selected) = selection.repo { repoNames.insert(selected) }
         let repoEntries = [AuthoredPrsFilterEntry(selection: AuthoredPrsRepoSelection.all, title: "All", count: prs.count)]
             + repoNames
-                .map { AuthoredPrsFilterEntry(selection: AuthoredPrsRepoSelection.repo($0), title: repoTitle($0), count: repoCounts[$0] ?? 0) }
+                .map { AuthoredPrsFilterEntry(selection: AuthoredPrsRepoSelection.repo($0), title: repoTitle($0), count: repoCounts[$0] ?? 0,
+                                                       fullTitle: repoTitle($0, cap: .max)) }
                 .sorted { byTitle($0.title, $1.title, tieBreak: "\($0.selection)" < "\($1.selection)") }
 
         var focusSelections = Set(sessionCounts.keys.filter { $0 != .noSession })
         if case .focus = selection.session { focusSelections.insert(selection.session) }
         var sessionEntries = [AuthoredPrsFilterEntry(selection: AuthoredPrsSessionSelection.all, title: "All", count: prs.count)]
         sessionEntries += focusSelections
-            .map { AuthoredPrsFilterEntry(selection: $0, title: sessionTitle($0), count: sessionCounts[$0] ?? 0) }
+            .map { AuthoredPrsFilterEntry(selection: $0, title: sessionTitle($0), count: sessionCounts[$0] ?? 0,
+                                                       fullTitle: sessionTitle($0, cap: .max)) }
             .sorted { byTitle($0.title, $1.title, tieBreak: "\($0.selection)" < "\($1.selection)") }
         if sessionCounts[.noSession] != nil || selection.session == .noSession {
             sessionEntries.append(AuthoredPrsFilterEntry(selection: .noSession, title: noSessionTitle, count: sessionCounts[.noSession] ?? 0))

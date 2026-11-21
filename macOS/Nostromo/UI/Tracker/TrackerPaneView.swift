@@ -802,7 +802,7 @@ final class TrackerPaneView: NSView {
     /// Open the title or details editor of an item (a double-click, the menu, the actions line or VoiceOver).
     /// Details first expand the row, and it stays expanded.
     func beginEdit(item id: String, kind: TrackerEditKind) {
-        guard editEnabled, let item = shownItem(id) else { return }
+        guard editEnabled, shownItem(id) != nil else { return }
         let key = TrackerRow.itemKey(id)
         if editSessions[id] != nil {
             rowViews[key]?.focusEditor()

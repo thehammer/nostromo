@@ -47,17 +47,6 @@ final class CreateFocusSheetLabelTests: XCTestCase {
                          onCreate: onCreate)
     }
 
-    /// Spins the main run loop until `condition` holds, returning the moment it does. A condition that never
-    /// holds fails here with `message`, after a bounded wait, instead of leaving a later assertion to guess.
-    private func waitUntil(_ message: @autoclosure () -> String, timeout: TimeInterval = 15,
-                           file: StaticString = #filePath, line: UInt = #line, _ condition: () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while !condition(), Date() < deadline {
-            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
-        }
-        if !condition() { XCTFail("timed out after \(timeout) s: \(message())", file: file, line: line) }
-    }
-
     private func allViews(_ root: NSView) -> [NSView] {
         var all: [NSView] = []
         func walk(_ v: NSView) { all.append(v); v.subviews.forEach(walk) }

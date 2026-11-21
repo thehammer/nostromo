@@ -31,6 +31,11 @@ private final class NotKeyWindow: NSWindow {
 
 final class MarkdownCodeBlockTests: XCTestCase {
 
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        try requireFiraCodeNerdFont(self)   // a missing font must fail loudly, not as height mismatches
+    }
+
     private let fixture = MarkdownFenceFixtures.reportedMessage
     private let base13 = NSFont.systemFont(ofSize: 13)
 
