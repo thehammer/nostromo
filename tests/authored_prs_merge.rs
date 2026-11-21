@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Duration as Chrono;
+use nostromo::data::authored_prs::ownership::PrKey;
 use nostromo::data::authored_prs::snapshot::{Lifecycle, PollState};
 use nostromo::data::authored_prs::verdicts::{Verdict, VerdictRecord};
 use nostromo::ipc::{
@@ -67,20 +68,9 @@ fn ready_pr(number: u64) -> FakePr {
         .approved_by("alice")
 }
 
-/// Capture this test's log lines. A process-wide subscriber (that discards
-/// everything) goes in first, so every callsite stays enabled: without it a
-/// test thread that logs before another test's capture starts would leave a
-/// callsite cached as disabled for the capturing one.
+/// Capture this test's log lines (see `capture_logs` for why a process-wide
+/// subscriber backs it).
 fn logs() -> (Captured, tracing::subscriber::DefaultGuard) {
-    static GLOBAL_LOG: std::sync::Once = std::sync::Once::new();
-    GLOBAL_LOG.call_once(|| {
-        let _ = tracing::subscriber::set_global_default(
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::TRACE)
-                .with_writer(std::io::sink)
-                .finish(),
-        );
-    });
     capture_logs()
 }
 
@@ -108,19 +98,12 @@ async fn start(prs: Vec<FakePr>) -> Rig {
 /// Perri's verdict on `head`, recorded the way the MCP tool records it, with
 /// the engine given time to publish it.
 async fn record(rig: &mut Rig, number: u64, head: &str, verdict: Verdict) {
-    let current = rig
-        .row(REPO, number)
-        .and_then(|p| p.head_sha_short)
-        .is_some_and(|short| head.starts_with(&short));
-    if current || verdict != Verdict::Approved {
-        rig.actions
-            .record_verdict(REPO, number, head, verdict, Some("perri"), None)
-            .await
-            .expect("a valid record");
-    } else {
-        // An approval of a head the daemon does not hold is refused by the tool
-        // (see `mcp_perri_record_verdict`); the merge's own check is tested
-        // against what such a record would be: one made while that head was current.
+    if verdict == Verdict::Approved {
+        // The tool checks an approval against GitHub's live head (see
+        // `authored_prs_verdicts` and `mcp_perri_record_verdict`); the merge's
+        // own check is tested against what such a record is: one made while
+        // that head was current. So it goes into the store directly, with no
+        // extra request in the fake's log, and the engine is told as the tool does.
         let rec = VerdictRecord::new(
             REPO,
             number,
@@ -132,6 +115,15 @@ async fn record(rig: &mut Rig, number: u64, head: &str, verdict: Verdict) {
         )
         .expect("a valid record");
         rig.verdicts.record(rec);
+        rig.demand.pr_changed(PrKey {
+            repo: REPO.to_ascii_lowercase(),
+            number,
+        });
+    } else {
+        rig.actions
+            .record_verdict(REPO, number, head, verdict, Some("perri"), None)
+            .await
+            .expect("a valid record");
     }
     rig.run(secs(3), Duration::from_millis(500)).await;
 }
