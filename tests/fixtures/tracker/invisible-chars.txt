@@ -1,0 +1,36 @@
+# The code points the daemon's `is_invisible` (src/data/work/untrusted.rs) refuses, one range per line: START or START-END, hex.
+# The ONE list both sides check: tests/tracker_invisible_chars.rs (Rust, every code point must agree with is_invisible)
+# and TrackerCommandText tests (Swift, every listed code point must be dropped from what the Mac draws and copies).
+# Change `is_invisible` and this file together or a test fails.
+# C0 and C1 controls (is_control; the Mac keeps only \n and \t of these, as the daemon does for commands)
+0000-001F
+007F-009F
+00AD
+034F
+0600-0605
+061C
+06DD
+070F
+0890-0891
+08E2
+115F
+1160
+17B4-17B5
+180B-180F
+200B-200F
+2028
+2029
+202A-202E
+2060-206F
+2800
+3164
+FE00-FE0F
+FEFF
+FFA0
+FFF0-FFFB
+110BD
+110CD
+13430-1343F
+1BCA0-1BCA3
+1D173-1D17A
+E0000-E0FFF

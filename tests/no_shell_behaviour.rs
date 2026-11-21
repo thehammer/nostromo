@@ -17,8 +17,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nostromo::ipc::pane_registry::PaneRegistry;
-use nostromo::ipc::protocol::{ServerMsg, TrackerPaneOp};
+use nostromo::ipc::protocol::{ConflictKeep, ServerMsg, TrackerPaneOp};
 use nostromo::ipc::SessionManager;
+use nostromo::mcp::tools::tracker_edit::tracker_edit_in;
 use nostromo::mcp::tools::{dispatch, ToolResult};
 use nostromo::mcp::{DaemonMcpBackend, McpSharedState, PerriDaemonState};
 use nostromo::terminal::session::TerminalSession;
@@ -230,10 +231,20 @@ impl World {
         }
     }
 
-    /// A pane edit against the board's current version; the outcome is the caller's to judge.
-    fn pane(&self, ops: Vec<TrackerPaneOp>) -> bool {
+    /// A pane edit through the daemon's real handler for the app's edits
+    /// (`mcp::tools::tracker_edit::tracker_edit_in`, what `ClientMsg::TrackerEdit` reaches), against the
+    /// board's current version. Driving the handler, not the registry, is what makes a write added to the
+    /// handler visible to the PTY detector.
+    async fn pane(&self, ops: Vec<TrackerPaneOp>) -> PaneOutcome {
         let version = self.registry.board_view(TAG).map_or(0, |b| b.version);
-        self.registry.apply_pane_ops(TAG, version, &ops).is_ok()
+        let reply = tracker_edit_in(&self.state, TAG, "req-1", "conn-1", version, None, ops).await;
+        match reply {
+            ServerMsg::TrackerEditResult { ok, error, .. } => PaneOutcome {
+                ok,
+                code: error.map(|e| e.code),
+            },
+            other => panic!("the edit handler answered {other:?}"),
+        }
     }
 
     fn board(&self) -> String {
@@ -241,6 +252,57 @@ impl World {
         String::from_utf8_lossy(&std::fs::read(path).expect("board file")).into_owned()
     }
 }
+
+/// What the daemon answered a pane edit: accepted, or refused with a code.
+#[derive(Debug)]
+struct PaneOutcome {
+    ok: bool,
+    code: Option<String>,
+}
+
+impl PaneOutcome {
+    fn assert_ok(&self, what: &str) {
+        assert!(self.ok && self.code.is_none(), "{what}: {self:?}");
+    }
+
+    fn assert_refused(&self, what: &str) {
+        assert!(
+            !self.ok && self.code.as_deref().is_some_and(|c| !c.is_empty()),
+            "{what}: expected a refusal with a code, got {self:?}"
+        );
+    }
+}
+
+/// Every pane op's name, by an EXHAUSTIVE match: a new `TrackerPaneOp` variant stops this file from
+/// compiling until it is named here, listed in [`ALL_PANE_OPS`] and driven below. The surface tests
+/// and this one are the tripwire: a pane op nobody classified cannot slip in.
+fn pane_op_name(op: &TrackerPaneOp) -> &'static str {
+    match op {
+        TrackerPaneOp::Status { .. } => "status",
+        TrackerPaneOp::Edit { .. } => "edit",
+        TrackerPaneOp::Add { .. } => "add",
+        TrackerPaneOp::Move { .. } => "move",
+        TrackerPaneOp::Remove { .. } => "remove",
+        TrackerPaneOp::RestoreText { .. } => "restore_text",
+        TrackerPaneOp::Restore { .. } => "restore",
+        TrackerPaneOp::ClearBadge { .. } => "clear_badge",
+        TrackerPaneOp::AckDropped { .. } => "ack_dropped",
+        TrackerPaneOp::ResolveConflict { .. } => "resolve_conflict",
+    }
+}
+
+const ALL_PANE_OPS: [&str; 10] = [
+    "status",
+    "edit",
+    "add",
+    "move",
+    "remove",
+    "restore_text",
+    "restore",
+    "clear_badge",
+    "ack_dropped",
+    "resolve_conflict",
+];
 
 fn pane_status(id: &str, status: &str) -> TrackerPaneOp {
     TrackerPaneOp::Status {
@@ -356,13 +418,20 @@ async fn driving_every_tracker_op_with_every_command_and_hostile_string_writes_n
         assert_eq!(res["ok"], json!(true), "{args}: {res}");
     }
 
-    // Every pane op (T3a), including the user's "Ran it" tick, with hostile text too.
-    assert!(
-        w.pane(vec![pane_status("cmd-1", "done")]),
-        "the user may tick a command"
-    );
-    for (_, text) in hostile() {
-        w.pane(vec![
+    // Every pane op (T3a), through the daemon's real edit handler, including the user's "Ran it" tick.
+    // Each answer is checked; every op is recorded so the list below proves none was skipped.
+    let mut driven: Vec<&'static str> = Vec::new();
+    let mut pane = |ops: Vec<TrackerPaneOp>| {
+        driven.extend(ops.iter().map(pane_op_name));
+        ops
+    };
+    w.pane(pane(vec![pane_status("cmd-1", "done")]))
+        .await
+        .assert_ok("the user may tick a command");
+    let mut accepted = 0;
+    let mut refused = 0;
+    for (name, text) in hostile() {
+        for op in pane(vec![
             TrackerPaneOp::Add {
                 section: "now".into(),
                 title: text.clone(),
@@ -386,18 +455,60 @@ async fn driving_every_tracker_op_with_every_command_and_hostile_string_writes_n
                 before: None,
                 after: None,
             },
-        ]);
+        ]) {
+            // One op per edit, so each outcome is its own: an answer with a code, or accepted.
+            let outcome = w.pane(vec![op]).await;
+            assert!(
+                outcome.ok == outcome.code.is_none(),
+                "{name}: ok and error must agree: {outcome:?}"
+            );
+            if outcome.ok {
+                accepted += 1;
+            } else {
+                refused += 1;
+            }
+        }
     }
-    w.pane(vec![TrackerPaneOp::Move {
+    assert!(
+        accepted > 0 && refused > 0,
+        "hostile text: {accepted} accepted, {refused} refused"
+    );
+    w.pane(pane(vec![TrackerPaneOp::Move {
         id: "cmd-3".into(),
         section: "next".into(),
         before: None,
         after: None,
-    }]);
-    w.pane(vec![TrackerPaneOp::ClearBadge { id: "cmd-3".into() }]);
-    w.pane(vec![TrackerPaneOp::AckDropped { id: "cmd-3".into() }]);
-    w.pane(vec![pane_status("cmd-1", "todo")]);
-    w.pane(vec![TrackerPaneOp::Remove { id: "cmd-4".into() }]);
+    }]))
+    .await
+    .assert_ok("move");
+    w.pane(pane(vec![TrackerPaneOp::ClearBadge { id: "cmd-3".into() }]))
+        .await
+        .assert_ok("clear_badge");
+    let ack = w
+        .pane(pane(vec![TrackerPaneOp::AckDropped { id: "cmd-3".into() }]))
+        .await;
+    assert!(ack.ok == ack.code.is_none(), "ack_dropped: {ack:?}");
+    w.pane(pane(vec![pane_status("cmd-1", "todo")]))
+        .await
+        .assert_ok("untick");
+    // A conflict that does not exist is refused with a code, and nothing is written.
+    let before = w.board();
+    w.pane(pane(vec![TrackerPaneOp::ResolveConflict {
+        id: "cmd-3".into(),
+        field: "status".into(),
+        keep: ConflictKeep::Losing,
+        conflict_id: Some("no-such-conflict".into()),
+        index: None,
+    }]))
+    .await
+    .assert_refused("resolve_conflict");
+    assert_eq!(w.board(), before, "a refused edit changes nothing");
+    w.pane(pane(vec![TrackerPaneOp::Remove { id: "cmd-4".into() }]))
+        .await
+        .assert_ok("remove");
+    for name in ALL_PANE_OPS {
+        assert!(driven.contains(&name), "pane op `{name}` was never driven");
+    }
     // A file edit ticking a command, as the user's editor would.
     let path = w.registry.bound_path(TAG).unwrap();
     std::fs::write(&path, w.board().replacen("- [ ]", "- [x]", 1)).unwrap();
@@ -435,6 +546,22 @@ fn the_detector_sees_a_byte_when_one_is_written() {
     assert!(quiet.log().is_empty());
 }
 
+/// `path` itself if it is a `.rs` file, else every `.rs` file below it.
+fn rust_files(path: &Path) -> Vec<PathBuf> {
+    if path.is_file() {
+        return if path.extension().is_some_and(|e| e == "rs") {
+            vec![path.to_path_buf()]
+        } else {
+            Vec::new()
+        };
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(path).unwrap() {
+        out.extend(rust_files(&entry.unwrap().path()));
+    }
+    out
+}
+
 #[test]
 fn the_tracker_code_names_nothing_that_writes_to_a_terminal_or_a_session() {
     let forbidden = [
@@ -451,28 +578,30 @@ fn the_tracker_code_names_nothing_that_writes_to_a_terminal_or_a_session() {
         "ChildStdin",
         "tokio::process",
         "libc::write",
+        "daemon.terminals",
+        ".terminals.",
     ];
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut files: Vec<PathBuf> = std::fs::read_dir(root.join("src/tracker"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect();
-    files.extend(
-        std::fs::read_dir(root.join("src/mcp/tools"))
+    // Every file under src/tracker (subdirectories too) and every tracker* file or directory of mcp/tools.
+    let mut files = rust_files(&root.join("src/tracker"));
+    for entry in std::fs::read_dir(root.join("src/mcp/tools")).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
             .unwrap()
-            .map(|e| e.unwrap().path())
-            .filter(|p| {
-                p.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with("tracker")
-            }),
+            .to_string_lossy()
+            .starts_with("tracker")
+        {
+            files.extend(rust_files(&path));
+        }
+    }
+    assert!(
+        files.len() >= 15,
+        "the scan found only {} files",
+        files.len()
     );
     let mut found = Vec::new();
-    for file in files
-        .into_iter()
-        .filter(|p| p.extension().is_some_and(|e| e == "rs"))
-    {
+    for file in files {
         let text = std::fs::read_to_string(&file).unwrap();
         // Production code (before `#[cfg(test)]`) may run `git` with a null stdin, but may name none of these.
         let production = text.split("#[cfg(test)]").next().unwrap();

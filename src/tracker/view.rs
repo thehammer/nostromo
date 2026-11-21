@@ -9,8 +9,9 @@ use std::collections::HashMap;
 use crate::ipc::protocol::{MdBlock, MdSpan};
 use crate::markdown_blocks::markdown_to_blocks;
 
-use super::format::{ParsedBoard, SegmentKind};
+use super::format::{validate_command_text, ParsedBoard, SegmentKind};
 use super::model::{fnv1a64, Env, Item, Kind, Link, Status};
+use super::ops::MAX_COMMAND_CHARS;
 
 /// The banner over a board that isn't current.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,8 +139,13 @@ pub struct ViewItem {
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<Env>,
-    /// Ran-it state of a command (T4; always false here).
+    /// Ran-it state of a command (T4; always false here: the Mac reads `done` as run).
     pub ran: bool,
+    /// The item's command was withheld: the board file holds one with control, escape or
+    /// invisible characters (or one over the length limit) that the MCP path would have
+    /// refused. `command` is then absent, so nothing hostile is drawn or copyable.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub command_withheld: bool,
     /// The live source this item follows and how fresh it is (T6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound: Option<BoundView>,
@@ -433,7 +439,24 @@ impl ViewNode {
     }
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// A command read from the board FILE gets the validation the MCP path applies on write: an agent
+/// (or anything else) can write the file directly. Returns the command to show and whether one was withheld.
+fn checked_command(command: Option<&String>) -> (Option<String>, bool) {
+    match command {
+        Some(c) if validate_command_text(c).is_err() || c.chars().count() > MAX_COMMAND_CHARS => {
+            (None, true)
+        }
+        Some(c) => (Some(c.clone()), false),
+        None => (None, false),
+    }
+}
+
 fn view_item(item: &Item, source: String, facts: &ViewFacts) -> ViewItem {
+    let (command, command_withheld) = checked_command(item.command.as_ref());
     ViewItem {
         id: item.id.clone(),
         section: item.section.clone(),
@@ -450,9 +473,10 @@ fn view_item(item: &Item, source: String, facts: &ViewFacts) -> ViewItem {
             .unwrap_or_default(),
         links: item.links.clone(),
         kind: item.kind,
-        command: item.command.clone(),
+        command,
         env: item.env,
         ran: false,
+        command_withheld,
         bound: facts.bound.get(&item.id).cloned(),
         conflicts: facts.conflicts.get(&item.id).cloned().unwrap_or_default(),
         dropped_conflicts: facts.dropped.get(&item.id).copied().unwrap_or(0),
