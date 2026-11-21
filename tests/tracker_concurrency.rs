@@ -61,7 +61,8 @@
 //!
 //! Failing interleavings print their seed and every step (a panic in one is
 //! reported with its seed too). `TRACKER_FUZZ_SEED` reruns one seed;
-//! `TRACKER_FUZZ_COUNT` runs more. Hermetic: `FakeClock`, temp dirs, no network.
+//! `TRACKER_FUZZ_COUNT` runs more (from `TRACKER_FUZZ_START`, default 0, so
+//! separate runs cover different seeds). Hermetic: `FakeClock`, temp dirs, no network.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -1700,6 +1701,13 @@ fn one(seed: u64) -> Result<(), String> {
     ))
 }
 
+/// The interleaving the long fuzz run found: a note a removal took off the
+/// board, set back by a stale save over a newer note, was silently lost.
+#[test]
+fn a_stale_save_restoring_a_value_a_removal_took_off_loses_no_edit() {
+    one(0x7a11_0a5a).unwrap_or_else(|e| panic!("{e}"));
+}
+
 #[test]
 fn four_hundred_interleavings_lose_no_edit() {
     let seeds: Vec<u64> = match std::env::var("TRACKER_FUZZ_SEED") {
@@ -1712,7 +1720,11 @@ fn four_hundred_interleavings_lose_no_edit() {
                 .ok()
                 .and_then(|c| c.parse().ok())
                 .unwrap_or(INTERLEAVINGS);
-            (0..count).map(|n| SEED_BASE + n).collect()
+            let start = std::env::var("TRACKER_FUZZ_START")
+                .ok()
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(0);
+            (start..start + count).map(|n| SEED_BASE + n).collect()
         }
     };
     // A panic inside an interleaving (a bug in the fixture, or in the daemon)

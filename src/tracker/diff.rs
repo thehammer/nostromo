@@ -24,11 +24,18 @@ pub fn diff(old: &Board, new: &Board, author: &Author, now: DateTime<Utc>) -> Ve
         .iter()
         .filter(|i| !new_ids.contains(i.id.as_str()))
     {
-        out.push(
-            Change::new(author, Some(&item.id), ChangeKind::Removed, now)
-                .with_field("section", json!(item.section), Value::Null)
-                .with_field("text", json!(item.text), Value::Null),
+        // Every field's value goes on the log (bounded like any logged
+        // value): a value that left the board here is one the field once had,
+        // which the conflict rules need to tell a stale copy bringing it back.
+        let mut removed = Change::new(author, Some(&item.id), ChangeKind::Removed, now).with_field(
+            "section",
+            json!(item.section),
+            Value::Null,
         );
+        for (name, value) in field_values(item) {
+            removed = removed.with_field(name, value, Value::Null);
+        }
+        out.push(removed);
     }
 
     let reordered = reordered_items(old, new, &renamed);

@@ -4584,6 +4584,16 @@ mod tests {
                     features.iter().any(|f| f == "focus_activity_v1"),
                     "{features:?}"
                 );
+                for advertised in [
+                    "tracker_edit_v1",
+                    "tracker_conflict_ids_v1",
+                    "tracker_ack_dropped_v1",
+                ] {
+                    assert!(
+                        features.iter().any(|f| f == advertised),
+                        "{advertised} missing: {features:?}"
+                    );
+                }
             }
             other => panic!("{other:?}"),
         }

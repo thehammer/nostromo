@@ -1203,6 +1203,9 @@ fn clearing_a_badge_is_refused_when_the_item_changed_after_what_the_user_saw() {
         .pane_at(seen, vec![TrackerPaneOp::ClearBadge { id: "alpha".into() }])
         .expect_err("changed since seen");
     assert_eq!(err.code, "invalid_args");
+    // The wire says the view is stale (look again), not that the op was malformed.
+    assert!(err.stale, "{err:?}");
+    assert_eq!(err.index, Some(0));
     assert!(
         rig.item("alpha").sensitive.is_some(),
         "nothing was approved"
