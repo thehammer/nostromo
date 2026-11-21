@@ -10,6 +10,9 @@ public let authoredPrsNotifyFeature = "authored_prs_notify_v1"
 public let authoredPrsPerriFeature = "authored_prs_perri_v1"
 /// The daemon takes `authored_pr_merge` (the Merge button's verb) and answers `authored_pr_merge_result`.
 public let authoredPrsMergeFeature = "authored_prs_merge_v1"
+/// The Merge verb goes through the base branch's merge queue where one is required: rows carry `merge_via` and
+/// `queue`, the merge request may carry `expected_via`, the answer may be `queued` or `already_queued`.
+public let authoredPrsMergeQueueFeature = "authored_prs_merge_queue_v1"
 
 /// Who a preview is for: an open focus, or a session that does not exist yet.
 public enum AuthoredPrPreviewTarget: Equatable, Sendable {
@@ -102,12 +105,19 @@ public struct ClientAuthoredPrMerge: Encodable, Equatable {
     public let repo: String
     public let number: Int
     public let expectedHeadShaShort: String
-    public init(requestId: String, repo: String, number: Int, expectedHeadShaShort: String) {
+    /// How the confirmation worded it: `.queue` for "add to the merge queue". Absent means a direct merge, so a
+    /// direct request is byte-for-byte what an older build sent. The daemon refuses (`via_changed`) when GitHub
+    /// says the PR goes in another way now.
+    public let expectedVia: AuthoredPrMergeVia?
+    public init(requestId: String, repo: String, number: Int, expectedHeadShaShort: String,
+                expectedVia: AuthoredPrMergeVia? = nil) {
         self.requestId = requestId; self.repo = repo; self.number = number
         self.expectedHeadShaShort = expectedHeadShaShort
+        self.expectedVia = expectedVia == .queue ? .queue : nil
     }
     enum CodingKeys: String, CodingKey {
         case type_ = "type", requestId = "request_id", repo, number, expectedHeadShaShort = "expected_head_sha_short"
+        case expectedVia = "expected_via"
     }
 }
 
@@ -148,7 +158,11 @@ public struct AuthoredPrPreviewPayload: Equatable, Sendable {
 }
 
 /// An empty success (`{}`).
-public struct AuthoredPrDone: Equatable, Sendable { public init() {} }
+public struct AuthoredPrDone: Equatable, Sendable {
+    /// A merge answered `queued`: the PR is in the merge queue, not merged.
+    public var queued: Bool
+    public init(queued: Bool = false) { self.queued = queued }
+}
 
 public struct AuthoredPrStarted: Equatable, Sendable {
     public var tag: String
@@ -184,6 +198,15 @@ private struct PreviewValue: Decodable {
 }
 private struct StartedValue: Decodable { let tag: String }
 private struct DoneValue: Decodable {}
+private struct MergeDoneValue: Decodable {
+    let code: String?
+    private enum K: String, CodingKey { case code }
+    init(from decoder: Decoder) throws {
+        // Anything but a string is no code: the answer is still a success.
+        code = (try? decoder.container(keyedBy: K.self))
+            .flatMap { try? $0.decodeIfPresent(String.self, forKey: .code) }.flatMap { $0 }
+    }
+}
 
 /// One decoded answer frame, by request id.
 public enum AuthoredPrAnswerFrame: Equatable, Sendable {
@@ -239,10 +262,11 @@ public enum AuthoredPrAnswerFrame: Equatable, Sendable {
             case .ok: return .link(requestId: head.request_id, .ok(AuthoredPrDone()))
             }
         case "authored_pr_merge_result":
-            guard let raw = parse(DoneValue.self) else { return nil }
+            guard let raw = parse(MergeDoneValue.self) else { return nil }
             switch raw {
             case .failed(let code): return .merge(requestId: head.request_id, .failed(code: code))
-            case .ok: return .merge(requestId: head.request_id, .ok(AuthoredPrDone()))
+            // Only the exact word is a queue: any other success value is a merge, as before.
+            case .ok(let v): return .merge(requestId: head.request_id, .ok(AuthoredPrDone(queued: v.code == "queued")))
             }
         default:
             return nil
@@ -288,6 +312,12 @@ public enum AuthoredPrsHandoffWords {
 public enum AuthoredPrMergeCode: Equatable, Sendable {
     case notFound, notOpen, draft, notApproved, checksNotGreen, notMergeable, blocked, behind, headChanged
     case perriNotApproved, perriStale, tokenCannotMerge, rateLimited, unreachable, busy, notPermitted
+    /// The merge queue: the PR is already in it, GitHub declined to enqueue it, GitHub could not say whether there
+    /// is a queue, or the PR goes in another way than the confirmation said.
+    case alreadyQueued, queueRefused, queueUnknown, viaChanged
+    /// Not from the daemon (no wire spelling maps to it): the PR was in the merge queue and a later snapshot shows
+    /// it is not, and it is not merged.
+    case droppedFromQueue
     /// Not from the daemon (no wire spelling maps to it): this app declined the press because no person's gesture
     /// was behind it, so nothing was sent.
     case gestureRefused
@@ -310,6 +340,10 @@ public enum AuthoredPrMergeCode: Equatable, Sendable {
         case "rate_limited": self = .rateLimited
         case "unreachable": self = .unreachable
         case "busy": self = .busy
+        case "already_queued": self = .alreadyQueued
+        case "queue_refused": self = .queueRefused
+        case "queue_unknown": self = .queueUnknown
+        case "via_changed": self = .viaChanged
         // A refusal of the peer, however the daemon spelled it: this app is not allowed to merge.
         case "not_permitted", "not_operator_app", "requires_secure_connection": self = .notPermitted
         default: self = .unknown
@@ -318,6 +352,12 @@ public enum AuthoredPrMergeCode: Equatable, Sendable {
 }
 
 extension AuthoredPrAnswer where Value == AuthoredPrDone {
+    /// The merge answered `queued`: it went into the merge queue, nothing is merged yet.
+    public var mergeQueued: Bool {
+        if case .ok(let done) = self { return done.queued }
+        return false
+    }
+
     /// The merge code of a failed answer; `.unreachable` when the daemon never answered; nil for success.
     public var mergeFailure: AuthoredPrMergeCode? {
         switch self {
@@ -348,6 +388,11 @@ public enum AuthoredPrsMergeWords {
         // The request may have gone through before the connection or GitHub failed to answer.
         case .unreachable: return "GitHub or Nostromo isn't reachable: check the PR before trying again"
         case .busy: return "A merge of this PR is already running"
+        case .alreadyQueued: return "This PR is already in the merge queue"
+        case .queueRefused: return "GitHub wouldn't add it to the merge queue (conflicts, or not ready?)"
+        case .queueUnknown: return "GitHub didn't say whether there is a merge queue, so nothing was sent"
+        case .viaChanged: return "How this PR merges changed since you looked: review it again"
+        case .droppedFromQueue: return "Dropped from the merge queue"
         case .notPermitted: return "Nostromo refused the request"
         case .gestureRefused: return "Merge was refused: use the button"
         case .unknown: return "The merge failed"

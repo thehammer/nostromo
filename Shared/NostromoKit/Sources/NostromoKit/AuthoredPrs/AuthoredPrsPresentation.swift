@@ -248,6 +248,7 @@ public enum AuthoredPrsPresentation {
     public static func groups(_ prs: [AuthoredPr], unfiltered: [AuthoredPr]? = nil, showAll: Set<AuthoredPrGroup> = [],
                               now: Date, timeZone: TimeZone, handoff: Bool = false,
                               tellable: Set<String>? = nil, perri: Bool = false, merge: Bool = false,
+                              mergeQueue: Bool = false,
                               mergeAttempts: [String: AuthoredPrMergeAttempt] = [:]) -> [AuthoredPrsGroupModel] {
         let chips = repoChips(unfiltered ?? prs)
         return AuthoredPrGroup.displayOrder.compactMap { group in
@@ -260,7 +261,7 @@ public enum AuthoredPrsPresentation {
                 unfilteredCount: unfiltered.map { all in all.filter { $0.group == group }.count },
                 rows: shown.map {
                     row($0, chip: chips[$0.repo] ?? $0.repo, now: now, handoff: handoff, tellable: tellable,
-                        perri: perri, merge: merge, mergeAttempt: mergeAttempts[$0.id])
+                        perri: perri, merge: merge, mergeQueue: mergeQueue, mergeAttempt: mergeAttempts[$0.id])
                 },
                 hiddenCount: members.count - shown.count)
         }
@@ -295,6 +296,7 @@ public enum AuthoredPrsPresentation {
     /// `mergeAttempt` is the person's last attempt on this row, if any.
     public static func row(_ pr: AuthoredPr, chip: String? = nil, now: Date, handoff: Bool = false,
                            tellable: Set<String>? = nil, perri: Bool = false, merge: Bool = false,
+                           mergeQueue: Bool = false,
                            mergeAttempt: AuthoredPrMergeAttempt? = nil) -> AuthoredPrRowModel {
         let chipText = chip ?? repoChips([pr])[pr.repo] ?? pr.repo
         let (kind, glyph, word) = status(pr)
@@ -325,7 +327,7 @@ public enum AuthoredPrsPresentation {
             model.accessibilityLabel += ", \(badge.accessibilityLabel)"
         }
         if perri, merge {
-            model.mergeButton = mergeButton(pr, attempt: mergeAttempt)
+            model.mergeButton = mergeButton(pr, attempt: mergeAttempt, queueSupported: mergeQueue)
             if let reason = model.mergeButton?.reason { model.reviewLine += " · \(reason)" }
             model.mergeNotice = mergeNotice(pr, attempt: mergeAttempt)
             if let notice = model.mergeNotice { model.accessibilityLabel += ", merge failed: \(notice)" }
@@ -346,6 +348,12 @@ public enum AuthoredPrsPresentation {
         case humanApprovalMissing
         case perriNotApproved(PerriBlock)
         case mergedOrClosed
+        /// The row says the PR goes in through a merge queue, and this daemon connection did not advertise
+        /// `authored_prs_merge_queue_v1`: pressing Merge would say "squash and merge" about something else.
+        case queueNeedsUpdate
+        /// The daemon says how the PR goes in with a value this build does not know, or (on a daemon that knows
+        /// merge queues) did not say at all: the confirmation could not be worded truthfully.
+        case mergeMethodUnknown
 
         /// How Perri has not approved the PR's current head.
         public enum PerriBlock: Equatable, Sendable {
@@ -362,7 +370,11 @@ public enum AuthoredPrsPresentation {
     /// The daemon enforces every one of these again when it merges; this only says whether to offer the button.
     /// Merge needs an open PR that is not a draft, whose checks are passing (or there are none), that a human
     /// approved, and that Perri approved at the head the row shows (`headShaShort`).
-    public static func mergeReadiness(_ pr: AuthoredPr) -> MergeReadiness {
+    ///
+    /// `queueSupported` is whether the daemon advertised `authored_prs_merge_queue_v1`. Without it a row that says
+    /// `queue` is never ready ("Update Nostromo to merge into a merge queue"); with it, a row that says nothing
+    /// about how it goes in is not ready either, because the confirmation could not be worded.
+    public static func mergeReadiness(_ pr: AuthoredPr, queueSupported: Bool = false) -> MergeReadiness {
         if pr.lifecycle != .open { return .mergedOrClosed }
         if pr.draft { return .draft }
         switch pr.checks.state {
@@ -375,7 +387,13 @@ public enum AuthoredPrsPresentation {
         switch perri.verdict {
         case .approved:
             // Without the head there is nothing to echo, so nothing to merge.
-            return pr.headShaShort == nil ? .perriNotApproved(.none) : .ready
+            if pr.headShaShort == nil { return .perriNotApproved(.none) }
+            switch pr.mergeVia {
+            case .direct?: return .ready
+            case .queue?: return queueSupported ? .ready : .queueNeedsUpdate
+            case .unknown?: return .mergeMethodUnknown
+            case nil: return queueSupported ? .mergeMethodUnknown : .ready
+            }
         case .changesRequested: return .perriNotApproved(.changesRequested)
         case .comment, .unknown: return .perriNotApproved(.none)
         }

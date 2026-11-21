@@ -54,15 +54,22 @@ public struct AuthoredPrPerriBadge: Equatable, Sendable {
 public enum AuthoredPrMergeProgress: Equatable, Sendable {
     case merging
     case merged
+    /// The daemon answered `queued` (or `already_queued`): the PR is in the merge queue, not merged. Never moves the
+    /// row to another group: only a later snapshot does.
+    case queued
     case failed(AuthoredPrMergeCode)
 }
 
 public struct AuthoredPrMergeAttempt: Equatable, Sendable {
     public var head: String
     public var progress: AuthoredPrMergeProgress
-    public init(head: String, progress: AuthoredPrMergeProgress) {
+    /// A snapshot has shown this PR with its queue entry since it was queued. Only then does a row without an entry
+    /// mean "dropped": the first snapshot after the answer may not have the entry yet.
+    public var sawQueueEntry: Bool
+    public init(head: String, progress: AuthoredPrMergeProgress, sawQueueEntry: Bool = false) {
         self.head = head
         self.progress = progress
+        self.sawQueueEntry = sawQueueEntry
     }
 }
 
@@ -76,10 +83,13 @@ public struct AuthoredPrMergeConfirmation: Equatable, Sendable {
     /// confirmation is open makes the sentence untrue, though the head has not moved.
     public var base: String?
     public var message: String
+    /// How the sentence says the PR goes in. A row that changes it while the confirmation is open makes the sentence
+    /// untrue, though the head has not moved.
+    public var via: AuthoredPrMergeVia = .direct
     /// Who approved, as the sentence says it ("Perri approved." / "Approval recorded by X, not by Perri."): the same
     /// head can be re-recorded by another focus while the confirmation is open, which makes the sentence untrue.
     public var approval: String = ""
-    public var confirmTitle: String { "Merge" }
+    public var confirmTitle: String { via == .queue ? "Add to merge queue" : "Merge" }
     public var cancelTitle: String { "Cancel" }
 }
 
@@ -91,6 +101,8 @@ public struct AuthoredPrMergeButton: Equatable, Sendable {
         case unavailable
         case merging
         case merged
+        /// In the merge queue (from the daemon's row, or the answer `queued`): nothing to press.
+        case queued
     }
     public var state: State
     public var title: String
@@ -166,32 +178,74 @@ extension AuthoredPrsPresentation {
     /// The Merge button of a READY-group open row, enabled only when `mergeReadiness` says `.ready`; nil elsewhere.
     /// `attempt` overlays the button while a merge is running or done; a failed attempt does not change it (the
     /// failure is a notice, see `mergeNotice`).
-    public static func mergeButton(_ pr: AuthoredPr, attempt: AuthoredPrMergeAttempt? = nil) -> AuthoredPrMergeButton? {
+    public static func mergeButton(_ pr: AuthoredPr, attempt: AuthoredPrMergeAttempt? = nil,
+                                   queueSupported: Bool = false) -> AuthoredPrMergeButton? {
         guard pr.lifecycle == .open, pr.group == .ready else { return nil }
         let n = pr.number
+        let queued = pr.mergeVia == .queue
         switch attempt?.progress {
         case .merging?:
-            return AuthoredPrMergeButton(state: .merging, title: "Merging…", reason: nil, tooltip: "Merging this PR",
-                                         accessibilityLabel: "Merge PR \(n), merging", confirmation: nil)
+            return AuthoredPrMergeButton(
+                state: .merging, title: queued ? "Adding…" : "Merging…", reason: nil,
+                tooltip: queued ? "Adding this PR to the merge queue" : "Merging this PR",
+                accessibilityLabel: queued ? "Add PR \(n) to the merge queue, adding" : "Merge PR \(n), merging",
+                confirmation: nil)
         case .merged?:
             return AuthoredPrMergeButton(state: .merged, title: "Merged", reason: nil, tooltip: "Merged",
                                          accessibilityLabel: "Merged", confirmation: nil)
+        case .queued?:
+            return queuedButton(pr)
         case .failed?, nil:
             break
         }
-        guard let reason = mergeDisabledReason(pr) else {
+        // The daemon's own row says it is in the queue (put there from here, or from GitHub): nothing to press.
+        if queueSupported, pr.queue != nil { return queuedButton(pr) }
+        let title = queued ? "Add to merge queue" : "Merge"
+        guard let reason = mergeDisabledReason(pr, queueSupported: queueSupported) else {
             return AuthoredPrMergeButton(
-                state: .ready, title: "Merge", reason: nil,
-                tooltip: "Squash and merge into \(pr.baseRef ?? "the base branch"). You will be asked to confirm.",
-                accessibilityLabel: "Merge PR \(n)", confirmation: mergeConfirmation(pr))
+                state: .ready, title: title, reason: nil,
+                tooltip: queued
+                    ? "Add to the merge queue for \(pr.baseRef ?? "the base branch"): GitHub merges it when its turn comes. You will be asked to confirm."
+                    : "Squash and merge into \(pr.baseRef ?? "the base branch"). You will be asked to confirm.",
+                accessibilityLabel: queued ? "Add PR \(n) to the merge queue" : "Merge PR \(n)",
+                confirmation: mergeConfirmation(pr, queueSupported: queueSupported))
         }
-        return AuthoredPrMergeButton(state: .unavailable, title: "Merge", reason: reason, tooltip: reason,
-                                     accessibilityLabel: "Merge, unavailable: \(reason)", confirmation: nil)
+        return AuthoredPrMergeButton(state: .unavailable, title: title, reason: reason, tooltip: reason,
+                                     accessibilityLabel: "\(queued ? "Add to merge queue" : "Merge"), unavailable: \(reason)",
+                                     confirmation: nil)
+    }
+
+    /// "In merge queue" (and the position, when GitHub said): the same width as every other state of the button.
+    private static func queuedButton(_ pr: AuthoredPr) -> AuthoredPrMergeButton {
+        let position = pr.queue?.position
+        let title = position.map { "In merge queue (\($0))" } ?? "In merge queue"
+        let spoken = position.map { "In merge queue, position \($0)" } ?? "In merge queue"
+        return AuthoredPrMergeButton(
+            state: .queued, title: title, reason: nil,
+            tooltip: "In the merge queue for \(pr.baseRef ?? "the base branch")"
+                + (position.map { ", position \($0)" } ?? "") + ". GitHub merges it when its turn comes.",
+            accessibilityLabel: "PR \(pr.number): \(spoken)", confirmation: nil)
+    }
+
+    /// The attempt after a snapshot that shows `pr` (nil: the row is not in this snapshot, nothing changes). A queued
+    /// attempt that has seen its queue entry and now finds none, on a PR that is still open, was dropped from the
+    /// queue: it becomes a failure whose notice says so, and the button is available again. An attempt that has not
+    /// seen its entry yet keeps waiting: the snapshot may simply be older than the enqueue. A PR that is merged or
+    /// closed ends the attempt's story (the row says so itself).
+    public static func reconcile(_ attempt: AuthoredPrMergeAttempt, with pr: AuthoredPr) -> AuthoredPrMergeAttempt {
+        guard attempt.progress == .queued else { return attempt }
+        var next = attempt
+        if pr.queue != nil {
+            next.sawQueueEntry = true
+        } else if attempt.sawQueueEntry, pr.lifecycle == .open {
+            next.progress = .failed(.droppedFromQueue)
+        }
+        return next
     }
 
     /// Why the Merge button is off, in words; nil when `mergeReadiness` is `.ready`.
-    static func mergeDisabledReason(_ pr: AuthoredPr) -> String? {
-        switch mergeReadiness(pr) {
+    static func mergeDisabledReason(_ pr: AuthoredPr, queueSupported: Bool = false) -> String? {
+        switch mergeReadiness(pr, queueSupported: queueSupported) {
         case .ready: return nil
         case .draft: return "Draft"
         case .checksNotGreen: return "Checks not green"
@@ -202,19 +256,28 @@ extension AuthoredPrsPresentation {
             return pr.perri?.verdict == .approved ? "Perri approved an older version" : "Needs Perri's review"
         case .perriNotApproved(.changesRequested): return "Perri requested changes"
         case .mergedOrClosed: return "No longer open"
+        case .queueNeedsUpdate: return "Update Nostromo to merge into a merge queue"
+        case .mergeMethodUnknown: return "Waiting for GitHub to say how this merges"
         }
     }
 
     /// The confirmation for a row that may be merged now; nil otherwise or without a head to carry.
-    static func mergeConfirmation(_ pr: AuthoredPr) -> AuthoredPrMergeConfirmation? {
-        guard mergeReadiness(pr) == .ready, let head = pr.headShaShort else { return nil }
+    static func mergeConfirmation(_ pr: AuthoredPr, queueSupported: Bool = false) -> AuthoredPrMergeConfirmation? {
+        guard mergeReadiness(pr, queueSupported: queueSupported) == .ready, let head = pr.headShaShort else { return nil }
         var title = AuthoredPrsText.clean(pr.title, max: Int.max)
         if title.count > confirmationTitleLimit { title = String(title.prefix(confirmationTitleLimit)) + "…" }
         let checks = pr.checks.state == .passing ? "green" : "none"
-        let message = "Squash and merge #\(pr.number) \(title) into \(pr.baseRef ?? "the base branch")? "
+        let base = pr.baseRef ?? "the base branch"
+        let via: AuthoredPrMergeVia = pr.mergeVia == .queue ? .queue : .direct
+        let action = via == .queue ? "Add #\(pr.number) \(title) to the merge queue for \(base)?"
+            : "Squash and merge #\(pr.number) \(title) into \(base)?"
+        let message = "\(action) "
             + "Head \(head). \(approvalSentence(pr.perri)) Human approval: yes. Checks: \(checks)."
-        return AuthoredPrMergeConfirmation(repo: pr.repo, number: pr.number, expectedHeadShaShort: head, base: pr.baseRef,
-                                           message: message, approval: approvalSentence(pr.perri))
+        var confirmation = AuthoredPrMergeConfirmation(repo: pr.repo, number: pr.number, expectedHeadShaShort: head,
+                                                       base: pr.baseRef, message: message,
+                                                       approval: approvalSentence(pr.perri))
+        confirmation.via = via
+        return confirmation
     }
 
     /// The most of a recorder's name the confirmation says.
