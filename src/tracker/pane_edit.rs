@@ -622,6 +622,11 @@ fn plan_ops(
                     ));
                 }
                 if *keep == ConflictKeep::Losing {
+                    // Putting a losing status back is a pane status op built
+                    // from the person's old view: the same guard applies.
+                    if field == "status" {
+                        check_status_not_on_new_command(board, log, id, base_version, index)?;
+                    }
                     let (steps, new_id) =
                         losing_steps(chosen, board, &mut taken).map_err(|e| invalid(index, &e))?;
                     plan.created.extend(new_id);

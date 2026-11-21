@@ -1237,10 +1237,13 @@ impl TrackerRegistry {
                     .any(|c| c.item_id.as_deref() == Some(item_id) && c.fields.contains_key(field));
                 if let (false, Some(item)) = (changed, applied.board.item(item_id)) {
                     let value = field_value(item, field);
-                    changes.push(
+                    let mut change =
                         super::model::Change::new(author, Some(item_id), ChangeKind::Changed, now)
-                            .with_field(field, value.clone(), value),
-                    );
+                            .with_field(field, value.clone(), value);
+                    // Same window as the write: its next write to this field
+                    // must not be judged against its own decision.
+                    change.client = ctx.client.map(str::to_string);
+                    changes.push(change);
                 }
             }
             record_conflicts(entry, &mut changes, found, &applied.board, ctx.settling);
@@ -2048,6 +2051,14 @@ fn record_conflicts(
         .iter()
         .filter_map(|id| entry.conflicts.clear(id))
         .collect();
+    // What each settled item had dropped before this batch pushes anything:
+    // only that much is forgotten below, a drop the pushes count survives.
+    let mut recorded: Vec<(String, u32)> = Vec::new();
+    for id in &settled_items {
+        if !recorded.iter().any(|(r, _)| r == id) {
+            recorded.push((id.clone(), entry.conflicts.dropped_for(id)));
+        }
+    }
     let mut elsewhere: Vec<(String, Conflict)> = Vec::new();
     for conflict in found {
         let kept = board
@@ -2066,8 +2077,9 @@ fn record_conflicts(
         }
     }
     // Only now: a conflict recorded above on a settled item (the value the
-    // settling displaced) keeps that item's dropped marker.
-    entry.conflicts.forget_drops_of_settled(&settled_items);
+    // settling displaced) keeps that item's dropped marker, and so does a
+    // drop the pushes above counted.
+    entry.conflicts.forget_recorded_drops(&recorded);
     let mut told: HashSet<String> = HashSet::new();
     for (item_id, by) in elsewhere {
         if told.insert(item_id.clone()) {

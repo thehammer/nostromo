@@ -232,6 +232,19 @@ impl Conflicts {
         }
     }
 
+    /// [`Self::forget_drops_of_settled`] for a batch: `recorded` is each
+    /// settled item with the dropped count it had right after the settling
+    /// and before the batch pushed anything. An item with no conflict left
+    /// forgets only that many (the way [`Self::ack_dropped`] does), so a drop
+    /// the batch's own pushes counted survives.
+    pub fn forget_recorded_drops(&mut self, recorded: &[(String, u32)]) {
+        for (id, count) in recorded {
+            if !self.list.iter().any(|c| &c.item_id == id) {
+                self.ack_dropped(id, *count);
+            }
+        }
+    }
+
     /// Stamps the conflicts recorded without a version with `version` and
     /// gives each its id.
     pub fn stamp_unversioned(&mut self, version: u64) {
@@ -858,6 +871,63 @@ mod tests {
         assert_eq!(conflicts.all().len(), MAX_PER_BOARD);
         assert_eq!(conflicts.all()[0].item_id, "i3");
         assert_eq!(conflicts.dropped(), 3);
+    }
+
+    /// A settling batch whose own pushes make a cap drop the settled item's
+    /// last remaining conflict: the forget subtracts only what was recorded
+    /// before the pushes, so the drop the batch counted survives.
+    #[test]
+    fn a_cap_drop_during_the_settling_batch_survives_the_forget() {
+        let make = |item: &str, field: &str, n: usize| Conflict {
+            id: format!("c{n}"),
+            item_id: item.into(),
+            field: field.into(),
+            losing: json!(n),
+            losing_author: Author::Pane,
+            winning_author: Author::File,
+            at: at(n as i64),
+            title: None,
+            section: None,
+            prev: None,
+            next: None,
+            version: 1,
+            guess: false,
+        };
+        let mut conflicts = Conflicts::default();
+        // alpha's note conflict is the oldest of a full board; its status
+        // conflict is the one the batch settles.
+        conflicts.push(make("alpha", "note", 0));
+        conflicts.push(make("alpha", "status", 1));
+        for n in 2..MAX_PER_BOARD {
+            conflicts.push(make(&format!("i{n}"), "status", n));
+        }
+        assert_eq!(conflicts.all().len(), MAX_PER_BOARD);
+        let item = conflicts.clear("c1").unwrap();
+        let recorded = vec![(item, conflicts.dropped_for("alpha"))];
+        // The batch records two conflicts: the cap drops alpha's note one.
+        conflicts.push(make("x", "status", 100));
+        conflicts.push(make("y", "status", 101));
+        assert!(conflicts.all().iter().all(|c| c.item_id != "alpha"));
+        assert_eq!(conflicts.dropped_for("alpha"), 1);
+        conflicts.forget_recorded_drops(&recorded);
+        assert_eq!(conflicts.dropped_for("alpha"), 1, "a value was lost");
+        // A drop recorded before the settling is what goes.
+        let mut older = Conflicts::default();
+        older.push(make("a", "status", 0));
+        for n in 1..=MAX_PER_FIELD {
+            older.push(make("a", "status", n));
+        }
+        assert_eq!(older.dropped_for("a"), 1);
+        let kept: Vec<String> = older.all().iter().map(|c| c.id.clone()).collect();
+        let mut recorded = Vec::new();
+        for id in &kept {
+            let item = older.clear(id).unwrap();
+            if recorded.is_empty() {
+                recorded.push((item, older.dropped_for("a")));
+            }
+        }
+        older.forget_recorded_drops(&recorded);
+        assert_eq!(older.dropped_for("a"), 0);
     }
 
     /// The invariant: a dropped marker stays while any conflict of the item is

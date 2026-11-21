@@ -368,6 +368,10 @@ struct World {
     prev_items: BTreeSet<String>,
     /// The cap's drop count at the last step.
     cap_drops: u32,
+    /// Conflicts (id, item, field) that left the board this step with no
+    /// settling to explain it, in a step where a cap dropped something: the
+    /// cap dropped them. Each must be accounted for in its item's marker.
+    cap_dropped_now: Vec<(String, String, String)>,
     /// The conflicts after the last step: (id, item, field, guess, version).
     prev_list: Vec<(String, String, String, bool, u64)>,
 }
@@ -465,6 +469,7 @@ impl World {
             prev_list: Vec::new(),
             cap_dropped_removed: BTreeSet::new(),
             cap_drops: 0,
+            cap_dropped_now: Vec::new(),
             prev_items: BTreeSet::new(),
         };
         for i in 0..2 {
@@ -1435,6 +1440,20 @@ impl World {
                 ));
             }
         }
+        // Conservation: a value a cap dropped is accounted for in its item's
+        // marker (the user's acknowledgement is the only thing that clears it,
+        // and nothing was acknowledged by the step that dropped the value).
+        for (id, item, field) in std::mem::take(&mut self.cap_dropped_now) {
+            let item_there = view
+                .nodes
+                .iter()
+                .any(|n| matches!(n, ViewNode::Item(i) if i.id == item));
+            if item_there && !marked.contains(&item) {
+                self.failures.push(format!(
+                    "step {step}: a cap dropped conflict {id} ({item}.{field}) and {item} has no dropped marker: the value was lost silently"
+                ));
+            }
+        }
         self.marked.extend(marked.iter().cloned());
         self.marked_now = marked;
     }
@@ -1459,8 +1478,13 @@ impl World {
                 .extend(self.prev_items.difference(&items).cloned());
         }
         self.prev_items = items;
+        self.cap_dropped_now.clear();
         for (id, item, field, guess, born) in &self.prev_list {
             let gone = !ids.contains(id.as_str()) && !settled.contains(id);
+            if gone && cap_dropped && field != "removed" {
+                self.cap_dropped_now
+                    .push((id.clone(), item.clone(), field.clone()));
+            }
             let in_group = self
                 .prev_list
                 .iter()
@@ -1715,9 +1739,9 @@ fn a_stale_save_after_a_removal_loses_no_edit_seed_7a110c9a() {
     one(0x7a11_0c9a).unwrap_or_else(|e| panic!("{e}"));
 }
 
-/// The three interleavings Perri's review of #490 found (they fail on main
-/// too): a stale window floods the board past its cap, and keeping the losing
-/// value cleared an item's dropped marker while it still had conflicts.
+/// Interleavings Perri's review of #490 found (they fail on main too): a stale
+/// window floods the board past its cap, and keeping the losing value cleared
+/// an item's dropped marker while it still had conflicts (7a1228e0, 7a126120).
 #[test]
 fn a_flooded_board_keeps_the_dropped_marker_seed_7a1228e0() {
     one(0x7a12_28e0).unwrap_or_else(|e| panic!("{e}"));
@@ -1728,8 +1752,9 @@ fn a_flooded_board_keeps_the_dropped_marker_seed_7a126120() {
     one(0x7a12_6120).unwrap_or_else(|e| panic!("{e}"));
 }
 
+/// Seed 7a1145aa was a lost edit (not a marker problem): kept as a pin.
 #[test]
-fn a_flooded_board_keeps_the_dropped_marker_seed_7a1145aa() {
+fn a_flooded_board_loses_no_edit_seed_7a1145aa() {
     one(0x7a11_45aa).unwrap_or_else(|e| panic!("{e}"));
 }
 

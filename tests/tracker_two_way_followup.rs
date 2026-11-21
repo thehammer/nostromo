@@ -1084,6 +1084,178 @@ fn settling_the_oldest_of_a_full_field_while_overflowing_adds_nothing_to_an_earl
     }
 }
 
+/// `alpha` holds a note conflict (the oldest of the board) and a status
+/// conflict, and the board holds fifty. One stale pane batch settles alpha's
+/// status conflict (keep current) and ticks two items that both conflict: the
+/// cap drops alpha's note conflict while the batch is applied. That drop was
+/// counted by this very batch, and the deferred forget of the settled item
+/// must not erase it: a value was lost, and the marker (and the agent's
+/// notice) must say so.
+#[test]
+fn a_cap_drop_counted_in_the_batch_that_settles_the_items_other_conflict_keeps_its_marker() {
+    let rig = Rig::new();
+    add_bulk(&rig, 50);
+    lose_notes(&rig, 1, 1);
+    rig.first_status_conflict();
+    for i in 0..48 {
+        rig.tick(100);
+        let id = format!("bulk-{i}");
+        rig.agent_b(&[status_op(&id, "in-progress")]).unwrap();
+        rig.tick(2);
+        rig.pane(vec![pane_status(&id, "done")]).unwrap();
+    }
+    assert_eq!(rig.reg.conflicts(TAG_A).len(), 50, "the board is full");
+    assert_eq!(rig.item("alpha").conflicts.len(), 2);
+    assert_eq!(rig.item("alpha").dropped_conflicts, 0);
+    let status = rig.conflict_id("alpha", "status", "in-progress");
+    let seen = rig.version();
+    rig.tick(100);
+    rig.agent_b(&[
+        status_op("bulk-48", "in-progress"),
+        status_op("bulk-49", "in-progress"),
+    ])
+    .unwrap();
+    rig.tick(2);
+    rig.reg.read(TAG_A, SESS_A).unwrap();
+
+    rig.pane_at(
+        seen,
+        vec![
+            resolve_op("alpha", "status", ConflictKeep::Current, &status),
+            pane_status("bulk-48", "done"),
+            pane_status("bulk-49", "done"),
+        ],
+    )
+    .unwrap();
+
+    assert!(
+        rig.item("alpha").conflicts.is_empty(),
+        "the cap dropped the note conflict: {:?}",
+        rig.item("alpha").conflicts
+    );
+    assert_eq!(
+        rig.item("alpha").dropped_conflicts,
+        1,
+        "a value was lost and the marker says so"
+    );
+    assert!(serialized_has_dropped_marker(&rig.item("alpha")));
+    // Acknowledging it is the only way it goes.
+    rig.pane(vec![ack_op("alpha")]).unwrap();
+    assert_eq!(rig.item("alpha").dropped_conflicts, 0);
+}
+
+/// Putting a losing status back is a pane status op built from the person's
+/// view: when the item became a command since that view, it is refused as stale
+/// like a plain tick, and nothing is written.
+#[test]
+fn keeping_a_losing_status_on_an_item_that_became_a_command_is_refused() {
+    let rig = Rig::new();
+    rig.tick(100);
+    // The person ticks plain alpha done; agent B, who has not seen it, writes
+    // blocked: the pane's "done" is kept as a conflict.
+    rig.pane(vec![pane_status("alpha", "done")]).unwrap();
+    rig.tick(2);
+    rig.agent_b(&[status_op("alpha", "blocked")]).unwrap();
+    assert_eq!(rig.losers("alpha", "status"), vec!["done"]);
+    let done = rig.conflict_id("alpha", "status", "done");
+    let seen = rig.version();
+    // An agent then makes alpha a command; the person's stale view puts "done"
+    // back.
+    rig.agent_a(&[Op::Upsert(Upsert {
+        id: Some("alpha".into()),
+        command: Some("rm -rf build".into()),
+        ..Default::default()
+    })])
+    .unwrap();
+    let before = rig.snapshot();
+
+    let err = rig
+        .pane_at(
+            seen,
+            vec![resolve_op("alpha", "status", ConflictKeep::Losing, &done)],
+        )
+        .expect_err("alpha became a command since the view");
+
+    assert!(err.stale, "{err:?}");
+    assert_eq!(err.index, Some(0));
+    assert_eq!(rig.snapshot(), before, "nothing was written");
+    assert_eq!(rig.item("alpha").status, Status::Blocked);
+    assert_eq!(rig.losers("alpha", "status"), vec!["done"], "still kept");
+    // Keeping the current value is not a status write and still settles it.
+    rig.pane_at(
+        seen,
+        vec![resolve_op("alpha", "status", ConflictKeep::Current, &done)],
+    )
+    .unwrap();
+    assert_eq!(rig.item("alpha").status, Status::Blocked);
+    // Having looked again, the person may put it back (a command they saw).
+    let rig2 = Rig::new();
+    rig2.tick(100);
+    rig2.pane(vec![pane_status("alpha", "done")]).unwrap();
+    rig2.tick(2);
+    rig2.agent_b(&[status_op("alpha", "blocked")]).unwrap();
+    let done = rig2.conflict_id("alpha", "status", "done");
+    rig2.pane(vec![resolve_op(
+        "alpha",
+        "status",
+        ConflictKeep::Losing,
+        &done,
+    )])
+    .unwrap();
+    assert_eq!(rig2.item("alpha").status, Status::Done);
+}
+
+/// A keep-losing resolve whose value the field already holds changes nothing
+/// but is logged as the person's decision; that entry belongs to the window
+/// that wrote it, so the window's next write to the field is not a conflict
+/// with itself.
+#[test]
+fn a_keep_losing_that_changes_nothing_does_not_conflict_with_the_next_write_of_its_window() {
+    let rig = Rig::new();
+    rig.tick(100);
+    rig.pane(vec![pane_status("alpha", "done")]).unwrap();
+    rig.tick(2);
+    rig.agent_b(&[status_op("alpha", "blocked")]).unwrap();
+    let done = rig.conflict_id("alpha", "status", "done");
+    // A stale save already put "done" back: the resolve changes nothing.
+    rig.reg
+        .apply_pane_ops_in(
+            TAG_A,
+            "win-1",
+            rig.version(),
+            None,
+            &[pane_status("alpha", "done")],
+        )
+        .unwrap();
+    // The window's view is from before its resolve.
+    let view = rig.version();
+    rig.reg
+        .apply_pane_ops_in(
+            TAG_A,
+            "win-1",
+            view,
+            None,
+            &[resolve_op("alpha", "status", ConflictKeep::Losing, &done)],
+        )
+        .unwrap();
+    assert_eq!(rig.item("alpha").status, Status::Done);
+    rig.tick(3);
+    rig.reg
+        .apply_pane_ops_in(
+            TAG_A,
+            "win-1",
+            view,
+            None,
+            &[pane_status("alpha", "blocked")],
+        )
+        .unwrap();
+    let after = rig.item("alpha").conflicts;
+    assert!(
+        after.iter().all(|c| c.losing_by != c.winning_by),
+        "a window never conflicts with itself: {after:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // R11 (M1): the overwritten value is kept when its field has no entry in the
 // log the pane's position is compared with

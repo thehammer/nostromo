@@ -167,7 +167,13 @@ only, exactly what is drawn) and a **Ran it** checkbox (the pane's tick: the use
   saw it; look again before changing its status") when the item's `kind` or `command` changed after the op's
   `base_version`, or when the log no longer reaches back to say. An agent can turn a plain item into a command
   and a ⌘Z that predates it must not tick it. A person's tick of a command they saw as it is now is
-  accepted, whatever else changed on the board since. The Mac shows the daemon's words.
+  accepted, whatever else changed on the board since. The same check runs when a `resolve_conflict` puts a
+  losing `status` back (keep-losing), since that writes a status from the person's old view too; keeping the
+  current value writes none and is not refused. No other pane op writes a status of an existing item (`edit`,
+  `add`, `move`, `remove`, `restore_text`, `clear_badge`, `ack_dropped` and the other fields' keep-losing never
+  touch it; `restore` puts back the exact bytes a removal kept). The Mac does not show the daemon's words:
+  `TrackerItemEditing.message` turns any refusal with `stale: true` into "Not saved: that changed since you
+  looked. Look again." It reads as a failure, never as success.
 - Nothing in the tracker code writes to a terminal or a session. Two tests keep it that way:
   `tests/no_shell_surface.rs` (every tool is classified; no tool input or op names a shell or an execution verb;
   a new unclassified tool fails the build) and `tests/no_shell_behaviour.rs`. The latter drives every tracker
