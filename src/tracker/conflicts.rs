@@ -896,7 +896,7 @@ mod tests {
         // (what a keep-losing resolve does): the marker stays.
         let item = conflicts.clear(&kept[0]).unwrap();
         conflicts.push(make("a", 99));
-        conflicts.forget_drops_of_settled(&[item.clone()]);
+        conflicts.forget_drops_of_settled(std::slice::from_ref(&item));
         assert_eq!(conflicts.dropped_for("a"), 1);
         // Settling that one with nothing recorded: the item has none left.
         conflicts.clear("c99");
