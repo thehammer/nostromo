@@ -4,13 +4,17 @@
 //!
 //! * A good record is acknowledged and says whether it is for the head the
 //!   daemon knows the PR to be at (`for_current_head`).
-//! * An `approved` is only taken for that head (after one refresh); a
-//!   `changes_requested` or `comment` is taken for any head, flagged.
+//! * An `approved` is only taken for the PR's live head on GitHub (one read),
+//!   and one that cannot be checked is refused; a `changes_requested` or
+//!   `comment` is taken for any head, flagged.
 //! * Anything off (repo, PR number, head, verdict, note, an unknown argument, a
 //!   caller that is no registered focus) is refused and nothing is recorded.
-//! * It only records: no request ever goes to GitHub.
+//! * It only records: an approval makes one read-only look at the PR; nothing else reads GitHub.
 //! * A session a network peer is steering is not offered the tool, is refused
 //!   when it calls it anyway, and nothing is recorded.
+
+#[path = "support/authored_prs_rig.rs"]
+mod rig;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,6 +29,7 @@ use nostromo::ipc::pane_registry::PaneRegistry;
 use nostromo::ipc::protocol::{FocusMeta, ServerMsg};
 use nostromo::ipc::SessionManager;
 use nostromo::mcp::{DaemonMcpBackend, McpServer, McpSharedState, PerriDaemonState};
+use rig::{Fake, FakePr, Kind};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -142,10 +147,12 @@ struct Harness {
     state: McpSharedState,
     dir: TempDir,
     verdicts: Arc<VerdictStore>,
-    /// A GitHub that is never mounted on: the daemon's client points at it, so
-    /// any request the tool made would be seen here.
-    github: MockServer,
-    feed: Arc<watch::Sender<Option<AuthoredPrsSnapshot>>>,
+    /// The fake GitHub the daemon's client points at; an approval is checked
+    /// against it, live.
+    fake: Fake,
+    /// Kept alive: the server stops when it is dropped.
+    _github: MockServer,
+    _feed: Arc<watch::Sender<Option<AuthoredPrsSnapshot>>>,
     _engine: tokio::task::JoinHandle<()>,
     _jobs: watch::Sender<Vec<nostromo::mother::MotherJob>>,
 }
@@ -159,6 +166,9 @@ async fn harness(actions_wired: bool) -> Harness {
         dir.path().join("sessions.json"),
     )));
     let github = MockServer::start().await;
+    let fake = Fake::new();
+    fake.put(FakePr::new(REPO, N).head("feat/x", &sha('a')));
+    fake.mount_on(&github, None).await;
     let verdicts = Arc::new(VerdictStore::in_memory());
     // An engine with no token: it never asks GitHub anything. The list the
     // verbs see is fed by hand.
@@ -188,8 +198,7 @@ async fn harness(actions_wired: bool) -> Harness {
             dir.path().join("agents"),
             Arc::new(TokioClock::new(Utc::now())),
         )
-        .with_merge(Arc::clone(&verdicts), Arc::new(Mutex::new(Some(api))))
-        .with_refresh_wait(Duration::from_millis(400));
+        .with_merge(Arc::clone(&verdicts), Arc::new(Mutex::new(Some(api))));
         session_mgr
             .lock()
             .unwrap()
@@ -230,8 +239,9 @@ async fn harness(actions_wired: bool) -> Harness {
         state,
         dir,
         verdicts,
-        github,
-        feed: Arc::new(feed),
+        fake,
+        _github: github,
+        _feed: Arc::new(feed),
         _engine: engine.task,
         _jobs: jobs_tx,
     }
@@ -520,7 +530,7 @@ async fn a_caller_that_is_no_registered_focus_records_nothing() {
 }
 
 #[tokio::test]
-async fn an_approval_of_a_commit_the_daemon_does_not_hold_is_refused_and_nothing_is_recorded() {
+async fn an_approval_of_a_commit_that_is_not_the_live_head_is_refused_and_nothing_is_recorded() {
     let h = harness(true).await;
     let mut s = connect(&h, Some(TAG)).await;
 
@@ -528,7 +538,7 @@ async fn an_approval_of_a_commit_the_daemon_does_not_hold_is_refused_and_nothing
     let r = s.call(good(&sha('b'), "approved")).await;
     assert_eq!(r["error"], "head_not_current", "{r}");
     assert!(r.get("ok").is_none(), "{r}");
-    // A PR that is not in the list.
+    // A PR GitHub does not have.
     let r = s
         .call(
             json!({"repo": "other-org/other-repo", "pr": 7, "head_sha": sha('a'),
@@ -537,26 +547,14 @@ async fn an_approval_of_a_commit_the_daemon_does_not_hold_is_refused_and_nothing
         .await;
     assert_eq!(r["error"], "pr_unknown", "{r}");
     assert!(h.verdicts.is_empty(), "something was recorded");
-
-    // The commit becomes the head: nothing is waiting for it.
-    let mut moved = pr();
-    moved.head_sha_short = Some("bbbbbbbb".into());
-    h.feed.send(Some(snapshot(vec![moved]))).unwrap();
-    assert!(h.verdicts.for_head(REPO, N, &sha('b')).is_none());
 }
 
 #[tokio::test]
-async fn a_push_the_poll_has_not_seen_is_refreshed_once_and_then_accepted() {
+async fn a_push_the_daemons_list_has_not_seen_is_accepted_from_the_live_head() {
     let h = harness(true).await;
     let mut s = connect(&h, Some(TAG)).await;
-    // The daemon reads the PR again a moment after it is asked to.
-    let feed = h.feed.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let mut moved = pr();
-        moved.head_sha_short = Some("bbbbbbbb".into());
-        feed.send(Some(snapshot(vec![moved]))).unwrap();
-    });
+    // GitHub moves to `b`; the daemon's list still says `a` and nothing updates it.
+    h.fake.edit(REPO, N, |p| p.head_sha = sha('b'));
     let r = s.call(good(&sha('b'), "approved")).await;
     assert_eq!(r["ok"], true, "{r}");
     assert_eq!(r["for_current_head"], true, "{r}");
@@ -564,23 +562,29 @@ async fn a_push_the_poll_has_not_seen_is_refreshed_once_and_then_accepted() {
         h.verdicts.for_head(REPO, N, &sha('b')).unwrap().verdict,
         Verdict::Approved
     );
+    // The old head is no longer approvable.
+    let r = s.call(good(&sha('a'), "approved")).await;
+    assert_eq!(r["error"], "head_not_current", "{r}");
+    assert!(h.verdicts.for_head(REPO, N, &sha('a')).is_none());
 }
 
 #[tokio::test]
-async fn a_refresh_that_still_shows_another_head_refuses_the_approval() {
+async fn an_approval_that_could_not_be_checked_is_refused_with_a_code_and_nothing_is_recorded() {
     let h = harness(true).await;
     let mut s = connect(&h, Some(TAG)).await;
-    // The refresh shows `bbbb…`; the caller approved `cccc…`.
-    let feed = h.feed.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let mut moved = pr();
-        moved.head_sha_short = Some("bbbbbbbb".into());
-        feed.send(Some(snapshot(vec![moved]))).unwrap();
-    });
-    let r = s.call(good(&sha('c'), "approved")).await;
-    assert_eq!(r["error"], "head_not_current", "{r}");
-    assert!(h.verdicts.is_empty());
+    for (status, code) in [(500u16, "unreachable"), (429, "rate_limited")] {
+        h.fake.force(
+            "graphql",
+            Some(rig::Forced {
+                status,
+                retry_after: None,
+            }),
+        );
+        let r = s.call(good(&sha('a'), "approved")).await;
+        assert_eq!(r["error"], code, "{status}: {r}");
+        assert!(r.get("ok").is_none(), "{r}");
+        assert!(h.verdicts.is_empty(), "{status}: something was recorded");
+    }
 }
 
 #[tokio::test]
@@ -612,22 +616,29 @@ async fn without_the_authored_pr_list_the_tool_says_it_is_not_supported_and_reco
 }
 
 #[tokio::test]
-async fn recording_never_sends_a_request_to_github() {
+async fn only_an_approval_reads_github_and_it_reads_once() {
     let h = harness(true).await;
     let mut s = connect(&h, Some(TAG)).await;
-    for (head, verdict) in [
-        (sha('a'), "approved"),
-        (sha('b'), "changes_requested"),
-        (sha('a'), "comment"),
-    ] {
+    let reads = |h: &Harness| {
+        h.fake
+            .log()
+            .iter()
+            .filter(|r| r.kind() == Kind::Graphql)
+            .count()
+    };
+    for (head, verdict) in [(sha('b'), "changes_requested"), (sha('a'), "comment")] {
         assert_eq!(s.call(good(&head, verdict)).await["ok"], true);
     }
     // A refused one, too.
     let r = s.call(good("nope", "approved")).await;
     assert_eq!(r["error"], "invalid_args");
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let seen = h.github.received_requests().await.expect("recording is on");
-    assert!(seen.is_empty(), "the tool talked to GitHub: {seen:?}");
+    assert_eq!(reads(&h), 0, "a verdict that cannot approve read GitHub");
+
+    assert_eq!(s.call(good(&sha('a'), "approved")).await["ok"], true);
+    assert_eq!(reads(&h), 1, "an approval is one live read");
+    let r = s.call(good(&sha('c'), "approved")).await;
+    assert_eq!(r["error"], "head_not_current");
+    assert_eq!(reads(&h), 2);
 }
 
 #[tokio::test]
