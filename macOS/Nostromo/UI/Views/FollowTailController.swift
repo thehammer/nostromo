@@ -238,7 +238,14 @@ final class TranscriptViewportCoordinator {
         case row(TurnListVirtualizer.Anchor, screenY: CGFloat, wasPinned: Bool)
         /// Rule 3: keep the content at the viewport top in place.
         case top(TurnListVirtualizer.Anchor)
+        /// Rule 3 across a width change: captured from the old-width geometry before the heights
+        /// were re-estimated. `anchor` is nil when the pane followed the tail (it goes to the bottom).
+        case width(TurnListVirtualizer.Anchor?, itemFraction: CGFloat, wasPinned: Bool)
     }
+
+    /// How far the anchored line may move over a width change: half of one body line, so it stays
+    /// well inside the one line the operator can tolerate.
+    static let widthAnchorTolerance: CGFloat = TurnHeightEstimator.bodyLineHeight / 2
 
     let virtualizer: TurnListVirtualizer
     let scrollView: NSScrollView
@@ -297,6 +304,32 @@ final class TranscriptViewportCoordinator {
         pendingViewportTop = clip.bounds.minY
     }
 
+    /// Rule 3 across a width change: the pane is about to be laid out at another width. Call before
+    /// `invalidateWidth` / `reset` and before the views are released, while the geometry and the
+    /// islands still describe the old width. Names the first visible block, the item inside it and how
+    /// far into that item (as a fraction of its height too, since the height changes with the width),
+    /// or notes that the pane follows the tail. A capture already waiting (the width changed again
+    /// before the pass ran, so the islands are gone and only estimates are left) or a toggled row is kept.
+    func noteWidthChange() {
+        switch pending {
+        case .width?, .row?: return
+        default: break
+        }
+        if followTail.isPinned {
+            pending = .width(nil, itemFraction: 0, wasPinned: true)
+        } else if let anchor = captureAnchor() {
+            var fraction: CGFloat = 0
+            if let itemKey = anchor.itemKey, let island = islandFor(anchor.index),
+               let height = itemHeight(itemKey, in: island), height > 0 {
+                fraction = anchor.offsetInItem / height
+            }
+            pending = .width(anchor, itemFraction: fraction, wasPinned: false)
+        } else {
+            return
+        }
+        pendingViewportTop = clip.bounds.minY
+    }
+
     /// Show the item at `documentY` (a document coordinate): its top goes to one third of the
     /// viewport height, clamped to the document. The operator asked for it, so it stops following
     /// the tail exactly as a scroll would, and it is the one programmatic move of the transcript in
@@ -333,7 +366,11 @@ final class TranscriptViewportCoordinator {
     /// Step 1 of a materialization pass: name where the operator is reading, before any
     /// height changes, unless that was done before the change that asked for this pass.
     func beginPass() {
-        if pending != nil, abs(clip.bounds.minY - pendingViewportTop) > 0.5 { pending = nil }
+        // A width change moves the clip's origin itself (AppKit clamps it as the document is
+        // resized), so that is not the operator scrolling.
+        if case .width? = pending {} else if pending != nil, abs(clip.bounds.minY - pendingViewportTop) > 0.5 {
+            pending = nil
+        }
         noteProgrammaticChange()
     }
 
@@ -347,11 +384,15 @@ final class TranscriptViewportCoordinator {
         switch pending {
         case .row(let anchor, let screenY, _)?:
             viewport.origin.y = virtualizer.restoredTop(for: anchor, itemOffset: itemOffset) - screenY
+        case .width(_, _, let wasPinned)? where wasPinned:
+            viewport.origin.y = lowest
+        case .width(let anchor?, let fraction, _)?:
+            viewport.origin.y = widthRestoredTop(anchor, fraction: fraction)
         case _ where followTail.isPinned:
             viewport.origin.y = lowest
         case .top(let anchor)?:
             viewport.origin.y = virtualizer.restoredTop(for: anchor, itemOffset: itemOffset)
-        case nil:
+        case nil, .width?:
             break
         }
         viewport.origin.y = min(max(0, viewport.origin.y), lowest)
@@ -371,11 +412,16 @@ final class TranscriptViewportCoordinator {
                                                                     documentHeight: documentHeight)
                 followTail.setPinned(pinned, cause: .foldToggle)
             }
+        case .width(_, _, let wasPinned)? where wasPinned:
+            followTail.setPinned(true, cause: .boundsChange)
+            followTail.scrollToBottom()
+        case .width(let anchor?, let fraction, _)?:
+            scroll(toTop: clamped(widthRestoredTop(anchor, fraction: fraction)))
         case _ where followTail.isPinned:
             followTail.scrollToBottom()
         case .top(let anchor)?:
             scroll(toTop: virtualizer.restoredTop(for: anchor, itemOffset: itemOffset))
-        case nil:
+        case nil, .width?:
             break
         }
     }
@@ -386,6 +432,39 @@ final class TranscriptViewportCoordinator {
         virtualizer.captureAnchor(viewportTop: clip.bounds.minY) { [islandFor] index, y in
             islandFor(index)?.anchorItem(atY: y)
         }
+    }
+
+    /// Where the viewport top goes to keep the block `anchor` named at the old width. The item is found
+    /// by key; the same fraction of its new height is the offset into it, but never more than
+    /// `widthAnchorTolerance` from the offset it had, so the line the reader was on stays where it was.
+    /// Before the island exists again (the pass has not built it), the turn-level offset is all there is.
+    private func widthRestoredTop(_ anchor: TurnListVirtualizer.Anchor, fraction: CGFloat) -> CGFloat {
+        let itemTop = virtualizer.restoredTop(for: TurnListVirtualizer.Anchor(
+            key: anchor.key, index: anchor.index, offsetWithinTurn: anchor.offsetWithinTurn,
+            itemKey: anchor.itemKey, offsetInItem: 0), itemOffset: itemOffset)
+        guard let itemKey = anchor.itemKey else { return itemTop }
+        let index = virtualizer.index(atY: itemTop + 0.5)
+        guard virtualizer.contentKey(at: index) == anchor.key, let island = islandFor(index),
+              island.offset(ofItemKey: itemKey) != nil, let height = itemHeight(itemKey, in: island)
+        else {
+            return virtualizer.restoredTop(for: anchor, itemOffset: itemOffset)
+        }
+        let tolerance = Self.widthAnchorTolerance
+        let offset = min(max(fraction * height, anchor.offsetInItem - tolerance), anchor.offsetInItem + tolerance)
+        return itemTop + min(max(0, offset), height)
+    }
+
+    /// The height of the item `key` in `island`, found from the island's own item lookup (the first item
+    /// whose bottom is below `y` is monotone in `y`, so its bottom is a bisection away).
+    private func itemHeight(_ key: String, in island: TurnIsland) -> CGFloat? {
+        guard let top = island.offset(ofItemKey: key) else { return nil }
+        var low = top, high = max(top, island.frame.height)
+        guard island.anchorItem(atY: top)?.key == key else { return nil }
+        for _ in 0 ..< 24 {
+            let mid = (low + high) / 2
+            if island.anchorItem(atY: mid)?.key == key { low = mid } else { high = mid }
+        }
+        return high - top
     }
 
     private func itemOffset(_ index: Int, _ itemKey: String) -> CGFloat? {

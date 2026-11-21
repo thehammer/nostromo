@@ -36,7 +36,7 @@ enum SafetyFixtures {
 final class SafetyRigClip: NSClipView { override var isFlipped: Bool { true } }
 
 final class SafetyRig {
-    let contentWidth: CGFloat = 880
+    var contentWidth: CGFloat = 880
     let window: RigWindow
     let scrollView = NSScrollView()
     let clip = SafetyRigClip()

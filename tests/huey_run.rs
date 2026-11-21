@@ -2929,13 +2929,13 @@ impl Curator for Gate {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn t7_a_second_trigger_during_a_run_is_refused_and_a_regeneration_waits_two_minutes() {
     let w = world("2026-10-26T05:00:00Z").await;
     w.sources(&[VENDOR]);
     let gate = Arc::new(Gate::default());
     let src = HueyEngine::spawn(w.deps(gate.clone(), Duration::from_secs(3600)));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    first_tick_done().await;
     w.confirm();
     w.items(
         VN,
@@ -3003,13 +3003,13 @@ async fn t7_a_second_trigger_during_a_run_is_refused_and_a_regeneration_waits_tw
     assert_eq!(w.store().versions(oct(26)), vec![1, 2]);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn t7_a_failed_run_also_starts_the_regeneration_cooldown_but_not_a_plain_run() {
     let w = world("2026-10-26T05:00:00Z").await;
     w.sources(&[VENDOR]);
     let curator = Scripted::failing();
     let src = HueyEngine::spawn(w.deps(curator.clone(), Duration::from_secs(3600)));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    first_tick_done().await;
     w.confirm();
     w.items(
         VN,
@@ -3548,6 +3548,18 @@ impl LiveSource for HangingLive {
     }
 }
 
+/// Let the engine's scheduler finish its first tick. `HueyEngine::spawn`
+/// ticks once at once, before any sleep, and a tick that finds the run due
+/// takes the run lock, so a test that then calls `trigger` is refused with
+/// `AlreadyRunning`. On a current-thread runtime the spawned scheduler task
+/// is polled ahead of the test task when the test yields, and a tick that
+/// is not due (or finds setup unconfirmed) runs to its sleep without another
+/// await, so after this the first tick is over and `tick` is far away.
+/// Callers start the world either unconfirmed or before the run time.
+async fn first_tick_done() {
+    tokio::task::yield_now().await;
+}
+
 fn limits(gather_ms: u64, curate_ms: u64, run_ms: u64) -> RunLimits {
     RunLimits {
         gather: Duration::from_millis(gather_ms),
@@ -3613,14 +3625,18 @@ async fn a_hung_context_gather_ends_the_run_as_a_failure() {
     assert_one_fixed_failure(&w);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn the_overall_deadline_fails_the_run_and_frees_the_lock() {
     let w = one_item_world().await;
+    // Before the run time, so the scheduler's first tick can never start a
+    // run of its own (which would hold the lock and refuse RunNow).
+    w.clock.set(ts("2026-10-26T05:00:00Z"));
     // The stage deadlines are far away: only the outer one can fire.
     let src = HueyEngine::spawn(HueyDeps {
         limits: limits(60_000, 60_000, 300),
         ..w.deps(Arc::new(Hanging), Duration::from_secs(3600))
     });
+    first_tick_done().await;
     w.clock.set(ts("2026-10-26T06:05:00Z"));
 
     let outcome = src.handle.trigger(Trigger::RunNow).await.unwrap();
@@ -3831,12 +3847,12 @@ async fn unknown_ids_are_dropped_and_counted_in_the_run_log() {
     assert!(!log.contains("nope"), "a count, never the ids: {log}");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn a_day_allows_six_regenerations_and_a_restart_does_not_clear_the_count() {
     let w = world("2026-10-26T05:00:00Z").await;
     w.sources(&[VENDOR]);
     let src = HueyEngine::spawn(w.deps(Scripted::picking(1, false), Duration::from_secs(3600)));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    first_tick_done().await;
     w.confirm();
     w.items(
         VN,
@@ -3881,7 +3897,7 @@ async fn a_day_allows_six_regenerations_and_a_restart_does_not_clear_the_count()
     // still has the count.
     let restarted =
         HueyEngine::spawn(w.deps(Scripted::picking(1, false), Duration::from_secs(3600)));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    first_tick_done().await;
     w.clock.set(ts("2026-10-26T08:00:00Z"));
     assert_eq!(
         restarted.handle.trigger(Trigger::Regenerate).await,
