@@ -1226,6 +1226,23 @@ impl TrackerRegistry {
         entry.last_good_at = Some(now);
         if ctx.log {
             let mut changes = applied.changes;
+            // Putting a losing value back when the field already holds it
+            // (a stale save restored it meanwhile) changes nothing, yet it is
+            // the person's decision: logged, so a later save over it is
+            // judged against that decision, not against the stale save that
+            // happened to restore the value.
+            for (item_id, field) in ctx.resolving {
+                let changed = changes
+                    .iter()
+                    .any(|c| c.item_id.as_deref() == Some(item_id) && c.fields.contains_key(field));
+                if let (false, Some(item)) = (changed, applied.board.item(item_id)) {
+                    let value = field_value(item, field);
+                    changes.push(
+                        super::model::Change::new(author, Some(item_id), ChangeKind::Changed, now)
+                            .with_field(field, value.clone(), value),
+                    );
+                }
+            }
             record_conflicts(entry, &mut changes, found, &applied.board, ctx.settling);
             let version = entry.log.append(changes);
             entry.conflicts.stamp_unversioned(version);
@@ -2027,9 +2044,10 @@ fn record_conflicts(
     board: &Board,
     settling: &[String],
 ) {
-    for id in settling {
-        entry.conflicts.clear(id);
-    }
+    let settled_items: Vec<String> = settling
+        .iter()
+        .filter_map(|id| entry.conflicts.clear(id))
+        .collect();
     let mut elsewhere: Vec<(String, Conflict)> = Vec::new();
     for conflict in found {
         let kept = board
@@ -2047,6 +2065,9 @@ fn record_conflicts(
             elsewhere.push((gone.item_id, conflict.clone()));
         }
     }
+    // Only now: a conflict recorded above on a settled item (the value the
+    // settling displaced) keeps that item's dropped marker.
+    entry.conflicts.forget_drops_of_settled(&settled_items);
     let mut told: HashSet<String> = HashSet::new();
     for (item_id, by) in elsewhere {
         if told.insert(item_id.clone()) {

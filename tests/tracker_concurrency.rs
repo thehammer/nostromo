@@ -1708,6 +1708,31 @@ fn a_stale_save_restoring_a_value_a_removal_took_off_loses_no_edit() {
     one(0x7a11_0a5a).unwrap_or_else(|e| panic!("{e}"));
 }
 
+/// Another interleaving of the same family: a removal's value coming back
+/// through a stale save.
+#[test]
+fn a_stale_save_after_a_removal_loses_no_edit_seed_7a110c9a() {
+    one(0x7a11_0c9a).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// The three interleavings Perri's review of #490 found (they fail on main
+/// too): a stale window floods the board past its cap, and keeping the losing
+/// value cleared an item's dropped marker while it still had conflicts.
+#[test]
+fn a_flooded_board_keeps_the_dropped_marker_seed_7a1228e0() {
+    one(0x7a12_28e0).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn a_flooded_board_keeps_the_dropped_marker_seed_7a126120() {
+    one(0x7a12_6120).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn a_flooded_board_keeps_the_dropped_marker_seed_7a1145aa() {
+    one(0x7a11_45aa).unwrap_or_else(|e| panic!("{e}"));
+}
+
 #[test]
 fn four_hundred_interleavings_lose_no_edit() {
     let seeds: Vec<u64> = match std::env::var("TRACKER_FUZZ_SEED") {

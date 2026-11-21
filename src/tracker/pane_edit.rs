@@ -255,7 +255,11 @@ fn apply_effects(entry: &mut BoardEntry, effects: Vec<Effect>) {
     for effect in effects {
         match effect {
             Effect::ClearBadge(item) => entry.approvals.approve(&item),
-            Effect::ClearConflict(id) => entry.conflicts.clear(&id),
+            Effect::ClearConflict(id) => {
+                if let Some(item) = entry.conflicts.clear(&id) {
+                    entry.conflicts.forget_drops_of_settled(&[item]);
+                }
+            }
             Effect::AckDropped { id, count } => entry.conflicts.ack_dropped(&id, count),
             Effect::ClearRemoved { id, block } => {
                 entry.conflicts.clear_removed_matching(&id, &block)
