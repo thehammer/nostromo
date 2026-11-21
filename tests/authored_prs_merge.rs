@@ -1514,6 +1514,8 @@ async fn every_rule_that_stops_a_direct_merge_stops_an_enqueue_the_same_way() {
     // same code, and neither a merge request nor an enqueue reaches GitHub.
     run_cases(vec![
         case("no human approval", "not_approved").pr(without_reviews),
+        case("only a bot approved", "not_approved")
+            .pr(|p| without_reviews(p).approved_by_bot("dependabot[bot]")),
         case("a draft", "draft").pr(|p| p.draft()),
         case("a failing check", "checks_not_green").pr(|p| p.failing("lint")),
         case("not clean: blocked", "blocked").pr(|p| p.merge_state("BLOCKED")),

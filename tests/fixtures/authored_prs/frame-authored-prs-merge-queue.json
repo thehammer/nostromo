@@ -1,0 +1,175 @@
+{
+  "type": "authored_prs",
+  "snapshot": {
+    "generated_at": "2026-11-14T12:00:00Z",
+    "token": "connected",
+    "relay": {
+      "state": "catching_up",
+      "org": "Carefeed"
+    },
+    "poll": {
+      "state": "rate_limited",
+      "checked_at": "2026-11-14T11:58:00Z",
+      "interval_secs": 300
+    },
+    "refresh_blocked": "running",
+    "hidden_orgs": [
+      "Secret-Org",
+      "an organization"
+    ],
+    "total_open": 5,
+    "shown": 5,
+    "prs": [
+      {
+        "repo": "thehammer/nostromo",
+        "number": 1,
+        "url": "https://github.com/thehammer/nostromo/pull/1",
+        "title": "A change",
+        "draft": false,
+        "updated_at": "2026-11-14T11:00:00Z",
+        "group": "ready",
+        "lifecycle": "open",
+        "checks": {
+          "state": "none",
+          "passed": 0,
+          "failed": 0,
+          "pending": 0
+        },
+        "review": {
+          "state": "none"
+        },
+        "new_comments": 0,
+        "unresolved_threads": 0,
+        "owner": {
+          "kind": "unknown"
+        },
+        "merge_via": "direct"
+      },
+      {
+        "repo": "thehammer/nostromo",
+        "number": 2,
+        "url": "https://github.com/thehammer/nostromo/pull/2",
+        "title": "A change",
+        "draft": false,
+        "updated_at": "2026-11-14T11:00:00Z",
+        "group": "ready",
+        "lifecycle": "open",
+        "checks": {
+          "state": "none",
+          "passed": 0,
+          "failed": 0,
+          "pending": 0
+        },
+        "review": {
+          "state": "none"
+        },
+        "new_comments": 0,
+        "unresolved_threads": 0,
+        "owner": {
+          "kind": "unknown"
+        },
+        "merge_via": "queue"
+      },
+      {
+        "repo": "thehammer/nostromo",
+        "number": 3,
+        "url": "https://github.com/thehammer/nostromo/pull/3",
+        "title": "A change",
+        "draft": false,
+        "updated_at": "2026-11-14T11:00:00Z",
+        "group": "ready",
+        "lifecycle": "open",
+        "checks": {
+          "state": "none",
+          "passed": 0,
+          "failed": 0,
+          "pending": 0
+        },
+        "review": {
+          "state": "none"
+        },
+        "new_comments": 0,
+        "unresolved_threads": 0,
+        "owner": {
+          "kind": "unknown"
+        },
+        "merge_via": "queue",
+        "queue": {
+          "state": "queued",
+          "position": 2
+        }
+      },
+      {
+        "repo": "thehammer/nostromo",
+        "number": 4,
+        "url": "https://github.com/thehammer/nostromo/pull/4",
+        "title": "A change",
+        "draft": false,
+        "updated_at": "2026-11-14T11:00:00Z",
+        "group": "ready",
+        "lifecycle": "open",
+        "checks": {
+          "state": "none",
+          "passed": 0,
+          "failed": 0,
+          "pending": 0
+        },
+        "review": {
+          "state": "none"
+        },
+        "new_comments": 0,
+        "unresolved_threads": 0,
+        "owner": {
+          "kind": "unknown"
+        },
+        "merge_via": "queue",
+        "queue": {
+          "state": "awaiting_checks"
+        }
+      },
+      {
+        "repo": "thehammer/nostromo",
+        "number": 5,
+        "url": "https://github.com/thehammer/nostromo/pull/5",
+        "title": "A change",
+        "draft": false,
+        "updated_at": "2026-11-14T11:00:00Z",
+        "group": "ready",
+        "lifecycle": "open",
+        "checks": {
+          "state": "none",
+          "passed": 0,
+          "failed": 0,
+          "pending": 0
+        },
+        "review": {
+          "state": "none"
+        },
+        "new_comments": 0,
+        "unresolved_threads": 0,
+        "owner": {
+          "kind": "unknown"
+        }
+      }
+    ],
+    "usage": {
+      "window_secs": 3600,
+      "charged": 41,
+      "not_modified": 17,
+      "search": 22,
+      "graphql_points": 19,
+      "relay_charged": 4,
+      "visible_charged": 36,
+      "hidden_charged": 5,
+      "since_start": {
+        "charged": 120,
+        "not_modified": 80,
+        "search": 100,
+        "graphql_points": 70,
+        "relay_charged": 12,
+        "visible_charged": 100,
+        "hidden_charged": 20
+      }
+    }
+  }
+}
