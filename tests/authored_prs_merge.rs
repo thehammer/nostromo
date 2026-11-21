@@ -1696,6 +1696,26 @@ async fn when_the_queue_cannot_be_read_nothing_is_sent_and_the_answer_is_queue_u
 }
 
 #[tokio::test]
+async fn a_queue_field_github_could_not_resolve_is_unknown_not_a_direct_merge() {
+    // `mergeQueue: null` beside an error is a failed read, not "no queue".
+    let mut rig = queue_rig(queue_pr(N).queue_field_error()).await;
+    assert_eq!(
+        rig.row(REPO, N).unwrap().merge_via,
+        None,
+        "the row does not guess"
+    );
+    for (i, via) in [Some(MergeVia::Direct), Some(MergeVia::Queue), None]
+        .into_iter()
+        .enumerate()
+    {
+        let task = rig.spawn_merge_via(&format!("f-{i}"), REPO, N, &short('a'), via);
+        let answer = rig.drive(task).await;
+        assert_eq!(code_of(&answer), "queue_unknown", "{via:?}: {answer:?}");
+    }
+    assert!(rig.fake.merges().is_empty() && rig.fake.enqueues().is_empty());
+}
+
+#[tokio::test]
 async fn one_request_id_enqueues_once_and_a_failure_is_remembered_for_its_id() {
     let mut rig = queue_rig(queue_pr(N)).await;
     let first = rig

@@ -380,12 +380,21 @@ impl Api {
             .pointer("/rateLimit/cost")
             .and_then(|c| c.as_u64())
             .unwrap_or(1);
+        let errors = v.get("errors").and_then(|e| e.as_array());
         let prs = (0..count)
             .map(|i| {
                 data.get(format!("p{i}"))
                     .and_then(|r| r.get("pullRequest"))
                     .filter(|p| !p.is_null())
                     .and_then(|p| serde_json::from_value::<RawPr>(p.clone()).ok())
+                    .map(|mut raw| {
+                        // A field GitHub could not resolve comes back `null` beside an
+                        // error: that is "could not read", never "there is no queue".
+                        if errors.is_some_and(|e| queue_field_failed(e, i)) {
+                            raw.merge_queue = None;
+                        }
+                        raw
+                    })
             })
             .collect();
         Ok(DetailBatch {
@@ -489,6 +498,23 @@ impl Api {
             Err(MergeError::Unmergeable)
         }
     }
+}
+
+/// Did GraphQL report an error on one of the merge queue fields of alias `p{index}`?
+fn queue_field_failed(errors: &[serde_json::Value], index: usize) -> bool {
+    let alias = format!("p{index}");
+    errors.iter().any(|e| {
+        let Some(path) = e.get("path").and_then(|p| p.as_array()) else {
+            return false;
+        };
+        path.first().and_then(|a| a.as_str()) == Some(alias.as_str())
+            && path.iter().any(|seg| {
+                matches!(
+                    seg.as_str(),
+                    Some("mergeQueue" | "isInMergeQueue" | "mergeQueueEntry")
+                )
+            })
+    })
 }
 
 /// What GraphQL errors on an enqueue come to. Anything not recognised is GitHub

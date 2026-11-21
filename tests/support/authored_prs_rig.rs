@@ -135,6 +135,8 @@ pub struct FakePr {
     pub queue_readable: bool,
     /// `(state, position)` of the PR's queue entry; `None` when it is not queued.
     pub in_queue: Option<(String, Option<u64>)>,
+    /// GitHub could not resolve the queue fields: `mergeQueue` is `null` beside an `errors[]` entry.
+    pub queue_field_error: bool,
 }
 
 impl FakePr {
@@ -173,7 +175,14 @@ impl FakePr {
             has_queue: false,
             queue_readable: true,
             in_queue: None,
+            queue_field_error: false,
         }
+    }
+
+    /// GitHub answers the queue fields with `null` and an error (it could not resolve them).
+    pub fn queue_field_error(mut self) -> Self {
+        self.queue_field_error = true;
+        self
     }
 
     /// The base branch has a merge queue.
@@ -634,20 +643,36 @@ fn respond(state: &Arc<Mutex<State>>, req: &Request) -> ResponseTemplate {
                 "rateLimit".into(),
                 json!({"cost": 1, "remaining": 4900, "limit": 5000, "resetAt": iso(t0())}),
             );
+            let mut field_errors: Vec<Value> = Vec::new();
             for c in re.captures_iter(&query) {
                 let repo = format!("{}/{}", &c[2], &c[3]);
                 let number: u64 = c[4].parse().unwrap();
                 let found = st.prs.iter().find(|p| {
                     p.repo.eq_ignore_ascii_case(&repo) && p.number == number && p.accessible
                 });
+                if found.is_some_and(|p| p.queue_field_error) {
+                    field_errors.push(json!({
+                        "type": "INTERNAL", "message": "Something went wrong",
+                        "path": [format!("p{}", &c[1]), "pullRequest", "mergeQueue"]
+                    }));
+                }
                 let value = match found {
+                    Some(p) if p.queue_field_error => {
+                        let mut v = pr_graphql(p, &query);
+                        v["mergeQueue"] = Value::Null;
+                        json!({"pullRequest": v})
+                    }
                     Some(p) => json!({"pullRequest": pr_graphql(p, &query)}),
                     None => json!({"pullRequest": null}),
                 };
                 data.insert(format!("p{}", &c[1]), value);
             }
             entry.status = 200;
-            ResponseTemplate::new(200).set_body_json(json!({"data": Value::Object(data)}))
+            let mut body = json!({"data": Value::Object(data)});
+            if !field_errors.is_empty() {
+                body["errors"] = Value::Array(field_errors);
+            }
+            ResponseTemplate::new(200).set_body_json(body)
         }
         "merge" => {
             // `/repos/{owner}/{name}/pulls/{n}/merge`
