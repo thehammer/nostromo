@@ -17,7 +17,9 @@
 //!     longer reaches back to what W had read and F has no visible history
 //!     (the value that was there fell off the log: its author is unknown, so
 //!     it is attributed `file (unknown editor)`);
-//!   - file: the save sets F back to a value F once had (a stale editor copy),
+//!   - file: the save sets F back to a value F once had (a stale editor copy;
+//!     a value that left through an item's removal counts, not only one an
+//!     edit replaced),
 //!     or drops an item L added or changed, at any age.
 //!
 //! `Source` writes never conflict and a `Source` change is never the losing
@@ -168,9 +170,10 @@ impl Conflicts {
         }
     }
 
-    /// This board's epoch for this run: the pane sends the one it saw as
-    /// `base_epoch`, so a `base_version` from another run (the state was lost
-    /// or rolled back) is known not to be about this log.
+    /// This board's epoch for this run (new on every daemon run): the pane
+    /// sends the one it saw as `base_epoch`, so a `base_version` from another
+    /// run (after a restart, or the state was lost or rolled back) is judged
+    /// as having seen nothing of this log.
     pub fn epoch(&self) -> &str {
         &self.epoch
     }
@@ -347,14 +350,17 @@ pub fn detect(
                         && matches!(c.kind, ChangeKind::Changed | ChangeKind::Added)
                         && conflicts(c, d, || true)
                 });
-                let touched = prior.iter().any(|c| {
-                    c.item_id.as_deref() == Some(id)
-                        && matches!(c.kind, ChangeKind::Changed | ChangeKind::Added)
-                });
+                // Only an item the log saw born has a whole known history; any
+                // other has values from before the log (or before a gap in it)
+                // that no entry attributes, even when the writer's own edits
+                // since then are logged.
+                let born_in_log = prior
+                    .iter()
+                    .any(|c| c.item_id.as_deref() == Some(id) && c.kind == ChangeKind::Added);
                 let guess = found.is_none();
                 let losing_author = match found {
                     Some(last) => last.by.clone(),
-                    None if !touched && gap_overwrite(d) => Author::File,
+                    None if !born_in_log && gap_overwrite(d) => Author::File,
                     None => continue,
                 };
                 let Some(source) = source_of(id) else {
@@ -475,13 +481,16 @@ fn latest<'a>(prior: &'a VecDeque<Change>, id: &str, field: Option<&str>) -> Opt
 }
 
 /// Did `field` of item `id` hold `value` before one of the logged changes?
-/// Then a save setting it back is what a stale copy does. (Compared in the
-/// logged form: values are bounded when logged.)
+/// Then a save setting it back is what a stale copy does. A value leaves a
+/// field by an edit (the old value of a `Changed`) or with the item, by a
+/// removal (a `Removed` carries the values the item held). A move or a
+/// restore changes no value another way: a restore is an edit. (Compared in
+/// the logged form: values are bounded when logged.)
 fn reverts(prior: &VecDeque<Change>, id: &str, field: &str, value: &Value) -> bool {
     let value = bounded(value.clone());
     prior.iter().any(|c| {
         c.item_id.as_deref() == Some(id)
-            && c.kind == ChangeKind::Changed
+            && matches!(c.kind, ChangeKind::Changed | ChangeKind::Removed)
             && c.fields.get(field).is_some_and(|(old, _)| *old == value)
     })
 }
@@ -602,6 +611,126 @@ mod tests {
         assert!(run(prior, fresh, &file, None, 300).is_empty());
     }
 
+    /// A `Removed` change as the diff logs it: every field's value at removal.
+    fn removal_with(by: &Author, id: &str, note: Value, secs: i64, seq: u64) -> Change {
+        let mut c = Change::new(by, Some(id), ChangeKind::Removed, at(secs))
+            .with_field("text", json!("Deploy"), Value::Null)
+            .with_field("note", note, Value::Null);
+        c.seq = seq;
+        c
+    }
+
+    fn note_change(by: &Author, id: &str, old: Value, new: Value, secs: i64, seq: u64) -> Change {
+        let mut c =
+            Change::new(by, Some(id), ChangeKind::Changed, at(secs)).with_field("note", old, new);
+        c.seq = seq;
+        c
+    }
+
+    /// The lost edit: the note was "moved", the item was removed and brought
+    /// back without it, the user typed "user-note", and a stale save sets
+    /// the note back to "moved".
+    fn removal_history() -> Vec<Change> {
+        let (pane, ag, file) = (Author::Pane, agent("claudia"), Author::File);
+        let mut added = Change::new(&file, Some("a"), ChangeKind::Added, at(2));
+        added.seq = 3;
+        vec![
+            note_change(&pane, "a", Value::Null, json!("moved"), 0, 1),
+            removal_with(&ag, "a", json!("moved"), 1, 2),
+            added,
+            note_change(&pane, "a", Value::Null, json!("user-note"), 4, 4),
+        ]
+    }
+
+    #[test]
+    fn rule_b_file_a_save_that_restores_a_value_a_removal_took_off_conflicts() {
+        let file = Author::File;
+        let revert = note_change(&file, "a", json!("user-note"), json!("moved"), 300, 0);
+        let got = run(removal_history(), revert, &file, None, 300);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].field, "note");
+        // A value the item never held is a deliberate edit.
+        let fresh = note_change(&file, "a", json!("user-note"), json!("fresh"), 300, 0);
+        assert!(run(removal_history(), fresh, &file, None, 300).is_empty());
+    }
+
+    #[test]
+    fn a_removal_of_another_item_does_not_make_a_value_a_revert() {
+        let file = Author::File;
+        let mut prior = removal_history();
+        prior[1].item_id = Some("other".into());
+        let revert = note_change(&file, "a", json!("user-note"), json!("moved"), 300, 0);
+        assert!(run(prior, revert, &file, None, 300).is_empty());
+    }
+
+    #[test]
+    fn a_value_cut_to_the_logged_bound_is_still_recognised_after_a_removal() {
+        let file = Author::File;
+        let long = "x".repeat(crate::tracker::model::MAX_LOGGED_CHARS + 50);
+        let (pane, ag) = (Author::Pane, agent("claudia"));
+        let prior = vec![
+            removal_with(&ag, "a", json!(long), 1, 1),
+            note_change(&pane, "a", Value::Null, json!("user-note"), 4, 2),
+        ];
+        let revert = note_change(&file, "a", json!("user-note"), json!(long), 300, 0);
+        assert_eq!(run(prior.clone(), revert, &file, None, 300).len(), 1);
+        let different = "z".repeat(crate::tracker::model::MAX_LOGGED_CHARS + 50);
+        let prior = vec![
+            removal_with(&ag, "a", json!(long), 1, 1),
+            note_change(&pane, "a", Value::Null, json!("user-note"), 4, 2),
+        ];
+        let fresh = note_change(&file, "a", json!("user-note"), json!(different), 300, 0);
+        assert!(run(prior, fresh, &file, None, 300).is_empty());
+    }
+
+    #[test]
+    fn a_restore_text_value_and_a_moved_item_leave_values_the_log_still_knows() {
+        // A restore (`restore_text`) is an ordinary Changed: its old value
+        // is what a stale save reverts to. A move changes no field value.
+        let (pane, file) = (Author::Pane, Author::File);
+        let mut moved = Change::new(&pane, Some("a"), ChangeKind::Moved, at(5)).with_field(
+            "section",
+            json!("now"),
+            json!("later"),
+        );
+        moved.seq = 3;
+        let mut restore = Change::new(&pane, Some("a"), ChangeKind::Changed, at(4)).with_field(
+            "text",
+            json!("Long original"),
+            json!("Short"),
+        );
+        restore.seq = 2;
+        let prior = vec![
+            note_change(&pane, "a", Value::Null, json!("n1"), 0, 1),
+            restore,
+            moved,
+            note_change(&pane, "a", json!("n1"), json!("n2"), 6, 4),
+        ];
+        let back = Change::new(&file, Some("a"), ChangeKind::Changed, at(300)).with_field(
+            "text",
+            json!("Short"),
+            json!("Long original"),
+        );
+        let mut p2 = prior.clone();
+        p2.push({
+            let mut c = Change::new(&pane, Some("a"), ChangeKind::Changed, at(7)).with_field(
+                "text",
+                json!("x"),
+                json!("Short"),
+            );
+            c.seq = 5;
+            c
+        });
+        assert_eq!(run(p2, back, &file, None, 300).len(), 1);
+        // A moved item's old section is not a field value anyone reverts to.
+        let sec = Change::new(&file, Some("a"), ChangeKind::Changed, at(300)).with_field(
+            "note",
+            json!("n2"),
+            json!("later"),
+        );
+        assert!(run(prior, sec, &file, None, 300).is_empty());
+    }
+
     #[test]
     fn a_source_change_never_conflicts_on_either_side() {
         let (src, pane) = (
@@ -637,6 +766,41 @@ mod tests {
         assert_eq!(got[0].field, REMOVED);
         assert_eq!(got[0].losing, json!("- [x] Deploy\n"));
         assert_eq!(got[0].title.as_deref(), Some("Deploy"));
+    }
+
+    /// `writer` removes item `a` with the log not reaching back to what it read.
+    fn remove_across_a_gap(prior: Vec<Change>, writer: &Author) -> Vec<Conflict> {
+        let removed = removal_with(writer, "a", Value::Null, 100, 0);
+        detect(
+            &prior.into_iter().collect(),
+            &[removed],
+            &board(),
+            &|_| Some("- [x] Deploy\n".to_string()),
+            &Detect {
+                writer,
+                seen_through: Some(0),
+                unseen: &[],
+                client: None,
+                history_gap: true,
+                resolving: &[],
+                now: at(100),
+            },
+        )
+    }
+
+    #[test]
+    fn removing_an_item_across_a_gap_keeps_it_unless_the_log_saw_it_born() {
+        let pane = Author::Pane;
+        // The writer's own edit since the log restarted says nothing of the
+        // values the item held before.
+        let own_edit = vec![status_change(&pane, "a", "todo", "done", 50, 1)];
+        let got = remove_across_a_gap(own_edit, &pane);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].guess);
+        // An item the log saw added has no values from before the log.
+        let mut added = Change::new(&pane, Some("a"), ChangeKind::Added, at(40));
+        added.seq = 1;
+        assert!(remove_across_a_gap(vec![added], &pane).is_empty());
     }
 
     #[test]

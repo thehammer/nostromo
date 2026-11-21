@@ -1195,6 +1195,42 @@ fn a_base_version_from_another_run_of_the_board_has_seen_nothing() {
     assert_eq!(rig.losers("alpha", "note"), vec!["the agent's note"]);
 }
 
+/// A value from before a state loss is in the new log nowhere. A pane edit
+/// from the old view overwrites it after the new log has grown past the old
+/// base version: the base is of another run, so the value is kept all the same.
+#[test]
+fn a_value_from_before_a_state_loss_is_kept_when_the_new_log_grew_past_the_old_base() {
+    let mut rig = Rig::new();
+    rig.tick(100);
+    rig.agent_b(&[note_op("alpha", "the note before the loss")])
+        .unwrap();
+    let (old_view, old_epoch) = (rig.version(), rig.epoch());
+
+    rig.restart_losing_state();
+    rig.tick(100);
+    let mut k = 0;
+    while rig.version() <= old_view + 2 {
+        rig.agent_a(&[upsert(&format!("later-{k}"), "now", "Later")])
+            .unwrap();
+        k += 1;
+    }
+    assert!(rig.version() > old_view, "the new log grew past the base");
+    rig.tick(100);
+
+    rig.pane_in(
+        old_view,
+        &old_epoch,
+        vec![pane_edit_body("alpha", "the user's note")],
+    )
+    .unwrap();
+
+    assert_eq!(rig.item("alpha").note.as_deref(), Some("the user's note"));
+    assert_eq!(
+        rig.losers("alpha", "note"),
+        vec!["the note before the loss"]
+    );
+}
+
 /// A view of the current run is trusted as before: an agent change at or below
 /// its base was seen, and overwriting it is no conflict.
 #[test]

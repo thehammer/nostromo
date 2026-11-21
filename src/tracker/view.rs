@@ -202,9 +202,13 @@ pub struct TrackerBoardView {
     pub title: String,
     pub path: String,
     pub version: u64,
-    /// Which run of the board `version` counts in (random; changes when the
-    /// daemon's state for the board is lost). The pane sends it back as
-    /// `tracker_edit.base_epoch`. Additive: absent from an older daemon.
+    /// Which run of the board `version` counts in: random, new on every
+    /// daemon run (not only when the board's state is lost; conflicts are not
+    /// persisted, so their ids never outlive a run). The pane sends it back as
+    /// `tracker_edit.base_epoch`. An edit from a view of an earlier run is
+    /// judged as having seen nothing, so after a restart it can raise a
+    /// "guess" conflict though nothing was lost; the pane re-reads on
+    /// reconnect. Additive: absent from an older daemon.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub epoch: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
