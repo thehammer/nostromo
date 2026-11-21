@@ -265,9 +265,15 @@ Each read has three states: a queue, no queue (`null`), and **unreadable** (the 
 | unreadable | any | omitted | refuses `queue_unknown`, sends nothing |
 | any | unreadable | omitted | refuses `queue_unknown`, sends nothing |
 
-Unknown is never guessed, and never falls back to a direct merge or to an enqueue. The merge also requires the live
-base branch to be the one the row showed (`base_ref`); if the PR was retargeted since, the verb answers
-`via_changed` and sends nothing.
+Unknown is never guessed, and never falls back to a direct merge or to an enqueue. The merge also compares the live
+base branch with the row's `base_ref` (the displayed form: absent for the default branch, cut at 100 characters);
+if they differ the verb answers `via_changed` and sends nothing. A retarget the displayed form cannot tell apart
+(for example `main` to a default branch that is not `main`, with the row showing neither) is not caught by that
+comparison; the live queue read and `expected_via` still decide queue versus direct from fresh data.
+
+Known limits: a rate limit on the second (base-branch) request is not passed to the poll's budget (the PR then has
+no `merge_via` and the verb says `queue_unknown`), and a GraphQL error with no `path` is not tied to a queue read.
+Both fail closed (nothing is enqueued).
 
 **Enqueue.** After every gate of the direct path (human approval, not draft, `mergeable`, checks, GitHub's
 `mergeStateStatus` clean, the head the app showed, Perri approved the **full** live head) the daemon sends
