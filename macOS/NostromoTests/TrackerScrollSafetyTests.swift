@@ -672,7 +672,6 @@ final class TrackerGateHarness {
     /// command row, Ran it, Copy).
     func assertNoMove(_ name: String, userGesture: Bool = false, file: StaticString = #filePath, line: UInt = #line,
                       _ interaction: () throws -> Void) {
-        let ownedFocusBefore = paneOwnsFirstResponder()
         let before = pane.anchorSnapshot(windowIndex: 0)
         XCTAssertNotNil(before.firstVisible, "\(name): the pane has a first visible row", file: file, line: line)
         let readKey = before.firstVisible?.rowKey
@@ -706,7 +705,8 @@ final class TrackerGateHarness {
             let drift = abs((after.firstVisible?.offsetPt ?? .infinity) - (before.firstVisible?.offsetPt ?? 0))
             XCTAssertLessThanOrEqual(drift, 1, "\(name): first visible row moved by \(drift) pt", file: file, line: line)
         }
-        XCTAssertFalse(paneOwnsFirstResponder() && !ownedFocusBefore && !userGesture,
+        // Strict for every caller but a person's own gesture (the one case the pane may take its focus sink).
+        XCTAssertFalse(paneOwnsFirstResponder() && !userGesture,
                        "\(name): the tracker took keyboard focus (\(String(describing: pane.window?.firstResponder)))",
                        file: file, line: line)
     }
@@ -788,6 +788,10 @@ final class TrackerScrollSafetyTests: XCTestCase {
                 block.ranItCheckbox.performClick(nil)
                 XCTAssertEqual(h.edits.sent.count, 1, "\(placement): Ran it sent the tick")
             }
+            // The person's click is the only step allowed to take the focus sink; give it back, so every
+            // other step above and below is held to the strict check (the pane never owns focus).
+            h.pane.window?.makeFirstResponder(nil)
+            XCTAssertFalse(h.paneOwnsFirstResponder(), "\(placement): focus given back after the person's click")
             h.assertNoMove("\(placement): the board ticks it") { try h.echo { try $0.setStatus(id, "done") } }
             h.assertNoMove("\(placement): a long command arrives") {
                 let lines = (1...40).map { "echo line \($0)" }.joined(separator: "\n")

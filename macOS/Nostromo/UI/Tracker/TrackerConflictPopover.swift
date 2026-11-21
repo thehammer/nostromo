@@ -33,8 +33,8 @@ struct TrackerConflictEntry: Equatable {
             return TrackerConflictEntry(
                 itemId: item.id, field: conflict.field, conflictId: conflict.conflictId,
                 sentence: TrackerConflictText.sentence(conflict, current: current, now: now),
-                losingValue: String(conflict.losing.prefix(TrackerConflictText.maxValueChars)),
-                currentValue: String(current.prefix(TrackerConflictText.maxValueChars)),
+                losingValue: TrackerConflictText.safe(String(conflict.losing.prefix(TrackerConflictText.maxValueChars))),
+                currentValue: TrackerConflictText.safe(String(current.prefix(TrackerConflictText.maxValueChars))),
                 inverse: inverse)
         }
     }
@@ -42,7 +42,7 @@ struct TrackerConflictEntry: Equatable {
     static func entry(for removed: TrackerRemovedConflictWire, now: Date) -> TrackerConflictEntry {
         TrackerConflictEntry(itemId: removed.itemId, field: "removed", conflictId: removed.conflictId,
                              sentence: TrackerConflictText.sentence(removed, now: now),
-                             losingValue: String(removed.title.prefix(TrackerConflictText.maxValueChars)),
+                             losingValue: TrackerConflictText.safe(String(removed.title.prefix(TrackerConflictText.maxValueChars))),
                              currentValue: "", inverse: [])
     }
 

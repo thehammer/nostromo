@@ -331,19 +331,29 @@ fn pane_op_name(op: &TrackerPaneOp) -> &'static str {
 /// declaration, not from a list typed here, so a variant left out of the drive fails the test even when
 /// it was named in [`pane_op_name`]'s match.
 fn declared_pane_ops() -> Vec<String> {
-    let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ipc/protocol.rs"))
-        .expect("protocol.rs");
-    let start = text.find("pub enum TrackerPaneOp {").expect("the enum is declared");
+    let text =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ipc/protocol.rs"))
+            .expect("protocol.rs");
+    let start = text
+        .find("pub enum TrackerPaneOp {")
+        .expect("the enum is declared");
     let body = &text[start..];
     let end = body.find("\n}\n").expect("the enum ends");
     let mut names = Vec::new();
     for line in body[..end].lines().skip(1) {
-        let Some(rest) = line.strip_prefix("    ") else { continue };
-        let Some(first) = rest.chars().next() else { continue };
+        let Some(rest) = line.strip_prefix("    ") else {
+            continue;
+        };
+        let Some(first) = rest.chars().next() else {
+            continue;
+        };
         if !first.is_ascii_uppercase() {
             continue;
         }
-        let ident: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        let ident: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
         let mut snake = String::new();
         for (i, c) in ident.chars().enumerate() {
             if c.is_ascii_uppercase() && i > 0 {
@@ -572,7 +582,10 @@ async fn driving_every_tracker_op_with_every_command_and_hostile_string_writes_n
     .await
     .assert_ok("resolve_conflict: a real conflict, kept the agent's value");
     assert!(
-        w.item("cmd-5").conflicts.iter().all(|c| c.conflict_id != conflict.conflict_id),
+        w.item("cmd-5")
+            .conflicts
+            .iter()
+            .all(|c| c.conflict_id != conflict.conflict_id),
         "the conflict is settled"
     );
     // Fifty more conflicts push the oldest past the board's cap of fifty; the item says so, and the
@@ -598,20 +611,35 @@ async fn driving_every_tracker_op_with_every_command_and_hostile_string_writes_n
             _ => None,
         })
         .expect("the cap dropped an item's only conflict");
-    w.pane(pane(vec![TrackerPaneOp::AckDropped { id: dropped.clone() }]))
-        .await
-        .assert_ok("ack_dropped: a real dropped count");
-    assert_eq!(w.item(&dropped).dropped_conflicts, 0, "the count is acknowledged");
+    w.pane(pane(vec![TrackerPaneOp::AckDropped {
+        id: dropped.clone(),
+    }]))
+    .await
+    .assert_ok("ack_dropped: a real dropped count");
+    assert_eq!(
+        w.item(&dropped).dropped_conflicts,
+        0,
+        "the count is acknowledged"
+    );
     w.pane(pane(vec![TrackerPaneOp::Remove { id: "cmd-4".into() }]))
         .await
         .assert_ok("remove");
     let declared = declared_pane_ops();
-    assert!(declared.len() >= 10, "the declaration was read: {declared:?}");
+    assert!(
+        declared.len() >= 10,
+        "the declaration was read: {declared:?}"
+    );
     for name in &declared {
-        assert!(driven.contains(&name.as_str()), "pane op `{name}` was never driven");
+        assert!(
+            driven.contains(&name.as_str()),
+            "pane op `{name}` was never driven"
+        );
     }
     for name in &driven {
-        assert!(declared.iter().any(|d| d == name), "`{name}` is driven but not declared: {declared:?}");
+        assert!(
+            declared.iter().any(|d| d == name),
+            "`{name}` is driven but not declared: {declared:?}"
+        );
     }
     // A file edit ticking a command, as the user's editor would.
     let path = w.registry.bound_path(TAG).unwrap();

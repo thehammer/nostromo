@@ -23,10 +23,10 @@ final class TrackerCommandGateTests: MouseQueueTestCase {
 
     /// A block in the window whose gate is the REAL `HumanGesture.permit` on `event()`, with the
     /// environment seams pinned (no VoiceOver, no synthetic input allowed).
-    private func rig(event: @escaping () -> NSEvent?, voiceOver: Bool = false) -> Rig {
+    private func rig(event: @escaping () -> NSEvent?, voiceOver: Bool = false, ran: Bool = false) -> Rig {
         let board = NSPasteboard(name: NSPasteboard.Name("TrackerGate-\(UUID().uuidString)"))
         addTeardownBlock { board.releaseGlobally() }
-        let block = TrackerCommandBlockView(command: "php artisan queue:retry 8812", env: .prod, ran: false,
+        let block = TrackerCommandBlockView(command: "php artisan queue:retry 8812", env: .prod, ran: ran,
                                             canMarkRan: true, pasteboard: board)
         block.frame = NSRect(x: 0, y: 0, width: 380, height: block.height(forWidth: 380))
         window.contentView!.addSubview(block)
@@ -56,6 +56,15 @@ final class TrackerCommandGateTests: MouseQueueTestCase {
         XCTAssertEqual(r.block.noticeText, "Not ticked: click it yourself")
         XCTAssertEqual(r.block.noticeLabel?.isHidden, false)
         XCTAssertEqual(r.block.ranItCheckbox.state, .off)
+    }
+
+    func testARefusedUntickSaysNotUnticked() throws {
+        let event = try GestureFixtures.marked(click())
+        let r = rig(event: { event }, ran: true)
+        r.block.ranItCheckbox.performClick(nil)
+        XCTAssertEqual(r.fired(), 0)
+        XCTAssertEqual(r.block.noticeText, "Not unticked: click it yourself")
+        XCTAssertEqual(r.block.ranItCheckbox.state, .on, "the box still shows what the board says")
     }
 
     func testAnAccessibilityPressWithNoEventIsRefused() {

@@ -210,6 +210,7 @@ final class TrackerPaneView: NSView {
             tag: tag, results: store.editResults.eraseToAnyPublisher(), send: editSender, schedule: editSchedule,
             shownBase: { [weak self] ids in self?.shownBase(forItems: ids) ?? TrackerBase(version: 0, epoch: nil) },
             itemExists: { [weak self] id in self?.wireItem(id) != nil })
+        editing.isCommandItem = { [weak self] id in self?.wireItem(id)?.kind == .command }
         editing.onNotice = { [weak self] text in self?.applyNotice(text ?? self?.openEditorRefusal()) }
         editing.onLookAgain = { [weak self] in self?.lookAgain() }
         editing.onConfirmed = { [weak self] ids, version in

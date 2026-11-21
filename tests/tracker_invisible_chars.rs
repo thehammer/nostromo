@@ -106,8 +106,14 @@ fn a_withheld_items_source_never_carries_the_raw_command() {
         assert!(!item.source.contains(bad), "U+{:04X} in source", bad as u32);
     }
     let wire = serde_json::to_string(&item).unwrap();
-    assert!(!wire.contains("201~"), "the paste-end sequence is not on the wire: {wire}");
-    assert!(!wire.contains("echo a"), "no part of the command is on the wire: {wire}");
+    assert!(
+        !wire.contains("201~"),
+        "the paste-end sequence is not on the wire: {wire}"
+    );
+    assert!(
+        !wire.contains("echo a"),
+        "no part of the command is on the wire: {wire}"
+    );
 }
 
 #[test]
@@ -115,7 +121,9 @@ fn a_withheld_item_in_a_whole_board_leaves_no_hostile_byte_in_the_joined_sources
     let parsed = parse(board_with_command(HOSTILE).as_bytes()).expect("parses");
     let view = build(&parsed, &ViewFacts::default());
     let joined: String = view.nodes.iter().map(|n| n.source()).collect();
-    assert!(!joined.contains('\u{1b}') && !joined.contains('\u{202e}') && !joined.contains('\u{0}'));
+    assert!(
+        !joined.contains('\u{1b}') && !joined.contains('\u{202e}') && !joined.contains('\u{0}')
+    );
     assert!(joined.contains("command withheld"));
 }
 

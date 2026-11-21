@@ -97,7 +97,7 @@ final class TrackerCommandBlockView: NSView {
         // No optimistic display: the checkbox goes back to what the board says until the board changes.
         sender.state = isRan ? .on : .off
         guard case .human = permit(sender) else {
-            showNotice("Not ticked: click it yourself")
+            showNotice(isRan ? "Not unticked: click it yourself" : "Not ticked: click it yourself")
             return
         }
         showNotice(nil)
@@ -199,8 +199,17 @@ final class TrackerCommandBlockView: NSView {
             .font: TrackerTheme.metaFont, .foregroundColor: TrackerTheme.muted])
         ran.state = isRan ? .on : .off
         ran.isEnabled = canMarkRan
-        ran.setAccessibilityLabel("Ran it")
-        ran.setAccessibilityHelp("Tick this after you have done it yourself.")
+        // One click on a ticked box takes the tick back at once, so the ticked state says so: a command
+        // that already ran must not look unrun by accident.
+        if isRan {
+            ran.toolTip = "Mark not run"
+            ran.setAccessibilityLabel("Ran it, ticked")
+            ran.setAccessibilityHelp("Click to mark not run. The command will show as not run, and nothing is undone on the terminal.")
+        } else {
+            ran.toolTip = "Tick after you have run it yourself"
+            ran.setAccessibilityLabel("Ran it, not ticked")
+            ran.setAccessibilityHelp("Tick this after you have done it yourself.")
+        }
         addSubview(ran)
         ranItCheckbox = ran
     }

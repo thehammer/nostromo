@@ -1129,8 +1129,13 @@ public enum TrackerConflictText {
         return (actor(conflict.losingBy), actor(conflict.winningBy))
     }
 
+    /// A value with every character the daemon refuses in a command removed (escape, bidi, tag, NUL and the
+    /// rest): a losing `command` value is drawn and spoken without them, like the command block does.
+    public static func safe(_ value: String) -> String { TrackerMarkdown.copySafe(value) }
+
     /// A value as plain text (no quotes), cut at `maxValueChars`: what a spoken sentence uses.
     public static func plain(_ value: String, field: String) -> String {
+        let value = safe(value)
         let shown = field == "status" ? value.replacingOccurrences(of: "-", with: " ") : value
         return shown.count > maxValueChars ? String(shown.prefix(maxValueChars)) + "…" : shown
     }
@@ -1159,6 +1164,7 @@ public enum TrackerConflictText {
     }
 
     public static func display(_ value: String) -> String {
+        let value = safe(value)
         let shown = value.count > maxValueChars ? String(value.prefix(maxValueChars)) + "…" : value
         return "“\(shown)”"
     }

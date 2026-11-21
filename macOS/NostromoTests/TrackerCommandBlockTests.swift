@@ -401,4 +401,166 @@ final class TrackerCommandBlockTests: XCTestCase {
         XCTAssertNil(whole.cutBadge)
         XCTAssertTrue(whole.copyButton.isEnabled)
     }
+
+    // MARK: Copy as Markdown never emits what the daemon refuses (Perri's fix 2)
+
+    /// ESC[201~ ends a terminal's bracketed paste, then bidi, a tag character, NUL and a newline.
+    private static let hostileSource = "echo a\u{1b}[201~b\u{202e}c\u{e0101}d\u{0}e\nrm -rf /"
+    private static let hostileScalars: [Unicode.Scalar] = ["\u{1b}", "\u{202e}", "\u{e0101}", "\u{0}"]
+
+    private func assertNoHostile(_ text: String?, _ label: String, file: StaticString = #filePath, line: UInt = #line) {
+        guard let text else { return XCTFail("\(label): nothing was copied", file: file, line: line) }
+        for scalar in Self.hostileScalars {
+            XCTAssertFalse(text.unicodeScalars.contains(scalar), "\(label): U+\(String(scalar.value, radix: 16)) reached the pasteboard",
+                           file: file, line: line)
+        }
+        XCTAssertFalse(text.contains("201~"), "\(label): the paste-end sequence reached the pasteboard", file: file, line: line)
+        XCTAssertFalse(text.contains("rm -rf"), "\(label): the command's text reached the pasteboard", file: file, line: line)
+    }
+
+    /// A board whose `retry-1074` source holds the hostile command (withheld, or not, as an older daemon would send it).
+    private func hostileHarness(withheld: Bool) throws -> (h: TrackerEditHarness, section: String) {
+        let id = "retry-1074"
+        let h = try TrackerEditHarness(self, configure: {
+            try $0.updateItem(id) { item in
+                item["source"] = "- [ ] Retry <!-- #\(id) 1760540262 cmd -->\n  ```\n  \(Self.hostileSource)\n  ```\n"
+                if withheld {
+                    item.removeValue(forKey: "command")
+                    item["command_withheld"] = true
+                }
+            }
+        })
+        return (h, try XCTUnwrap(h.script.item(id)?["section"] as? String))
+    }
+
+    private func copiedBy(_ h: TrackerEditHarness, _ row: TrackerRow) -> String? {
+        h.rig.pasteboard.clearContents()
+        h.pane.copyMarkdown(for: row)
+        return h.rig.pasteboard.string(forType: .string)
+    }
+
+    func testAWithheldCommandCopiesAsItsMarkerByItemSectionAndBoard() throws {
+        let (h, sectionId) = try hostileHarness(withheld: true)
+        let itemRow = try XCTUnwrap(h.pane.displayedRows.first { $0.key == TrackerRow.itemKey("retry-1074") })
+        let item = copiedBy(h, itemRow)
+        assertNoHostile(item, "item copy")
+        XCTAssertEqual(item, TrackerMarkdown.withheldMarker, "a withheld item copies as its marker, not its source")
+        let sectionRow = try XCTUnwrap(h.pane.displayedRows.first {
+            if case .section(let s) = $0.content { return s.id == sectionId }
+            return false
+        })
+        let section = copiedBy(h, sectionRow)
+        assertNoHostile(section, "section copy")
+        XCTAssertTrue(section?.contains(TrackerMarkdown.withheldMarker) ?? false)
+        h.rig.pasteboard.clearContents()
+        h.pane.copyBoardMarkdown()
+        assertNoHostile(h.rig.pasteboard.string(forType: .string), "board copy")
+        // The row offers no Copy of the command: no block, no Copy button.
+        let row = try h.row("retry-1074")
+        XCTAssertNil(row.commandBlock)
+        XCTAssertFalse(namesInTree(row).contains("Copy"))
+    }
+
+    func testARawSourceWithRefusedCharactersIsStrippedWhateverTheWithheldFlag() throws {
+        let (h, sectionId) = try hostileHarness(withheld: false)
+        let itemRow = try XCTUnwrap(h.pane.displayedRows.first { $0.key == TrackerRow.itemKey("retry-1074") })
+        for scalar in Self.hostileScalars {
+            XCTAssertFalse((copiedBy(h, itemRow) ?? "").unicodeScalars.contains(scalar), "item: U+\(String(scalar.value, radix: 16))")
+        }
+        let sectionRow = try XCTUnwrap(h.pane.displayedRows.first {
+            if case .section(let s) = $0.content { return s.id == sectionId }
+            return false
+        })
+        XCTAssertFalse((copiedBy(h, sectionRow) ?? "").unicodeScalars.contains("\u{1b}"))
+        h.rig.pasteboard.clearContents()
+        h.pane.copyBoardMarkdown()
+        let board = try XCTUnwrap(h.rig.pasteboard.string(forType: .string))
+        for scalar in Self.hostileScalars { XCTAssertFalse(board.unicodeScalars.contains(scalar), "board: U+\(String(scalar.value, radix: 16))") }
+        XCTAssertFalse(board.contains("201~") && board.unicodeScalars.contains("\u{1b}"))
+    }
+
+    // MARK: Undo and redo never change "Ran it" (Perri's fix 3)
+
+    /// A person ticks the command and the daemon confirms: the board shows it `done`.
+    private func tickedCommand() throws -> TrackerEditHarness {
+        let h = try TrackerEditHarness(self)
+        let block = try XCTUnwrap(try h.row("retry-1074").commandBlock)
+        block.permit = Self.aPersonsClick
+        block.ranItCheckbox.performClick(nil)
+        XCTAssertEqual(h.sent.map(\.ops), [[.status(id: "retry-1074", status: "done")]])
+        try h.echo { try $0.setStatus("retry-1074", "done") }
+        return h
+    }
+
+    func testATickedCommandHasNoUndoStepSoAnUndoOrRedoFromAppControlSendsNothing() throws {
+        let h = try tickedCommand()
+        XCTAssertFalse(h.pane.editing.undoManager.canUndo, "a command's tick is not on the undo stack")
+        SyntheticInputGate.begin()
+        defer { SyntheticInputGate.end() }
+        h.pane.performUndo()
+        h.pane.performRedo()
+        h.pane.focusSink()
+        _ = h.pane.sink.tryToPerform(Selector(("undo:")), with: nil)
+        _ = h.pane.sink.tryToPerform(Selector(("redo:")), with: nil)
+        XCTAssertEqual(h.sent.count, 1, "no undo or redo of the tick was sent: \(h.sent.map(\.ops))")
+    }
+
+    func testAnUndoOrRedoWithNoEventOrAStaleOneSendsNothingForATickedCommand() throws {
+        let h = try tickedCommand()
+        // No current event (an Accessibility-driven or scripted call) and an old one: same answer.
+        h.pane.performUndo()
+        h.pane.performRedo()
+        _ = h.pane.sink.tryToPerform(Selector(("undo:")), with: nil)
+        XCTAssertEqual(h.sent.count, 1)
+        XCTAssertFalse(h.pane.editing.undoManager.canRedo)
+    }
+
+    func testAPersonsClickAfterTheTickStillTakesItBack() throws {
+        let h = try tickedCommand()
+        let block = try XCTUnwrap(try h.row("retry-1074").commandBlock)
+        XCTAssertEqual(block.ranItCheckbox.state, .on)
+        block.permit = Self.aPersonsClick
+        block.ranItCheckbox.performClick(nil)
+        XCTAssertEqual(h.sent.count, 2)
+        XCTAssertEqual(h.sent.last?.ops, [.status(id: "retry-1074", status: "blocked")],
+                       "back to the status it had before this pane ticked it")
+    }
+
+    func testAnOrdinaryItemsTickIsStillUndoable() throws {
+        let h = try TrackerEditHarness(self)
+        try XCTUnwrap(try h.row("revie-1111").tickButton).performClick(nil)
+        try h.echo { try $0.setStatus("revie-1111", "done") }
+        XCTAssertTrue(h.pane.editing.undoManager.canUndo)
+        h.pane.performUndo()
+        XCTAssertEqual(h.sent.count, 2)
+    }
+
+    func testUndoOfACommandItemsTitleEditOnlyRestoresItsStagedText() throws {
+        let id = "retry-1074"
+        let h = try TrackerEditHarness(self)
+        let before = try XCTUnwrap(h.script.text(id))
+        h.pane.beginEdit(item: id, kind: .title)
+        let editor = try XCTUnwrap(try h.row(id).titleEditor)
+        h.type("Retry the other job", into: editor)
+        h.pressReturn(in: editor)
+        try h.echo { try $0.setText(id, "Retry the other job") }
+        XCTAssertTrue(h.pane.editing.undoManager.canUndo, "a title edit stays undoable")
+        h.pane.performUndo()
+        XCTAssertEqual(h.sent.last?.ops, [.restoreText(id: id, text: before)],
+                       "the undo is a text restore: it changes staged text, never a status, and reaches no terminal")
+    }
+
+    // MARK: Un-ticking is labelled (Perri's fix 4)
+
+    func testATickedBoxSaysItTakesTheTickBackAndAnUntickedOneDoesNot() {
+        let ticked = block("ls", ran: true)
+        XCTAssertEqual(ticked.ranItCheckbox.toolTip, "Mark not run")
+        XCTAssertEqual(ticked.ranItCheckbox.accessibilityLabel(), "Ran it, ticked")
+        XCTAssertTrue(ticked.ranItCheckbox.accessibilityHelp()?.contains("mark not run") ?? false)
+        XCTAssertFalse(ticked.ranItCheckbox.accessibilityHelp()?.contains("Tick this after") ?? true)
+        let open = block("ls", ran: false)
+        XCTAssertNotEqual(open.ranItCheckbox.toolTip, "Mark not run")
+        XCTAssertEqual(open.ranItCheckbox.accessibilityLabel(), "Ran it, not ticked")
+        XCTAssertEqual(open.ranItCheckbox.accessibilityHelp(), "Tick this after you have done it yourself.")
+    }
 }
