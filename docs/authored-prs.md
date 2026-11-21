@@ -137,10 +137,16 @@ dropped, and a file that does not parse starts the store empty (its bytes are ke
 **Recording** is the MCP tool `perri.record_verdict` (see `docs/mcp/tools.md`). It only records. Any session of
 a **registered** focus may call it (a tag that matches no focus is `unidentified_caller`); a session a network peer
 is steering is refused (the tool is withheld, like the Teri/Fred/Mother/Huey tools). An `approved` is only taken
-for the head the daemon holds for the PR: if the PR is unknown or its head differs, the PR is read once more and
-the check repeated, and a miss is refused (`pr_unknown`, `head_not_current`), so a commit cannot be approved before
-it is pushed. A `changes_requested` or `comment` can only block, so it is taken for any head. The result says
-`for_current_head: true | false`.
+for the PR's **live** head: the daemon reads the PR from GitHub once, at the time of the call (the same one-shot
+read the Merge verb makes, with the same rate-limit pause), and never decides from its list, whose poller sleeps
+while no Overview is showing and so can hold a head several pushes old. A head that differs is refused
+`head_not_current`, a PR GitHub does not have `pr_unknown`, and an approval that could not be verified (the read
+failed, GitHub is rate-limiting, no token) `unreachable` or `rate_limited`, with nothing recorded: an approval that
+was not checked is never taken. A PR the daemon has never listed is checked the same way. A `changes_requested` or
+`comment` can only block, so it is taken for any head without a read. The result says
+`for_current_head: true | false` (for an approval, from that live read; for the others, best-effort from the
+daemon's list, which is repaired when the Overview opens and the poller wakes). After recording, the engine is
+told so the row shows the verdict when the poller is active.
 
 *Trust model.* The caller's tag is self-declared: the record shows **who** (`by`, `<agent>:<tag>`), it does not prove
 who. A local process on the user's account can still claim a registered tag. The real gates of a merge are the

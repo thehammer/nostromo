@@ -1537,7 +1537,23 @@ impl Captured {
 
 /// Capture every tracing event of this thread (TRACE and up) until the guard
 /// drops. The engine runs on the test's own thread, so it is captured too.
+///
+/// A process-wide subscriber that discards everything goes in first, so every
+/// callsite stays enabled. Without it, a test thread that reaches a callsite
+/// while no scoped subscriber is registered (or while another test's is being
+/// built or dropped) can leave that callsite cached as disabled for a later
+/// capture: the feature's lines silently go missing ("the feature logged
+/// something" failed about 1 in 100 whole-binary runs under load).
 pub fn capture_logs() -> (Captured, tracing::subscriber::DefaultGuard) {
+    static GLOBAL_LOG: std::sync::Once = std::sync::Once::new();
+    GLOBAL_LOG.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::TRACE)
+                .with_writer(std::io::sink)
+                .finish(),
+        );
+    });
     let captured = Captured::default();
     let writer = captured.clone();
     let subscriber = tracing_subscriber::fmt()

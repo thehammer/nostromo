@@ -380,7 +380,7 @@ impl AuthoredPrActions {
     /// The engine is hard-paused on a rate limit that has not ended: the merge
     /// waits with it. (`resumes_at` is only ever set while paused; the slower
     /// `rate_limited` poll state is a slow-down, not a stop.)
-    fn rate_limited_now(&self) -> bool {
+    pub(super) fn rate_limited_now(&self) -> bool {
         let snap = self.snapshot.borrow();
         let Some(snap) = snap.as_ref() else {
             return false;

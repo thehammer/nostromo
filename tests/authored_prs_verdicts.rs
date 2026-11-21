@@ -49,11 +49,15 @@ fn perri_of(rig: &Rig) -> Option<PerriRow> {
     rig.row(REPO, N).and_then(|p| p.perri)
 }
 
-async fn say(rig: &Rig, head: &str, verdict: Verdict, note: Option<&str>) {
-    rig.actions
-        .record_verdict(REPO, N, head, verdict, Some("perri"), note)
-        .await
-        .expect("a valid record");
+async fn say(rig: &mut Rig, head: &str, verdict: Verdict, note: Option<&str>) {
+    let actions = std::sync::Arc::clone(&rig.actions);
+    let (head, note) = (head.to_owned(), note.map(str::to_owned));
+    let task = tokio::spawn(async move {
+        actions
+            .record_verdict(REPO, N, &head, verdict, Some("perri"), note.as_deref())
+            .await
+    });
+    rig.drive(task).await.expect("a valid record");
 }
 
 /// The PR gets a new head on GitHub, and the engine reads it.
@@ -139,7 +143,7 @@ async fn a_verdict_for_the_current_head_shows_as_current_and_publishes_without_w
 {
     let mut rig = start_with(pr_at(&sha('a'))).await;
     let started = rig.elapsed;
-    say(&rig, &sha('a'), Verdict::Approved, None).await;
+    say(&mut rig, &sha('a'), Verdict::Approved, None).await;
 
     let seen = rig
         .run_until(secs(20), Duration::from_millis(250), |r| {
@@ -158,7 +162,7 @@ async fn a_verdict_for_the_current_head_shows_as_current_and_publishes_without_w
     assert_eq!(perri.by.as_deref(), Some("perri"));
 
     // Saying something else about the same head replaces it.
-    say(&rig, &sha('a'), Verdict::ChangesRequested, None).await;
+    say(&mut rig, &sha('a'), Verdict::ChangesRequested, None).await;
     rig.run_until(secs(20), Duration::from_millis(250), |r| {
         perri_of(r).is_some_and(|p| p.verdict == Verdict::ChangesRequested)
     })
@@ -170,7 +174,7 @@ async fn a_verdict_for_the_current_head_shows_as_current_and_publishes_without_w
 #[tokio::test]
 async fn after_a_new_push_the_old_verdict_is_an_older_version_and_never_current() {
     let mut rig = start_with(pr_at(&sha('a'))).await;
-    say(&rig, &sha('a'), Verdict::Approved, None).await;
+    say(&mut rig, &sha('a'), Verdict::Approved, None).await;
     rig.run(secs(3), Duration::from_millis(500)).await;
     assert!(perri_of(&rig).unwrap().for_current_head);
 
@@ -183,14 +187,14 @@ async fn after_a_new_push_the_old_verdict_is_an_older_version_and_never_current(
     );
 
     // Perri looks at the new head: that is the one shown.
-    say(&rig, &sha('b'), Verdict::ChangesRequested, None).await;
+    say(&mut rig, &sha('b'), Verdict::ChangesRequested, None).await;
     rig.run(secs(3), Duration::from_millis(500)).await;
     let perri = perri_of(&rig).unwrap();
     assert_eq!(perri.verdict, Verdict::ChangesRequested);
     assert!(perri.for_current_head);
 
     // And once it approves the new head, that is current too.
-    say(&rig, &sha('b'), Verdict::Approved, None).await;
+    say(&mut rig, &sha('b'), Verdict::Approved, None).await;
     rig.run(secs(3), Duration::from_millis(500)).await;
     let perri = perri_of(&rig).unwrap();
     assert_eq!(perri.verdict, Verdict::Approved);
@@ -205,7 +209,7 @@ async fn after_a_new_push_the_old_verdict_is_an_older_version_and_never_current(
 #[tokio::test]
 async fn when_the_daemon_does_not_know_the_head_no_verdict_counts_as_current() {
     let mut rig = start_with(pr_at("sha-not-a-commit")).await;
-    say(&rig, &sha('a'), Verdict::Comment, None).await;
+    say(&mut rig, &sha('a'), Verdict::Comment, None).await;
     rig.run(secs(3), Duration::from_millis(500)).await;
     let perri = perri_of(&rig).expect("the verdict is shown");
     assert!(!perri.for_current_head, "{perri:?}");
@@ -218,10 +222,10 @@ async fn when_the_daemon_does_not_know_the_head_no_verdict_counts_as_current() {
 #[tokio::test]
 async fn the_wire_carries_no_note_and_no_full_sha_however_the_verdicts_change() {
     let mut rig = start_with(pr_at(&sha('a'))).await;
-    say(&rig, &sha('a'), Verdict::Approved, Some(NOTE)).await;
+    say(&mut rig, &sha('a'), Verdict::Approved, Some(NOTE)).await;
     rig.run(secs(3), Duration::from_millis(500)).await;
     push(&mut rig, &sha('b'), 5).await;
-    say(&rig, &sha('b'), Verdict::Comment, Some(NOTE)).await;
+    say(&mut rig, &sha('b'), Verdict::Comment, Some(NOTE)).await;
     rig.run(secs(3), Duration::from_millis(500)).await;
     assert!(perri_of(&rig).is_some());
 
@@ -435,6 +439,179 @@ async fn a_changes_requested_for_a_head_the_daemon_has_not_seen_is_recorded_not_
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// An approval is checked against GitHub's live head, not the poller's snapshot
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// The Overview closes (the poller idles), then GitHub moves to `new_head`: the
+/// daemon's snapshot keeps the old head.
+async fn idle_then_pushed(old: &str, new_head: &str) -> Rig {
+    let mut rig = start_with(pr_at(old)).await;
+    rig.set_demand("idle").await;
+    let new_head = new_head.to_owned();
+    rig.fake.edit(REPO, N, |p| {
+        p.head_sha = new_head;
+        p.updated_at = t0() + Chrono::minutes(5);
+    });
+    // A day passes with nobody looking: the poller reads nothing.
+    rig.run(mins(30), secs(30)).await;
+    assert_eq!(
+        rig.row(REPO, N).and_then(|p| p.head_sha_short).as_deref(),
+        Some(&old[..8]),
+        "the idle poller must not have read the push"
+    );
+    rig
+}
+
+fn graphql_count(rig: &Rig) -> usize {
+    rig.fake
+        .log()
+        .iter()
+        .filter(|r| r.kind() == Kind::Graphql)
+        .count()
+}
+
+#[tokio::test]
+async fn an_approval_of_the_live_head_is_taken_while_the_poller_is_idle_and_the_snapshot_is_old() {
+    let mut rig = idle_then_pushed(&sha('a'), &sha('b')).await;
+    let r = try_record(&mut rig, REPO, N, &sha('b'), Verdict::Approved).await;
+    assert_eq!(r, Ok(true));
+    assert_eq!(
+        rig.verdicts.for_head(REPO, N, &sha('b')).unwrap().verdict,
+        Verdict::Approved
+    );
+}
+
+#[tokio::test]
+async fn an_approval_of_the_old_head_is_refused_when_github_has_moved_on() {
+    let mut rig = idle_then_pushed(&sha('a'), &sha('b')).await;
+    // The snapshot still says `a`, but `a` is not the head any more.
+    let r = try_record(&mut rig, REPO, N, &sha('a'), Verdict::Approved).await;
+    assert_eq!(r, Err("head_not_current"));
+    // And a commit nobody pushed.
+    let r = try_record(&mut rig, REPO, N, &sha('c'), Verdict::Approved).await;
+    assert_eq!(r, Err("head_not_current"));
+    assert!(rig.verdicts.is_empty(), "something was kept");
+}
+
+#[tokio::test]
+async fn an_approval_for_a_pr_the_snapshot_never_listed_is_checked_live() {
+    let mut rig = start_with(pr_at(&sha('a'))).await;
+    rig.set_demand("idle").await;
+    // Open on GitHub, but never in the daemon's list.
+    let mut other = pr_at(&sha('d'));
+    other.number = N + 7;
+    rig.fake.put(other);
+    assert!(rig.row(REPO, N + 7).is_none());
+    let r = try_record(&mut rig, REPO, N + 7, &sha('d'), Verdict::Approved).await;
+    assert_eq!(r, Ok(true));
+    assert!(rig.verdicts.for_head(REPO, N + 7, &sha('d')).is_some());
+    // A PR GitHub does not have.
+    let r = try_record(&mut rig, REPO, N + 99, &sha('d'), Verdict::Approved).await;
+    assert_eq!(r, Err("pr_unknown"));
+}
+
+async fn unverifiable(status: u16, retry_after: Option<u64>, code: &'static str) {
+    let mut rig = start_with(pr_at(&sha('a'))).await;
+    rig.fake.force(
+        "graphql",
+        Some(Forced {
+            status,
+            retry_after,
+        }),
+    );
+    let r = try_record(&mut rig, REPO, N, &sha('a'), Verdict::Approved).await;
+    assert_eq!(r, Err(code), "GitHub answered {status}");
+    assert!(rig.verdicts.is_empty(), "{status}: something was kept");
+}
+
+#[tokio::test]
+async fn an_approval_is_refused_unreachable_when_github_says_401() {
+    unverifiable(401, None, "unreachable").await;
+}
+
+#[tokio::test]
+async fn an_approval_is_refused_rate_limited_on_a_403() {
+    unverifiable(403, None, "rate_limited").await;
+}
+
+#[tokio::test]
+async fn an_approval_is_refused_rate_limited_on_a_429() {
+    unverifiable(429, Some(30), "rate_limited").await;
+}
+
+#[tokio::test]
+async fn an_approval_is_refused_unreachable_on_a_5xx() {
+    unverifiable(500, None, "unreachable").await;
+}
+
+#[tokio::test]
+async fn an_approval_is_refused_unreachable_on_a_503() {
+    unverifiable(503, None, "unreachable").await;
+}
+
+#[tokio::test]
+async fn an_approval_with_no_github_client_is_refused_unreachable() {
+    let fake = Fake::new();
+    fake.put(pr_at(&sha('a')));
+    let mut rig = Rig::start(
+        fake,
+        RigOpts {
+            token: false,
+            ..RigOpts::default()
+        },
+    )
+    .await;
+    let r = try_record(&mut rig, REPO, N, &sha('a'), Verdict::Approved).await;
+    assert_eq!(r, Err("unreachable"));
+    assert!(rig.verdicts.is_empty());
+}
+
+#[tokio::test]
+async fn blocking_verdicts_are_recorded_for_any_head_without_a_live_read() {
+    let mut rig = idle_then_pushed(&sha('a'), &sha('b')).await;
+    let before = graphql_count(&rig);
+    // Even with GitHub failing: they can only block.
+    rig.fake.force(
+        "graphql",
+        Some(Forced {
+            status: 500,
+            retry_after: None,
+        }),
+    );
+    for (verdict, head) in [
+        (Verdict::ChangesRequested, 'a'),
+        (Verdict::ChangesRequested, 'b'),
+        (Verdict::Comment, 'c'),
+    ] {
+        let r = try_record(&mut rig, REPO, N, &sha(head), verdict).await;
+        assert!(r.is_ok(), "{verdict:?} for {head}");
+        assert!(rig.verdicts.for_head(REPO, N, &sha(head)).is_some());
+    }
+    assert_eq!(
+        graphql_count(&rig),
+        before,
+        "a blocking verdict read GitHub"
+    );
+}
+
+#[tokio::test]
+async fn an_approval_reads_the_pr_from_github_exactly_once() {
+    let mut rig = idle_then_pushed(&sha('a'), &sha('b')).await;
+    let before = graphql_count(&rig);
+    let r = try_record(&mut rig, REPO, N, &sha('b'), Verdict::Approved).await;
+    assert_eq!(r, Ok(true));
+    assert_eq!(graphql_count(&rig) - before, 1, "accepted: one read");
+    let before = graphql_count(&rig);
+    let r = try_record(&mut rig, REPO, N, &sha('c'), Verdict::Approved).await;
+    assert_eq!(r, Err("head_not_current"));
+    assert_eq!(
+        graphql_count(&rig) - before,
+        1,
+        "refused: one read, no loop"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // Across a restart
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -444,9 +621,15 @@ async fn a_verdict_survives_a_restart_in_a_private_file_with_no_temporary_left_b
     fake.put(pr_at(&sha('a')));
     let mut first = Rig::start(fake.clone(), RigOpts::default()).await;
     first.visible_and_settled().await;
-    say(&first, &sha('a'), Verdict::Approved, Some("kept")).await;
-    say(&first, &sha('a'), Verdict::ChangesRequested, Some("kept")).await;
-    say(&first, &sha('a'), Verdict::Approved, Some("kept")).await;
+    say(&mut first, &sha('a'), Verdict::Approved, Some("kept")).await;
+    say(
+        &mut first,
+        &sha('a'),
+        Verdict::ChangesRequested,
+        Some("kept"),
+    )
+    .await;
+    say(&mut first, &sha('a'), Verdict::Approved, Some("kept")).await;
     first.run(secs(3), Duration::from_millis(500)).await;
 
     // The file: private, and the directory holds no leftover temporary.
