@@ -67,20 +67,9 @@ fn ready_pr(number: u64) -> FakePr {
         .approved_by("alice")
 }
 
-/// Capture this test's log lines. A process-wide subscriber (that discards
-/// everything) goes in first, so every callsite stays enabled: without it a
-/// test thread that logs before another test's capture starts would leave a
-/// callsite cached as disabled for the capturing one.
+/// Capture this test's log lines (see `capture_logs` for why a process-wide
+/// subscriber backs it).
 fn logs() -> (Captured, tracing::subscriber::DefaultGuard) {
-    static GLOBAL_LOG: std::sync::Once = std::sync::Once::new();
-    GLOBAL_LOG.call_once(|| {
-        let _ = tracing::subscriber::set_global_default(
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::TRACE)
-                .with_writer(std::io::sink)
-                .finish(),
-        );
-    });
     capture_logs()
 }
 
