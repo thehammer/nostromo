@@ -162,17 +162,11 @@ final class BranchProviderTests: XCTestCase {
         return (BranchProvider(queue: queue, lookup: fake.lookup), queue)
     }
 
-    private func pumpMain(_ seconds: TimeInterval = 0.25) {
-        let e = expectation(description: "pump")
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { e.fulfill() }
-        wait(for: [e], timeout: 20)
-    }
-
     /// Refresh and wait until the lookups have run and their results have been published.
     private func refreshAndSettle(_ provider: BranchProvider, _ queue: DispatchQueue, _ paths: [String]) {
         provider.refresh(paths)
         queue.sync {}
-        pumpMain()
+        flushMain()
     }
 
     private final class Recorder {
@@ -464,7 +458,7 @@ final class BranchProviderTests: XCTestCase {
         for i in 0..<10 { provider.refresh(["/queued-\(i)"]) }
         provider.refresh(["/latest-a", "/latest-b"])
         git.gate.signal(); git.gate.signal(); git.gate.signal()   // release everything
-        queue.sync {}; pumpMain(); queue.sync {}; pumpMain()
+        queue.sync {}; flushMain(); queue.sync {}; flushMain()
 
         XCTAssertEqual(git.lookups, ["/first", "/latest-a", "/latest-b"],
                        "exactly one follow-up batch, with only the latest path set")
@@ -479,7 +473,7 @@ final class BranchProviderTests: XCTestCase {
         provider.refresh(["/only"])
         XCTAssertEqual(git.started.wait(timeout: .now() + 5), .success)
         git.gate.signal()
-        queue.sync {}; pumpMain(); queue.sync {}; pumpMain()
+        queue.sync {}; flushMain(); queue.sync {}; flushMain()
         XCTAssertEqual(git.lookups, ["/only"])
     }
 
@@ -509,15 +503,15 @@ final class BranchProviderTests: XCTestCase {
         var active = false
         let (provider, queue) = makePollingProvider(fake, timers: timers, active: { active })
         provider.startPolling { ["/p"] }
-        queue.sync {}; pumpMain()
+        queue.sync {}; flushMain()
         let afterStart = fake.calls.count("/p")
         XCTAssertEqual(afterStart, 1, "start does an immediate refresh")
 
-        timers.tick?(); queue.sync {}; pumpMain()
+        timers.tick?(); queue.sync {}; flushMain()
         XCTAssertEqual(fake.calls.count("/p"), afterStart, "inactive app: tick is a no-op")
 
         active = true
-        timers.tick?(); queue.sync {}; pumpMain()
+        timers.tick?(); queue.sync {}; flushMain()
         XCTAssertEqual(fake.calls.count("/p"), afterStart + 1, "active app: tick refreshes")
     }
 
@@ -530,8 +524,8 @@ final class BranchProviderTests: XCTestCase {
         XCTAssertEqual(timers.created, 1)
         XCTAssertTrue(provider.isPolling)
 
-        queue.sync {}; pumpMain()
-        timers.tick?(); queue.sync {}; pumpMain()
+        queue.sync {}; flushMain()
+        timers.tick?(); queue.sync {}; flushMain()
         XCTAssertEqual(provider.branches, ["/b": "y"], "the latest paths provider is the one polled")
     }
 
@@ -541,14 +535,14 @@ final class BranchProviderTests: XCTestCase {
         let center = NotificationCenter()
         let (provider, queue) = makePollingProvider(fake, timers: timers, active: { true }, center: center)
         provider.startPolling { ["/p"] }
-        queue.sync {}; pumpMain()
+        queue.sync {}; flushMain()
         let calls = fake.calls.count("/p")
 
         provider.stopPolling()
         XCTAssertEqual(timers.cancelled, 1)
         XCTAssertFalse(provider.isPolling)
         center.post(name: NSApplication.didBecomeActiveNotification, object: nil)
-        queue.sync {}; pumpMain()
+        queue.sync {}; flushMain()
         XCTAssertEqual(fake.calls.count("/p"), calls, "activation after stop does nothing")
 
         provider.startPolling { ["/p"] }
@@ -561,11 +555,11 @@ final class BranchProviderTests: XCTestCase {
         let center = NotificationCenter()
         let (provider, queue) = makePollingProvider(fake, timers: timers, active: { false }, center: center)
         provider.startPolling { ["/p"] }
-        queue.sync {}; pumpMain()
+        queue.sync {}; flushMain()
         let calls = fake.calls.count("/p")
 
         center.post(name: NSApplication.didBecomeActiveNotification, object: nil)
-        queue.sync {}; pumpMain()
+        queue.sync {}; flushMain()
         XCTAssertEqual(fake.calls.count("/p"), calls + 1)
     }
 

@@ -97,6 +97,11 @@ everything else for ~2 min of gain.
   `ChatTurnViewLayoutTests`' rendered-height goldens (recorded with Fira Code)
   then come out several to ~120 pt short. If you regenerate those goldens or
   bump the font, update the version and checksum in `ci.yml` together.
+  `ChatTurnViewLayoutTests` and `MarkdownCodeBlockTests` now check for the font in
+  `setUpWithError` and FAIL with "Fira Code Nerd Font is not installed" instead of
+  eight height mismatches. On a laptop without the font, `NOSTROMO_ALLOW_MISSING_FIRA=1`
+  turns that failure into a skip (CI never sets it). Run Mac tests with
+  `-scheme NostromoTests` (the `Nostromo` scheme builds the app and runs no tests).
 - Concurrency is per job, event and ref; a newer push to a PR cancels the older
   run (pushes to `main` and dispatches are never cancelled).
 - **There is no dependency cache.** The Mac app has one remote package, SwiftTerm,

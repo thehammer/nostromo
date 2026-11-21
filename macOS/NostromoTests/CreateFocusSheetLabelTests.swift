@@ -5,6 +5,18 @@ import XCTest
 /// same agent in the same repo can be told apart from the moment they are made.
 final class CreateFocusSheetLabelTests: XCTestCase {
 
+    /// `rememberedTab` is process-wide: a class that ran earlier in the same process can leave the sheet opening on
+    /// another tab, where Create does not make a focus. Every test here starts from the New tab.
+    override func setUp() {
+        super.setUp()
+        CreateFocusSheet.rememberedTab = .new
+    }
+
+    override func tearDown() {
+        CreateFocusSheet.rememberedTab = .new
+        super.tearDown()
+    }
+
     // MARK: - Helpers (small copies of the RepoOrgTests patterns; those are private there)
 
     /// Lookup whose per-path completion the test controls.
@@ -45,17 +57,6 @@ final class CreateFocusSheetLabelTests: XCTestCase {
         CreateFocusSheet(orgResolver: RepoOrgResolver(lookup: { _ in .resolved(nil) }),
                          agents: ["claudia"], projects: ["/tmp/alpha", "/tmp/beta"],
                          onCreate: onCreate)
-    }
-
-    /// Spins the main run loop until `condition` holds, returning the moment it does. A condition that never
-    /// holds fails here with `message`, after a bounded wait, instead of leaving a later assertion to guess.
-    private func waitUntil(_ message: @autoclosure () -> String, timeout: TimeInterval = 15,
-                           file: StaticString = #filePath, line: UInt = #line, _ condition: () -> Bool) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while !condition(), Date() < deadline {
-            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
-        }
-        if !condition() { XCTFail("timed out after \(timeout) s: \(message())", file: file, line: line) }
     }
 
     private func allViews(_ root: NSView) -> [NSView] {
@@ -163,7 +164,7 @@ final class CreateFocusSheetLabelTests: XCTestCase {
         if let text { sheet.typeLabel(text) }
         sheet.createTapped()
         g.release(2)
-        waitUntil("the create callback never fired (created \(created.count))", file: file, line: line) { created.count >= 1 }
+        waitUntil("the create callback never fired (created \(created.count), tab \(CreateFocusSheet.rememberedTab))", file: file, line: line) { created.count >= 1 }
         XCTAssertEqual(created.count, 1, file: file, line: line)
         return created.first
     }
