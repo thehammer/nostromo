@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import NostromoKit
+import ObjectiveC
 
 // Contract: assistant prose in the transcript can be selected and copied.
 //
@@ -40,23 +41,40 @@ final class RigWindow: NSWindow {
             // What AppKit does for a text view in a key window: it takes focus
             // on a click.
             if let tv = tracked as? NSTextView, !tv.isFieldEditor { _ = makeFirstResponder(tv) }
-            // A selectable label starts editing itself on a click: it installs its
-            // field editor and hands the mouse-down on to it. `NSTextField.mouseDown`
-            // does that only while the application is active, and a test process
-            // that is not in front never is, so the label would swallow the click
-            // and select nothing. Do the hand-over here, so the drag reaches the
-            // field editor the same way whether or not the app is active.
-            if let label = tracked as? NSTextField, label.isSelectable, !label.isEditable,
-               label.currentEditor() == nil {
-                label.selectText(nil)
-                if let editor = rigEditor(of: label) { tracked = editor }
-            }
             tracked?.mouseDown(with: e)
         case .leftMouseDragged: tracked?.mouseDragged(with: e)
         case .leftMouseUp: tracked?.mouseUp(with: e); tracked = nil
         default: super.sendEvent(e)
         }
     }
+}
+
+extension RigWindow {
+    /// `NSTextField.mouseDown` on a selectable label installs the field editor and hands the
+    /// click on to it -- but only while the application is active. A test process that is
+    /// not in front never is (the operator is using another app), so the label swallowed the
+    /// click and the drag selected nothing; with the app in front it worked, which is why this
+    /// passed in CI and failed on a desktop. Production code reaches the same call too
+    /// (`ToolGroupRowView` forwards a drag to its summary label), so the hand-over is done at
+    /// the label rather than in `sendEvent`: in a `RigWindow` that is not active, the label
+    /// installs its field editor and gives it the mouse-down, whose tracking loop then follows
+    /// the queued drag as in an active app. Nothing activates the app. Installed once.
+    static let handsLabelClicksToFieldEditor: Void = {
+        let sel = #selector(NSResponder.mouseDown(with:))
+        guard let method = class_getInstanceMethod(NSTextField.self, sel) else { return }
+        typealias Original = @convention(c) (AnyObject, Selector, NSEvent) -> Void
+        let original = unsafeBitCast(method_getImplementation(method), to: Original.self)
+        let replacement: @convention(block) (NSTextField, NSEvent) -> Void = { field, event in
+            if field.window is RigWindow, !NSApp.isActive, field.isSelectable, !field.isEditable,
+               field.currentEditor() == nil {
+                field.selectText(nil)
+                if let editor = rigEditor(of: field) { editor.mouseDown(with: event); return }
+            }
+            original(field, sel, event)
+        }
+        class_replaceMethod(NSTextField.self, sel, imp_implementationWithBlock(replacement),
+                            method_getTypeEncoding(method))
+    }()
 }
 
 /// Lets AppKit finish setting a window (and its hierarchy) up. A mouse event queued
@@ -90,6 +108,7 @@ func rigPrivatePasteboard(_ testCase: XCTestCase) -> NSPasteboard {
 func makeRigWindow(_ testCase: XCTestCase, size: NSSize = NSSize(width: 900, height: 700),
                    appearance: NSAppearance? = nil) -> RigWindow {
     _ = NSApplication.shared
+    _ = RigWindow.handsLabelClicksToFieldEditor
     let window = RigWindow(contentRect: NSRect(origin: .zero, size: size),
                            styleMask: .borderless, backing: .buffered, defer: false)
     window.isReleasedWhenClosed = false
