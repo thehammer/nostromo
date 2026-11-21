@@ -102,7 +102,7 @@ final class TranscriptWidthAnchorTests: XCTestCase {
         print("T1W worst error \(name): \(worst) pt (line height \(lineHeight))")
     }
 
-    func testAProseParagraphKeepsItsPlaceAcrossEveryWidthChange() { assertAnchored("prose", spot: .prose, into: 60) }
+    func testAProseParagraphKeepsItsPlaceAcrossEveryWidthChange() { assertAnchored("prose", spot: .prose, into: 20) }
 
     func testAToolGroupRowKeepsItsPlaceAcrossEveryWidthChange() { assertAnchored("group", spot: .group, into: 6) }
 
@@ -123,7 +123,7 @@ final class TranscriptWidthAnchorTests: XCTestCase {
 
     func testADividerDragOfTenWidthChangesEndsOnTheSameFirstVisibleTurn() {
         let rig = makeRig()
-        park(rig, at: .prose, into: 60)
+        park(rig, at: .prose, into: 20)
         let turnBefore = rig.firstVisibleTurnIdentity()
         let itemBefore = rig.snapshot().firstVisible?.itemKey
         for step in 1 ... 5 { rig.changeWidth(to: 880 - CGFloat(step) * 48) }
@@ -135,7 +135,7 @@ final class TranscriptWidthAnchorTests: XCTestCase {
 
     func testTwoWidthChangesBeforeAPassKeepTheFirstCapture() {
         let rig = makeRig()
-        park(rig, at: .prose, into: 60)
+        park(rig, at: .prose, into: 20)
         let turnBefore = rig.firstVisibleTurnIdentity()
         rig.changeWidth(to: 700, settle: false)
         rig.changeWidth(to: 600)   // a second change before any pass ran
