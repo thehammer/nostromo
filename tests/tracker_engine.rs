@@ -1357,6 +1357,26 @@ fn a_removed_item_is_gone_and_recorded() {
     assert_eq!(changes[0].item_id.as_deref(), Some(item.id.as_str()));
 }
 
+#[test]
+fn a_removal_logs_every_field_value_the_item_held() {
+    let (_, parsed) = board60();
+    let mut item = parsed.board.items[3].clone();
+    item.note = Some("moved".into());
+    item.owner = Some("sam".into());
+    let mut old = parsed.board.clone();
+    old.items[3] = item.clone();
+    let mut new = old.clone();
+    new.items.remove(3);
+    let changes = diff(&old, &new, &agent(), now0());
+    let removed = changes
+        .iter()
+        .find(|c| c.kind == ChangeKind::Removed)
+        .expect("a removal");
+    assert_eq!(removed.fields["note"], (json!("moved"), Value::Null));
+    assert_eq!(removed.fields["owner"], (json!("sam"), Value::Null));
+    assert_eq!(removed.fields["status"].0, json!(item.status));
+}
+
 // ---------------------------------------------------------------------------
 // Readable file (PRD 6)
 // ---------------------------------------------------------------------------

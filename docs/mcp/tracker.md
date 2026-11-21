@@ -365,6 +365,13 @@ author L and either
   clamped one), a field with no logged history is kept as a *guess* (attributed
   `file (unknown editor)`): the value may have been someone else's. For a file save, the save sets F back to a value F once
   had (an old editor buffer), or drops an item L added or changed, at any age.
+  A value F once had includes one that left the board with its item: a removal
+  logs the values the item held (bounded like any logged value), so a stale
+  save that brings a removed item's old note back over a newer one is a
+  conflict. (An edit's old value, a `restore_text`'s included, counts the same
+  way; a move changes no field value.) A pane or agent removing an item the
+  log did not see added, across a history gap, keeps the item's markdown as a
+  guess even when the only logged changes to it are its own.
 
 `source` changes never conflict (a bound item follows its source), and two
 changes by one author never do. The write is honoured, since it is the user's
@@ -465,12 +472,16 @@ advertises `tracker_ack_dropped_v1` (its own flag, not folded into
 the op); a pane must not send `ack_dropped` without it.
 
 `base_epoch` (additive, optional) is the `epoch` of the board view the edit was
-made from (`tracker_board.board.epoch`, random per board and per daemon run). A
+made from (`tracker_board.board.epoch`, random per board and **new on every daemon run**, not only when state is lost: conflicts are not persisted, so an id must never outlive its run). A
 `base_version` from another epoch (the daemon lost or rolled back its state, so
 version numbers start over and could land at or below a newer log's) counts as
 having seen nothing: every other author's change is unseen, and
 `clear_badge` / `ack_dropped` are refused as stale. Absent (an older pane): the
-`base_version` is trusted, as before.
+`base_version` is trusted, as before. After a plain daemon restart the log
+(and so `base_version`) survives but the epoch changes, so an edit from a view
+made before the restart is judged as having seen nothing and can raise a
+`guess` conflict although nothing was lost; the Mac re-reads on reconnect, which
+gives it the new epoch.
 
 A refusal that means "your view is out of date" carries `stale: true` in the
 error next to `code: "invalid_args"` (which an older client still reads):
