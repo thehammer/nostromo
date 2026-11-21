@@ -42,15 +42,17 @@ use super::{
     protocol::{
         ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, ServerMsg,
         SessionAction, Topic, TrackerEditError, FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_MERGE,
-        FEATURE_AUTHORED_PRS_NOTIFY, FEATURE_AUTHORED_PRS_PERRI, FEATURE_CONVERSATION_HISTORY,
-        FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_SLASH_COMMANDS,
-        FEATURE_TERMINAL_STAGING_ONLY, FEATURE_TRACKER_ACK_DROPPED, FEATURE_TRACKER_CONFLICT_IDS,
-        FEATURE_TRACKER_EDIT, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
+        FEATURE_AUTHORED_PRS_MERGE_QUEUE, FEATURE_AUTHORED_PRS_NOTIFY, FEATURE_AUTHORED_PRS_PERRI,
+        FEATURE_CONVERSATION_HISTORY, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN,
+        FEATURE_SLASH_COMMANDS, FEATURE_TERMINAL_STAGING_ONLY, FEATURE_TRACKER_ACK_DROPPED,
+        FEATURE_TRACKER_CONFLICT_IDS, FEATURE_TRACKER_EDIT, MAX_FRAME_LEN, MIN_CLIENT_VERSION,
+        PROTOCOL_VERSION,
     },
     session_manager::{ModelRequestOutcome, ResendTrigger, SessionManager, SwitchRequest},
 };
 use crate::approvals::broker::ApprovalBroker;
 use crate::approvals::wire::{AnswerRefusal, RefusalChannel};
+use crate::data::authored_prs::merge::MergeDone;
 use crate::data::authored_prs::wire::AuthoredPrResult;
 use crate::data::work::{
     fred_detail_service, work_service, SendOutcome, SendRequest, SourceState, WorkError, WorkResult,
@@ -581,6 +583,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
         if mgr.authored_pr_actions().is_some() {
             features.push(FEATURE_AUTHORED_PRS_NOTIFY.to_string());
             features.push(FEATURE_AUTHORED_PRS_MERGE.to_string());
+            features.push(FEATURE_AUTHORED_PRS_MERGE_QUEUE.to_string());
         }
     }
     ServerMsg::Welcome {
@@ -2973,6 +2976,7 @@ fn handle_client_msg(
             repo,
             number,
             expected_head_sha_short,
+            expected_via,
         } => {
             let actions = session_mgr.lock().unwrap().authored_pr_actions();
             let tx = targeted_tx.clone();
@@ -2980,12 +2984,19 @@ fn handle_client_msg(
             tokio::spawn(async move {
                 let result = match actions {
                     Some(a) => {
-                        a.merge(&request_id, &repo, number, &expected_head_sha_short, &by)
-                            .await
+                        a.merge(
+                            &request_id,
+                            &repo,
+                            number,
+                            &expected_head_sha_short,
+                            expected_via,
+                            &by,
+                        )
+                        .await
                     }
                     None => AuthoredPrResult::err("unreachable"),
                 };
-                debug!(code = authored_pr_code(&result), "authored-pr merge answered");
+                debug!(code = merge_result_code(&result), "authored-pr merge answered");
                 let _ = tx.send(ServerMsg::AuthoredPrMergeResult { request_id, result });
             });
         }
@@ -4115,6 +4126,14 @@ fn log_authored_pr_refusal(msg: &ClientMsg, code: &str) {
 fn authored_pr_code<T>(result: &AuthoredPrResult<T>) -> &str {
     match result {
         AuthoredPrResult::Ok(_) => "ok",
+        AuthoredPrResult::Err(e) => e.code.as_str(),
+    }
+}
+
+/// The merge verb's answer as a code: `queued` for an enqueue, else `ok` or the refusal.
+fn merge_result_code(result: &AuthoredPrResult<MergeDone>) -> &str {
+    match result {
+        AuthoredPrResult::Ok(d) => d.code.as_deref().unwrap_or("ok"),
         AuthoredPrResult::Err(e) => e.code.as_str(),
     }
 }

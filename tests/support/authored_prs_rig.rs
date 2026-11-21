@@ -48,8 +48,10 @@ use tokio::sync::{mpsc, watch};
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+use nostromo::data::authored_prs::merge::MergeDone;
+use nostromo::data::authored_prs::snapshot::MergeVia;
 use nostromo::data::authored_prs::verdicts::VerdictStore;
-use nostromo::data::authored_prs::wire::{AuthoredPrResult, Done};
+use nostromo::data::authored_prs::wire::AuthoredPrResult;
 use nostromo::data::authored_prs::{
     ApiSlot, AuthoredPrActions, AuthoredPrsSnapshot, AuthoredPrsSource, Clock, DemandBoard, Deps,
     FocusInfo, TokenResolver, TokioClock,
@@ -125,6 +127,14 @@ pub struct FakePr {
     pub mergeable: String,
     /// `CLEAN`, `BEHIND`, `BLOCKED`, ...; sent only when the query asks for it.
     pub merge_state_status: String,
+    /// The PR's GraphQL node id.
+    pub node_id: String,
+    /// The base branch has a merge queue.
+    pub has_queue: bool,
+    /// `false`: the answer has no `mergeQueue` key at all (the token cannot read it).
+    pub queue_readable: bool,
+    /// `(state, position)` of the PR's queue entry; `None` when it is not queued.
+    pub in_queue: Option<(String, Option<u64>)>,
 }
 
 impl FakePr {
@@ -159,7 +169,27 @@ impl FakePr {
             contexts_total: None,
             mergeable: "MERGEABLE".to_owned(),
             merge_state_status: "CLEAN".to_owned(),
+            node_id: format!("PR_node_{number}"),
+            has_queue: false,
+            queue_readable: true,
+            in_queue: None,
         }
+    }
+
+    /// The base branch has a merge queue.
+    pub fn with_merge_queue(mut self) -> Self {
+        self.has_queue = true;
+        self
+    }
+    /// GitHub's answer says nothing about the queue (the key is missing).
+    pub fn queue_unreadable(mut self) -> Self {
+        self.queue_readable = false;
+        self
+    }
+    /// The PR is in its merge queue.
+    pub fn in_queue(mut self, state: &str, position: Option<u64>) -> Self {
+        self.in_queue = Some((state.to_owned(), position));
+        self
     }
 
     pub fn title(mut self, t: &str) -> Self {
@@ -331,6 +361,9 @@ pub struct State {
     pub merge_delay: Option<Duration>,
     /// A merge that succeeds turns the PR merged (GitHub does).
     pub merge_marks_merged: bool,
+    /// When set, the `enqueuePullRequest` mutation is answered with this status
+    /// and body instead of by the fake's own rules.
+    pub enqueue_reply: Option<(u16, Value)>,
 }
 
 #[derive(Clone)]
@@ -421,6 +454,21 @@ fn pr_graphql(pr: &FakePr, query: &str) -> Value {
     });
     if asks_cross_repo {
         out["isCrossRepository"] = json!(pr.cross_repo);
+    }
+    if query.contains("isInMergeQueue") {
+        out["id"] = json!(pr.node_id);
+        out["isInMergeQueue"] = json!(pr.in_queue.is_some());
+        out["mergeQueueEntry"] = match &pr.in_queue {
+            Some((state, pos)) => json!({"state": state, "position": pos}),
+            None => Value::Null,
+        };
+        if pr.queue_readable {
+            out["mergeQueue"] = if pr.has_queue {
+                json!({"id": "MQ_fake"})
+            } else {
+                Value::Null
+            };
+        }
     }
     if asks_merge_state {
         out["mergeable"] = json!(pr.mergeable);
@@ -533,6 +581,34 @@ fn respond(state: &Arc<Mutex<State>>, req: &Request) -> ResponseTemplate {
                 t = t.insert_header("x-github-sso", sso.as_str());
             }
             t
+        }
+        "graphql" if body.contains("enqueuePullRequest") => {
+            let vars = serde_json::from_str::<Value>(&body)
+                .ok()
+                .map(|v| v["variables"].clone())
+                .unwrap_or(Value::Null);
+            let node = vars["pr"].as_str().unwrap_or("").to_owned();
+            let head = vars["head"].as_str().unwrap_or("").to_owned();
+            if let Some((code, v)) = st.enqueue_reply.clone() {
+                entry.status = code;
+                ResponseTemplate::new(code).set_body_json(v)
+            } else {
+                entry.status = 200;
+                let found = st.prs.iter_mut().find(|p| p.node_id == node);
+                let v = match found {
+                    None => json!({"data": {"enqueuePullRequest": null}, "errors": [
+                        {"type": "NOT_FOUND", "message": "Could not resolve to a node"}]}),
+                    Some(p) if p.head_sha != head => {
+                        json!({"data": {"enqueuePullRequest": null}, "errors": [
+                        {"type": "UNPROCESSABLE", "message": "Head branch was modified. Review the latest changes and try again."}]})
+                    }
+                    Some(p) => {
+                        p.in_queue = Some(("QUEUED".to_owned(), Some(1)));
+                        json!({"data": {"enqueuePullRequest": {"mergeQueueEntry": {"id": "MQE_fake"}}}})
+                    }
+                };
+                ResponseTemplate::new(200).set_body_json(v)
+            }
         }
         "graphql" if st.graphql_script.front().is_some_and(|c| *c != 200) => {
             let code = st.graphql_script.pop_front().unwrap_or(500);
@@ -666,6 +742,7 @@ impl Fake {
                 graphql_script: std::collections::VecDeque::new(),
                 merge_delay: None,
                 merge_marks_merged: true,
+                enqueue_reply: None,
             })),
         }
     }
@@ -752,6 +829,21 @@ impl Fake {
             .log
             .iter()
             .filter(|r| r.kind() == Kind::Merge)
+            .cloned()
+            .collect()
+    }
+
+    /// Answer the enqueue mutation with `status` and `body` from now on.
+    pub fn enqueue_responds(&self, reply: Option<(u16, Value)>) {
+        self.lock().enqueue_reply = reply;
+    }
+
+    /// Every `enqueuePullRequest` mutation seen so far.
+    pub fn enqueues(&self) -> Vec<Req> {
+        self.lock()
+            .log
+            .iter()
+            .filter(|r| r.kind() == Kind::Graphql && r.body.contains("enqueuePullRequest"))
             .cloned()
             .collect()
     }
@@ -1191,7 +1283,19 @@ impl Rig {
         repo: &str,
         number: u64,
         expected_short: &str,
-    ) -> tokio::task::JoinHandle<AuthoredPrResult<Done>> {
+    ) -> tokio::task::JoinHandle<AuthoredPrResult<MergeDone>> {
+        self.spawn_merge_via(request_id, repo, number, expected_short, None)
+    }
+
+    /// `spawn_merge` saying how the app told the person the PR goes in.
+    pub fn spawn_merge_via(
+        &self,
+        request_id: &str,
+        repo: &str,
+        number: u64,
+        expected_short: &str,
+        via: Option<MergeVia>,
+    ) -> tokio::task::JoinHandle<AuthoredPrResult<MergeDone>> {
         let actions = Arc::clone(&self.actions);
         let (id, repo, short) = (
             request_id.to_owned(),
@@ -1200,7 +1304,7 @@ impl Rig {
         );
         tokio::spawn(async move {
             actions
-                .merge(&id, &repo, number, &short, "test-operator")
+                .merge(&id, &repo, number, &short, via, "test-operator")
                 .await
         })
     }
@@ -1225,8 +1329,21 @@ impl Rig {
         repo: &str,
         number: u64,
         expected_short: &str,
-    ) -> AuthoredPrResult<Done> {
+    ) -> AuthoredPrResult<MergeDone> {
         let task = self.spawn_merge(request_id, repo, number, expected_short);
+        self.drive(task).await
+    }
+
+    /// `merge` saying the app worded the confirmation for `via`.
+    pub async fn merge_via(
+        &mut self,
+        request_id: &str,
+        repo: &str,
+        number: u64,
+        expected_short: &str,
+        via: MergeVia,
+    ) -> AuthoredPrResult<MergeDone> {
+        let task = self.spawn_merge_via(request_id, repo, number, expected_short, Some(via));
         self.drive(task).await
     }
 
@@ -1407,9 +1524,9 @@ pub fn capture_logs() -> (Captured, tracing::subscriber::DefaultGuard) {
 }
 
 /// The code of a verb answer (`ok` for success).
-pub fn code_of(result: &AuthoredPrResult<Done>) -> String {
+pub fn code_of(result: &AuthoredPrResult<MergeDone>) -> String {
     match result {
-        AuthoredPrResult::Ok(_) => "ok".to_owned(),
+        AuthoredPrResult::Ok(d) => d.code.clone().unwrap_or_else(|| "ok".to_owned()),
         AuthoredPrResult::Err(e) => e.code.clone(),
     }
 }

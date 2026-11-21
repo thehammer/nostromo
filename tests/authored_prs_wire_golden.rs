@@ -80,6 +80,8 @@ fn base_row(repo: &str, number: u64, title: &str, group: Group) -> AuthoredPr {
         pill: false,
         head_sha_short: None,
         perri: None,
+        merge_via: None,
+        queue: None,
         attention_key: String::new(),
     }
 }
@@ -505,6 +507,7 @@ mod verbs {
                     repo: "thehammer/nostromo".into(),
                     number: 458,
                     expected_head_sha_short: "0123abcd".into(),
+                    expected_via: None,
                 },
             ),
             (

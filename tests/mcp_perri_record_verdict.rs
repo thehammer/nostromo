@@ -84,6 +84,8 @@ fn pr() -> AuthoredPr {
         pill: false,
         head_sha_short: Some("aaaaaaaa".into()),
         perri: None,
+        merge_via: None,
+        queue: None,
         attention_key: String::new(),
     }
 }

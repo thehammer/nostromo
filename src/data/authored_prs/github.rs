@@ -431,7 +431,113 @@ impl Api {
             _ => MergeError::Transport,
         })
     }
+
+    /// Add the PR (GraphQL node id `node_id`) to its merge queue, and only if
+    /// its head is still `head`. GitHub's reply text is never forwarded or
+    /// logged: the HTTP status, the error `type` and, for the one distinction
+    /// those cannot make (the head moved), a bounded look at the message decide.
+    pub async fn enqueue(&self, node_id: &str, head: &str) -> Result<(), MergeError> {
+        if node_id.is_empty()
+            || node_id.len() > 100
+            || !node_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'=')
+        {
+            return Err(MergeError::Unmergeable);
+        }
+        let resp = self
+            .http
+            .post(format!("{}/graphql", self.base))
+            .headers(self.headers())
+            .json(&serde_json::json!({
+                "query": ENQUEUE_MUTATION,
+                "variables": { "pr": node_id, "head": head },
+            }))
+            .send()
+            .await
+            .map_err(|_| MergeError::Transport)?;
+        let status = resp.status().as_u16();
+        let meta = read_meta(resp.headers());
+        let retry_after = header_str(resp.headers(), "retry-after").and_then(parse_retry_after);
+        let exhausted = meta.rate.is_some_and(|(_, o)| o.remaining == 0);
+        match status {
+            200..=299 => {}
+            401 => return Err(MergeError::Unauthorized),
+            429 => return Err(MergeError::RateLimited),
+            403 if retry_after.is_some() || exhausted => return Err(MergeError::RateLimited),
+            403 => return Err(MergeError::Forbidden),
+            404 => return Err(MergeError::NotFound),
+            _ => return Err(MergeError::Transport),
+        }
+        let body = resp.bytes().await.map_err(|_| MergeError::Transport)?;
+        if body.len() > MAX_BODY {
+            return Err(MergeError::Transport);
+        }
+        let v: serde_json::Value =
+            serde_json::from_slice(&body).map_err(|_| MergeError::Transport)?;
+        if let Some(errors) = v
+            .get("errors")
+            .and_then(|e| e.as_array())
+            .filter(|e| !e.is_empty())
+        {
+            return Err(classify_enqueue_errors(errors));
+        }
+        let entry = v.pointer("/data/enqueuePullRequest/mergeQueueEntry");
+        if entry.is_some_and(|e| e.is_object()) {
+            Ok(())
+        } else {
+            Err(MergeError::Unmergeable)
+        }
+    }
 }
+
+/// What GraphQL errors on an enqueue come to. Anything not recognised is GitHub
+/// declining to enqueue.
+fn classify_enqueue_errors(errors: &[serde_json::Value]) -> MergeError {
+    let kind = |e: &serde_json::Value| e.get("type").and_then(|t| t.as_str()).map(str::to_owned);
+    if errors
+        .iter()
+        .any(|e| kind(e).as_deref() == Some("RATE_LIMITED"))
+    {
+        return MergeError::RateLimited;
+    }
+    if errors.iter().any(|e| {
+        matches!(
+            kind(e).as_deref(),
+            Some("FORBIDDEN" | "INSUFFICIENT_SCOPES")
+        )
+    }) {
+        return MergeError::Forbidden;
+    }
+    if errors
+        .iter()
+        .any(|e| kind(e).as_deref() == Some("NOT_FOUND"))
+    {
+        return MergeError::NotFound;
+    }
+    let head_moved = errors.iter().any(|e| {
+        let m = e
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        m.contains("head")
+            && ["modified", "match", "expected", "changed"]
+                .iter()
+                .any(|w| m.contains(w))
+    });
+    if head_moved {
+        MergeError::HeadMoved
+    } else {
+        MergeError::Unmergeable
+    }
+}
+
+/// The one mutation that adds a PR to its base branch's merge queue. It carries
+/// the PR's node id and the head it must still be at (`expectedHeadOid`), and
+/// nothing else: `jump` would skip the queue and is never sent, and there is no
+/// admin or bypass input.
+const ENQUEUE_MUTATION: &str = "mutation EnqueueAuthoredPr($pr: ID!, $head: GitObjectID!) { enqueuePullRequest(input: { pullRequestId: $pr, expectedHeadOid: $head }) { mergeQueueEntry { id } } }";
 
 /// Why a merge request did not merge. No variant carries any response text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -512,7 +618,7 @@ pub fn merge_query(targets: &[Target]) -> String {
 }
 
 const FRAGMENT: &str = "fragment AuthoredPr on PullRequest {
-  number title isDraft state merged updatedAt{EXTRA}
+  id number title isDraft state merged updatedAt isInMergeQueue mergeQueue { id } mergeQueueEntry { state position }{EXTRA}
   author { __typename login }
   baseRefName headRefName headRefOid isCrossRepository
   repository { nameWithOwner defaultBranchRef { name } }

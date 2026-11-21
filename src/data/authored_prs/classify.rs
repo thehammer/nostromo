@@ -8,8 +8,9 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use super::snapshot::{
-    safe_segment, valid_login, Checks, ChecksState, Group, Lifecycle, Review, ReviewState,
-    MAX_BASE_REF, MAX_CHECK_NAME, MAX_FAILING_NAMES, MAX_LOGINS, MAX_NEW_COMMENTS,
+    safe_segment, valid_login, Checks, ChecksState, Group, Lifecycle, MergeVia, QueueRow,
+    QueueState, Review, ReviewState, MAX_BASE_REF, MAX_CHECK_NAME, MAX_FAILING_NAMES, MAX_LOGINS,
+    MAX_NEW_COMMENTS, MAX_QUEUE_POSITION,
 };
 use crate::data::perri_queue::CiState;
 use crate::data::perri_queue_native::is_bot;
@@ -185,6 +186,76 @@ pub struct RawPr {
     /// Only the merge's own read asks for it; empty otherwise.
     #[serde(default, rename = "mergeStateStatus")]
     pub merge_state_status: String,
+    /// The PR's GraphQL node id (what `enqueuePullRequest` takes).
+    #[serde(default)]
+    pub id: String,
+    /// `isInMergeQueue`.
+    #[serde(default, rename = "isInMergeQueue")]
+    pub is_in_merge_queue: bool,
+    /// The base branch's merge queue. Three states, on purpose: `None` is the
+    /// key missing from GitHub's answer (not readable: unknown), `Some(None)`
+    /// is `null` (the base branch has no queue) and `Some(Some(_))` is a queue.
+    #[serde(default, rename = "mergeQueue", deserialize_with = "present_or_null")]
+    pub merge_queue: Option<Option<RawMergeQueue>>,
+    #[serde(default, rename = "mergeQueueEntry")]
+    pub merge_queue_entry: Option<RawQueueEntry>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RawMergeQueue {
+    #[serde(default)]
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RawQueueEntry {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub position: Option<u64>,
+}
+
+/// Keeps "the key was there and null" apart from "the key was missing".
+fn present_or_null<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
+impl RawPr {
+    /// How GitHub will take this PR in: `None` when it could not be read.
+    pub fn merge_via(&self) -> Option<MergeVia> {
+        match &self.merge_queue {
+            None => None,
+            Some(None) => Some(MergeVia::Direct),
+            Some(Some(q)) if !q.id.is_empty() => Some(MergeVia::Queue),
+            Some(Some(_)) => None,
+        }
+    }
+
+    /// Where the PR is in its queue, as the wire shows it.
+    pub fn queue_row(&self) -> Option<QueueRow> {
+        if !self.is_in_merge_queue && self.merge_queue_entry.is_none() {
+            return None;
+        }
+        let e = self.merge_queue_entry.as_ref();
+        Some(QueueRow {
+            state: match e.map(|e| e.state.to_ascii_uppercase()).as_deref() {
+                Some("QUEUED") => QueueState::Queued,
+                Some("AWAITING_CHECKS") => QueueState::AwaitingChecks,
+                Some("MERGEABLE") => QueueState::Mergeable,
+                Some("UNMERGEABLE") => QueueState::Unmergeable,
+                Some("LOCKED") => QueueState::Locked,
+                _ => QueueState::Unknown,
+            },
+            position: e
+                .and_then(|e| e.position)
+                .filter(|p| *p >= 1)
+                .map(|p| p.min(MAX_QUEUE_POSITION) as u32),
+        })
+    }
 }
 
 /// What the classifier concludes about one PR. Everything the wire row needs
@@ -202,6 +273,8 @@ pub struct Classified {
     pub threads_truncated: bool,
     pub base_ref: Option<String>,
     pub lifecycle: Lifecycle,
+    pub merge_via: Option<MergeVia>,
+    pub queue: Option<QueueRow>,
 }
 
 /// A human: a `User`, not a known bot and not a `[bot]` account.
@@ -479,6 +552,8 @@ pub fn classify(pr: &RawPr, told: Option<DateTime<Utc>>) -> Classified {
                 .map(|d| d.name.as_str()),
         ),
         lifecycle: lifecycle_of(pr),
+        merge_via: pr.merge_via(),
+        queue: pr.queue_row(),
     }
 }
 
