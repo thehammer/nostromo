@@ -135,7 +135,7 @@ final class TrackerCommandBlockTests: XCTestCase {
             let badge = view.envBadge?.stringValue ?? ""
             XCTAssertTrue(badge.hasSuffix(word), "\(word): \(badge)")
             XCTAssertEqual(view.isHazard, hazard, word)
-            XCTAssertEqual(badge.contains("\u{26A0}"), hazard, "\(word): the hazard has a glyph as well as a colour")
+            XCTAssertEqual(badge.unicodeScalars.contains("\u{26A0}"), hazard, "\(word): the hazard has a glyph as well as a colour")
             let edge = everyView(view).first { $0.layer?.backgroundColor == TrackerTheme.hazard.cgColor }
             XCTAssertEqual(edge != nil, hazard, "\(word): the red edge")
             if hazard {
