@@ -144,7 +144,7 @@ final class TrackerPaneView: NSView {
     /// - Parameters:
     ///   - now: the clock relative times are drawn from.
     ///   - reduceMotion: whether to skip the change highlight.
-    ///   - pasteboard: where Copy as Markdown writes.
+    ///   - pasteboard: where Copy as Markdown and a command block's Copy write.
     ///   - schedule: runs work after a delay (the highlight's end); tests pass their own.
     ///   - tickInterval: how often relative times refresh; nil for none (tests call `tick()`).
     ///   - idleReleaseDelay: how long the pane must be idle before held rows are released.
@@ -210,6 +210,8 @@ final class TrackerPaneView: NSView {
             tag: tag, results: store.editResults.eraseToAnyPublisher(), send: editSender, schedule: editSchedule,
             shownBase: { [weak self] ids in self?.shownBase(forItems: ids) ?? TrackerBase(version: 0, epoch: nil) },
             itemExists: { [weak self] id in self?.wireItem(id) != nil })
+        editing.isCommandItem = { [weak self] id in self?.wireItem(id)?.kind == .command }
+        editing.isWithheldItem = { [weak self] id in self?.wireItem(id)?.commandWithheld == true }
         editing.onNotice = { [weak self] text in self?.applyNotice(text ?? self?.openEditorRefusal()) }
         editing.onLookAgain = { [weak self] in self?.lookAgain() }
         editing.onConfirmed = { [weak self] ids, version in
@@ -545,7 +547,7 @@ final class TrackerPaneView: NSView {
     }
 
     private func makeRowView(_ row: TrackerRow) -> TrackerRowView {
-        let view = TrackerRowView(row: row)
+        let view = TrackerRowView(row: row, commandPasteboard: pasteboard)
         view.onToggleDone = { [weak self] section in self?.toggleDoneGroup(section: section) }
         view.onToggleNote = { [weak self] id in self?.toggleNote(item: id) }
         view.onToggleLog = { [weak self] in self?.toggleLog() }
@@ -1592,7 +1594,7 @@ final class TrackerPaneView: NSView {
     /// The whole board's markdown (the file's bytes for a clean file).
     func copyBoardMarkdown() {
         guard let board else { return }
-        writeToPasteboard(TrackerMarkdown.board(board))
+        writeToPasteboard(TrackerMarkdown.copyBoard(board))
     }
 
     /// A section's or an item's markdown, exactly as the file has it.
@@ -1600,8 +1602,8 @@ final class TrackerPaneView: NSView {
         guard let board else { return }
         let text: String?
         switch row.content {
-        case .section(let section): text = TrackerMarkdown.section(section.id, in: board)
-        default: text = row.item.flatMap { TrackerMarkdown.item($0.id, in: board) }
+        case .section(let section): text = TrackerMarkdown.copySection(section.id, in: board)
+        default: text = row.item.flatMap { TrackerMarkdown.copyItem($0.id, in: board) }
         }
         if let text { writeToPasteboard(text) }
     }

@@ -301,9 +301,11 @@ final class TrackerEditingTests: XCTestCase {
         let row = try h.row(command)
         XCTAssertNil(row.tickButton)
         XCTAssertFalse(row.editMenuItems().contains { $0.title == "Status" })
-        h.pane.tick(item: command)
         h.pane.setStatus(item: command, to: "done")
-        XCTAssertTrue(h.sent.isEmpty)
+        XCTAssertTrue(h.sent.isEmpty, "the status menu never applies to a command")
+        // The tick of a command is the command block's "Ran it" (a human action; T4).
+        h.pane.tick(item: command)
+        XCTAssertEqual(h.sent.map(\.ops), [[.status(id: command, status: "done")]])
     }
 
     // MARK: - The title editor
@@ -780,12 +782,17 @@ final class TrackerEditingTests: XCTestCase {
 
     func testTheNoticeAppearingAndGoingKeepsTheLineBeingReadWhereItIsOnScreen() throws {
         let h = try TrackerEditHarness(self, size: NSSize(width: 360, height: 300))
-        h.rig.scroll(to: 420)
-        let reading = try XCTUnwrap(h.pane.displayedRows.first { row in
-            guard let view = h.pane.rowViews[row.key], row.item != nil else { return false }
-            let rect = h.pane.convert(view.bounds, from: view)
-            return rect.minY > h.pane.scrollView.frame.minY + 20 && rect.maxY < h.pane.bounds.maxY - 20
-        })
+        // Command rows carry a block and are taller; try a few offsets for one whole row clear of both edges.
+        var found: TrackerRow?
+        for offset in [420, 400, 440, 380, 460, 360] as [CGFloat] where found == nil {
+            h.rig.scroll(to: offset)
+            found = h.pane.displayedRows.first { row in
+                guard let view = h.pane.rowViews[row.key], row.item != nil else { return false }
+                let rect = h.pane.convert(view.bounds, from: view)
+                return rect.minY > h.pane.scrollView.frame.minY + 20 && rect.maxY < h.pane.bounds.maxY - 20
+            }
+        }
+        let reading = try XCTUnwrap(found)
         let view = try XCTUnwrap(h.pane.rowViews[reading.key])
         let before = h.pane.convert(view.bounds, from: view).minY
         h.pane.editing.showNotice("Not saved: test")

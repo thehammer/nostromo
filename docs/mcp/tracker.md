@@ -122,6 +122,59 @@ characters), never instructions.
 | `not_supported` | the MCP server isn't hosted by the daemon |
 | `io_error` | the file system refused; the error kind is in `reason`. `reason:"concurrent_edit"`: the user kept saving the file while the write was built (it is retried once, on top of the user's edit); nothing was written, call again. |
 
+## Staged commands
+
+A `kind:"command"` item stages a command **for the user to copy and run themselves**. **There is no way to run
+one from Nostromo**, for an agent or for the user: no tool, op, pane control, menu item or key does it.
+The pane shows the text exactly as staged in a monospaced block (no wrapping; it scrolls sideways inside the
+block), the environment badge (`PROD`, `CANADA`, `DEMO`, `STAGING`, `LOCAL`, `ENV?`; the first three and
+`ENV?` get the red edge and a ⚠︎ glyph), `N lines` for a multi-line command, a **Copy** button (plain text
+only, exactly what is drawn) and a **Ran it** checkbox (the pane's tick: the user's, never an agent's).
+
+- Hostile text (carriage return, escape sequences, other control characters, bidi, zero-width and
+  variation-selector characters: `is_invisible`) is refused (`invalid_command_text`). The same set is held to ONE
+  list, `tests/fixtures/tracker/invisible-chars.txt`: a Rust test checks every code point against it and the Mac's
+  tests read the same file, so the two cannot drift. The Mac also strips those characters from what it draws and copies.
+- A command written straight into the board **file** skips the MCP check, so the daemon applies it again when it
+  builds the view: a command with such characters (or over 4,000 characters) is **withheld**: the item arrives
+  with `command_withheld: true` and no `command`, the row says "command withheld" and has no block and no Copy.
+  Withholding was chosen over showing it flagged: there is then no hostile text to draw or copy as if clean.
+  The item's `source` (its raw markdown, which the Mac's Copy as Markdown copies and Undo restores from) would
+  carry the refused command too, so a withheld item's `source` is the plain marker line
+  `<!-- nostromo: command withheld -->` and none of the file's bytes for it go on the wire. As a second line the
+  Mac's item, section and whole-board **Copy as Markdown** drop every refused character (control, escape,
+  bidi, tag, other invisible) from whatever they copy, and a withheld item copies as that marker, never as a
+  source. A losing `command` value in the conflict popover is drawn and spoken with the same characters removed.
+  The Mac's own 8,000-character cap is a second line: a command cut by it shows "CUT" and Copy is off.
+- An agent cannot mark a command `done` (`not_permitted`). When the user ticks Ran it, or edits `[x]` into the
+  file, the agent's next `read` shows it, attributed to `pane (you)` or the file edit. A `done` command shows
+  Ran it ticked (the daemon never sends `ran: true`; the Mac reads `done` as run).
+- **Ran it** acts only on a person's own click: it asks `HumanGesture.permit` first, like the staging and Merge
+  controls. App-control input, an Accessibility press with no event and a stale event are refused; the block
+  says "Not ticked: click it yourself" ("Not unticked" on a ticked box) and nothing is sent. Hazard environments
+  carry the glyph and the word on the row's own badge (and in VoiceOver), not only the red.
+- A click on a **ticked** box takes the tick back at once (the status it had before the pane ticked it, else
+  `todo`), so the ticked box is labelled for that: tooltip "Mark not run", VoiceOver "Ran it, ticked" with the
+  help "Click to mark not run".
+- **Undo and redo cannot change Ran it.** A command's tick (or a conflict choice over its status) registers no
+  undo step: ⌘Z and ⇧⌘Z are not a person's click on the box and app-control can send them, so there is nothing
+  for them to undo or redo; a person clicks the box again instead. Every other edit of a command item (title,
+  details, move, remove and its undo) keeps its undo step: those change only the staged text or where it
+  sits, never a status the person did not set, and nothing in them reaches a terminal. (Putting a removed
+  command back restores the item as the person had it, a tick of their own included.)
+- Nothing in the tracker code writes to a terminal or a session. Two tests keep it that way:
+  `tests/no_shell_surface.rs` (every tool is classified; no tool input or op names a shell or an execution verb;
+  a new unclassified tool fails the build) and `tests/no_shell_behaviour.rs`. The latter drives every tracker
+  tool op and every pane op (including `resolve_conflict`) through the daemon's real handlers, the pane ops
+  through `tracker_edit_in`, the function the app's edits reach, with every fixture command and every hostile
+  string; it checks each pane op's outcome, leaves a live PTY at zero bytes written by the daemon's own count and
+  an empty child log, and scans the tracker sources (subdirectories too) for terminal and session names,
+  `daemon.terminals` included (that scan only catches those spellings: the behavioural half is what catches a
+  write spelled any other way). The drive runs the success path of `resolve_conflict` (a real conflict) and
+  `ack_dropped` (a real dropped count), not only their refusals. `pane_op_name` is an exhaustive `match` on
+  `TrackerPaneOp` (a new pane op stops the test from compiling until it is classified), and the ops the drive
+  must cover are read from the enum's own declaration in `src/ipc/protocol.rs`, so a variant nobody drives fails.
+
 ## Live items
 
 An item can follow a source the daemon keeps fresh, with no agent call. The set

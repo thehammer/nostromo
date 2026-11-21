@@ -917,6 +917,50 @@ impl TerminalManager {
         Ok(())
     }
 
+    /// Test seam (`test-support` only): runs `argv` (no shell of ours) in
+    /// `cwd` as a live local terminal of focus `tag`, so an integration test can
+    /// watch the PTY's input counter. Returns the terminal id and the session.
+    #[cfg(feature = "test-support")]
+    pub fn open_argv_for_test(
+        &mut self,
+        tag: &str,
+        argv: &[String],
+        cwd: &std::path::Path,
+        env: &[(String, String)],
+    ) -> anyhow::Result<(String, Arc<session::TerminalSession>)> {
+        let session = session::TerminalSession::spawn_argv(argv, cwd, env, 80, 24)?;
+        let id = format!("test-terminal-{}", self.terminals_len_for_test());
+        let info = TerminalInfo {
+            terminal_id: id.clone(),
+            tag: tag.to_string(),
+            pane_id: format!("terminal-{:08x}", self.terminals_len_for_test()),
+            kind: TerminalKind::Local,
+            label: "Terminal".into(),
+            cwd: Some(cwd.display().to_string()),
+            target: None,
+            status: TerminalStatus::Running,
+            exit_code: None,
+            ended_reason: None,
+            cols: 80,
+            rows: 24,
+            requested_by: TerminalRequester {
+                kind: "user".into(),
+                tag: None,
+            },
+            opened_by_request: None,
+            follower: None,
+            idle_closes_at: None,
+            idle_warn_after_secs: None,
+        };
+        self.insert_live(info, Arc::clone(&session), None);
+        Ok((id, session))
+    }
+
+    #[cfg(feature = "test-support")]
+    fn terminals_len_for_test(&self) -> usize {
+        self.list().len() + 1
+    }
+
     /// Track a freshly spawned session: fan-out, and the exit hook.
     fn insert_live(
         &mut self,

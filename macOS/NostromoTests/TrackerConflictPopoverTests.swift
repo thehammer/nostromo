@@ -67,6 +67,30 @@ final class TrackerConflictPopoverTests: XCTestCase {
         popover.close()
     }
 
+    func testALosingCommandValueIsDrawnAndSpokenWithoutTheCharactersTheDaemonRefuses() throws {
+        let hostile = "echo a\u{1b}[201~b\u{202e}c\u{e0101}d\u{0}e"
+        let h = try TrackerEditHarness(self, configure: { script in
+            try script.updateItem("retry-1074") { $0["conflicts"] = [self.conflict(field: "command", losing: hostile)] }
+        })
+        let mark = try XCTUnwrap(try h.row("retry-1074").conflictButton)
+        mark.performClick(nil)
+        let popover = try XCTUnwrap(h.pane.activePopover)
+        var drawn: [String] = popover.sections.flatMap { $0.values }
+        drawn += popover.sections.map { $0.message }
+        drawn += popover.buttons.map { $0.title }
+        drawn += popover.buttons.compactMap { $0.accessibilityLabel() }
+        drawn += popover.buttons.compactMap { $0.toolTip }
+        drawn += popover.valueViews.map { $0.string }
+        drawn.append(mark.accessibilityLabel() ?? "")
+        XCTAssertTrue(drawn.contains { $0.contains("echo a") }, "the visible part is shown: \(drawn)")
+        for text in drawn {
+            for scalar in ["\u{1b}", "\u{202e}", "\u{e0101}", "\u{0}"] as [Unicode.Scalar] {
+                XCTAssertFalse(text.unicodeScalars.contains(scalar), "U+\(String(scalar.value, radix: 16)) drawn in: \(text)")
+            }
+        }
+        popover.close()
+    }
+
     func testAValueIsCutAtFiveHundredCharactersAndNeverMarkdown() throws {
         let long = "**bold** [link](https://example.com) " + String(repeating: "x", count: 700)
         let h = try harness(conflicts: [conflict(field: "note", losing: long)])

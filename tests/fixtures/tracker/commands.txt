@@ -1,0 +1,50 @@
+# Staged-command fixtures (tracker T4). One per line: NAME<TAB>PAYLOAD.
+# Lines starting with '#' are comments. Names starting with `hostile_` must be REFUSED
+# as command text (invalid_command_text); every other name must be ACCEPTED and read back byte for byte.
+# Escapes in PAYLOAD: \n = line feed, \t = tab, \e = ESC, \a = BEL, \r = CR, \\ = backslash, \u{HEX} = that code point.
+single	php artisan queue:retry 8812
+single_flags	ls -la --color=never /var/log
+double_quotes	echo "hello world" && echo "done"
+single_quotes	echo 'it'\\''s fine'
+pipe	ps aux | grep nostromo | awk '{print $2}'
+env_var	echo "$HOME" "${PATH}" "$(whoami)"
+backticks	echo `date`
+redirect	cat /etc/hosts > /tmp/hosts.copy 2>&1
+semicolons	cd /tmp; ls; pwd
+unicode	echo "caf\u{e9} \u{2603} \u{1f680}"
+cjk	echo "\u{65e5}\u{672c}\u{8a9e}"
+note_close_text	echo '</nostromo-note>'
+multi_two	cd /var/www\nphp artisan migrate --force
+multi_three	set -e\ncd /srv/app\n./deploy.sh
+heredoc	cat <<'EOF' > /tmp/x\nfirst line\nsecond line\nEOF
+multi_indented	if true; then\n  echo yes\nfi
+multi_tab	printf 'a\tb\n'\n\techo tab-indented
+hostile_bare_cr	echo one\recho two
+hostile_esc_csi	echo \e[31mred\e[0m
+hostile_osc_bel	echo \e]0;owned\a
+hostile_osc_st	echo \e]0;owned\e\\
+hostile_c0_nul	echo a\u{0}b
+hostile_c0_bel	echo a\u{7}b
+hostile_c0_backspace	echo a\u{8}b
+hostile_c0_vt	echo a\u{b}b
+hostile_c0_ff	echo a\u{c}b
+hostile_c0_so	echo a\u{e}b
+hostile_c0_can	echo a\u{18}b
+hostile_c0_del	echo a\u{7f}b
+hostile_c1_csi	echo a\u{9b}31mb
+hostile_c1_nel	echo a\u{85}b
+hostile_bidi_rlo	echo \u{202e}evil
+hostile_bidi_lre	echo \u{202a}evil
+hostile_bidi_isolate	echo \u{2066}evil\u{2069}
+hostile_bidi_mark	echo a\u{200e}b
+hostile_zero_width_space	echo a\u{200b}b
+hostile_zero_width_joiner	echo a\u{200d}b
+hostile_word_joiner	echo a\u{2060}b
+hostile_bom	\u{feff}echo hi
+hostile_line_separator	echo a\u{2028}b
+hostile_paragraph_separator	echo a\u{2029}b
+hostile_hangul_filler	echo a\u{3164}b
+hostile_hangul_choseong_filler	echo a\u{115f}b
+hostile_halfwidth_hangul_filler	echo a\u{ffa0}b
+hostile_braille_blank	echo a\u{2800}b
+hostile_combining_grapheme_joiner	echo a\u{34f}b

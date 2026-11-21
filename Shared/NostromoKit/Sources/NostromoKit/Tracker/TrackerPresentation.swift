@@ -352,6 +352,14 @@ public struct TrackerItemRow: Equatable {
     /// The environment is one a mistake there hurts (`PROD`, `CANADA`, `DEMO`, `ENV?`).
     public let isHazard: Bool
     public let kind: TrackerItemKindWire
+    /// The staged command as the daemon sent it (nil on a plain item). Untrusted text: draw
+    /// `TrackerCommandText.displayed(_:)`, never this.
+    public let command: String?
+    /// The user ticked "Ran it" (or edited `[x]` into the file); a done command counts as run.
+    public let ran: Bool
+    /// The daemon refused to show this command (control, escape or invisible characters, or too long, in
+    /// the board file): the row says so and offers no Copy.
+    public let commandWithheld: Bool
     /// The item's exact markdown in the file.
     public let source: String
     /// The task text as stored, raw markdown (what an editor opens with).
@@ -371,6 +379,10 @@ public struct TrackerItemRow: Equatable {
     /// (its status follows its source).
     public var isTickable: Bool { kind == .item && bound == nil }
     public var isStatusEditable: Bool { isTickable }
+    /// A staged command: the pane shows its command block instead of a tick.
+    public var isCommand: Bool { kind == .command && command != nil }
+    /// "Ran it" applies: a human action on a command (the pane's Tick; an agent can never do it).
+    public var canMarkRan: Bool { isCommand }
     /// "Status follows Mother job" for a bound item, nil otherwise.
     public var boundTooltip: String? {
         bound.map { "Status follows \(TrackerConflictText.sourceLabel($0.source))" }
@@ -772,6 +784,10 @@ public enum TrackerPresenter {
             envBadge: wire.env.flatMap(TrackerEnvBadge.text),
             isHazard: wire.env.map(TrackerEnvBadge.isHazard) ?? false,
             kind: wire.kind,
+            command: wire.command,
+            // The daemon never sends `ran: true`; a done command is one the person ticked (or edited `[x]`).
+            ran: wire.ran || wire.status == .done,
+            commandWithheld: wire.commandWithheld,
             source: wire.source,
             editText: wire.text,
             editNote: wire.note,
@@ -808,6 +824,72 @@ extension TrackerStatusWire {
         case .done: return "done"
         case .unknown(let raw): return raw
         }
+    }
+}
+
+/// What the command block draws and Copy copies. The daemon refuses hostile command text; the Mac
+/// still treats whatever arrives as untrusted: it keeps line feeds and tabs, drops every other control,
+/// format (bidi, zero-width, BOM) and line/paragraph-separator character, and caps the length.
+public enum TrackerCommandText {
+    public static let maxScalars = 8_000
+
+    /// The daemon's `is_invisible` (`src/data/work/untrusted.rs`), range for range, minus the C0/C1
+    /// controls that `displayed` drops by category. `tests/fixtures/tracker/invisible-chars.txt` is the ONE
+    /// list: a Rust test holds the daemon to it and a Swift test holds this set to it, so they cannot drift.
+    static let invisibleRanges: [ClosedRange<UInt32>] = [
+        0x00AD...0x00AD, 0x034F...0x034F, 0x0600...0x0605, 0x061C...0x061C, 0x06DD...0x06DD,
+        0x070F...0x070F, 0x0890...0x0891, 0x08E2...0x08E2, 0x115F...0x1160, 0x17B4...0x17B5,
+        0x180B...0x180F, 0x200B...0x200F, 0x2028...0x2029, 0x202A...0x202E, 0x2060...0x206F,
+        0x2800...0x2800, 0x3164...0x3164, 0xFE00...0xFE0F, 0xFEFF...0xFEFF, 0xFFA0...0xFFA0,
+        0xFFF0...0xFFFB, 0x110BD...0x110BD, 0x110CD...0x110CD, 0x13430...0x1343F,
+        0x1BCA0...0x1BCA3, 0x1D173...0x1D17A, 0xE0000...0xE0FFF,
+    ]
+
+    /// A scalar the daemon refuses in command text and the Mac never draws or copies.
+    public static func isInvisible(_ scalar: Unicode.Scalar) -> Bool {
+        let v = scalar.value
+        if v < 0x20 || (0x7F...0x9F).contains(v) { return true }
+        return invisibleRanges.contains { $0.contains(v) }
+    }
+
+    /// True when `displayed` stops short of the whole command: it is longer than `maxScalars` once the
+    /// refused characters are gone. A cut command must not be copied as if it were the whole one.
+    public static func wasCut(_ raw: String) -> Bool {
+        var count = 0
+        for scalar in raw.unicodeScalars where keeps(scalar) {
+            count += 1
+            if count > maxScalars { return true }
+        }
+        return false
+    }
+
+    public static func displayed(_ raw: String) -> String {
+        var out = String.UnicodeScalarView()
+        var count = 0
+        for scalar in raw.unicodeScalars where keeps(scalar) {
+            if count >= maxScalars { break }
+            out.append(scalar)
+            count += 1
+        }
+        return String(out)
+    }
+
+    /// `displayed`'s filter for a scalar other than newline and tab (what a copy keeps too).
+    static func keepsForCopy(_ scalar: Unicode.Scalar) -> Bool { keeps(scalar) }
+
+    private static func keeps(_ scalar: Unicode.Scalar) -> Bool {
+        if scalar == "\n" || scalar == "\t" { return true }
+        switch scalar.properties.generalCategory {
+        case .control, .format, .lineSeparator, .paragraphSeparator: return false
+        default: break
+        }
+        return !isInvisible(scalar)
+    }
+
+    /// "3 lines" for a command of more than one line, nil for one line.
+    public static func lineBadge(_ displayed: String) -> String? {
+        let lines = displayed.split(separator: "\n", omittingEmptySubsequences: false).count
+        return lines > 1 ? "\(lines) lines" : nil
     }
 }
 
@@ -961,6 +1043,63 @@ public enum TrackerMarkdown {
         return nil
     }
 
+    // MARK: What is copied
+    //
+    // Copy as Markdown puts text on the pasteboard that a person pastes into a terminal or an editor. It
+    // must never carry a byte the daemon refuses in a command (escape, the bracketed-paste end, bidi,
+    // tag and other invisible characters, NUL): those are dropped from everything copied, and an item
+    // whose command was withheld copies as a marker, never as its source. The raw `board`/`section`/`item`
+    // above stay exact (Undo puts a removed item back from them); the pane copies with these.
+
+    /// What a withheld item copies as (the daemon sends the same text as its `source`).
+    public static let withheldMarker = "<!-- nostromo: command withheld -->\n"
+
+    /// The text with every refused character removed (newline and tab stay). A carriage return stays only
+    /// as half of a CRLF line ending, so a clean CRLF board copies byte for byte; a lone one is dropped.
+    public static func copySafe(_ text: String) -> String {
+        let scalars = Array(text.unicodeScalars)
+        var out = String.UnicodeScalarView()
+        for (i, scalar) in scalars.enumerated() {
+            let crlf = scalar == "\r" && i + 1 < scalars.count && scalars[i + 1] == "\n"
+            if crlf || scalar == "\n" || scalar == "\t" || TrackerCommandText.keepsForCopy(scalar) {
+                out.append(scalar)
+            }
+        }
+        return String(out)
+    }
+
+    public static func copyBoard(_ board: TrackerBoardViewWire) -> String {
+        board.nodes.map { Self.copySource($0) }.joined()
+    }
+
+    public static func copySection(_ id: String, in board: TrackerBoardViewWire) -> String? {
+        var out: String?
+        for node in board.nodes {
+            switch node {
+            case .section(let sid, _, _):
+                if out != nil { return out }
+                if sid == id { out = Self.copySource(node) }
+            case .logHeading:
+                if out != nil { return out }
+            default:
+                if out != nil { out! += Self.copySource(node) }
+            }
+        }
+        return out
+    }
+
+    public static func copyItem(_ id: String, in board: TrackerBoardViewWire) -> String? {
+        for node in board.nodes {
+            if case .item(let item) = node, item.id == id { return copySource(node) }
+        }
+        return nil
+    }
+
+    static func copySource(_ node: TrackerNodeWire) -> String {
+        if case .item(let item) = node, item.commandWithheld { return withheldMarker }
+        return copySafe(source(node))
+    }
+
     /// What a copy shows in place of a node this client does not recognise (it carries no source):
     /// a visible comment, so a whole-board copy is never silently missing a piece of the file.
     static let unknownNodePlaceholder = "<!-- nostromo: unrecognised board node -->\n"
@@ -995,8 +1134,13 @@ public enum TrackerConflictText {
         return (actor(conflict.losingBy), actor(conflict.winningBy))
     }
 
+    /// A value with every character the daemon refuses in a command removed (escape, bidi, tag, NUL and the
+    /// rest): a losing `command` value is drawn and spoken without them, like the command block does.
+    public static func safe(_ value: String) -> String { TrackerMarkdown.copySafe(value.replacingOccurrences(of: "\r", with: "")) }
+
     /// A value as plain text (no quotes), cut at `maxValueChars`: what a spoken sentence uses.
     public static func plain(_ value: String, field: String) -> String {
+        let value = safe(value)
         let shown = field == "status" ? value.replacingOccurrences(of: "-", with: " ") : value
         return shown.count > maxValueChars ? String(shown.prefix(maxValueChars)) + "…" : shown
     }
@@ -1025,6 +1169,7 @@ public enum TrackerConflictText {
     }
 
     public static func display(_ value: String) -> String {
+        let value = safe(value)
         let shown = value.count > maxValueChars ? String(value.prefix(maxValueChars)) + "…" : value
         return "“\(shown)”"
     }

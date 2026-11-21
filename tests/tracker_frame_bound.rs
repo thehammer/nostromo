@@ -10,6 +10,30 @@ use nostromo::tracker::{parse, ViewFacts};
 /// removed items together).
 const BOARD_CAP: usize = 50;
 
+/// A removed item's markdown of exactly `len` bytes that is REAL: one restorable item (the daemon puts any
+/// other removed source on the wire as the short withheld marker, which would skip the size path under test).
+/// The body is note lines of quotes, the characters JSON escapes and so expands the most.
+fn removed_source(k: usize, len: usize) -> String {
+    let mut md = format!("- [ ] gone {k} <!-- #gone-{k} 1760540000 -->\n");
+    while md.len() < len {
+        let room = len - md.len();
+        let quotes = room.saturating_sub(3).min(80);
+        if quotes == 0 {
+            md.push_str(&" ".repeat(room));
+            break;
+        }
+        md.push_str("  ");
+        md.push_str(&"\"".repeat(quotes));
+        md.push('\n');
+    }
+    assert_eq!(md.len(), len, "the fixture is exactly {len} bytes");
+    assert!(
+        nostromo::tracker::ops::parse_restorable(&md).is_ok(),
+        "the fixture is one restorable item, so the daemon sends it whole"
+    );
+    md
+}
+
 /// The frame for `board_md` with `fields` field conflicts (each a maximum-size
 /// 8,000-character value of 3-byte characters) and `removed_n` removed items
 /// (each 9,000 bytes of characters JSON escapes), plus the view it carries.
@@ -46,7 +70,7 @@ fn frame(
             losing_by: "pane (you)".into(),
             winning_by: "agent cody".into(),
             at,
-            source: "\"\n".repeat(4_500),
+            source: removed_source(k, 9_000),
         });
     }
     let view = build(

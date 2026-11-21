@@ -138,7 +138,7 @@ const DOCUMENTED_PROPERTY_EXCEPTIONS: &[(&str, &str, &str)] = &[
     (
         "nostromo.tracker",
         "command",
-        "text of a tracker 'command' item stored on the board; nothing writes it to a shell (tracker T4 adds its own proof)",
+        "text of a tracker 'command' item stored on the board; nothing writes it to a shell (proved by tests/no_shell_behaviour.rs)",
     ),
 ];
 
@@ -348,6 +348,34 @@ fn the_staging_op_enum_is_exactly_the_five_display_list_ops() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert_eq!(ops, ["list", "stage", "replace", "remove", "clear"]);
+}
+
+#[test]
+fn the_tracker_op_enum_is_exactly_the_seven_board_ops() {
+    let descriptor = tool_descriptors()
+        .into_iter()
+        .find(|d| d["name"] == "nostromo.tracker")
+        .expect("the tracker tool is listed");
+    let mut ops: Vec<&str> = descriptor["inputSchema"]["properties"]["op"]["enum"]
+        .as_array()
+        .expect("op enum")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    ops.sort_unstable();
+    let mut want = ["open", "upsert", "status", "remove", "move", "log", "read"];
+    want.sort_unstable();
+    assert_eq!(ops, want, "a new tracker op needs a no-shell review");
+    // The per-item `ops` batch carries the same verbs, minus open/read.
+    let mut batch: Vec<&str> = descriptor["inputSchema"]["properties"]["ops"]["items"]
+        ["properties"]["op"]["enum"]
+        .as_array()
+        .expect("batch op enum")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    batch.sort_unstable();
+    assert_eq!(batch, ["log", "move", "remove", "status", "upsert"]);
 }
 
 #[test]

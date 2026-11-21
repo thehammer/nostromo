@@ -9,8 +9,9 @@ use std::collections::HashMap;
 use crate::ipc::protocol::{MdBlock, MdSpan};
 use crate::markdown_blocks::markdown_to_blocks;
 
-use super::format::{ParsedBoard, SegmentKind};
+use super::format::{validate_command_text, ParsedBoard, SegmentKind};
 use super::model::{fnv1a64, Env, Item, Kind, Link, Status};
+use super::ops::MAX_COMMAND_CHARS;
 
 /// The banner over a board that isn't current.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,8 +139,14 @@ pub struct ViewItem {
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<Env>,
-    /// Ran-it state of a command (T4; always false here).
+    /// Ran-it state of a command (T4; always false here: the Mac reads `done` as run).
     pub ran: bool,
+    /// The item's command was withheld: the board file holds one with control, escape or
+    /// invisible characters (or one over the length limit) that the MCP path would have
+    /// refused. `command` is then absent and `source` is a plain marker (never the item's raw
+    /// markdown), so nothing hostile is drawn or copied.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub command_withheld: bool,
     /// The live source this item follows and how fresh it is (T6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound: Option<BoundView>,
@@ -405,7 +412,14 @@ pub fn build(parsed: &ParsedBoard, facts: &ViewFacts) -> TrackerBoardView {
         banner: facts.banner.clone(),
         committable: facts.committable.clone(),
         hidden_by_user: facts.hidden_by_user,
-        removed_conflicts: facts.removed_conflicts.clone(),
+        removed_conflicts: facts
+            .removed_conflicts
+            .iter()
+            .map(|r| ViewRemovedConflict {
+                source: wire_removed_source(&r.source),
+                ..r.clone()
+            })
+            .collect(),
         trimmed: None,
     };
     fit_to_frame(&mut view);
@@ -437,7 +451,55 @@ impl ViewNode {
     }
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// A command read from the board FILE gets the validation the MCP path applies on write: an agent
+/// (or anything else) can write the file directly. Returns the command to show and whether one was withheld.
+fn checked_command(command: Option<&String>) -> (Option<String>, bool) {
+    match command {
+        Some(c) if validate_command_text(c).is_err() || c.chars().count() > MAX_COMMAND_CHARS => {
+            (None, true)
+        }
+        Some(c) => (Some(c.clone()), false),
+        None => (None, false),
+    }
+}
+
+/// What a withheld item's `source` is on the wire: a plain marker line. The item's own markdown holds
+/// the refused command (the Mac's Copy as Markdown copies `source`), so none of it leaves the daemon.
+pub const WITHHELD_SOURCE: &str = "<!-- nostromo: command withheld -->\n";
+
+/// What a conflict's losing `command` value is on the wire when the text fails the command checks.
+pub const WITHHELD_COMMAND_VALUE: &str = "[command withheld]";
+
+/// A losing value for `field`, as it may go on the wire: a `command` text that fails the checks is the marker.
+fn wire_losing(field: &str, losing: &str) -> String {
+    if field == "command" && checked_command(Some(&losing.to_string())).1 {
+        WITHHELD_COMMAND_VALUE.to_string()
+    } else {
+        losing.to_string()
+    }
+}
+
+/// A removed item's markdown as it may go on the wire: the marker when it carries a command that fails the
+/// checks, or when it is not exactly one item (it cannot be restored from the wire, and its bytes are unknown).
+/// The daemon keeps the real text and `restore` / `resolve_conflict` use that.
+fn wire_removed_source(source: &str) -> String {
+    match super::ops::parse_restorable(source) {
+        Ok((item, _)) if !checked_command(item.command.as_ref()).1 => source.to_string(),
+        _ => WITHHELD_SOURCE.to_string(),
+    }
+}
+
 fn view_item(item: &Item, source: String, facts: &ViewFacts) -> ViewItem {
+    let (command, command_withheld) = checked_command(item.command.as_ref());
+    let source = if command_withheld {
+        WITHHELD_SOURCE.to_string()
+    } else {
+        source
+    };
     ViewItem {
         id: item.id.clone(),
         section: item.section.clone(),
@@ -454,11 +516,23 @@ fn view_item(item: &Item, source: String, facts: &ViewFacts) -> ViewItem {
             .unwrap_or_default(),
         links: item.links.clone(),
         kind: item.kind,
-        command: item.command.clone(),
+        command,
         env: item.env,
         ran: false,
+        command_withheld,
         bound: facts.bound.get(&item.id).cloned(),
-        conflicts: facts.conflicts.get(&item.id).cloned().unwrap_or_default(),
+        conflicts: facts
+            .conflicts
+            .get(&item.id)
+            .map(|list| {
+                list.iter()
+                    .map(|c| ViewConflict {
+                        losing: wire_losing(&c.field, &c.losing),
+                        ..c.clone()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         dropped_conflicts: facts.dropped.get(&item.id).copied().unwrap_or(0),
         sensitive: facts.sensitive.get(&item.id).map(|classes| ViewSensitive {
             classes: classes.clone(),

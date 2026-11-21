@@ -1599,6 +1599,9 @@ final class TrackerRowLayoutTests: MouseQueueTestCase {
                        windowWidthBefore: windowWidthBefore)
     }
 
+    /// A hazard environment's badge in the real row: the warning glyph (text presentation) and the word.
+    private static let prodBadgeText = "\u{26A0}\u{FE0E} PROD"
+
     private func chip(_ text: String, in row: TrackerRowView) -> NSTextField? {
         row.badges.first { $0.stringValue == text }
     }
@@ -1651,12 +1654,12 @@ final class TrackerRowLayoutTests: MouseQueueTestCase {
             // (d) the whole owner is one hover away.
             XCTAssertEqual(ownerChip.toolTip, owner, "\(label): the owner chip's tooltip is the full owner", file: file, line: line)
         } else {
-            XCTAssertTrue(row.badges.allSatisfy { $0.stringValue == "PROD" }, "\(label): no owner chip", file: file, line: line)
+            XCTAssertTrue(row.badges.allSatisfy { $0.stringValue == Self.prodBadgeText }, "\(label): no owner chip", file: file, line: line)
         }
         if env != nil {
-            let envBadge = try XCTUnwrap(chip("PROD", in: row), "\(label): the env badge", file: file, line: line)
+            let envBadge = try XCTUnwrap(chip(Self.prodBadgeText, in: row), "\(label): the env badge", file: file, line: line)
             XCTAssertLessThanOrEqual(envBadge.frame.width, 48.5, "\(label): env badge \(envBadge.frame.width) pt", file: file, line: line)
-            XCTAssertEqual(envBadge.toolTip, "PROD", "\(label): the env badge's tooltip is its full text", file: file, line: line)
+            XCTAssertEqual(envBadge.toolTip, "PROD: a mistake here hurts", "\(label): the env badge's tooltip names the environment and the hazard", file: file, line: line)
         }
 
         // (e) nothing sits on anything else.

@@ -126,6 +126,11 @@ final class TrackerAppearanceTests: XCTestCase {
         rigAllSubviews(of: view).compactMap { $0 as? NSTextField }.first { $0.stringValue == text }
     }
 
+    /// A hazard environment's badge reads "⚠︎ PROD": the word is its tail.
+    private func label(endingWith text: String, in view: NSView) -> NSTextField? {
+        rigAllSubviews(of: view).compactMap { $0 as? NSTextField }.first { $0.stringValue.hasSuffix(text) }
+    }
+
     private func results(keyWindow: Bool) -> (measured: [String: Measurement], problems: [String]) {
         if let done = Self.measured[keyWindow] { return (done, Self.problems[keyWindow] ?? []) }
         var problems: [String] = []
@@ -200,7 +205,7 @@ final class TrackerAppearanceTests: XCTestCase {
 
             // The PROD badge on its hazard fill.
             let prod = "item:retry-1074"
-            measure("prod-badge", pane.rowViews[prod].flatMap { label("PROD", in: $0) }, scrollingTo: prod)
+            measure("prod-badge", pane.rowViews[prod].flatMap { label(endingWith: "PROD", in: $0) }, scrollingTo: prod)
 
             // A banner over the board.
             script.setBanner(["type": "unreadable", "line": 42, "reason": "duplicate_id", "last_good_at": Fx.iso(1_760_547_000)])

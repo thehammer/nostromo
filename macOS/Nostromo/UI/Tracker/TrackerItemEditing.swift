@@ -67,6 +67,15 @@ final class TrackerItemEditing {
     /// The quiet one-line notice above the board, or nil.
     private(set) var notice: String?
     var onNotice: ((String?) -> Void)?
+
+    /// Whether an item is a staged command (kind `command`). A command's status ("Ran it") is never put on
+    /// the undo stack: ⌘Z and ⇧⌘Z are not a person's click on the box, and app-control can send them.
+    /// Undo of a command item's other edits (title, details, move, remove) stays: those only change the
+    /// staged text or its place and send nothing to any terminal.
+    var isCommandItem: (String) -> Bool = { _ in false }
+    /// Whether an item's command was withheld by the daemon (its text never reaches the pane, so the
+    /// pane cannot put the item back): its removal gets no undo step and no banner.
+    var isWithheldItem: (String) -> Bool = { _ in false }
     /// An edit touching these items was confirmed (ids, board version): the pane does not flash them.
     var onConfirmed: (([String], UInt64) -> Void)?
     /// The daemon says the pane's view is out of date: the pane shows the board as it is now.
@@ -154,7 +163,7 @@ final class TrackerItemEditing {
 
     /// The tick: done, or (on a done item) the status it had before this pane ticked it, else todo.
     func tick(_ item: TrackerItemRow, base: TrackerBase) {
-        guard item.isTickable else { return }
+        guard item.isTickable || item.canMarkRan else { return }
         if item.isDone {
             setStatus(item, to: statusBeforeTick[item.id] ?? "todo", base: base, name: "Tick")
         } else {
@@ -164,7 +173,7 @@ final class TrackerItemEditing {
     }
 
     func setStatus(_ item: TrackerItemRow, to status: String, base: TrackerBase, name: String = "Status") {
-        guard item.isStatusEditable, status != item.status.wireName else { return }
+        guard item.isStatusEditable || (item.canMarkRan && name == "Tick"), status != item.status.wireName else { return }
         perform([.status(id: item.id, status: status)], inverse: [.status(id: item.id, status: item.status.wireName)],
                 name: name, base: base)
     }
@@ -299,6 +308,11 @@ final class TrackerItemEditing {
             showNotice("Not removed: that item is no longer on the board.")
             return
         }
+        if isWithheldItem(ref.id) {
+            showNotice("Removed. This command was withheld and cannot be restored from the pane.")
+            submitExempt([ref.id], [.remove(id: ref.id)], base: base) { _ in }
+            return
+        }
         let token = registerRemovalUndo(snapshot, ref: ref)
         if announce {
             latestRemoval = (token, snapshot, ref)
@@ -361,13 +375,26 @@ final class TrackerItemEditing {
     private func perform(_ ops: [TrackerPaneOpWire], inverse: [TrackerPaneOpWire], name: String,
                          base: TrackerBase, exempt: Bool = false, completion: ((Outcome) -> Void)? = nil) {
         let ids = Set(ops.compactMap(Self.itemId)).union(inverse.compactMap(Self.itemId))
-        let token = registerUndo(name: name, ids: Array(ids)) { me in
+        // A command's status (the person's tick, or a conflict over it) is not undoable: see `isCommandItem`.
+        let undoable = !changesACommandsStatus(ops)
+        let token = undoable ? registerUndo(name: name, ids: Array(ids)) { me in
+            // Checked again now: an agent can turn a plain item into a command after the person ticked it,
+            // and the step would then mark a command run or not run with no one ticking it.
+            if me.changesACommandsStatus(inverse) {
+                me.showNotice("Couldn't undo: this item is a command now. Tick it on its row.")
+                return
+            }
             me.perform(inverse, inverse: ops, name: name, base: me.shownBase(Array(ids)), exempt: exempt)
-        }
+        } : nil
         submitExempt(exempt ? Array(ids) : [], ops, base: base) { [weak self] outcome in
-            if case .failed = outcome { self?.retract(token) }
+            if case .failed = outcome, let token { self?.retract(token) }
             completion?(outcome)
         }
+    }
+
+    /// Does any of `ops` set the status of an item that is a command on the board the person sees now?
+    private func changesACommandsStatus(_ ops: [TrackerPaneOpWire]) -> Bool {
+        ops.contains { Self.changesStatus($0) && Self.itemId(of: $0).map(isCommandItem) == true }
     }
 
     /// Register what ⌘Z runs (`run`, when every item in `ids` is still on the board). Registered while undoing
@@ -551,6 +578,15 @@ final class TrackerItemEditing {
         if textToo { ops.append(.restoreText(id: item.id, text: item.editText)) }
         if includingNote { ops.append(.edit(id: item.id, title: nil, text: nil, body: item.editNote ?? "")) }
         return ops
+    }
+
+    /// An op that can change an item's status: a tick, or a conflict choice (it may keep a status).
+    private static func changesStatus(_ op: TrackerPaneOpWire) -> Bool {
+        switch op {
+        case .status: return true
+        case .resolveConflict(_, let field, _, _): return field == "status"
+        default: return false
+        }
     }
 
     private static func itemId(of op: TrackerPaneOpWire) -> String? {
