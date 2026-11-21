@@ -38,8 +38,19 @@ final class RigWindow: NSWindow {
         case .leftMouseDown:
             tracked = cv.hitTest(cv.convert(e.locationInWindow, from: nil))
             // What AppKit does for a text view in a key window: it takes focus
-            // on a click. Not done for labels, which start editing themselves.
+            // on a click.
             if let tv = tracked as? NSTextView, !tv.isFieldEditor { _ = makeFirstResponder(tv) }
+            // A selectable label starts editing itself on a click: it installs its
+            // field editor and hands the mouse-down on to it. `NSTextField.mouseDown`
+            // does that only while the application is active, and a test process
+            // that is not in front never is, so the label would swallow the click
+            // and select nothing. Do the hand-over here, so the drag reaches the
+            // field editor the same way whether or not the app is active.
+            if let label = tracked as? NSTextField, label.isSelectable, !label.isEditable,
+               label.currentEditor() == nil {
+                label.selectText(nil)
+                if let editor = rigEditor(of: label) { tracked = editor }
+            }
             tracked?.mouseDown(with: e)
         case .leftMouseDragged: tracked?.mouseDragged(with: e)
         case .leftMouseUp: tracked?.mouseUp(with: e); tracked = nil
