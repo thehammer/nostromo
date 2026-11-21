@@ -684,6 +684,18 @@ mod tests {
     }
 
     #[test]
+    fn reverts_compares_an_unbounded_value_in_its_logged_form() {
+        let ag = agent("claudia");
+        let long = "x".repeat(crate::tracker::model::MAX_LOGGED_CHARS + 50);
+        let prior: VecDeque<Change> = vec![removal_with(&ag, "a", json!(long), 1, 1)].into();
+        assert!(reverts(&prior, "a", "note", &json!(long)));
+        assert!(!reverts(&prior, "a", "note", &json!("other")));
+        let edit: VecDeque<Change> =
+            vec![note_change(&ag, "a", json!(long), json!("n"), 1, 1)].into();
+        assert!(reverts(&edit, "a", "note", &json!(long)));
+    }
+
+    #[test]
     fn a_restore_text_value_and_a_moved_item_leave_values_the_log_still_knows() {
         // A restore (`restore_text`) is an ordinary Changed: its old value
         // is what a stale save reverts to. A move changes no field value.
