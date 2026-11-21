@@ -759,8 +759,8 @@ Source: `src/mcp/tools/perri_mutators.rs`
 
 Record Perri's verdict on one commit of a pull request, so the Mother pane's Overview can tell whether the
 commit about to be merged is the one Perri approved (see "Perri's verdict and the Merge verb" in
-`docs/authored-prs.md`). It **only records**: it never merges and never talks to GitHub. Requires `nostromd`
-with the authored-PR list on.
+`docs/authored-prs.md`). It **only records**: it never merges and never writes to GitHub (an `approved` makes one
+read-only look at the PR's head). Requires `nostromd` with the authored-PR list on.
 
 **Input**: `{ "repo": "owner/name", "pr": 123, "head_sha": "<40 lowercase hex>", "verdict": "approved" |
 "changes_requested" | "comment", "note"?: "<at most 200 chars>" }`. No other argument is accepted. `repo` must be
@@ -769,10 +769,11 @@ refused), and a `note` longer than 200 characters is refused. The note is plain 
 dropped and it is never rendered as markup or put on the board row.
 
 **Output**: `{ "ok": true, "recorded": { "repo", "pr", "head_sha", "verdict" }, "for_current_head": true | false }`.
-`for_current_head` says whether `head_sha` is the head the daemon holds for the PR. An `approved` is only recorded
-when it is: if the PR is unknown or the head differs, the PR is read once more (up to a few seconds) and the check
-repeated; a miss is refused, so a commit cannot be approved before it is pushed. A `changes_requested` or `comment`
-can only block and is recorded for any head (`for_current_head: false` for one the daemon does not hold). A verdict
+`for_current_head` says whether `head_sha` is the PR's current head. An `approved` is only recorded when it is the
+**live** head: the daemon reads the PR from GitHub once, during the call (not from its own list, which is stale while
+no Overview is showing); a different head is refused, so a commit cannot be approved before it is pushed, and an
+approval that could not be verified is refused and nothing is recorded. A `changes_requested` or `comment` can only
+block and is recorded for any head without a read (`for_current_head` is then best-effort from the daemon's list). A verdict
 is for `head_sha` exactly: a later push is a new head and the old verdict no longer applies to it. Recording again
 for the same head replaces the earlier verdict (the replaced one is kept, one level, as `replaced`).
 
@@ -782,8 +783,10 @@ who and proves nothing. A session a network peer is steering does not see the to
 (`Forbidden`), like the Teri, Fred, Mother and Huey tools.
 
 **Errors**: `invalid_args` (a bad `repo`, `pr`, `head_sha`, `verdict` or `note`, or an unknown argument),
-`unidentified_caller` (the caller's tag matches no registered focus), `pr_unknown` and `head_not_current` (an
-`approved` for a PR the daemon does not list, or for a commit that is not its head), `not_supported` (no daemon, or
+`unidentified_caller` (the caller's tag matches no registered focus), `pr_unknown` (an `approved` for a PR GitHub
+does not have) and `head_not_current` (an `approved` for a commit that is not the PR's live head), `unreachable` and
+`rate_limited` (an `approved` whose head could not be read from GitHub, so it was not verified and nothing was
+recorded; retry), `not_supported` (no daemon, or
 the authored-PR list is off).
 
 Source: `src/mcp/tools/perri_verdict.rs`

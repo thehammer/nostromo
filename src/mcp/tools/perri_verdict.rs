@@ -2,9 +2,10 @@
 //! what it thinks of one commit of a pull request.
 //!
 //! It **only records** (in the daemon's verdict store, see
-//! `data::authored_prs::verdicts`). It never merges and never talks to GitHub:
-//! the Overview's Merge button reads the record, and the merge itself has its
-//! own guarded verb.
+//! `data::authored_prs::verdicts`). It never merges and never writes to GitHub
+//! (an `approved` makes one read-only look at the PR's head, below): the
+//! Overview's Merge button reads the record, and the merge itself has its own
+//! guarded verb.
 //!
 //! Who may call it: any session of the operator's own focuses. A session a
 //! network peer is steering is refused at dispatch (the tool is withheld from
@@ -17,14 +18,17 @@
 //! record shows who, it does not prove who. The merge's real gates are the
 //! user's click, GitHub's CLEAN state and branch protection.
 //!
-//! An `approved` is only recorded for the head the daemon holds for the PR (one
-//! refresh is asked for when it differs); `changes_requested` and `comment` can
-//! only block, so they are recorded for any head, flagged `for_current_head`.
+//! An `approved` is only recorded for the PR's live head, read from GitHub once
+//! at the time of the call (never from the daemon's list, which can be stale
+//! while no Overview is showing); one that cannot be checked is refused.
+//! `changes_requested` and `comment` can only block, so they are recorded for
+//! any head, flagged `for_current_head`.
 //!
 //! Errors: `invalid_args` (with a fixed `detail`), `unidentified_caller` (the
-//! caller is no registered focus), `pr_unknown`, `head_not_current` (an
-//! `approved` for a commit the daemon does not hold as the PR's head),
-//! `not_supported` (no daemon, or the authored-PR list is off).
+//! caller is no registered focus), `pr_unknown` (GitHub has no such PR),
+//! `head_not_current` (an `approved` for a commit that is not the PR's live
+//! head), `unreachable` / `rate_limited` (the head could not be read, so the
+//! approval was not verified and nothing was recorded), `not_supported` (no daemon, or the authored-PR list is off).
 
 use serde_json::{json, Value};
 
@@ -113,12 +117,16 @@ pub async fn record_verdict(state: &McpSharedState, args: &Value, pty_id: Option
             },
             "for_current_head": for_current_head,
         }),
-        Err(code @ ("pr_unknown" | "head_not_current")) => json!({
+        Err(code @ ("pr_unknown" | "head_not_current" | "unreachable" | "rate_limited")) => json!({
             "error": code,
             "detail": match code {
-                "pr_unknown" => "the PR is not in the daemon's list of open PRs",
-                _ => "the daemon does not hold that commit as the PR's head; \
+                "pr_unknown" => "GitHub has no such pull request",
+                "head_not_current" => "that commit is not the PR's head on GitHub right now; \
                       an approval is only recorded for the current head",
+                "unreachable" => "the PR's head could not be read from GitHub, so the approval \
+                      was not verified and nothing was recorded; try again",
+                _ => "GitHub is rate-limiting the daemon, so the approval was not verified \
+                      and nothing was recorded; try again later",
             },
         }),
         Err(_) => invalid("not a valid record"),
