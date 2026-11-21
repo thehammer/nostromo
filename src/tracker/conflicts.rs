@@ -323,7 +323,7 @@ pub fn detect(
         match change.kind {
             ChangeKind::Changed => {
                 for (field, (_, new)) in &change.fields {
-                    let last = latest(prior, id, Some(field));
+                    let last = latest(prior, id, Some(field), d);
                     let mut guess = false;
                     let losing_author = match last {
                         Some(last) => {
@@ -491,17 +491,34 @@ fn gap_overwrite(d: &Detect<'_>) -> bool {
 }
 
 /// The latest change to `field` of item `id` (any field when `None`), made
-/// by an add or an edit. Earlier conflict entries are not changes.
-fn latest<'a>(prior: &'a VecDeque<Change>, id: &str, field: Option<&str>) -> Option<&'a Change> {
+/// by an add or an edit. Earlier conflict entries are not changes. A no-op
+/// the writer itself logged for the field (a losing value it put back where
+/// the field already held it) is skipped: it records a decision, not a write,
+/// so it must never stand in for an unseen write that came before it.
+fn latest<'a>(
+    prior: &'a VecDeque<Change>,
+    id: &str,
+    field: Option<&str>,
+    d: &Detect<'_>,
+) -> Option<&'a Change> {
     prior.iter().rev().find(|c| {
         c.item_id.as_deref() == Some(id)
             && match c.kind {
                 ChangeKind::Changed | ChangeKind::Added => {
-                    field.is_none_or(|f| c.fields.contains_key(f))
+                    field.is_none_or(|f| c.fields.contains_key(f)) && !own_no_op(c, field, d)
                 }
                 _ => false,
             }
     })
+}
+
+/// Is `c` a no-op the writer itself logged for `field`?
+fn own_no_op(c: &Change, field: Option<&str>, d: &Detect<'_>) -> bool {
+    let Some(f) = field else { return false };
+    c.kind == ChangeKind::Changed
+        && &c.by == d.writer
+        && c.client.as_deref() == d.client
+        && c.fields.get(f).is_some_and(|(old, new)| old == new)
 }
 
 /// Did `field` of item `id` hold `value` before one of the logged changes?
@@ -765,6 +782,38 @@ mod tests {
             json!("later"),
         );
         assert!(run(prior, sec, &file, None, 300).is_empty());
+    }
+
+    /// A no-op the pane logged for a field (a losing value put back where the
+    /// field already held it) is the pane's decision, not a write: it must
+    /// never stand in for the file's unseen save before it.
+    #[test]
+    fn a_writers_own_no_op_does_not_hide_an_unseen_write_before_it() {
+        let (file, pane) = (Author::File, Author::Pane);
+        let mut no_op = status_change(&pane, "a", "in-progress", "in-progress", 100, 3);
+        no_op.client = Some("w0".to_string());
+        let prior = vec![
+            status_change(&file, "a", "todo", "in-progress", 50, 2),
+            no_op,
+        ];
+        let write = status_change(&pane, "a", "in-progress", "needs-you", 200, 0);
+        let got = detect(
+            &prior.into_iter().collect(),
+            &[write],
+            &board(),
+            &|_| Some("- [x] Deploy\n".to_string()),
+            &Detect {
+                writer: &pane,
+                seen_through: Some(1),
+                unseen: &[],
+                client: Some("w0"),
+                history_gap: false,
+                resolving: &[],
+                now: at(200),
+            },
+        );
+        assert_eq!(got.len(), 1, "the file's save after the view is kept");
+        assert_eq!(got[0].losing_author, file);
     }
 
     #[test]

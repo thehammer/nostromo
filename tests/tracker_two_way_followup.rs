@@ -912,6 +912,66 @@ fn ack_dropped_is_refused_when_more_were_dropped_after_the_users_view() {
     assert_eq!(rig.item("alpha").dropped_conflicts, 0);
 }
 
+/// `alpha` holds a note conflict (the oldest of the board) and a status
+/// conflict; the person's view is taken, then a cap drops the note conflict.
+/// Returns the view's version and the status conflict's id.
+fn view_then_a_cap_drops_alphas_note_conflict(rig: &Rig) -> (u64, String) {
+    add_bulk(rig, 50);
+    lose_notes(rig, 1, 1);
+    rig.first_status_conflict();
+    let status = rig.conflict_id("alpha", "status", "in-progress");
+    let seen = rig.version();
+    for i in 0..49 {
+        rig.tick(100);
+        let id = format!("bulk-{i}");
+        rig.agent_b(&[status_op(&id, "in-progress")]).unwrap();
+        rig.tick(2);
+        rig.pane(vec![pane_status(&id, "done")]).unwrap();
+    }
+    assert_eq!(
+        rig.item("alpha").dropped_conflicts,
+        1,
+        "the note was dropped"
+    );
+    assert_eq!(rig.conflict_ids("alpha"), vec![status.clone()]);
+    (seen, status)
+}
+
+/// The person never saw the drop (their view predates it), so settling what
+/// is left of the item from that view must not clear its marker.
+#[test]
+fn settling_from_a_view_older_than_a_drop_keeps_the_marker() {
+    for keep in [ConflictKeep::Current, ConflictKeep::Losing] {
+        let rig = Rig::new();
+        let (seen, status) = view_then_a_cap_drops_alphas_note_conflict(&rig);
+        rig.pane_at(seen, vec![resolve_op("alpha", "status", keep, &status)])
+            .unwrap();
+        assert!(rig.item("alpha").conflicts.is_empty(), "{keep:?}");
+        assert_eq!(
+            rig.item("alpha").dropped_conflicts,
+            1,
+            "{keep:?}: unseen drop"
+        );
+        assert!(serialized_has_dropped_marker(&rig.item("alpha")));
+    }
+}
+
+/// Control: from a view that shows the drop, settling the last conflict
+/// clears the marker.
+#[test]
+fn settling_from_a_view_that_shows_the_drop_clears_the_marker() {
+    let rig = Rig::new();
+    let (_, status) = view_then_a_cap_drops_alphas_note_conflict(&rig);
+    rig.pane(vec![resolve_op(
+        "alpha",
+        "status",
+        ConflictKeep::Current,
+        &status,
+    )])
+    .unwrap();
+    assert_eq!(rig.item("alpha").dropped_conflicts, 0);
+}
+
 /// After an acknowledgement, the next drop is counted from nothing, in the
 /// pane's view and in what the agent reads.
 #[test]

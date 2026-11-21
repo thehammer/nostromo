@@ -372,6 +372,12 @@ struct World {
     /// settling to explain it, in a step where a cap dropped something: the
     /// cap dropped them. Each must be accounted for in its item's marker.
     cap_dropped_now: Vec<(String, String, String)>,
+    /// For each item, the versions at which a cap dropped one of its
+    /// conflicts and the person has not yet been shown (acknowledged) the
+    /// drop: a pane batch that settles the item's last conflict from a view
+    /// at or after a drop's version shows it, and forgets it here. The item's
+    /// marker is never lower than the number of these.
+    unacked_drops: BTreeMap<String, Vec<u64>>,
     /// The conflicts after the last step: (id, item, field, guess, version).
     prev_list: Vec<(String, String, String, bool, u64)>,
 }
@@ -470,6 +476,7 @@ impl World {
             cap_dropped_removed: BTreeSet::new(),
             cap_drops: 0,
             cap_dropped_now: Vec::new(),
+            unacked_drops: BTreeMap::new(),
             prev_items: BTreeSet::new(),
         };
         for i in 0..2 {
@@ -567,6 +574,7 @@ impl World {
         self.prev_list.clear();
         self.cap_dropped_removed.clear();
         self.cap_drops = 0;
+        self.unacked_drops.clear();
         self.view_stale = [true; 2];
         self.steps
             .push("*** the daemon restarts with its state lost ***".to_string());
@@ -1247,6 +1255,23 @@ impl World {
                     self.settled_now.push(id.clone());
                 }
             }
+            // A batch that settles an item's last conflict from a view shows
+            // (and so forgets) the drops at or before that view.
+            let left: BTreeSet<String> = self
+                .reg
+                .conflicts(TAG[0])
+                .into_iter()
+                .map(|c| c.item_id)
+                .collect();
+            for op in &ops {
+                if let TrackerPaneOp::ResolveConflict { id, .. } = op {
+                    if !left.contains(id) {
+                        if let Some(drops) = self.unacked_drops.get_mut(id) {
+                            drops.retain(|v| *v > seen);
+                        }
+                    }
+                }
+            }
         }
         if let Ok(done) = &result {
             touched.extend(done.created.clone());
@@ -1454,8 +1479,55 @@ impl World {
                 ));
             }
         }
+        // Conservation at the end of every step: an item's marker is never
+        // lower than the drops the person has not been shown. (An item off
+        // the board has no marker to show; its tally goes.)
+        let on_board: BTreeMap<&str, u32> = view
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                ViewNode::Item(i) => Some((i.id.as_str(), i.dropped_conflicts)),
+                _ => None,
+            })
+            .collect();
+        self.unacked_drops
+            .retain(|item, _| on_board.contains_key(item.as_str()));
+        let mut too_early = Vec::new();
+        for (item, drops) in &self.unacked_drops {
+            let shown = on_board[item.as_str()];
+            if (shown as usize) < drops.len() {
+                too_early.push((item.clone(), shown, drops.len()));
+            }
+        }
+        for (item, shown, owed) in too_early {
+            self.failures.push(format!(
+                "step {step}: {item} shows {shown} dropped conflict(s) but {owed} were dropped and never shown to the person: a marker cleared too early"
+            ));
+            // Said once.
+            self.unacked_drops.remove(&item);
+        }
+        // What the markers show now is what the person has yet to be shown,
+        // from this version on.
+        self.observe_drops();
         self.marked.extend(marked.iter().cloned());
         self.marked_now = marked;
+    }
+
+    /// Notes the drops the markers show that the oracle has not yet counted
+    /// (a cap drops values in the very write that records them, which no
+    /// earlier look at the conflicts could have seen), at the current version.
+    fn observe_drops(&mut self) {
+        let version = self.version();
+        let view = self.reg.board_view(TAG[0]).expect("a board");
+        for node in &view.nodes {
+            if let ViewNode::Item(item) = node {
+                let counted = self.unacked_drops.entry(item.id.clone()).or_default();
+                while counted.len() < item.dropped_conflicts as usize {
+                    counted.push(version);
+                }
+            }
+        }
+        self.unacked_drops.retain(|_, v| !v.is_empty());
     }
 
     /// A real conflict is never dropped by the board cap while an older guess
@@ -1478,7 +1550,9 @@ impl World {
                 .extend(self.prev_items.difference(&items).cloned());
         }
         self.prev_items = items;
-        self.cap_dropped_now.clear();
+        // Not cleared here: `bulk_step` calls this mid-step, and a drop it
+        // sees must still be there when `audit` checks at the step's end
+        // (`audit` takes the list).
         for (id, item, field, guess, born) in &self.prev_list {
             let gone = !ids.contains(id.as_str()) && !settled.contains(id);
             if gone && cap_dropped && field != "removed" {
@@ -1560,6 +1634,58 @@ impl World {
         // From here on the real conflict is watched.
         let kept = self.reg.conflicts(TAG[0]);
         self.audit_real_before_guess(step, &kept);
+        // A real conflict on bulk-0's note (agent 1 sets it, window 0 puts
+        // another), which window 0 then looks at. The flood below changes
+        // every status: bulk-0's is the first guess, and the board cap drops
+        // it, a drop window 0's view predates.
+        // A second one, on bulk-1, so the flood overflows the board cap.
+        for target in ["bulk-0", "bulk-1"] {
+            let before = self.bytes();
+            let base = self.cursor[1].unwrap_or(0);
+            let op = Op::Upsert(Upsert {
+                id: Some(target.into()),
+                note: Some(self.unique("probe-agent-note-")),
+                ..Default::default()
+            });
+            let r = self.reg.apply(
+                TAG[1],
+                &session,
+                std::slice::from_ref(&op),
+                &agent(1, &session),
+            );
+            self.steps.push(format!("agent 1 {op:?} -> {}", r.is_ok()));
+            self.settle(
+                Who::Agent(1, self.generation[1]),
+                base,
+                &before,
+                &[target.to_string()],
+                false,
+                step,
+            );
+            let ops = vec![TrackerPaneOp::Edit {
+                id: target.into(),
+                title: None,
+                text: None,
+                body: Some(self.unique("probe-pane-note-")),
+            }];
+            let (before, base) = (self.bytes(), self.views[0].version);
+            let epoch = self.views[0].epoch.clone();
+            let r = self
+                .reg
+                .apply_pane_ops_in(TAG[0], WINDOW[0], base, Some(&epoch), &ops);
+            self.steps
+                .push(format!("window 0 (base {base}) {ops:?} -> {}", r.is_ok()));
+            self.settle(
+                Who::Pane(0),
+                base,
+                &before,
+                &[target.to_string()],
+                false,
+                step,
+            );
+        }
+        self.look(0);
+        let older_view = self.views[0].clone();
         // The stale window changes every bulk item.
         let ops: Vec<TrackerPaneOp> = (0..BULK)
             .map(|n| TrackerPaneOp::Status {
@@ -1582,6 +1708,48 @@ impl World {
                 .push(format!("step {step}: the bulk change was refused: {e:?}"));
         }
         self.settle(Who::Pane(1), base, &before, &ids, false, step);
+        // What the cap dropped in the flood is on the markers now, before
+        // window 0 settles from a view that predates it.
+        let kept = self.reg.conflicts(TAG[0]);
+        self.audit_real_before_guess(step, &kept);
+        self.observe_drops();
+        // Window 0 settles bulk-0's conflict from the view it took before the
+        // flood: it was never shown what the cap dropped since.
+        if let Some(shown) = older_view
+            .shown
+            .iter()
+            .find(|c| c.item == "bulk-0" && c.field == "note")
+            .cloned()
+        {
+            let ops = vec![TrackerPaneOp::ResolveConflict {
+                id: "bulk-0".into(),
+                field: "note".into(),
+                keep: ConflictKeep::Current,
+                conflict_id: Some(shown.conflict_id.clone()),
+                index: None,
+            }];
+            let (before, base) = (self.bytes(), older_view.version);
+            let r =
+                self.reg
+                    .apply_pane_ops_in(TAG[0], WINDOW[0], base, Some(&older_view.epoch), &ops);
+            self.steps
+                .push(format!("window 0 (base {base}) {ops:?} -> {}", r.is_ok()));
+            if r.is_ok() {
+                self.settled_now.push(shown.conflict_id.clone());
+                self.excused.push(shown);
+                let still = self
+                    .reg
+                    .conflicts(TAG[0])
+                    .iter()
+                    .any(|c| c.item_id == "bulk-0");
+                if !still {
+                    if let Some(drops) = self.unacked_drops.get_mut("bulk-0") {
+                        drops.retain(|v| *v > base);
+                    }
+                }
+            }
+            self.settle(Who::Pane(0), base, &before, &["bulk-0".into()], false, step);
+        }
     }
 
     fn run(&mut self) {
@@ -1756,6 +1924,15 @@ fn a_flooded_board_keeps_the_dropped_marker_seed_7a126120() {
 #[test]
 fn a_flooded_board_loses_no_edit_seed_7a1145aa() {
     one(0x7a11_45aa).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Round 2: a keep-losing that put back a value the field already held was
+/// logged as the window's own change, and the window's next keep-losing from
+/// the same view read it as the field's last write, overwriting the file's
+/// unseen save before it.
+#[test]
+fn a_flooded_board_loses_no_edit_seed_7a126776() {
+    one(0x7a12_6776).unwrap_or_else(|e| panic!("{e}"));
 }
 
 #[test]
