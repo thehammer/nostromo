@@ -58,6 +58,13 @@ final class TrackerCommandBlockTests: XCTestCase {
         return view
     }
 
+    /// AppKit mirrors every plain string under its legacy name; anything else (rich text, HTML, a file URL) is a leak.
+    private func assertPlainTextOnly(_ board: NSPasteboard, _ message: String, file: StaticString = #filePath, line: UInt = #line) {
+        let allowed: Set<NSPasteboard.PasteboardType> = [.string, NSPasteboard.PasteboardType("NSStringPboardType")]
+        XCTAssertTrue(Set(board.types ?? []).isSubset(of: allowed), "\(message): \(board.types ?? [])", file: file, line: line)
+        XCTAssertTrue(board.types?.contains(.string) ?? false, message, file: file, line: line)
+    }
+
     private func everyView(_ root: NSView) -> [NSView] { [root] + rigAllSubviews(of: root) }
 
     /// Every title and label a person or VoiceOver meets in `root` (the command's own text is a value).
@@ -180,8 +187,10 @@ final class TrackerCommandBlockTests: XCTestCase {
 
     func testARowHostingACommandHasNoRunAffordanceInItsTreeOrItsContextMenu() throws {
         let h = try TrackerEditHarness(self)
-        let ids = h.script.itemNodes.filter { ($0["kind"] as? String) == "command" }.compactMap { $0["id"] as? String }
-        XCTAssertGreaterThanOrEqual(ids.count, 5, "the golden board stages commands in every environment")
+        // A done command lives in its section's folded Done group, which has no row of its own.
+        let ids = h.script.itemNodes.filter { ($0["kind"] as? String) == "command" && ($0["status"] as? String) != "done" }
+            .compactMap { $0["id"] as? String }
+        XCTAssertGreaterThanOrEqual(ids.count, 4, "the golden board stages open commands in several environments")
         for id in ids {
             let row = try h.row(id)
             XCTAssertNotNil(row.commandBlock, "\(id) hosts a command block")
@@ -211,7 +220,7 @@ final class TrackerCommandBlockTests: XCTestCase {
             let view = block(command, board: board)
             XCTAssertEqual(view.displayedText, command, "\(name): the displayed string is the staged one")
             view.copyButton.performClick(nil)
-            XCTAssertEqual(board.types ?? [], [.string], "\(name): plain text only")
+            assertPlainTextOnly(board, "\(name): plain text only")
             let copied = try XCTUnwrap(board.data(forType: .string), name)
             XCTAssertEqual(Array(copied), Array(command.utf8), "\(name): byte for byte")
         }
@@ -224,7 +233,7 @@ final class TrackerCommandBlockTests: XCTestCase {
         h.rig.pasteboard.clearContents()
         block.copyButton.performClick(nil)
         XCTAssertEqual(h.rig.pasteboard.string(forType: .string), "php artisan queue:retry 8812")
-        XCTAssertEqual(h.rig.pasteboard.types ?? [], [.string])
+        assertPlainTextOnly(h.rig.pasteboard, "plain text only")
     }
 
     func testWhatIsDrawnAndCopiedHasNoControlBidiOrZeroWidthCharacterWhateverArrives() {
