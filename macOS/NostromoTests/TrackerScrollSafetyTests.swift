@@ -665,6 +665,14 @@ final class TrackerGateHarness {
     /// the very top, scrolled by nothing, and the first row stays the first row at offset 0.)
     func assertNoMove(_ name: String, _ event: TrackerGateEvent,
                       file: StaticString = #filePath, line: UInt = #line) {
+        assertNoMove(name, file: file, line: line) { try self.perform(event) }
+    }
+
+    /// [`assertNoMove(_:_:)`] for any interaction, not only a scripted board update (T4: expanding a
+    /// command row, Ran it, Copy).
+    func assertNoMove(_ name: String, userGesture: Bool = false, file: StaticString = #filePath, line: UInt = #line,
+                      _ interaction: () throws -> Void) {
+        let ownedFocusBefore = paneOwnsFirstResponder()
         let before = pane.anchorSnapshot(windowIndex: 0)
         XCTAssertNotNil(before.firstVisible, "\(name): the pane has a first visible row", file: file, line: line)
         let readKey = before.firstVisible?.rowKey
@@ -672,7 +680,8 @@ final class TrackerGateHarness {
         let chromeBefore = pane.scrollView.frame.minY
         let atTop = before.scrollY <= 0.5
         do {
-            try perform(event)
+            try interaction()
+            layout()
         } catch {
             XCTFail("\(name): \(error)", file: file, line: line)
             return
@@ -697,7 +706,7 @@ final class TrackerGateHarness {
             let drift = abs((after.firstVisible?.offsetPt ?? .infinity) - (before.firstVisible?.offsetPt ?? 0))
             XCTAssertLessThanOrEqual(drift, 1, "\(name): first visible row moved by \(drift) pt", file: file, line: line)
         }
-        XCTAssertFalse(paneOwnsFirstResponder(),
+        XCTAssertFalse(paneOwnsFirstResponder() && !ownedFocusBefore && !userGesture,
                        "\(name): the tracker took keyboard focus (\(String(describing: pane.window?.firstResponder)))",
                        file: file, line: line)
     }
@@ -708,9 +717,10 @@ final class TrackerGateHarness {
 final class TrackerScrollSafetyTests: XCTestCase {
 
     private func makeHarness(_ start: TrackerGateHarness.Start,
-                             size: NSSize = NSSize(width: 380, height: 420)) throws -> TrackerGateHarness {
+                             size: NSSize = NSSize(width: 380, height: 420),
+                             editing: Bool = false) throws -> TrackerGateHarness {
         let window = makeRigWindow(self, size: size)
-        let harness = try TrackerGateHarness(self)
+        let harness = try TrackerGateHarness(self, editing: editing)
         let content = window.contentView!
         harness.pane.frame = content.bounds
         harness.pane.autoresizingMask = [.width, .height]
@@ -752,6 +762,42 @@ final class TrackerScrollSafetyTests: XCTestCase {
         XCTAssertEqual(first?.rowKey, expected.key, "\(message): first visible row", file: file, line: line)
         XCTAssertEqual(first?.offsetPt ?? .infinity, Double(expected.offset), accuracy: 1,
                        "\(message): offset into the first visible row", file: file, line: line)
+    }
+
+    // MARK: - T4: a staged command's row never moves the reading line
+
+    /// Expanding a command row, Ran it, Copy and a long command arriving each leave the first visible
+    /// row where it was (the measure `assertNoMove` takes), wherever the command row is.
+    func testCommandRowInteractionsNeverMoveTheFirstVisibleRow() throws {
+        var exercised = 0
+        for placement in [TrackerGatePlacement.above, .inside, .below] {
+            let h = try makeHarness(.mid, editing: true)
+            guard let item = h.pickItem(placement, where: { $0.isCommand && $0.status != .done }) else { continue }
+            let id = item.id
+            let key = TrackerRow.itemKey(id)
+            exercised += 1
+            h.assertNoMove("\(placement): expand the command row") { h.pane.toggleNote(item: id) }
+            h.assertNoMove("\(placement): Copy") {
+                let block = try XCTUnwrap(h.pane.rowViews[key]?.commandBlock)
+                block.copyButton.performClick(nil)
+            }
+            // A person's click on the box is a user edit: it may take the pane's focus sink (as every pane edit does).
+            h.assertNoMove("\(placement): Ran it", userGesture: true) {
+                let block = try XCTUnwrap(h.pane.rowViews[key]?.commandBlock)
+                block.permit = { _ in .human(sourcePid: nil, sourceState: nil) }
+                block.ranItCheckbox.performClick(nil)
+                XCTAssertEqual(h.edits.sent.count, 1, "\(placement): Ran it sent the tick")
+            }
+            h.assertNoMove("\(placement): the board ticks it") { try h.echo { try $0.setStatus(id, "done") } }
+            h.assertNoMove("\(placement): a long command arrives") {
+                let lines = (1...40).map { "echo line \($0)" }.joined(separator: "\n")
+                try h.mutate { try $0.editItem(id) { $0["command"] = lines } }
+            }
+            h.assertNoMove("\(placement): the long command is cut to a short one") {
+                try h.mutate { try $0.editItem(id) { $0["command"] = "ls" } }
+            }
+        }
+        XCTAssertGreaterThanOrEqual(exercised, 2, "the board has command rows above, inside and below the viewport")
     }
 
     // MARK: - PRD 17: thirty scripted updates

@@ -355,6 +355,8 @@ public struct TrackerItemWire: Decodable, Equatable {
     public let command: String?
     public let env: TrackerEnvWire?
     public let ran: Bool
+    /// The daemon withheld the command as unsafe text (`command` is then nil).
+    public let commandWithheld: Bool
     /// The live source this item follows and how fresh it is.
     public let bound: TrackerBoundWire?
     /// Overwritten values the user hasn't settled (empty from an older daemon).
@@ -367,6 +369,7 @@ public struct TrackerItemWire: Decodable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case id, section, status, owner, links, kind, command, env, ran, bound, source
+        case commandWithheld = "command_withheld"
         case text, note, conflicts, sensitive
         case droppedConflicts = "dropped_conflicts"
         case textSpans = "text_spans"
@@ -390,6 +393,7 @@ public struct TrackerItemWire: Decodable, Equatable {
         command = try c.decodeIfPresent(String.self, forKey: .command)
         env = try c.decodeIfPresent(TrackerEnvWire.self, forKey: .env)
         ran = try c.decodeIfPresent(Bool.self, forKey: .ran) ?? false
+        commandWithheld = (try? c.decodeIfPresent(Bool.self, forKey: .commandWithheld)) ?? false
         bound = try? c.decodeIfPresent(TrackerBoundWire.self, forKey: .bound)
         conflicts = (try? c.decodeIfPresent([TrackerConflictWire].self, forKey: .conflicts)) ?? []
         droppedConflicts = (try? c.decodeIfPresent(Int.self, forKey: .droppedConflicts)) ?? 0

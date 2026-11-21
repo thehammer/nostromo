@@ -355,8 +355,11 @@ public struct TrackerItemRow: Equatable {
     /// The staged command as the daemon sent it (nil on a plain item). Untrusted text: draw
     /// `TrackerCommandText.displayed(_:)`, never this.
     public let command: String?
-    /// The user ticked "Ran it" (or edited `[x]` into the file).
+    /// The user ticked "Ran it" (or edited `[x]` into the file); a done command counts as run.
     public let ran: Bool
+    /// The daemon refused to show this command (control, escape or invisible characters, or too long, in
+    /// the board file): the row says so and offers no Copy.
+    public let commandWithheld: Bool
     /// The item's exact markdown in the file.
     public let source: String
     /// The task text as stored, raw markdown (what an editor opens with).
@@ -782,7 +785,9 @@ public enum TrackerPresenter {
             isHazard: wire.env.map(TrackerEnvBadge.isHazard) ?? false,
             kind: wire.kind,
             command: wire.command,
-            ran: wire.ran,
+            // The daemon never sends `ran: true`; a done command is one the person ticked (or edited `[x]`).
+            ran: wire.ran || wire.status == .done,
+            commandWithheld: wire.commandWithheld,
             source: wire.source,
             editText: wire.text,
             editNote: wire.note,
@@ -827,29 +832,55 @@ extension TrackerStatusWire {
 /// format (bidi, zero-width, BOM) and line/paragraph-separator character, and caps the length.
 public enum TrackerCommandText {
     public static let maxScalars = 8_000
-    private static let invisiblePadding: Set<UInt32> = [0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0x034F]
+
+    /// The daemon's `is_invisible` (`src/data/work/untrusted.rs`), range for range, minus the C0/C1
+    /// controls that `displayed` drops by category. `tests/fixtures/tracker/invisible-chars.txt` is the ONE
+    /// list: a Rust test holds the daemon to it and a Swift test holds this set to it, so they cannot drift.
+    static let invisibleRanges: [ClosedRange<UInt32>] = [
+        0x00AD...0x00AD, 0x034F...0x034F, 0x0600...0x0605, 0x061C...0x061C, 0x06DD...0x06DD,
+        0x070F...0x070F, 0x0890...0x0891, 0x08E2...0x08E2, 0x115F...0x1160, 0x17B4...0x17B5,
+        0x180B...0x180F, 0x200B...0x200F, 0x2028...0x2029, 0x202A...0x202E, 0x2060...0x206F,
+        0x2800...0x2800, 0x3164...0x3164, 0xFE00...0xFE0F, 0xFEFF...0xFEFF, 0xFFA0...0xFFA0,
+        0xFFF0...0xFFFB, 0x110BD...0x110BD, 0x110CD...0x110CD, 0x13430...0x1343F,
+        0x1BCA0...0x1BCA3, 0x1D173...0x1D17A, 0xE0000...0xE0FFF,
+    ]
+
+    /// A scalar the daemon refuses in command text and the Mac never draws or copies.
+    public static func isInvisible(_ scalar: Unicode.Scalar) -> Bool {
+        let v = scalar.value
+        if v < 0x20 || (0x7F...0x9F).contains(v) { return true }
+        return invisibleRanges.contains { $0.contains(v) }
+    }
+
+    /// True when `displayed` stops short of the whole command: it is longer than `maxScalars` once the
+    /// refused characters are gone. A cut command must not be copied as if it were the whole one.
+    public static func wasCut(_ raw: String) -> Bool {
+        var count = 0
+        for scalar in raw.unicodeScalars where keeps(scalar) {
+            count += 1
+            if count > maxScalars { return true }
+        }
+        return false
+    }
 
     public static func displayed(_ raw: String) -> String {
         var out = String.UnicodeScalarView()
         var count = 0
-        for scalar in raw.unicodeScalars {
+        for scalar in raw.unicodeScalars where keeps(scalar) {
             if count >= maxScalars { break }
-            switch scalar {
-            case "\n", "\t":
-                break
-            default:
-                switch scalar.properties.generalCategory {
-                case .control, .format, .lineSeparator, .paragraphSeparator: continue
-                default: break
-                }
-                // Blank-looking padding that could hide text off the block's edge (the daemon refuses
-                // these too: `is_invisible`).
-                if invisiblePadding.contains(scalar.value) { continue }
-            }
             out.append(scalar)
             count += 1
         }
         return String(out)
+    }
+
+    private static func keeps(_ scalar: Unicode.Scalar) -> Bool {
+        if scalar == "\n" || scalar == "\t" { return true }
+        switch scalar.properties.generalCategory {
+        case .control, .format, .lineSeparator, .paragraphSeparator: return false
+        default: break
+        }
+        return !isInvisible(scalar)
     }
 
     /// "3 lines" for a command of more than one line, nil for one line.

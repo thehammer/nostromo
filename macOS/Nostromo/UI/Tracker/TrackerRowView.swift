@@ -192,6 +192,10 @@ final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
     private var hazardEdge: NSView?
     /// A staged command's block (display-only: Copy and Ran it, nothing that runs).
     private(set) var commandBlock: TrackerCommandBlockView?
+    /// The environment badge in the right column (hazard environments carry the warning glyph and word).
+    private(set) var envBadgeLabel: NSTextField?
+    /// "command withheld": the daemon refused to show a command the board file holds.
+    private(set) var withheldMark: NSTextField?
     /// Where the command block's Copy writes (tests inject their own).
     private let commandPasteboard: NSPasteboard
     private let highlightLayer = CALayer()
@@ -767,6 +771,8 @@ final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
         disclosure = nil
         hazardEdge = nil
         commandBlock = nil
+        envBadgeLabel = nil
+        withheldMark = nil
         measured = nil
         layer?.backgroundColor = nil
 
@@ -867,15 +873,32 @@ final class TrackerRowView: NSView, NSDraggingSource, NSMenuDelegate {
         mainText = titleView
 
         if let env = item.envBadge {
-            let badge = addLabel(env, color: item.isHazard ? TrackerTheme.hazard : muted,
+            // A hazard environment says so in words and a glyph as well as in red: the name stays as text and
+            // the warning mark is not colour alone (DEMO and STAGING must differ without seeing red).
+            let shown = item.isHazard ? "\u{26A0}\u{FE0E} \(env)" : env
+            let badge = addLabel(shown, color: item.isHazard ? TrackerTheme.hazard : muted,
                                  font: NSFont.systemFont(ofSize: 10, weight: .semibold))
             badge.alignment = .center
             badge.lineBreakMode = .byTruncatingTail
-            badge.toolTip = env
+            badge.toolTip = item.isHazard ? "\(env): a mistake here hurts" : env
+            badge.setAccessibilityLabel(item.isHazard ? "Environment: \(env), take care" : "Environment: \(env)")
+            envBadgeLabel = badge
             badge.wantsLayer = true
             badge.layer?.backgroundColor = (item.isHazard ? TrackerTheme.hazardFill : TrackerTheme.badgeFill).cgColor
             badge.layer?.cornerRadius = 3
             badges.append(badge)
+        }
+        if item.kind == .command && item.commandWithheld {
+            let note = addLabel("command withheld", color: Theme.amber, font: TrackerTheme.metaFont)
+            note.alignment = .center
+            note.lineBreakMode = .byTruncatingTail
+            note.toolTip = "This command has hidden or control characters (or is too long), so it is not shown or copyable. Fix it in the board file."
+            note.setAccessibilityLabel("Command withheld: it has hidden or control characters or is too long. Fix it in the board file.")
+            note.wantsLayer = true
+            note.layer?.backgroundColor = TrackerTheme.badgeFill.cgColor
+            note.layer?.cornerRadius = 7
+            badges.append(note)
+            withheldMark = note
         }
         if let owner = item.owner, !owner.isEmpty {
             let chip = addLabel(owner, color: muted, font: TrackerTheme.metaFont)

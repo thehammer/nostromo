@@ -759,6 +759,7 @@
 		ZZ0000000000000000TK2111 /* TrackerConflictPopoverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2110 /* TrackerConflictPopoverTests.swift */; };
 		ZZ0000000000000000TK9911 /* TrackerFixupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK9910 /* TrackerFixupTests.swift */; };
 		ZZ0000000000000000TK2201 /* TrackerCommandBlockTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2200 /* TrackerCommandBlockTests.swift */; };
+		ZZ0000000000000000TK2203 /* TrackerCommandGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2202 /* TrackerCommandGateTests.swift */; };
 		ZZ0000000000000000TK2301 /* TrackerWaitingStripTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2300 /* TrackerWaitingStripTests.swift */; };
 		ZZ0000000000000000TK2401 /* TrackerLinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2400 /* TrackerLinkTests.swift */; };
 		ZZ0000000000000000TK2501 /* TranscriptWidthAnchorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2500 /* TranscriptWidthAnchorTests.swift */; };
@@ -1397,6 +1398,7 @@
 		ZZ0000000000000000TK2110 /* TrackerConflictPopoverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerConflictPopoverTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK9910 /* TrackerFixupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerFixupTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2200 /* TrackerCommandBlockTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerCommandBlockTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000TK2202 /* TrackerCommandGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerCommandGateTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2300 /* TrackerWaitingStripTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerWaitingStripTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2400 /* TrackerLinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerLinkTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2500 /* TranscriptWidthAnchorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptWidthAnchorTests.swift; sourceTree = "<group>"; };
@@ -2114,6 +2116,7 @@
 				ZZ0000000000000000TK2110 /* TrackerConflictPopoverTests.swift */,
 				ZZ0000000000000000TK9910 /* TrackerFixupTests.swift */,
 				ZZ0000000000000000TK2200 /* TrackerCommandBlockTests.swift */,
+				ZZ0000000000000000TK2202 /* TrackerCommandGateTests.swift */,
 				ZZ0000000000000000TK2300 /* TrackerWaitingStripTests.swift */,
 				ZZ0000000000000000TK2400 /* TrackerLinkTests.swift */,
 				ZZ0000000000000000TK2500 /* TranscriptWidthAnchorTests.swift */,
@@ -3201,6 +3204,7 @@
 				ZZ0000000000000000TK2111 /* TrackerConflictPopoverTests.swift in Sources */,
 				ZZ0000000000000000TK9911 /* TrackerFixupTests.swift in Sources */,
 				ZZ0000000000000000TK2201 /* TrackerCommandBlockTests.swift in Sources */,
+				ZZ0000000000000000TK2203 /* TrackerCommandGateTests.swift in Sources */,
 				ZZ0000000000000000TK2301 /* TrackerWaitingStripTests.swift in Sources */,
 				ZZ0000000000000000TK2401 /* TrackerLinkTests.swift in Sources */,
 				ZZ0000000000000000TK2501 /* TranscriptWidthAnchorTests.swift in Sources */,

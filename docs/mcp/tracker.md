@@ -131,15 +131,31 @@ block), the environment badge (`PROD`, `CANADA`, `DEMO`, `STAGING`, `LOCAL`, `EN
 `ENV?` get the red edge and a ⚠︎ glyph), `N lines` for a multi-line command, a **Copy** button (plain text
 only, exactly what is drawn) and a **Ran it** checkbox (the pane's tick: the user's, never an agent's).
 
-- Hostile text (carriage return, escape sequences, other control characters, bidi or zero-width characters)
-  is refused (`invalid_command_text`); the Mac also strips such characters from what it draws and copies.
+- Hostile text (carriage return, escape sequences, other control characters, bidi, zero-width and
+  variation-selector characters: `is_invisible`) is refused (`invalid_command_text`). The same set is held to ONE
+  list, `tests/fixtures/tracker/invisible-chars.txt`: a Rust test checks every code point against it and the Mac's
+  tests read the same file, so the two cannot drift. The Mac also strips those characters from what it draws and copies.
+- A command written straight into the board **file** skips the MCP check, so the daemon applies it again when it
+  builds the view: a command with such characters (or over 4,000 characters) is **withheld**: the item arrives
+  with `command_withheld: true` and no `command`, the row says "command withheld" and has no block and no Copy.
+  Withholding was chosen over showing it flagged: there is then no hostile text to draw or copy as if clean.
+  The Mac's own 8,000-character cap is a second line: a command cut by it shows "CUT" and Copy is off.
 - An agent cannot mark a command `done` (`not_permitted`). When the user ticks Ran it, or edits `[x]` into the
-  file, the agent's next `read` shows it, attributed to `pane (you)` or the file edit.
+  file, the agent's next `read` shows it, attributed to `pane (you)` or the file edit. A `done` command shows
+  Ran it ticked (the daemon never sends `ran: true`; the Mac reads `done` as run).
+- **Ran it** acts only on a person's own click: it asks `HumanGesture.permit` first, like the staging and Merge
+  controls. App-control input, an Accessibility press with no event and a stale event are refused; the block
+  says "Not ticked: click it yourself" and nothing is sent. Hazard environments carry the glyph and the word on
+  the row's own badge (and in VoiceOver), not only the red.
 - Nothing in the tracker code writes to a terminal or a session. Two tests keep it that way:
   `tests/no_shell_surface.rs` (every tool is classified; no tool input or op names a shell or an execution verb;
-  a new unclassified tool fails the build) and `tests/no_shell_behaviour.rs` (every tracker and pane op, driven
-  with every fixture command and every hostile string, leaves a live PTY at zero bytes written by the daemon's
-  own count and an empty child log).
+  a new unclassified tool fails the build) and `tests/no_shell_behaviour.rs`. The latter drives every tracker
+  tool op and every pane op (including `resolve_conflict`) through the daemon's real handlers, the pane ops
+  through `tracker_edit_in`, the function the app's edits reach, with every fixture command and every hostile
+  string; it checks each pane op's outcome, leaves a live PTY at zero bytes written by the daemon's own count and
+  an empty child log, and scans the tracker sources (subdirectories too) for terminal and session names,
+  `daemon.terminals` included. `pane_op_name` is an exhaustive `match` on `TrackerPaneOp`: a new pane op stops the
+  test from compiling until it is classified and driven.
 
 ## Live items
 

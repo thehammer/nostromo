@@ -7,6 +7,9 @@ import NostromoKit
 // `tests/no_shell_surface.rs` and `tests/no_shell_behaviour.rs`.
 final class TrackerCommandBlockTests: XCTestCase {
 
+    /// The gate says a person clicked (the gate itself is tested in `TrackerCommandGateTests`).
+    static let aPersonsClick: TrackerCommandBlockView.Permit = { _ in .human(sourcePid: nil, sourceState: nil) }
+
     // MARK: Fixtures
 
     /// `tests/fixtures/tracker/commands.txt`: `(name, text)` for every command that must be accepted.
@@ -254,6 +257,7 @@ final class TrackerCommandBlockTests: XCTestCase {
         let id = "retry-1074"
         let block = try XCTUnwrap(try h.row(id).commandBlock)
         XCTAssertEqual(block.ranItCheckbox.state, .off)
+        block.permit = Self.aPersonsClick
         block.ranItCheckbox.performClick(nil)
         XCTAssertEqual(h.sent.map(\.ops), [[.status(id: id, status: "done")]])
         XCTAssertEqual(h.sent.first?.base, 7)
@@ -266,6 +270,7 @@ final class TrackerCommandBlockTests: XCTestCase {
         let block = try XCTUnwrap(try h.row("retry-1074").commandBlock)
         XCTAssertFalse(block.ranItCheckbox.isEnabled)
         XCTAssertEqual(block.copyButton.isEnabled, true, "Copy never needs the daemon")
+        block.permit = Self.aPersonsClick
         block.ranItCheckbox.performClick(nil)
         XCTAssertTrue(h.sent.isEmpty)
     }
@@ -284,5 +289,116 @@ final class TrackerCommandBlockTests: XCTestCase {
         let plain = try XCTUnwrap(items.first { ($0["id"] as? String) == "revie-1111" })
         XCTAssertEqual(plain["kind"] as? String, "item")
         XCTAssertTrue(plain["command"] is NSNull)
+    }
+
+    // MARK: A ticked command shows "Ran it" ticked (Perri's fix 2)
+
+    private func doneCommandHarness() throws -> (h: TrackerEditHarness, section: String) {
+        let id = "retry-1074"
+        let h = try TrackerEditHarness(self, configure: { try $0.setStatus(id, "done") })
+        let section = try XCTUnwrap(h.script.item(id)?["section"] as? String)
+        // The daemon never sends `ran: true`: a ticked command is `done`.
+        XCTAssertEqual(h.script.item(id)?["ran"] as? Bool, false)
+        h.pane.toggleDoneGroup(section: section)
+        h.window.contentView?.layoutSubtreeIfNeeded()
+        return (h, section)
+    }
+
+    func testADoneCommandInTheDoneGroupShowsRanItTickedNotUnticked() throws {
+        let (h, _) = try doneCommandHarness()
+        let block = try XCTUnwrap(try h.row("retry-1074").commandBlock)
+        XCTAssertEqual(block.ranItCheckbox.state, .on, "a done command is one the person ran")
+        XCTAssertTrue(block.isRan)
+        // And a click on the ticked box un-ticks it: the tick it sends is the one the box invites.
+        block.permit = Self.aPersonsClick
+        block.ranItCheckbox.performClick(nil)
+        XCTAssertEqual(h.sent.count, 1)
+    }
+
+    func testAnUntickedCommandStillShowsRanItUnticked() throws {
+        let h = try TrackerEditHarness(self)
+        XCTAssertEqual(try XCTUnwrap(try h.row("retry-1074").commandBlock).ranItCheckbox.state, .off)
+    }
+
+    func testTheShowReportSaysARanCommandRanWhenItIsDone() throws {
+        let (h, _) = try doneCommandHarness()
+        let sections = try XCTUnwrap(h.pane.showReport()["sections"] as? [[String: Any]])
+        let items = sections.flatMap { ($0["items"] as? [[String: Any]]) ?? [] }
+        let command = try XCTUnwrap(items.first { ($0["id"] as? String) == "retry-1074" })
+        XCTAssertEqual(command["status"] as? String, "done")
+        XCTAssertEqual(command["ran"] as? Bool, true, "a done command ran: the report matches the row")
+    }
+
+    // MARK: Hazard warning on the row the pane really draws (Perri's fix 5)
+
+    func testTheRowsEnvironmentBadgeCarriesTheWarningGlyphAndTheWordForEveryHazard() throws {
+        let h = try TrackerEditHarness(self)
+        var seen = Set<String>()
+        for node in h.script.itemNodes {
+            guard let env = node["env"] as? String, let id = node["id"] as? String,
+                  (node["status"] as? String) != "done", let row = h.pane.rowViews["item:\(id)"],
+                  let badge = row.envBadgeLabel else { continue }
+            let wire = TrackerEnvWire(wire: env)
+            let word = try XCTUnwrap(TrackerEnvBadge.text(wire))
+            let hazard = TrackerEnvBadge.isHazard(wire)
+            seen.insert(word)
+            XCTAssertTrue(badge.stringValue.hasSuffix(word), "\(id): the word is text: \(badge.stringValue)")
+            XCTAssertEqual(badge.stringValue.unicodeScalars.contains("\u{26A0}"), hazard,
+                           "\(id) \(word): the glyph is on the real row's badge exactly when it is a hazard")
+            XCTAssertEqual(badge.accessibilityLabel()?.contains(word), true, "\(id): VoiceOver names it")
+            XCTAssertEqual(badge.accessibilityLabel()?.contains("take care") ?? false, hazard, "\(id) VoiceOver says take care")
+            // The block never repeats the badge (the row draws it once).
+            XCTAssertNil(row.commandBlock?.envBadge)
+        }
+        XCTAssertTrue(seen.isSuperset(of: ["PROD"]), "the golden board shows hazards: \(seen)")
+        XCTAssertGreaterThanOrEqual(seen.count, 2, "more than one environment is checked: \(seen)")
+    }
+
+    func testTheRowsHazardBadgeIsAtLeast4_5To1OnItsFill() throws {
+        let h = try TrackerEditHarness(self)
+        let badge = try XCTUnwrap(try h.row("retry-1074").envBadgeLabel)
+        XCTAssertEqual(badge.textColor, TrackerTheme.hazard)
+        let fill = composite(TrackerTheme.hazardFill, over: TrackerTheme.background)
+        XCTAssertGreaterThanOrEqual(contrast(TrackerTheme.hazard, fill), 4.5)
+    }
+
+    // MARK: Hostile text read from the file (Perri's fix 3)
+
+    func testACommandTheDaemonWithheldShowsNoBlockNoTextAndNothingToCopy() throws {
+        let id = "retry-1074"
+        let h = try TrackerEditHarness(self, configure: {
+            try $0.updateItem(id) { item in
+                item.removeValue(forKey: "command")
+                item["command_withheld"] = true
+            }
+        })
+        let row = try h.row(id)
+        XCTAssertNil(row.commandBlock, "no block: there is no text to draw or copy")
+        let mark = try XCTUnwrap(row.withheldMark)
+        XCTAssertEqual(mark.stringValue, "command withheld")
+        XCTAssertEqual(mark.accessibilityLabel()?.contains("withheld"), true)
+        let everything = namesInTree(row).joined(separator: "\n")
+        XCTAssertFalse(everything.contains("php artisan"), "the old command text is nowhere in the row")
+        XCTAssertFalse(namesInTree(row).contains("Copy"))
+    }
+
+    // MARK: A cut command (Perri's fix 7)
+
+    func testACommandOverTheLimitIsShownCutAndCannotBeCopied() throws {
+        let board = pasteboard()
+        board.clearContents()
+        board.setString("untouched", forType: .string)
+        let long = String(repeating: "x", count: TrackerCommandText.maxScalars + 10)
+        let view = block(long, board: board)
+        XCTAssertTrue(view.isCut)
+        XCTAssertEqual(view.cutBadge?.stringValue, "CUT")
+        XCTAssertFalse(view.copyButton.isEnabled, "Copy is off for a cut command")
+        view.copyButton.performClick(nil)
+        view.copyPressed(nil)
+        XCTAssertEqual(board.string(forType: .string), "untouched", "a half command never reaches the clipboard")
+        let whole = block("ls -la", board: board)
+        XCTAssertFalse(whole.isCut)
+        XCTAssertNil(whole.cutBadge)
+        XCTAssertTrue(whole.copyButton.isEnabled)
     }
 }

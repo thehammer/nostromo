@@ -30,8 +30,23 @@ final class TrackerCommandBlockView: NSView {
     private(set) var isRan: Bool
 
     /// Fired by the Ran it checkbox; the owner sends the pane's Tick. The checkbox never flips by itself:
-    /// it shows what the board says.
+    /// it shows what the board says. Fires only for a person's own click (`HumanGesture.permit`): input
+    /// from app-control, an Accessibility press or a stale event is refused, says so on the block
+    /// (`noticeText`) and sends nothing.
     var onRanIt: (() -> Void)?
+
+    /// The gate the Ran it checkbox asks first. Tests replace it; the live one is `HumanGesture.permit`
+    /// on the current event, exactly like the staging and Merge controls.
+    typealias Permit = (NSView) -> HumanGestureVerdict
+    var permit: Permit = { HumanGesture.permit(NSApp?.currentEvent, control: $0) }
+
+    /// Why the last Ran it press did nothing ("Not ticked: click it yourself"), nil after a person's click.
+    private(set) var noticeText: String?
+    private(set) var noticeLabel: NSTextField?
+
+    /// The command is longer than the block shows (`TrackerCommandText.maxScalars`): what is drawn is a
+    /// cut, so Copy is off rather than put half a command on the clipboard.
+    let isCut: Bool
 
     private let pasteboard: NSPasteboard
     private let lineCount: Int
@@ -42,6 +57,7 @@ final class TrackerCommandBlockView: NSView {
     private(set) var ranItCheckbox: NSButton!
     private(set) var envBadge: NSTextField?
     private(set) var lineBadge: NSTextField?
+    private(set) var cutBadge: NSTextField?
 
     /// - Parameters:
     ///   - showsEnvBadge: a row that already draws the environment badge in its own right column passes false.
@@ -49,6 +65,7 @@ final class TrackerCommandBlockView: NSView {
          pasteboard: NSPasteboard = .general) {
         let shown = TrackerCommandText.displayed(command)
         self.displayedText = shown
+        self.isCut = TrackerCommandText.wasCut(command)
         self.env = env
         self.isHazard = env.map(TrackerEnvBadge.isHazard) ?? false
         self.envBadgeText = showsEnvBadge ? env.flatMap(TrackerEnvBadge.text) : nil
@@ -71,14 +88,28 @@ final class TrackerCommandBlockView: NSView {
 
     /// Copy puts exactly the displayed string on the pasteboard, as plain text only.
     @objc func copyPressed(_ sender: Any?) {
+        guard !isCut else { return }
         pasteboard.clearContents()
         pasteboard.setString(displayedText, forType: .string)
     }
 
-    @objc private func ranItPressed(_ sender: NSButton) {
+    @objc func ranItPressed(_ sender: NSButton) {
         // No optimistic display: the checkbox goes back to what the board says until the board changes.
         sender.state = isRan ? .on : .off
+        guard case .human = permit(sender) else {
+            showNotice("Not ticked: click it yourself")
+            return
+        }
+        showNotice(nil)
         onRanIt?()
+    }
+
+    private func showNotice(_ text: String?) {
+        noticeText = text
+        noticeLabel?.stringValue = text ?? ""
+        noticeLabel?.isHidden = text == nil
+        noticeLabel?.setAccessibilityLabel(text.map { "\($0). The tick must come from you, not from another program." })
+        needsLayout = true
     }
 
     // MARK: - Build
@@ -134,13 +165,31 @@ final class TrackerCommandBlockView: NSView {
             envBadge?.setAccessibilityLabel("Environment: \(text)")
         }
 
+        if isCut {
+            let cut = badge("CUT", hazard: true)
+            cut.setAccessibilityLabel("Command shown cut: it is longer than the block can show, so it cannot be copied")
+            cut.toolTip = "Longer than this block shows: not copied."
+            cutBadge = cut
+        }
+        let notice = NSTextField(labelWithString: "")
+        notice.font = TrackerTheme.metaFont
+        notice.textColor = Theme.amber
+        notice.lineBreakMode = .byTruncatingTail
+        notice.refusesFirstResponder = true
+        notice.isHidden = true
+        addSubview(notice)
+        noticeLabel = notice
+
         let copy = NSButton(title: "Copy", target: self, action: #selector(copyPressed(_:)))
         copy.isBordered = false
         copy.refusesFirstResponder = true
         copy.attributedTitle = NSAttributedString(string: "Copy", attributes: [
             .font: TrackerTheme.metaFont, .foregroundColor: Theme.cornflower])
         copy.setAccessibilityLabel("Copy command")
-        copy.setAccessibilityHelp("Copies the command to the clipboard so you can paste it yourself.")
+        copy.setAccessibilityHelp(isCut
+            ? "Off: the command is longer than the block shows."
+            : "Copies the command to the clipboard so you can paste it yourself.")
+        copy.isEnabled = !isCut
         addSubview(copy)
         copyButton = copy
 
@@ -198,7 +247,7 @@ final class TrackerCommandBlockView: NSView {
         let pad = Self.pad
         edge.frame = NSRect(x: 0, y: 0, width: 3, height: bounds.height)
         var x = pad + (isHazard ? 3 : 0)
-        for label in [envBadge, lineBadge].compactMap({ $0 }) {
+        for label in [envBadge, lineBadge, cutBadge].compactMap({ $0 }) {
             let bw = badgeWidth(label)
             label.frame = NSRect(x: x, y: pad + 2, width: bw, height: 15)
             x += bw + 4
@@ -209,6 +258,10 @@ final class TrackerCommandBlockView: NSView {
         right -= ranWidth + 8
         let copyWidth = ceil(copyButton.intrinsicContentSize.width)
         copyButton.frame = NSRect(x: right - copyWidth, y: pad, width: copyWidth, height: Self.headerHeight)
+        if let noticeLabel {
+            let room = max(right - copyWidth - 8 - x, 0)
+            noticeLabel.frame = NSRect(x: x, y: pad + 2, width: room, height: 15)
+        }
 
         let textX = pad + (isHazard ? 3 : 0)
         let area = NSRect(x: textX, y: pad + Self.headerHeight + 2,
