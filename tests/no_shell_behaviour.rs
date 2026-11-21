@@ -137,6 +137,7 @@ struct World {
     rx: Mutex<broadcast::Receiver<ServerMsg>>,
     tx: broadcast::Sender<ServerMsg>,
     spawned: Mutex<usize>,
+    clock: Arc<FakeClock>,
 }
 
 impl World {
@@ -158,7 +159,9 @@ impl World {
         );
         let clock = Arc::new(FakeClock::at_secs(1_760_540_000));
         let registry = Arc::new(TrackerRegistry::new(RegistryParts::hermetic(
-            state_root, home, clock,
+            state_root,
+            home,
+            clock.clone(),
         )));
         let sessions = Arc::new(Mutex::new(SessionManager::with_store_path(
             base.join("sessions.json"),
@@ -194,6 +197,7 @@ impl World {
             rx: Mutex::new(rx),
             tx,
             spawned: Mutex::new(0),
+            clock,
         }
     }
 
@@ -247,6 +251,37 @@ impl World {
         }
     }
 
+    fn tick(&self, secs: i64) {
+        self.clock.advance(chrono::Duration::seconds(secs));
+    }
+
+    /// An item of the board as the pane sees it.
+    fn item(&self, id: &str) -> nostromo::tracker::view::ViewItem {
+        self.registry
+            .board_view(TAG)
+            .expect("board")
+            .nodes
+            .into_iter()
+            .find_map(|n| match n {
+                nostromo::tracker::view::ViewNode::Item(i) if i.id == id => Some(i),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no item {id}"))
+    }
+
+    /// A status conflict on `id`: the agent's `in-progress` loses to the person's tick two seconds later.
+    async fn status_conflict(&self, id: &str) {
+        self.tick(100);
+        let res = self
+            .tool(json!({"op": "status", "id": id, "status": "in-progress"}))
+            .await;
+        assert_eq!(res["ok"], json!(true), "{res}");
+        self.tick(2);
+        self.pane(vec![pane_status(id, "done")])
+            .await
+            .assert_ok("the person's tick over the agent's status");
+    }
+
     fn board(&self) -> String {
         let path = self.registry.bound_path(TAG).expect("a bound board");
         String::from_utf8_lossy(&std::fs::read(path).expect("board file")).into_owned()
@@ -274,7 +309,7 @@ impl PaneOutcome {
 }
 
 /// Every pane op's name, by an EXHAUSTIVE match: a new `TrackerPaneOp` variant stops this file from
-/// compiling until it is named here, listed in [`ALL_PANE_OPS`] and driven below. The surface tests
+/// compiling until it is named here and the drive then has to cover it ([`declared_pane_ops`]). The surface tests
 /// and this one are the tripwire: a pane op nobody classified cannot slip in.
 fn pane_op_name(op: &TrackerPaneOp) -> &'static str {
     match op {
@@ -291,18 +326,35 @@ fn pane_op_name(op: &TrackerPaneOp) -> &'static str {
     }
 }
 
-const ALL_PANE_OPS: [&str; 10] = [
-    "status",
-    "edit",
-    "add",
-    "move",
-    "remove",
-    "restore_text",
-    "restore",
-    "clear_badge",
-    "ack_dropped",
-    "resolve_conflict",
-];
+/// The pane ops the protocol DECLARES, read from the enum's own source (`src/ipc/protocol.rs`), as the
+/// wire names (`AckDropped` -> `ack_dropped`). This is the list the drive must cover: it comes from the
+/// declaration, not from a list typed here, so a variant left out of the drive fails the test even when
+/// it was named in [`pane_op_name`]'s match.
+fn declared_pane_ops() -> Vec<String> {
+    let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ipc/protocol.rs"))
+        .expect("protocol.rs");
+    let start = text.find("pub enum TrackerPaneOp {").expect("the enum is declared");
+    let body = &text[start..];
+    let end = body.find("\n}\n").expect("the enum ends");
+    let mut names = Vec::new();
+    for line in body[..end].lines().skip(1) {
+        let Some(rest) = line.strip_prefix("    ") else { continue };
+        let Some(first) = rest.chars().next() else { continue };
+        if !first.is_ascii_uppercase() {
+            continue;
+        }
+        let ident: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        let mut snake = String::new();
+        for (i, c) in ident.chars().enumerate() {
+            if c.is_ascii_uppercase() && i > 0 {
+                snake.push('_');
+            }
+            snake.push(c.to_ascii_lowercase());
+        }
+        names.push(snake);
+    }
+    names
+}
 
 fn pane_status(id: &str, status: &str) -> TrackerPaneOp {
     TrackerPaneOp::Status {
@@ -484,10 +536,6 @@ async fn driving_every_tracker_op_with_every_command_and_hostile_string_writes_n
     w.pane(pane(vec![TrackerPaneOp::ClearBadge { id: "cmd-3".into() }]))
         .await
         .assert_ok("clear_badge");
-    let ack = w
-        .pane(pane(vec![TrackerPaneOp::AckDropped { id: "cmd-3".into() }]))
-        .await;
-    assert!(ack.ok == ack.code.is_none(), "ack_dropped: {ack:?}");
     w.pane(pane(vec![pane_status("cmd-1", "todo")]))
         .await
         .assert_ok("untick");
@@ -503,11 +551,67 @@ async fn driving_every_tracker_op_with_every_command_and_hostile_string_writes_n
     .await
     .assert_refused("resolve_conflict");
     assert_eq!(w.board(), before, "a refused edit changes nothing");
+    // The SUCCESS paths: a real conflict is resolved, and a real dropped-conflict count is acknowledged.
+    // A write placed only on a successful resolve or ack (the refused path above never reaches it) is
+    // seen here.
+    w.status_conflict("cmd-5").await;
+    let conflict = w
+        .item("cmd-5")
+        .conflicts
+        .first()
+        .cloned()
+        .expect("the agent's lost status is a conflict on cmd-5");
+    assert_eq!(conflict.field, "status");
+    w.pane(pane(vec![TrackerPaneOp::ResolveConflict {
+        id: "cmd-5".into(),
+        field: "status".into(),
+        keep: ConflictKeep::Losing,
+        conflict_id: Some(conflict.conflict_id.clone()),
+        index: None,
+    }]))
+    .await
+    .assert_ok("resolve_conflict: a real conflict, kept the agent's value");
+    assert!(
+        w.item("cmd-5").conflicts.iter().all(|c| c.conflict_id != conflict.conflict_id),
+        "the conflict is settled"
+    );
+    // Fifty more conflicts push the oldest past the board's cap of fifty; the item says so, and the
+    // person acknowledges it.
+    w.status_conflict("cmd-6").await;
+    let bulk: Vec<Value> = (0..50)
+        .map(|i| json!({"op": "upsert", "id": format!("bulk-{i}"), "section": "now", "text": format!("Bulk {i}")}))
+        .collect();
+    let res = w.tool(json!({"ops": bulk})).await;
+    assert_eq!(res["ok"], json!(true), "{res}");
+    let _ = w.tool(json!({"op": "read"})).await;
+    for i in 0..50 {
+        w.status_conflict(&format!("bulk-{i}")).await;
+    }
+    let dropped = w
+        .registry
+        .board_view(TAG)
+        .expect("board")
+        .nodes
+        .into_iter()
+        .find_map(|n| match n {
+            nostromo::tracker::view::ViewNode::Item(i) if i.dropped_conflicts > 0 => Some(i.id),
+            _ => None,
+        })
+        .expect("the cap dropped an item's only conflict");
+    w.pane(pane(vec![TrackerPaneOp::AckDropped { id: dropped.clone() }]))
+        .await
+        .assert_ok("ack_dropped: a real dropped count");
+    assert_eq!(w.item(&dropped).dropped_conflicts, 0, "the count is acknowledged");
     w.pane(pane(vec![TrackerPaneOp::Remove { id: "cmd-4".into() }]))
         .await
         .assert_ok("remove");
-    for name in ALL_PANE_OPS {
-        assert!(driven.contains(&name), "pane op `{name}` was never driven");
+    let declared = declared_pane_ops();
+    assert!(declared.len() >= 10, "the declaration was read: {declared:?}");
+    for name in &declared {
+        assert!(driven.contains(&name.as_str()), "pane op `{name}` was never driven");
+    }
+    for name in &driven {
+        assert!(declared.iter().any(|d| d == name), "`{name}` is driven but not declared: {declared:?}");
     }
     // A file edit ticking a command, as the user's editor would.
     let path = w.registry.bound_path(TAG).unwrap();

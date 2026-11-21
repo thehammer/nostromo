@@ -91,3 +91,36 @@ fn a_file_written_command_with_an_escape_sequence_or_over_the_length_limit_is_wi
     let at_limit = staged(&"x".repeat(4_000));
     assert!(!at_limit.command_withheld && at_limit.command.is_some());
 }
+
+/// Everything the withheld item's raw markdown could carry to a clipboard or a terminal.
+const HOSTILE: &str = "echo a\u{1b}[201~b\u{202e}c\u{e0101}d\u{0}e";
+
+#[test]
+fn a_withheld_items_source_never_carries_the_raw_command() {
+    // The command sits in a fence in the file; a newline inside would end the fence, so it is
+    // written as the remaining hostile bytes only.
+    let item = staged(HOSTILE);
+    assert!(item.command_withheld);
+    assert_eq!(item.source, nostromo::tracker::view::WITHHELD_SOURCE);
+    for bad in ['\u{1b}', '\u{202e}', '\u{e0101}', '\u{0}'] {
+        assert!(!item.source.contains(bad), "U+{:04X} in source", bad as u32);
+    }
+    let wire = serde_json::to_string(&item).unwrap();
+    assert!(!wire.contains("201~"), "the paste-end sequence is not on the wire: {wire}");
+    assert!(!wire.contains("echo a"), "no part of the command is on the wire: {wire}");
+}
+
+#[test]
+fn a_withheld_item_in_a_whole_board_leaves_no_hostile_byte_in_the_joined_sources() {
+    let parsed = parse(board_with_command(HOSTILE).as_bytes()).expect("parses");
+    let view = build(&parsed, &ViewFacts::default());
+    let joined: String = view.nodes.iter().map(|n| n.source()).collect();
+    assert!(!joined.contains('\u{1b}') && !joined.contains('\u{202e}') && !joined.contains('\u{0}'));
+    assert!(joined.contains("command withheld"));
+}
+
+#[test]
+fn a_clean_commands_source_is_still_its_raw_markdown() {
+    let item = staged("php artisan queue:retry 8812");
+    assert!(item.source.contains("php artisan queue:retry 8812"));
+}

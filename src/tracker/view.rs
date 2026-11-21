@@ -143,7 +143,8 @@ pub struct ViewItem {
     pub ran: bool,
     /// The item's command was withheld: the board file holds one with control, escape or
     /// invisible characters (or one over the length limit) that the MCP path would have
-    /// refused. `command` is then absent, so nothing hostile is drawn or copyable.
+    /// refused. `command` is then absent and `source` is a plain marker (never the item's raw
+    /// markdown), so nothing hostile is drawn or copied.
     #[serde(default, skip_serializing_if = "is_false")]
     pub command_withheld: bool,
     /// The live source this item follows and how fresh it is (T6).
@@ -459,8 +460,17 @@ fn checked_command(command: Option<&String>) -> (Option<String>, bool) {
     }
 }
 
+/// What a withheld item's `source` is on the wire: a plain marker line. The item's own markdown holds
+/// the refused command (the Mac's Copy as Markdown copies `source`), so none of it leaves the daemon.
+pub const WITHHELD_SOURCE: &str = "<!-- nostromo: command withheld -->\n";
+
 fn view_item(item: &Item, source: String, facts: &ViewFacts) -> ViewItem {
     let (command, command_withheld) = checked_command(item.command.as_ref());
+    let source = if command_withheld {
+        WITHHELD_SOURCE.to_string()
+    } else {
+        source
+    };
     ViewItem {
         id: item.id.clone(),
         section: item.section.clone(),

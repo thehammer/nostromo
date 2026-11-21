@@ -874,6 +874,9 @@ public enum TrackerCommandText {
         return String(out)
     }
 
+    /// `displayed`'s filter for a scalar other than newline and tab (what a copy keeps too).
+    static func keepsForCopy(_ scalar: Unicode.Scalar) -> Bool { keeps(scalar) }
+
     private static func keeps(_ scalar: Unicode.Scalar) -> Bool {
         if scalar == "\n" || scalar == "\t" { return true }
         switch scalar.properties.generalCategory {
@@ -1038,6 +1041,58 @@ public enum TrackerMarkdown {
             if case .item(let item) = node, item.id == id { return item.source }
         }
         return nil
+    }
+
+    // MARK: What is copied
+    //
+    // Copy as Markdown puts text on the pasteboard that a person pastes into a terminal or an editor. It
+    // must never carry a byte the daemon refuses in a command (escape, the bracketed-paste end, bidi,
+    // tag and other invisible characters, NUL): those are dropped from everything copied, and an item
+    // whose command was withheld copies as a marker, never as its source. The raw `board`/`section`/`item`
+    // above stay exact (Undo puts a removed item back from them); the pane copies with these.
+
+    /// What a withheld item copies as (the daemon sends the same text as its `source`).
+    public static let withheldMarker = "<!-- nostromo: command withheld -->\n"
+
+    /// The text with every refused character removed (newline and tab stay).
+    public static func copySafe(_ text: String) -> String {
+        var out = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars where scalar == "\n" || scalar == "\t" || TrackerCommandText.keepsForCopy(scalar) {
+            out.append(scalar)
+        }
+        return String(out)
+    }
+
+    public static func copyBoard(_ board: TrackerBoardViewWire) -> String {
+        board.nodes.map { Self.copySource($0) }.joined()
+    }
+
+    public static func copySection(_ id: String, in board: TrackerBoardViewWire) -> String? {
+        var out: String?
+        for node in board.nodes {
+            switch node {
+            case .section(let sid, _, _):
+                if out != nil { return out }
+                if sid == id { out = Self.copySource(node) }
+            case .logHeading:
+                if out != nil { return out }
+            default:
+                if out != nil { out! += Self.copySource(node) }
+            }
+        }
+        return out
+    }
+
+    public static func copyItem(_ id: String, in board: TrackerBoardViewWire) -> String? {
+        for node in board.nodes {
+            if case .item(let item) = node, item.id == id { return copySource(node) }
+        }
+        return nil
+    }
+
+    static func copySource(_ node: TrackerNodeWire) -> String {
+        if case .item(let item) = node, item.commandWithheld { return withheldMarker }
+        return copySafe(source(node))
     }
 
     /// What a copy shows in place of a node this client does not recognise (it carries no source):

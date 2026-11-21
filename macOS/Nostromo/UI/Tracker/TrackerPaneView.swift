@@ -1592,7 +1592,7 @@ final class TrackerPaneView: NSView {
     /// The whole board's markdown (the file's bytes for a clean file).
     func copyBoardMarkdown() {
         guard let board else { return }
-        writeToPasteboard(TrackerMarkdown.board(board))
+        writeToPasteboard(TrackerMarkdown.copyBoard(board))
     }
 
     /// A section's or an item's markdown, exactly as the file has it.
@@ -1600,8 +1600,8 @@ final class TrackerPaneView: NSView {
         guard let board else { return }
         let text: String?
         switch row.content {
-        case .section(let section): text = TrackerMarkdown.section(section.id, in: board)
-        default: text = row.item.flatMap { TrackerMarkdown.item($0.id, in: board) }
+        case .section(let section): text = TrackerMarkdown.copySection(section.id, in: board)
+        default: text = row.item.flatMap { TrackerMarkdown.copyItem($0.id, in: board) }
         }
         if let text { writeToPasteboard(text) }
     }
