@@ -1267,3 +1267,90 @@ final class TrackerMarkdownTests: XCTestCase {
         XCTAssertNil(TrackerMarkdown.item("now", in: board), "a section id is not an item id")
     }
 }
+
+// MARK: - Copy as Markdown never emits what the daemon refuses
+
+final class TrackerCopySafetyTests: XCTestCase {
+
+    /// ESC[201~ ends a terminal's bracketed paste; the rest are bidi, a tag character, NUL and a newline.
+    private static let hostile = "echo a\u{1b}[201~b\u{202e}c\u{e0101}d\u{0}e\nrm -rf /"
+    private static let bad: [Unicode.Scalar] = ["\u{1b}", "\u{202e}", "\u{e0101}", "\u{0}"]
+
+    private func assertClean(_ text: String?, _ label: String, file: StaticString = #filePath, line: UInt = #line) {
+        guard let text else { return XCTFail("\(label): nothing copied", file: file, line: line) }
+        for scalar in Self.bad {
+            XCTAssertFalse(text.unicodeScalars.contains(scalar), "\(label): U+\(String(scalar.value, radix: 16)) was copied",
+                           file: file, line: line)
+        }
+        XCTAssertFalse(text.contains("201~") && text.unicodeScalars.contains("\u{1b}"), "\(label): the paste-end sequence was copied",
+                       file: file, line: line)
+    }
+
+    /// The golden board with an item whose raw markdown holds the hostile command, withheld or not (an
+    /// older daemon sends the raw source; a newer one the marker: the Mac is safe either way).
+    private func board(withheld: Bool) throws -> TrackerBoardViewWire {
+        try TFx.edited { edit in
+            try edit.updateItem("retry-1074") {
+                $0["source"] = "- [ ] Retry <!-- #retry-1074 1760540262 cmd -->\n  ```\n  \(Self.hostile)\n  ```\n"
+                if withheld { $0["command_withheld"] = true }
+            }
+        }
+    }
+
+    func testAWithheldItemCopiesAsItsMarkerNotItsSourceByItemSectionAndBoard() throws {
+        let board = try board(withheld: true)
+        let item = TrackerMarkdown.copyItem("retry-1074", in: board)
+        assertClean(item, "item")
+        XCTAssertEqual(item, TrackerMarkdown.withheldMarker)
+        XCTAssertFalse(item?.contains("rm -rf") ?? true, "no part of the command is copied")
+        let section = TrackerMarkdown.copySection("now", in: board)
+        assertClean(section, "section")
+        XCTAssertTrue(section?.contains(TrackerMarkdown.withheldMarker) ?? false)
+        XCTAssertFalse(section?.contains("rm -rf") ?? true)
+        let whole = TrackerMarkdown.copyBoard(board)
+        assertClean(whole, "board")
+        XCTAssertFalse(whole.contains("rm -rf"))
+    }
+
+    func testAnyRawSourceIsStrippedOfEverythingTheDaemonRefusesWhateverTheFlag() throws {
+        let board = try board(withheld: false)
+        assertClean(TrackerMarkdown.copyItem("retry-1074", in: board), "item")
+        assertClean(TrackerMarkdown.copySection("now", in: board), "section")
+        assertClean(TrackerMarkdown.copyBoard(board), "board")
+    }
+
+    func testAHostileProseSourceIsStrippedToo() throws {
+        let board = try TFx.edited { edit in
+            var nodes = edit.nodes
+            for index in nodes.indices where (nodes[index]["type"] as? String) == "prose" {
+                nodes[index]["source"] = "plain \(Self.hostile) text\n"
+                break
+            }
+            edit.nodes = nodes
+        }
+        let whole = TrackerMarkdown.copyBoard(board)
+        assertClean(whole, "board")
+        XCTAssertTrue(whole.contains("plain echo a"), "the visible text stays")
+    }
+
+    func testACleanBoardCopiesItsBytesExactly() throws {
+        let board = try TFx.golden()
+        let file = try TFx.fixtureText("board-60.md")
+        XCTAssertEqual(TrackerMarkdown.copyBoard(board), file)
+        XCTAssertEqual(TrackerMarkdown.copyItem("check-1000", in: board), TrackerMarkdown.item("check-1000", in: board))
+        XCTAssertEqual(TrackerMarkdown.copySection("next", in: board), TrackerMarkdown.section("next", in: board))
+    }
+
+    func testTheRawItemApiStaysExactForUndo() throws {
+        let board = try board(withheld: false)
+        XCTAssertTrue(TrackerMarkdown.item("retry-1074", in: board)?.contains("\u{1b}[201~") ?? false)
+    }
+
+    func testAConflictValueIsShownWithoutTheRefusedCharacters() {
+        let shown = TrackerConflictText.display(Self.hostile, field: "command")
+        for scalar in Self.bad { XCTAssertFalse(shown.unicodeScalars.contains(scalar)) }
+        let spoken = TrackerConflictText.plain(Self.hostile, field: "command")
+        for scalar in Self.bad { XCTAssertFalse(spoken.unicodeScalars.contains(scalar)) }
+        XCTAssertTrue(spoken.hasPrefix("echo a"))
+    }
+}
