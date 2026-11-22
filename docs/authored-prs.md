@@ -57,6 +57,15 @@ refused (and the snapshot says `refresh_blocked`) while one runs or while paused
   sooner, but at most once per 5 min (each retry is an uncharged 401).
   No token: `token: missing`, no requests; while someone watches it is looked for
   again at most every 5 min, so a token that appears later needs no restart.
+  The token is found in this order: `GITHUB_TOKEN`, `GH_TOKEN`, `oauth_token` in
+  `~/.config/gh/hosts.yml`, then `gh auth token --hostname github.com` (modern
+  `gh` keeps the token in the macOS keychain, so `hosts.yml` has none). `gh` is
+  found by absolute path only, never `PATH`: `$NOSTROMO_GH_CLI`, then
+  `/opt/homebrew/bin/gh`, `/usr/local/bin/gh`, `/usr/bin/gh`. It runs with a fixed
+  argv, no stdin, stderr discarded, a cleared environment (`HOME`, `USER`,
+  `GH_CONFIG_DIR`, `XDG_CONFIG_HOME` only), a 5 s timeout and a capped stdout; its
+  answer must be one printable-ASCII word. A token from `gh` is cached 5 min and a
+  failure 30 s, so it runs at most about twice a minute. Neither is logged.
 - A secondary limit is `paused` too: a 403 or 429 without `Retry-After` and with
   `remaining` above 0 pauses for a minute, as does a GraphQL 200 whose
   `errors[].type` is `RATE_LIMITED`. A pause from a header's reset time is capped at
