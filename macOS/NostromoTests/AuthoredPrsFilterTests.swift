@@ -266,11 +266,11 @@ final class AuthoredPrsFilterBarTests: XCTestCase {
         let bad = entry.title.unicodeScalars.filter { $0.value < 0x20 || (0x202A...0x202E).contains($0.value) || (0x2066...0x2069).contains($0.value) }
         XCTAssertTrue(bad.isEmpty, "no bidi or control character in the menu: \(entry.title.debugDescription)")
         XCTAssertTrue(entry.title.hasPrefix("Evil"), entry.title)
-        XCTAssertLessThanOrEqual(entry.title.count, 60 + " (1)".count)
+        XCTAssertEqual(entry.title.count, 60 + " (1)".count, "the menu name is cut at exactly the 60-character org cap, then its count")
         let tip = entry.toolTip ?? ""
         XCTAssertTrue(tip.hasPrefix("Evil"))
-        XCTAssertLessThanOrEqual(tip.count, MotherOriginDisplay.tooltipCap, "the tooltip is capped")
-        XCTAssertGreaterThan(tip.count, entry.title.count, "but still longer than the menu title")
+        XCTAssertEqual(tip.count, MotherOriginDisplay.tooltipCap, "the tooltip is cut at exactly the tooltip cap")
+        XCTAssertTrue(tip.hasSuffix("…"))
         XCTAssertTrue(tip.unicodeScalars.allSatisfy { $0.value >= 0x20 && !(0x202A...0x202E).contains($0.value) })
     }
 
@@ -579,6 +579,19 @@ final class AuthoredPrsFilterBarTests: XCTestCase {
         XCTAssertTrue(strip.repoPopUp.nextKeyView === strip.sessionPopUp)
     }
 
+    /// Tab out of Session goes to the list by an explicit link, not by whatever the window's loop says.
+    func testTabOutOfSessionGoesToTheListByAnExplicitLink() throws {
+        let overview = makeOverview()
+        let strip = overview.filterStrip
+        XCTAssertTrue(strip.sessionPopUp.nextKeyView === overview.outline, "Tab from Session lands on the list")
+        XCTAssertTrue(strip.viewAfterStrip === overview.outline)
+        choose(strip.orgPopUp, "carefeed")
+        XCTAssertTrue(strip.sessionPopUp.nextKeyView === overview.outline, "still, with a selection made")
+        // The whole chain is explicit: Org, Repo, Session, then the list.
+        XCTAssertTrue(strip.orgPopUp.nextKeyView === strip.repoPopUp)
+        XCTAssertTrue(strip.repoPopUp.nextKeyView === strip.sessionPopUp)
+    }
+
     func testCommandOAndCommandRAreNotTheListsWhileAPopUpHasTheKeyboard() throws {
         let overview = makeOverview()
         let window = try XCTUnwrap(overview.window)
@@ -757,9 +770,20 @@ final class AuthoredPrsFilterBarTests: XCTestCase {
                     XCTAssertTrue(tip.hasSuffix("…") && expectedFull.hasPrefix(String(tip.dropLast())), "\(context): capped from the front of the name")
                 }
                 XCTAssertNotEqual(popUp.toolTip, full, "\(context): and is not the capped menu title with its count")
-                XCTAssertTrue(popUp.itemArray.allSatisfy { item in
-                    item.toolTip.map { !$0.isEmpty && item.title.hasPrefix(String($0.prefix(8))) } ?? false
-                }, "\(context): every entry has its name as a tooltip")
+                // Every entry's tooltip is exactly its own sanitised name (up to the cap): the title is that name,
+                // capped for the menu, plus " (n)" for a pick that has a count; "All" has no count.
+                for item in popUp.itemArray {
+                    let tooltip = try XCTUnwrap(item.toolTip, "\(context): '\(item.title)' has a tooltip")
+                    XCTAssertFalse(tooltip.isEmpty, "\(context): '\(item.title)' has a non-empty tooltip")
+                    XCTAssertLessThanOrEqual(tooltip.count, MotherOriginDisplay.tooltipCap, "\(context): '\(item.title)' tooltip is capped")
+                    let name = item.title.replacingOccurrences(of: #" \(\d+\)$"#, with: "", options: .regularExpression)
+                    if name.hasSuffix("…") {
+                        XCTAssertTrue(tooltip.hasPrefix(String(name.dropLast())), "\(context): '\(item.title)' tooltip continues its title")
+                        XCTAssertGreaterThan(tooltip.count, name.count - 1, "\(context): '\(item.title)' tooltip is the longer name")
+                    } else {
+                        XCTAssertEqual(tooltip, name, "\(context): '\(item.title)' tooltip is exactly its name, without the count")
+                    }
+                }
             }
         }
     }

@@ -594,8 +594,9 @@ final class AuthoredPrsFilterTests: XCTestCase {
         let full = entry?.fullTitle ?? ""
         XCTAssertFalse(hasBidiOrControl(full), "the tooltip name is sanitised too")
         XCTAssertTrue(full.hasPrefix("Evil"))
-        XCTAssertGreaterThan(full.count, title.count, "longer than the menu title: \(full.count)")
-        XCTAssertLessThanOrEqual(full.count, MotherOriginDisplay.tooltipCap, "but capped at the tooltip cap")
+        XCTAssertEqual(title.count, F.orgCap, "the menu title is cut at exactly the org cap")
+        XCTAssertEqual(full.count, MotherOriginDisplay.tooltipCap, "the tooltip is cut at exactly the tooltip cap (120)")
+        XCTAssertEqual(MotherOriginDisplay.tooltipCap, 120)
         XCTAssertTrue(full.hasSuffix("…"))
 
         // It still selects by what the daemon named it, and the empty message is clean.

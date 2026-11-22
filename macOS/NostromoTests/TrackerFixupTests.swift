@@ -275,6 +275,46 @@ final class TrackerFixupTests: XCTestCase {
         XCTAssertFalse(h.window.firstResponder === h.window, "focus must not be dropped onto the window")
     }
 
+    /// The title editor held focus while it was pending (the user clicked back in), then the user went to the
+    /// composer and on to the bare window: the focus flag must not outlive that, or a late refusal pulls focus back.
+    func testALateRefusalAfterTheUserWentFromThePendingTitleEditorToTheComposerDoesNotTakeFocus() throws {
+        let h = try TrackerEditHarness(self)
+        let composer = try saveTitleFromComposer(h)
+        let editor = try XCTUnwrap(try h.row(plain).titleEditor)
+        XCTAssertTrue(h.window.makeFirstResponder(editor), "the user clicks back into the pending editor")
+        XCTAssertTrue(h.window.makeFirstResponder(h.rig.composer), "and then goes to the composer")
+        XCTAssertTrue(h.window.firstResponder === h.rig.composer.currentEditor() || h.window.firstResponder === composer, "setup: the composer has focus")
+        XCTAssertTrue(h.window.makeFirstResponder(nil), "and then onto the bare window")
+        XCTAssertTrue(h.window.firstResponder === h.window, "setup: the window holds focus")
+        h.answer(try XCTUnwrap(h.sent.last).requestId, ok: false, error: ["code": "board_missing"])
+        XCTAssertTrue(h.window.firstResponder === h.window, "a refusal never pulls focus back into the editor: now \(String(describing: h.window.firstResponder))")
+    }
+
+    /// P4b limit, pinned (not fixed): a second save made after a late ok but before the board that shows that ok
+    /// restores the title from before the FIRST save when undone, one step further back than the late ok's text.
+    /// (When the board has arrived by the time of the second save, the undo goes to the late ok's text: see
+    /// `testUndoAfterALateOkThatArrivesBeforeItsBoardRestoresTheTitleTheLateOkSaved`.)
+    func testASecondSaveBetweenALateOkAndItsBoardUndoesToTheTitleBeforeTheFirstSave() throws {
+        let h = try TrackerEditHarness(self)
+        let original = try XCTUnwrap(try h.row(plain).row.item?.editText)
+        h.pane.beginEdit(item: plain, kind: .title)
+        let editor = try XCTUnwrap(try h.row(plain).titleEditor)
+        h.type("Slow title", into: editor)
+        h.pressReturn(in: editor)
+        let first = try XCTUnwrap(h.sent.last).requestId
+        h.fire(5)                                                    // no answer: the editor opens up again
+        h.type("Slow title, and more", into: editor)
+        h.answer(first, ok: true, version: 8)                        // the late ok; its board (version 8) has not arrived
+        let still = try XCTUnwrap(try h.row(plain).titleEditor, "the late ok does not close an editor with newer typing")
+        h.pressReturn(in: still)                                     // the second save, before the board
+        XCTAssertEqual(h.sent.count, 2, "setup: the second save was sent")
+        try h.agentChange(setText(plain, "Slow title"))              // the board that shows the first save: version 8
+        try h.echo(setText(plain, "Slow title, and more"))           // the second save: version 9
+        h.pane.performUndo()
+        XCTAssertEqual(h.sent.last?.ops, [.restoreText(id: plain, text: original)],
+                       "the limit: back to the title before the first save, not to \"Slow title\"")
+    }
+
     func testAnUndoIsMadeAgainstTheVersionTheRowShowsNotTheNewestBoard() throws {
         let h = try TrackerEditHarness(self)
         try XCTUnwrap(try h.row(plain).tickButton).performClick(nil)

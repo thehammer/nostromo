@@ -307,6 +307,7 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
         skeleton.translatesAutoresizingMaskIntoConstraints = false
         header.onRefresh = { [weak self] in self?.refresh() }
         filterStrip.onChange = { [weak self] selection in self?.setFilter(selection) }
+        filterStrip.viewAfterStrip = outline
         message.onShowAll = { [weak self] in self?.setFilter(.all) }
 
         for v in [header, filterStrip, scroll, message, skeleton] as [NSView] { addSubview(v) }

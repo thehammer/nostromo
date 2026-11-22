@@ -144,4 +144,67 @@ final class TranscriptWidthAnchorTests: XCTestCase {
         rig.changeWidth(to: 600)   // a second change before any pass ran
         XCTAssertEqual(rig.firstVisibleTurnIdentity(), turnBefore)
     }
+
+    // MARK: Review leftovers from #494
+
+    /// AppKit clamps the clip's origin itself when the document is resized, before the pass runs. The
+    /// rig does not resize the document until the pass, so the test makes that move by hand.
+    func testTheWidthPassKeepsTheCapturedPositionEvenThoughAppKitMovedTheClipOriginBeforeIt() {
+        let rig = makeRig()
+        park(rig, at: .prose, into: 20)
+        let before = rig.snapshot()
+        let turnBefore = rig.firstVisibleTurnIdentity()
+        rig.changeWidth(to: 880 * 0.66, settle: false)
+        let origin = rig.clip.bounds.minY
+        rig.userScroll(to: origin + 30)   // what the clamp does; not the operator
+        XCTAssertEqual(rig.clip.bounds.minY, origin + 30, accuracy: 0.5, "setup: the origin moved before the pass")
+        rig.runPass()
+        rig.settle()
+        let after = rig.snapshot()
+        XCTAssertEqual(rig.firstVisibleTurnIdentity(), turnBefore)
+        XCTAssertEqual(after.firstVisible?.itemKey, before.firstVisible?.itemKey)
+        let drift = abs(CGFloat(after.firstVisible?.offsetPt ?? .infinity) - CGFloat(before.firstVisible?.offsetPt ?? 0))
+        XCTAssertLessThanOrEqual(drift, TranscriptViewportCoordinator.widthAnchorTolerance + 1,
+                                 "the pass restored the captured position (\(drift) pt off), not the clamped one 30 pt below it")
+    }
+
+    /// The same window, for a pane that was following the tail: the operator scrolls up before the pass.
+    func testAnOperatorWhoScrollsUpBetweenAWidthChangeAndItsPassIsNotPulledBackToTheBottom() {
+        let rig = makeRig()
+        rig.focusComposer()
+        XCTAssertTrue(rig.followTail.isPinned)
+        rig.changeWidth(to: 880 * 0.66, settle: false)
+        rig.userScroll(to: rig.virtualizer.offset(of: 3))
+        rig.followTail.setPinned(false, cause: .userScroll)
+        rig.runPass()
+        XCTAssertFalse(rig.followTail.isPinned, "the operator stopped following; the pass does not turn it back on")
+        XCTAssertGreaterThan(rig.snapshot().bottomOffsetPt, rig.viewportHeight, "and the view is still where they scrolled to, far from the bottom")
+    }
+
+    /// The restore puts the line on the side of its old offset that its fraction of the item's new height
+    /// says, within the tolerance. A restore that ignored the fraction would always land half a line above.
+    func testTheRestoredOffsetFollowsTheFractionOfTheItemsNewHeightWithinTheTolerance() throws {
+        let rig = makeRig()
+        park(rig, at: .prose, into: 20)
+        let turn = rig.turns[3]
+        func height(of key: String) throws -> CGFloat {
+            let island = try XCTUnwrap(rig.materialized[turn.id])
+            let top = try XCTUnwrap(island.offset(ofItemKey: key))
+            var low = top, high = island.frame.height
+            for _ in 0 ..< 24 {
+                let mid = (low + high) / 2
+                if island.anchorItem(atY: mid)?.key == key { low = mid } else { high = mid }
+            }
+            return high - top
+        }
+        let oldHeight = try height(of: "b10")
+        let oldOffset = CGFloat(try XCTUnwrap(rig.snapshot().firstVisible?.offsetPt))
+        rig.changeWidth(to: 880 * 0.66)
+        let newHeight = try height(of: "b10")
+        let tolerance = TranscriptViewportCoordinator.widthAnchorTolerance
+        let expected = min(max(oldOffset / oldHeight * newHeight, oldOffset - tolerance), oldOffset + tolerance)
+        let after = CGFloat(try XCTUnwrap(rig.snapshot().firstVisible?.offsetPt))
+        XCTAssertNotEqual(expected, oldOffset - tolerance, accuracy: 1, "setup: the fraction decides here, so ignoring it is visible")
+        XCTAssertEqual(after, expected, accuracy: 1, "old \(oldOffset) of \(oldHeight), new height \(newHeight)")
+    }
 }

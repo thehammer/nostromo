@@ -113,12 +113,19 @@ final class AuthoredPrsFilterStripView: NSView {
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ] + widths)
         // Tab order is set here, not left to the window's key-view loop (which is geometry-ordered and depends on
-        // the system's keyboard-navigation setting): Org, then Repo, then Session.
+        // the system's keyboard-navigation setting): Org, then Repo, then Session, then `viewAfterStrip`.
         orgPopUp.nextKeyView = repoPopUp
         repoPopUp.nextKeyView = sessionPopUp
         setAccessibilityElement(false)
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Where Tab goes from the Session pop-up: the list below the strip. Set by the owner; named explicitly so
+    /// leaving the strip does not depend on the window's key-view loop (a `recalculateKeyViewLoop()` would
+    /// otherwise overwrite the links to wherever the geometry sends it).
+    weak var viewAfterStrip: NSView? {
+        didSet { sessionPopUp.nextKeyView = viewAfterStrip }
+    }
 
     /// Below this width the captions give way to the pop-ups: three pop-ups and their captions do not fit a
     /// narrow pane, and each pop-up is already named by its accessibility label and tooltip.
