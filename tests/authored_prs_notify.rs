@@ -162,6 +162,8 @@ fn pr() -> AuthoredPr {
         pill: true,
         head_sha_short: None,
         perri: None,
+        merge_via: None,
+        queue: None,
         attention_key: "attention-1".into(),
     }
 }

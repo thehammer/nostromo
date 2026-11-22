@@ -14,6 +14,20 @@
 //! 4. The merge request carries `sha` (the live head), so GitHub itself refuses
 //!    when the head moved after the checks above, and never an admin or bypass
 //!    parameter, so branch protection always applies.
+//! 5. Where the base branch has a **merge queue** GitHub refuses a direct merge,
+//!    so the same live read says which way the PR goes in (`merge_via`), and
+//!    after every rule above the PR is *enqueued* instead
+//!    (`enqueuePullRequest`, pinned to the live head with `expectedHeadOid`,
+//!    never `jump`, never an admin or bypass input) and the answer is `queued`.
+//!    The way the app worded its confirmation (`expected_via`; absent means a
+//!    direct merge) must be the way GitHub says now, or nothing is sent
+//!    (`via_changed`). If the live read cannot say whether a queue exists the
+//!    verb refuses (`queue_unknown`): it never guesses. The queue is the BASE
+//!    branch's (`repository.mergeQueue(branch: <base>)`), cross-checked against
+//!    the PR's own `mergeQueue` field: no queue on the base is a direct merge,
+//!    a queue needs both reads to say so (else `queue_unknown`). The live base
+//!    branch must also be the one the row showed (else `via_changed`). A PR
+//!    already in the queue answers `already_queued` and nothing is sent.
 //!
 //! Answers are codes only. Nothing GitHub says (a message, a title) is
 //! forwarded or logged. One request id gets one answer, and a second request for
@@ -29,16 +43,24 @@ use super::actions::AuthoredPrActions;
 use super::classify::{classify, is_human, RawPr};
 use super::github::{ApiError, MergeError, Target};
 use super::links::key_string;
-use super::snapshot::{valid_repo, AuthoredPr, ChecksState, Lifecycle, PollState, ReviewState};
+use super::snapshot::{
+    valid_repo, AuthoredPr, ChecksState, Lifecycle, MergeVia, PollState, ReviewState,
+};
 use super::verdicts::{is_full_sha, plain_text, short_sha, Verdict};
-use super::wire::{AuthoredPrResult, Done};
+use super::wire::AuthoredPrResult;
+use serde::{Deserialize, Serialize};
 
 /// How many answers are remembered, for a repeated request id.
 const REMEMBERED_MERGES: usize = 64;
 
 /// Every answer code the verb gives.
-pub const CODES: [&str; 17] = [
+pub const CODES: [&str; 22] = [
     "ok",
+    "queued",
+    "already_queued",
+    "queue_refused",
+    "queue_unknown",
+    "via_changed",
     "not_found",
     "not_open",
     "draft",
@@ -57,6 +79,21 @@ pub const CODES: [&str; 17] = [
     "not_permitted",
 ];
 
+/// A successful answer. `{}` is "merged now" (`ok`); `{"code":"queued"}` is "in
+/// the merge queue" (`queued`). Never anything GitHub said.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MergeDone {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+}
+
+/// What a successful call did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Merged,
+    Queued,
+}
+
 /// Merges in flight and the answers already given.
 #[derive(Default)]
 pub struct MergeBook {
@@ -67,7 +104,7 @@ pub struct MergeBook {
 struct BookState {
     in_flight: HashSet<String>,
     /// `(request id, PR, answer)`: an id answers only for the PR it first named.
-    answers: VecDeque<(String, String, AuthoredPrResult<Done>)>,
+    answers: VecDeque<(String, String, AuthoredPrResult<MergeDone>)>,
 }
 
 /// Releases the PR's in-flight mark when dropped, even if the task is.
@@ -106,7 +143,7 @@ impl MergeBook {
         })
     }
 
-    fn remember(&self, request_id: &str, pr: &str, result: &AuthoredPrResult<Done>) {
+    fn remember(&self, request_id: &str, pr: &str, result: &AuthoredPrResult<MergeDone>) {
         let mut g = self.state.lock().unwrap_or_else(|e| e.into_inner());
         g.answers
             .push_back((request_id.to_owned(), pr.to_owned(), result.clone()));
@@ -117,7 +154,7 @@ impl MergeBook {
 }
 
 enum BeginOutcome<'a> {
-    Again(AuthoredPrResult<Done>),
+    Again(AuthoredPrResult<MergeDone>),
     Busy,
     Go(InFlight<'a>),
 }
@@ -126,7 +163,7 @@ enum BeginOutcome<'a> {
 /// the head the app showed (short), who asked and the code. What the client sent
 /// is shown only when it is the shape it must be (a client cannot put text in a
 /// log line); never a token, title or anything GitHub said.
-fn log_refusal(repo: &str, number: u64, head_short: &str, by: &str, code: &str) {
+fn log_refusal(repo: &str, number: u64, head_short: &str, by: &str, code: &str, via: &str) {
     let head = Some(head_short)
         .filter(|h| h.len() == 8 && h.bytes().all(|b| b.is_ascii_hexdigit()))
         .unwrap_or("invalid");
@@ -137,16 +174,26 @@ fn log_refusal(repo: &str, number: u64, head_short: &str, by: &str, code: &str) 
         head = %head,
         by = %plain_text(by, 80),
         code,
+        via,
         "authored-pr merge refused"
     );
 }
 
-fn refuse(code: &'static str) -> Result<(), &'static str> {
+fn refuse<T>(code: &'static str) -> Result<T, &'static str> {
     Err(code)
 }
 
+fn via_word(via: MergeVia) -> &'static str {
+    match via {
+        MergeVia::Direct => "direct",
+        MergeVia::Queue => "queue",
+    }
+}
+
 impl AuthoredPrActions {
-    /// Merge `repo#number`. `expected_head_short` is the head the app showed;
+    /// Merge `repo#number` (or add it to its merge queue). `expected_head_short`
+    /// is the head the app showed; `expected_via` is the way it said the PR goes
+    /// in (`None`: a direct merge, what an app that does not know queues says);
     /// `by` is who asked (an audit label, never content).
     pub async fn merge(
         &self,
@@ -154,22 +201,37 @@ impl AuthoredPrActions {
         repo: &str,
         number: u64,
         expected_head_short: &str,
+        expected_via: Option<MergeVia>,
         by: &str,
-    ) -> AuthoredPrResult<Done> {
+    ) -> AuthoredPrResult<MergeDone> {
         let pr = key_string(repo, number);
         let _in_flight = match self.merges.begin(request_id, &pr) {
             BeginOutcome::Again(first) => return first,
             // Not remembered: it is not the first answer to anything.
             BeginOutcome::Busy => {
-                log_refusal(repo, number, expected_head_short, by, "busy");
+                log_refusal(repo, number, expected_head_short, by, "busy", "unknown");
                 return AuthoredPrResult::err("busy");
             }
             BeginOutcome::Go(guard) => guard,
         };
-        let result = match self.merge_once(repo, number, expected_head_short, by).await {
-            Ok(()) => AuthoredPrResult::Ok(Done {}),
+        let mut via = "unknown";
+        let result = match self
+            .merge_once(
+                repo,
+                number,
+                expected_head_short,
+                expected_via,
+                by,
+                &mut via,
+            )
+            .await
+        {
+            Ok(Outcome::Merged) => AuthoredPrResult::Ok(MergeDone::default()),
+            Ok(Outcome::Queued) => AuthoredPrResult::Ok(MergeDone {
+                code: Some("queued".to_owned()),
+            }),
             Err(code) => {
-                log_refusal(repo, number, expected_head_short, by, code);
+                log_refusal(repo, number, expected_head_short, by, code, via);
                 AuthoredPrResult::err(code)
             }
         };
@@ -182,8 +244,10 @@ impl AuthoredPrActions {
         repo: &str,
         number: u64,
         expected_head_short: &str,
+        expected_via: Option<MergeVia>,
         by: &str,
-    ) -> Result<(), &'static str> {
+        via_label: &mut &'static str,
+    ) -> Result<Outcome, &'static str> {
         if !valid_repo(repo) || number == 0 {
             return refuse("not_found");
         }
@@ -215,6 +279,11 @@ impl AuthoredPrActions {
                 })
             }
         };
+        // Already waiting in the queue: nothing to send, and nothing to gate.
+        if live.is_in_merge_queue && classify(&live, None).lifecycle == Lifecycle::Open {
+            *via_label = "queue";
+            return refuse("already_queued");
+        }
         check_live_state(&live)?;
 
         // The head the app showed is the head being merged.
@@ -226,6 +295,23 @@ impl AuthoredPrActions {
             return refuse("head_changed");
         }
         self.check_perri(&row.repo, number, head)?;
+
+        // Every rule holds. How GitHub takes the PR in decides the action, and it
+        // must be the way the app told the person.
+        let via = live.merge_via().ok_or("queue_unknown")?;
+        // The queue decision was made for the live base branch: it must be the
+        // one the row showed, or the person confirmed something else.
+        if classify(&live, None).base_ref != row.base_ref {
+            *via_label = via_word(via);
+            return refuse("via_changed");
+        }
+        *via_label = via_word(via);
+        if expected_via.unwrap_or(MergeVia::Direct) != via {
+            return refuse("via_changed");
+        }
+        if via == MergeVia::Queue {
+            return self.enqueue_once(&api, &row, &live, number, head, by).await;
+        }
 
         match api.merge(&row.repo, number, head).await {
             Ok(()) => {}
@@ -246,11 +332,49 @@ impl AuthoredPrActions {
             number,
             head = %&head[..8],
             by = %plain_text(by, 80),
+            via = "direct",
             "authored-pr merged"
         );
         // The row turns merged on the next read: ask for it now.
         self.changed(&row);
-        Ok(())
+        Ok(Outcome::Merged)
+    }
+
+    /// Add the PR to its merge queue, pinned to `head`.
+    async fn enqueue_once(
+        &self,
+        api: &super::github::Api,
+        row: &AuthoredPr,
+        live: &RawPr,
+        number: u64,
+        head: &str,
+        by: &str,
+    ) -> Result<Outcome, &'static str> {
+        match api.enqueue(&live.id, head).await {
+            Ok(()) => {}
+            Err(e) => {
+                return refuse(match e {
+                    MergeError::HeadMoved => "head_changed",
+                    MergeError::Forbidden | MergeError::Unauthorized => "token_cannot_merge",
+                    MergeError::NotFound => "not_found",
+                    MergeError::RateLimited => "rate_limited",
+                    MergeError::Transport => "unreachable",
+                    // GitHub declined to enqueue (not ready, conflicts, ...).
+                    MergeError::NotAllowed | MergeError::Unmergeable => "queue_refused",
+                });
+            }
+        }
+        tracing::info!(
+            repo = %row.repo,
+            number,
+            head = %&head[..8],
+            by = %plain_text(by, 80),
+            via = "queue",
+            "authored-pr queued"
+        );
+        // The row shows its queue entry on the next read: ask for it now.
+        self.changed(row);
+        Ok(Outcome::Queued)
     }
 
     /// Perri approved exactly `head`. A verdict for any other head is `perri_stale`.

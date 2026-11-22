@@ -20,7 +20,8 @@ private let mergeLog = Logger(subsystem: "com.hammer.nostromo", category: "autho
 protocol AuthoredPrMergeTransport: AnyObject {
     /// The daemon advertised `authored_prs_merge_v1` and is connected.
     var isMergeAvailable: Bool { get }
-    func merge(repo: String, number: Int, expectedHeadShaShort: String,
+    /// `expectedVia` is how the confirmation worded it: `.queue` for "add to the merge queue", nil for a squash merge.
+    func merge(repo: String, number: Int, expectedHeadShaShort: String, expectedVia: AuthoredPrMergeVia?,
                done: @escaping (AuthoredPrAnswer<AuthoredPrDone>) -> Void)
 }
 
@@ -95,7 +96,7 @@ final class AuthoredPrMerger {
         guard transport.isMergeAvailable, let button = model.mergeButton, button.state == .ready,
               let confirmation = button.confirmation else { return }
         switch attempts[model.id]?.progress {
-        case .merging?, .merged?: return
+        case .merging?, .merged?, .queued?: return
         case .failed?, nil: break
         }
         guard permit(event, control, "merge") else {
@@ -148,8 +149,21 @@ final class AuthoredPrMerger {
         let now = row.flatMap { $0.mergeButton?.state == .ready ? $0.mergeButton?.confirmation : nil }
         let read = session.confirmation
         guard now?.expectedHeadShaShort != read.expectedHeadShaShort || now?.base != read.base
-                || now?.approval != read.approval else { return }
+                || now?.approval != read.approval || now?.via != read.via else { return }
         session.cancel()
+    }
+
+    /// The PRs a snapshot now shows (an Overview's `displayed`). A queued attempt whose PR has been seen in the merge
+    /// queue and is no longer in it, while still open, was dropped from the queue (the Kit words it and the button is
+    /// available again). Rows the snapshot does not hold, and every other kind of attempt, are left alone.
+    func reconcile(prs: [AuthoredPr]) {
+        var changed = false
+        for pr in prs {
+            guard let attempt = attempts[pr.id] else { continue }
+            let next = AuthoredPrsPresentation.reconcile(attempt, with: pr)
+            if next != attempt { attempts[pr.id] = next; changed = true }
+        }
+        if changed { changes.send() }
     }
 
     // MARK: Private
@@ -176,9 +190,18 @@ final class AuthoredPrMerger {
         }
         attempts[rowId] = AuthoredPrMergeAttempt(head: head, progress: .merging)
         changes.send()
-        transport.merge(repo: confirmation.repo, number: confirmation.number, expectedHeadShaShort: head) { [weak self] answer in
+        let via: AuthoredPrMergeVia? = confirmation.via == .queue ? .queue : nil
+        transport.merge(repo: confirmation.repo, number: confirmation.number, expectedHeadShaShort: head,
+                        expectedVia: via) { [weak self] answer in
             guard let self else { return }
-            let progress: AuthoredPrMergeProgress = answer.mergeFailure.map { .failed($0) } ?? .merged
+            // `queued` and `already_queued` both leave the PR in the merge queue: never read as merged, and never a
+            // reason to move the row (only a later snapshot does).
+            let progress: AuthoredPrMergeProgress
+            switch answer.mergeFailure {
+            case nil: progress = answer.mergeQueued ? .queued : .merged
+            case .alreadyQueued?: progress = .queued
+            case let code?: progress = .failed(code)
+            }
             self.attempts[rowId] = AuthoredPrMergeAttempt(head: head, progress: progress)
             self.changes.send()
         }

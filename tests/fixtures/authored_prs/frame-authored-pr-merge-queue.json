@@ -1,0 +1,8 @@
+{
+  "type": "authored_pr_merge",
+  "request_id": "r8",
+  "repo": "thehammer/nostromo",
+  "number": 458,
+  "expected_head_sha_short": "0123abcd",
+  "expected_via": "queue"
+}

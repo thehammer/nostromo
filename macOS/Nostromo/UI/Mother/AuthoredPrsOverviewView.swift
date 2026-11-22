@@ -215,6 +215,9 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     private(set) var perriAvailable = false
     /// The daemon advertised `authored_prs_merge_v1`: READY rows get their Merge button (with Perri's verdicts too).
     private(set) var mergeAvailable = false
+    /// The daemon advertised `authored_prs_merge_queue_v1`: rows that merge through a queue can be offered "Add to
+    /// merge queue" (without it they are shown off, "Update Nostromo to merge into a merge queue").
+    private(set) var mergeQueueAvailable = false
     /// The Repo and Session pop-ups' selection. It only chooses which rows show: the header total, the pinned
     /// row's pill, the sidebar pills and notifications all read the full snapshot.
     private(set) var filter: AuthoredPrsFilterSelection
@@ -341,6 +344,7 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
         setHandoffAvailable(store.authoredPrsNotifySupported)
         setPerriAvailable(store.authoredPrsPerriSupported)
         setMergeAvailable(store.authoredPrsMergeSupported)
+        setMergeQueueAvailable(store.authoredPrsMergeQueueSupported)
         store.$authoredPrsNotifySupported
             .dropFirst()
             .sink { [weak self] supported in self?.setHandoffAvailable(supported) }
@@ -352,6 +356,10 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
         store.$authoredPrsMergeSupported
             .dropFirst()
             .sink { [weak self] supported in self?.setMergeAvailable(supported) }
+            .store(in: &cancellables)
+        store.$authoredPrsMergeQueueSupported
+            .dropFirst()
+            .sink { [weak self] supported in self?.setMergeQueueAvailable(supported) }
             .store(in: &cancellables)
     }
 
@@ -373,6 +381,13 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     func setMergeAvailable(_ available: Bool) {
         guard available != mergeAvailable else { return }
         mergeAvailable = available
+        rebuildRows()
+    }
+
+    /// The daemon can (or can no longer) put a PR in a merge queue: rows are rebuilt with or without the button.
+    func setMergeQueueAvailable(_ available: Bool) {
+        guard available != mergeQueueAvailable else { return }
+        mergeQueueAvailable = available
         rebuildRows()
     }
 
@@ -542,10 +557,14 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
                                        handoff: handoffAvailable,
                                        tellable: handoff.map { Set($0.openFocuses().map(\.tag)) },
                                        perri: perriAvailable, merge: mergeAvailable && merger != nil,
-                                       mergeAttempts: merger?.attempts ?? [:])
+                                       mergeQueue: mergeQueueAvailable, mergeAttempts: merger?.attempts ?? [:])
     }
 
     private func rebuildRows() {
+        // A queued attempt learns here whether the PR is (still) in its queue; it moves no row by itself.
+        notifyingMerger = true
+        merger?.reconcile(prs: displayed)
+        notifyingMerger = false
         shownAttempts = merger?.attempts ?? [:]
         let selected = selectedRowId
         var newRowNodes: [String: OverviewNode] = [:]

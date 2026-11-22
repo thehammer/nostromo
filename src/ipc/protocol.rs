@@ -1318,6 +1318,12 @@ pub const FEATURE_AUTHORED_PRS_PERRI: &str = "authored_prs_perri_v1";
 /// `authored_pr_merge_result`).
 pub const FEATURE_AUTHORED_PRS_MERGE: &str = "authored_prs_merge_v1";
 
+/// The Merge verb goes through the base branch's merge queue where one is
+/// required: rows carry `merge_via` (`direct` or `queue`) and, while queued,
+/// `queue`; the merge request may carry `expected_via`; the answer may be
+/// `queued` (`{"status":"ok","value":{"code":"queued"}}`) or `already_queued`.
+pub const FEATURE_AUTHORED_PRS_MERGE_QUEUE: &str = "authored_prs_merge_queue_v1";
+
 /// The optional capability advertised in `Welcome.features`: this daemon takes
 /// `tracker_edit` (the pane edits the board as the user) and answers with
 /// `tracker_edit_result`. The Mac shows its edit controls only when present.
@@ -2424,6 +2430,10 @@ pub enum ClientMsg {
         repo: String,
         number: u64,
         expected_head_sha_short: String,
+        /// How the app told the person the PR goes in: `direct` or `queue`.
+        /// Absent means `direct` (an app that does not know merge queues).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_via: Option<crate::data::authored_prs::snapshot::MergeVia>,
     },
 }
 
@@ -3669,7 +3679,7 @@ pub enum ServerMsg {
     AuthoredPrMergeResult {
         request_id: String,
         result: crate::data::authored_prs::wire::AuthoredPrResult<
-            crate::data::authored_prs::wire::Done,
+            crate::data::authored_prs::merge::MergeDone,
         >,
     },
     /// The author's open PRs (`Topic::AuthoredPrs`, local peers only, and only

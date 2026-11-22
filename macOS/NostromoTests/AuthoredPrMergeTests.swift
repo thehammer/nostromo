@@ -515,14 +515,14 @@ final class AuthoredPrMergerTests: MouseQueueTestCase {
     private final class OneEntryTransport: AuthoredPrMergeTransport {
         var isMergeAvailable = true
         var requests = 0
-        func merge(repo: String, number: Int, expectedHeadShaShort: String,
+        func merge(repo: String, number: Int, expectedHeadShaShort: String, expectedVia: AuthoredPrMergeVia?,
                    done: @escaping (AuthoredPrAnswer<AuthoredPrDone>) -> Void) {
             requests += 1
         }
     }
 
     func testThereIsNoWayToMergeButTheOneVerbAndItNeedsTheExpectedHead() throws {
-        // `OneEntryTransport` implements `isMergeAvailable` and `merge(repo:number:expectedHeadShaShort:done:)` and
+        // `OneEntryTransport` implements `isMergeAvailable` and `merge(repo:number:expectedHeadShaShort:expectedVia:done:)` and
         // nothing else: it compiles only while the protocol asks for nothing more (no admin path, no force flag,
         // no second entry), and a merger drives it with exactly one call per confirm.
         let transport = OneEntryTransport()
@@ -680,7 +680,7 @@ final class AuthoredPrMergeLiveTransportTests: XCTestCase {
     func testItSendsOneMergeRequestWithTheRepoNumberAndExpectedHeadAndNothingElse() throws {
         let fixture = LiveMergeFixture()
         var answers: [AuthoredPrAnswer<AuthoredPrDone>] = []
-        fixture.transport.merge(repo: "thehammer/nostromo", number: 458, expectedHeadShaShort: "0123abcd") { answers.append($0) }
+        fixture.transport.merge(repo: "thehammer/nostromo", number: 458, expectedHeadShaShort: "0123abcd", expectedVia: nil) { answers.append($0) }
 
         XCTAssertEqual(fixture.sent.count, 1)
         let request = try XCTUnwrap(fixture.sent.first)
@@ -695,7 +695,7 @@ final class AuthoredPrMergeLiveTransportTests: XCTestCase {
     func testTheAnswerForItsRequestIdIsDeliveredOnce() throws {
         let fixture = LiveMergeFixture()
         var answers: [AuthoredPrAnswer<AuthoredPrDone>] = []
-        fixture.transport.merge(repo: "o/r", number: 1, expectedHeadShaShort: "0123abcd") { answers.append($0) }
+        fixture.transport.merge(repo: "o/r", number: 1, expectedHeadShaShort: "0123abcd", expectedVia: nil) { answers.append($0) }
         let id = try XCTUnwrap(fixture.sent.first).requestId
 
         fixture.transport.deliver(.merge(requestId: id, ok()))
@@ -707,7 +707,7 @@ final class AuthoredPrMergeLiveTransportTests: XCTestCase {
     func testAFailureCodeIsPassedThrough() throws {
         let fixture = LiveMergeFixture()
         var answers: [AuthoredPrAnswer<AuthoredPrDone>] = []
-        fixture.transport.merge(repo: "o/r", number: 1, expectedHeadShaShort: "0123abcd") { answers.append($0) }
+        fixture.transport.merge(repo: "o/r", number: 1, expectedHeadShaShort: "0123abcd", expectedVia: nil) { answers.append($0) }
         let id = try XCTUnwrap(fixture.sent.first).requestId
         fixture.transport.deliver(.merge(requestId: id, .failed(code: "perri_stale")))
         XCTAssertEqual(answers, [.failed(code: "perri_stale")])
@@ -716,7 +716,7 @@ final class AuthoredPrMergeLiveTransportTests: XCTestCase {
     func testAnAnswerForAnotherRequestIsIgnored() throws {
         let fixture = LiveMergeFixture()
         var answers: [AuthoredPrAnswer<AuthoredPrDone>] = []
-        fixture.transport.merge(repo: "o/r", number: 1, expectedHeadShaShort: "0123abcd") { answers.append($0) }
+        fixture.transport.merge(repo: "o/r", number: 1, expectedHeadShaShort: "0123abcd", expectedVia: nil) { answers.append($0) }
         let id = try XCTUnwrap(fixture.sent.first).requestId
 
         fixture.transport.deliver(.merge(requestId: "someone-elses-request", ok()))
@@ -737,7 +737,7 @@ final class AuthoredPrMergeLiveTransportTests: XCTestCase {
         for (name, make) in frames {
             let fixture = LiveMergeFixture()
             var answers: [AuthoredPrAnswer<AuthoredPrDone>] = []
-            fixture.transport.merge(repo: "o/r", number: 1, expectedHeadShaShort: "0123abcd") { answers.append($0) }
+            fixture.transport.merge(repo: "o/r", number: 1, expectedHeadShaShort: "0123abcd", expectedVia: nil) { answers.append($0) }
             let id = try XCTUnwrap(fixture.sent.first).requestId
 
             fixture.transport.deliver(make(id))
@@ -749,8 +749,8 @@ final class AuthoredPrMergeLiveTransportTests: XCTestCase {
     func testTwoMergesInFlightAreAnsweredEachByItsOwnId() throws {
         let fixture = LiveMergeFixture()
         var first: [AuthoredPrAnswer<AuthoredPrDone>] = [], second: [AuthoredPrAnswer<AuthoredPrDone>] = []
-        fixture.transport.merge(repo: "o/a", number: 1, expectedHeadShaShort: "0123abcd") { first.append($0) }
-        fixture.transport.merge(repo: "o/b", number: 2, expectedHeadShaShort: "4567abcd") { second.append($0) }
+        fixture.transport.merge(repo: "o/a", number: 1, expectedHeadShaShort: "0123abcd", expectedVia: nil) { first.append($0) }
+        fixture.transport.merge(repo: "o/b", number: 2, expectedHeadShaShort: "4567abcd", expectedVia: nil) { second.append($0) }
         XCTAssertEqual(fixture.sent.count, 2)
         XCTAssertNotEqual(fixture.sent[0].requestId, fixture.sent[1].requestId)
 
@@ -765,7 +765,7 @@ final class AuthoredPrMergeLiveTransportTests: XCTestCase {
         let fixture = LiveMergeFixture(timeout: 0.05)
         let answered = expectation(description: "the merge was answered unreachable")
         var answers: [AuthoredPrAnswer<AuthoredPrDone>] = []
-        fixture.transport.merge(repo: "o/r", number: 1, expectedHeadShaShort: "0123abcd") { answers.append($0); answered.fulfill() }
+        fixture.transport.merge(repo: "o/r", number: 1, expectedHeadShaShort: "0123abcd", expectedVia: nil) { answers.append($0); answered.fulfill() }
         let id = try XCTUnwrap(fixture.sent.first).requestId
 
         wait(for: [answered], timeout: 5)
@@ -778,7 +778,7 @@ final class AuthoredPrMergeLiveTransportTests: XCTestCase {
     func testAnAnswerBeforeTheTimeoutIsNotFollowedByAnUnreachable() throws {
         let fixture = LiveMergeFixture(timeout: 0.1)
         var answers: [AuthoredPrAnswer<AuthoredPrDone>] = []
-        fixture.transport.merge(repo: "o/r", number: 1, expectedHeadShaShort: "0123abcd") { answers.append($0) }
+        fixture.transport.merge(repo: "o/r", number: 1, expectedHeadShaShort: "0123abcd", expectedVia: nil) { answers.append($0) }
         let id = try XCTUnwrap(fixture.sent.first).requestId
         fixture.transport.deliver(.merge(requestId: id, ok()))
 
@@ -792,8 +792,8 @@ final class AuthoredPrMergeLiveTransportTests: XCTestCase {
     func testALostConnectionAnswersPendingMergesUnreachableOnce() throws {
         let fixture = LiveMergeFixture()
         var first: [AuthoredPrAnswer<AuthoredPrDone>] = [], second: [AuthoredPrAnswer<AuthoredPrDone>] = []
-        fixture.transport.merge(repo: "o/a", number: 1, expectedHeadShaShort: "0123abcd") { first.append($0) }
-        fixture.transport.merge(repo: "o/b", number: 2, expectedHeadShaShort: "4567abcd") { second.append($0) }
+        fixture.transport.merge(repo: "o/a", number: 1, expectedHeadShaShort: "0123abcd", expectedVia: nil) { first.append($0) }
+        fixture.transport.merge(repo: "o/b", number: 2, expectedHeadShaShort: "4567abcd", expectedVia: nil) { second.append($0) }
 
         fixture.transport.connectionLost()
         fixture.transport.connectionLost()
@@ -1744,7 +1744,7 @@ final class AuthoredPrMergeReviewFixTests: MouseQueueTestCase {
             mergeSupported: { true }, sendMerge: { sent.merges.append($0) }, mergeTimeout: 30)
         var merge: [AuthoredPrAnswer<AuthoredPrDone>] = []
         var link: [AuthoredPrAnswer<AuthoredPrDone>] = []
-        transport.merge(repo: "o/r", number: 1, expectedHeadShaShort: "0123abcd") { merge.append($0) }
+        transport.merge(repo: "o/r", number: 1, expectedHeadShaShort: "0123abcd", expectedVia: nil) { merge.append($0) }
         transport.link(repo: "o/r", number: 1, tag: "t") { link.append($0) }
 
         let passed = expectation(description: "the short timeout passed")
@@ -1897,5 +1897,269 @@ final class AuthoredPrMergeTwoWindowTests: MouseQueueTestCase {
 
         XCTAssertNil(rig.merger.presented, "the row the person read is gone from the window they read it in")
         XCTAssertTrue(rig.transport.calls.isEmpty)
+    }
+}
+
+
+// MARK: - The merge queue
+
+/// What the Mac does with `authored_prs_merge_queue_v1`: the confirmation per path, `expected_via` on the request,
+/// `queued` / `already_queued` answers, "In merge queue", "dropped", and a Mac that did not hear the feature.
+final class AuthoredPrMergeQueueMergerTests: MouseQueueTestCase {
+
+    private var rigs: [MergeRig] = []
+
+    override func tearDown() {
+        rigs.forEach { $0.close() }
+        rigs = []
+        super.tearDown()
+    }
+
+    private func makeRig() -> MergeRig {
+        let rig = MergeRig(allowEverything: true)
+        rigs.append(rig)
+        return rig
+    }
+
+    private func queueRow(_ pr: AuthoredPr, attempt: AuthoredPrMergeAttempt? = nil) -> AuthoredPrRowModel {
+        MF.row(pr, mergeQueue: true, attempt: attempt)
+    }
+
+    func testTheQueueConfirmationSaysAddToTheMergeQueueAndTheRequestSaysQueue() throws {
+        let rig = makeRig()
+        let pr = MF.queuePr()
+        rig.activate(queueRow(pr))
+        let session = try XCTUnwrap(rig.session)
+        XCTAssertEqual(session.confirmation.message,
+                       "Add #458 Fix the thing to the merge queue for main? Head 0aaaaaaa. Perri approved. Human approval: yes. Checks: green.")
+        XCTAssertEqual(session.confirmation.confirmTitle, "Add to merge queue")
+        XCTAssertTrue(rig.transport.calls.isEmpty, "pressing never sends")
+        rig.confirm()
+        XCTAssertEqual(rig.transport.calls, [RecordingMergeTransport.Call(repo: MF.repo, number: 458, head: MF.headA, via: .queue)])
+    }
+
+    func testADirectRowSendsNoViaAndKeepsTheSquashSentence() throws {
+        let rig = makeRig()
+        var pr = MF.readyPr()
+        pr.mergeVia = .direct
+        rig.activate(queueRow(pr))
+        XCTAssertTrue(try XCTUnwrap(rig.session).confirmation.message.hasPrefix("Squash and merge #458"))
+        rig.confirm()
+        XCTAssertEqual(rig.transport.calls.first?.via, nil)
+    }
+
+    func testQueuedIsNotMergedAndNeverRegroups() throws {
+        let rig = makeRig()
+        let pr = MF.queuePr()
+        rig.activate(queueRow(pr))
+        rig.confirm()
+        rig.transport.answer(.ok(AuthoredPrDone(queued: true)))
+        XCTAssertEqual(rig.merger.attempts[pr.id]?.progress, .queued)
+        let model = queueRow(pr, attempt: rig.merger.attempts[pr.id])
+        XCTAssertEqual(model.mergeButton?.state, .queued)
+        XCTAssertEqual(model.mergeButton?.title, "In merge queue")
+        // Same group as without the attempt: only a snapshot moves a row.
+        let groups = AuthoredPrsPresentation.groups([pr], now: APT.t0, timeZone: APT.utc, perri: true, merge: true,
+                                                    mergeQueue: true, mergeAttempts: rig.merger.attempts)
+        XCTAssertEqual(groups.map { $0.group }, [.ready])
+        // A second press opens nothing.
+        rig.merger.activate(model, anchor: rig.control, event: MF.human(in: rig.window), control: rig.control)
+        XCTAssertNil(rig.session)
+        XCTAssertEqual(rig.transport.calls.count, 1)
+    }
+
+    func testAlreadyQueuedAlsoLeavesThePrInTheQueue() throws {
+        let rig = makeRig()
+        let pr = MF.queuePr()
+        rig.activate(queueRow(pr))
+        rig.confirm()
+        rig.transport.answer(.failed(code: "already_queued"))
+        XCTAssertEqual(rig.merger.attempts[pr.id]?.progress, .queued)
+    }
+
+    func testAQueueRefusalIsANoticeAndTheButtonStaysAvailable() throws {
+        let rig = makeRig()
+        let pr = MF.queuePr()
+        rig.activate(queueRow(pr))
+        rig.confirm()
+        rig.transport.answer(.failed(code: "queue_refused"))
+        let model = queueRow(pr, attempt: rig.merger.attempts[pr.id])
+        XCTAssertEqual(model.mergeNotice, AuthoredPrsMergeWords.failure(.queueRefused))
+        XCTAssertEqual(model.mergeButton?.state, .ready)
+    }
+
+    func testAChangedWayInCancelsTheOpenConfirmation() throws {
+        let rig = makeRig()
+        rig.activate(queueRow(MF.queuePr()))
+        XCTAssertNotNil(rig.session)
+        var direct = MF.readyPr()
+        direct.mergeVia = .direct
+        rig.merger.rowsDidChange([queueRow(direct)])
+        XCTAssertNil(rig.session, "the sentence said queue; the row says direct now")
+        XCTAssertTrue(rig.transport.calls.isEmpty)
+    }
+
+    func testASnapshotThatKeepsTheWayInLeavesTheConfirmationOpen() throws {
+        let rig = makeRig()
+        rig.activate(queueRow(MF.queuePr()))
+        rig.merger.rowsDidChange([queueRow(MF.queuePr())])
+        XCTAssertNotNil(rig.session)
+    }
+
+    func testAQueueRowOnAMacThatDidNotHearTheFeatureOpensNothing() throws {
+        let rig = makeRig()
+        let model = MF.row(MF.queuePr(), mergeQueue: false)
+        XCTAssertEqual(model.mergeButton?.state, .unavailable)
+        XCTAssertEqual(model.mergeButton?.reason, "Update Nostromo to merge into a merge queue")
+        rig.activate(model)
+        XCTAssertNil(rig.session)
+        XCTAssertTrue(rig.transport.calls.isEmpty)
+    }
+
+    func testAnOldDaemonsRowIsStillADirectMerge() throws {
+        let rig = makeRig()
+        rig.activate(MF.row(MF.readyPr()))
+        XCTAssertTrue(try XCTUnwrap(rig.session).confirmation.message.hasPrefix("Squash and merge"))
+        XCTAssertEqual(try XCTUnwrap(rig.session).confirmation.via, .direct)
+    }
+
+    func testDroppedFromTheQueueShowsTheNoticeOnlyAfterTheEntryWasSeen() throws {
+        let rig = makeRig()
+        let pr = MF.queuePr()
+        rig.activate(queueRow(pr))
+        rig.confirm()
+        rig.transport.answer(.ok(AuthoredPrDone(queued: true)))
+        // A snapshot older than the enqueue: still waiting.
+        rig.merger.reconcile(prs: [pr])
+        XCTAssertEqual(rig.merger.attempts[pr.id]?.progress, .queued)
+        // The entry shows, then goes: dropped.
+        rig.merger.reconcile(prs: [MF.queuePr(entry: AuthoredPrQueue(state: .queued, position: 1))])
+        XCTAssertEqual(rig.merger.attempts[pr.id]?.progress, .queued)
+        rig.merger.reconcile(prs: [pr])
+        XCTAssertEqual(rig.merger.attempts[pr.id]?.progress, .failed(.droppedFromQueue))
+        let model = queueRow(pr, attempt: rig.merger.attempts[pr.id])
+        XCTAssertEqual(model.mergeNotice, "Dropped from the merge queue")
+        XCTAssertEqual(model.mergeButton?.state, .ready)
+        // A new press is allowed again.
+        rig.activate(model)
+        XCTAssertNotNil(rig.session)
+    }
+}
+
+final class AuthoredPrMergeQueueStoreTests: MouseQueueTestCase {
+
+    override func setUp() {
+        super.setUp()
+        AppStore.shared.resetAuthoredPrsForTesting()
+    }
+
+    override func tearDown() {
+        AppStore.shared.resetAuthoredPrsForTesting()
+        super.tearDown()
+    }
+
+    func testTheQueueFlagIsTrueOnlyWithTheMergeVerbAndTheListAndTheFeature() {
+        let store = AppStore.shared
+        XCTAssertFalse(store.authoredPrsMergeQueueSupported)
+        store.daemonConnectedForTesting(authoredPrs: true, perri: true, merge: true, mergeQueue: false)
+        XCTAssertFalse(store.authoredPrsMergeQueueSupported, "an older daemon")
+        store.daemonConnectedForTesting(authoredPrs: true, perri: true, merge: false, mergeQueue: true)
+        XCTAssertFalse(store.authoredPrsMergeQueueSupported, "without the merge verb")
+        store.daemonConnectedForTesting(authoredPrs: false, perri: true, merge: true, mergeQueue: true)
+        XCTAssertFalse(store.authoredPrsMergeQueueSupported, "without the list")
+        store.daemonConnectedForTesting(authoredPrs: true, perri: true, merge: true, mergeQueue: true)
+        XCTAssertTrue(store.authoredPrsMergeQueueSupported)
+        store.resetAuthoredPrsForTesting()
+        XCTAssertFalse(store.authoredPrsMergeQueueSupported)
+    }
+
+    func testTheFeatureNameIsTheDaemonsAndTheClientReadsIt() {
+        XCTAssertTrue(NostromodClient.supportsAuthoredPrsMergeQueue(features: ["authored_prs_merge_queue_v1"]))
+        XCTAssertFalse(NostromodClient.supportsAuthoredPrsMergeQueue(features: ["authored_prs_merge_v1"]))
+        XCTAssertFalse(NostromodClient.supportsAuthoredPrsMergeQueue(features: nil))
+    }
+}
+
+final class AuthoredPrMergeQueueOverviewTests: MouseQueueTestCase {
+
+    private var rigs: [MergeOverviewRig] = []
+
+    override func tearDown() {
+        rigs.forEach { $0.close() }
+        rigs = []
+        super.tearDown()
+    }
+
+    func testTheRowSaysAddToMergeQueueThenInMergeQueueThenDroppedAndNothingMoves() throws {
+        let pr = MF.queuePr(110)
+        let others = (100..<122).filter { $0 != 110 }.map { MF.readyPr($0) }
+        let rig = MergeOverviewRig(others + [pr], mergeQueue: true)
+        rigs.append(rig)
+        XCTAssertEqual(try rig.buttonTitle(pr), "Add to merge queue")
+        let height = try rig.rowView(pr).frame.height
+
+        try rig.mergeAndWait(pr)
+        XCTAssertEqual(try rig.buttonTitle(pr), "Adding…")
+        rig.answer(.ok(AuthoredPrDone(queued: true)))
+        XCTAssertEqual(try rig.buttonTitle(pr), "In merge queue")
+        XCTAssertFalse(try rig.buttonIsEnabled(pr))
+
+        // A snapshot shows the entry: the position joins the title; still READY.
+        rig.apply(others + [MF.queuePr(110, entry: AuthoredPrQueue(state: .queued, position: 2))])
+        XCTAssertEqual(try rig.buttonTitle(pr), "In merge queue (2)")
+
+        // The entry goes while the PR is still open: dropped, and pressable again.
+        rig.apply(others + [pr])
+        XCTAssertEqual(try rig.noticeText(pr), "Dropped from the merge queue")
+        XCTAssertEqual(try rig.buttonTitle(pr), "Add to merge queue")
+        XCTAssertTrue(try rig.buttonIsEnabled(pr))
+        XCTAssertEqual(try rig.rowView(pr).frame.height, height, accuracy: 0.5, "no row-height jump between states")
+    }
+
+    func testScrollSelectionAndHoverHoldStillThroughTheQueueStates() throws {
+        let pr = MF.queuePr(110)
+        let needs = (1...20).map { APT.pr($0, repo: MF.repo, title: "Needs you \($0)", group: .needsYou) }
+        let others = (100..<122).filter { $0 != 110 }.map { MF.readyPr($0) }
+        let all = needs + others + [pr]
+        let rig = MergeOverviewRig(all, mergeQueue: true)
+        rigs.append(rig)
+        let selected = MF.readyPr(109), hovered = MF.readyPr(111)
+        rig.overview.selectRow(id: selected.id)
+        let index = try XCTUnwrap(rig.overview.outlineRow(forRowId: pr.id))
+        let scroll = try XCTUnwrap(rig.scroll)
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: rig.outline.rect(ofRow: index).minY - 200))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        rig.overview.layoutSubtreeIfNeeded()
+        rig.overview.setHovered(rowId: hovered.id)
+        let origin = scroll.contentView.bounds.origin.y
+        XCTAssertGreaterThan(origin, 300, "precondition: scrolled well down")
+
+        func assertHeld(_ what: String, file: StaticString = #filePath, line: UInt = #line) {
+            XCTAssertEqual(scroll.contentView.bounds.origin.y, origin, accuracy: 0.5, "\(what): the scroll moved", file: file, line: line)
+            XCTAssertEqual(rig.overview.selectedRowId, selected.id, "\(what): the selection moved", file: file, line: line)
+            XCTAssertEqual(rig.overview.hoveredId, hovered.id, "\(what): the hover moved", file: file, line: line)
+        }
+        try rig.mergeAndWait(pr)
+        assertHeld("Adding…")
+        rig.answer(.ok(AuthoredPrDone(queued: true)))
+        assertHeld("In merge queue")
+        rig.apply(needs + others + [MF.queuePr(110, entry: AuthoredPrQueue(state: .queued, position: 1))])
+        assertHeld("a queue entry arrived")
+        rig.apply(needs + others + [pr])
+        assertHeld("dropped from the queue")
+    }
+
+    func testWithoutTheFeatureAQueueRowIsShownOffAndPressingItOpensNothing() throws {
+        let pr = MF.queuePr(110)
+        let rig = MergeOverviewRig([pr], mergeQueue: false)
+        rigs.append(rig)
+        XCTAssertFalse(try rig.buttonIsEnabled(pr))
+        try rig.press(pr)
+        XCTAssertNil(rig.merger.presented)
+        XCTAssertTrue(rig.transport.calls.isEmpty)
+        // The feature arrives: the row is rebuilt with the button.
+        rig.overview.setMergeQueueAvailable(true)
+        XCTAssertTrue(try rig.buttonIsEnabled(pr))
+        XCTAssertEqual(try rig.buttonTitle(pr), "Add to merge queue")
     }
 }

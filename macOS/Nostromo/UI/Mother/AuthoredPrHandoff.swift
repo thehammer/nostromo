@@ -167,13 +167,14 @@ final class AuthoredPrHandoffTransportLive: AuthoredPrHandoffTransport, Authored
 
     /// The Merge verb. A merge answers only for the request it sent: any other kind of frame under its id, a
     /// timeout and a lost connection are all `.unreachable` (the merge is not known to have happened).
-    func merge(repo: String, number: Int, expectedHeadShaShort: String,
+    func merge(repo: String, number: Int, expectedHeadShaShort: String, expectedVia: AuthoredPrMergeVia?,
                done: @escaping (AuthoredPrAnswer<AuthoredPrDone>) -> Void) {
         let id = UUID().uuidString
         register(id, timeout: mergeTimeout) { frame in
             if case .merge(_, let answer)? = frame { done(answer) } else { done(.unreachable) }
         }
-        sendMerge(ClientAuthoredPrMerge(requestId: id, repo: repo, number: number, expectedHeadShaShort: expectedHeadShaShort))
+        sendMerge(ClientAuthoredPrMerge(requestId: id, repo: repo, number: number,
+                                        expectedHeadShaShort: expectedHeadShaShort, expectedVia: expectedVia))
     }
 }
 

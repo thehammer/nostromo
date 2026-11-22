@@ -311,6 +311,38 @@ extension AuthoredPrPerri: Decodable {
     }
 }
 
+/// How the daemon says the Merge button will take a PR in (`authored_prs_merge_queue_v1`): a direct squash merge, or
+/// through the base branch's merge queue. A value this build does not know is `.unknown`: nothing is offered for it.
+public enum AuthoredPrMergeVia: String, LenientWireEnum, Encodable, Sendable {
+    case direct, queue, unknown
+    static var unknownCase: Self { .unknown }
+}
+
+/// A queued PR's entry state, as the daemon words it.
+public enum AuthoredPrQueueState: String, LenientWireEnum, Sendable {
+    case queued, awaitingChecks = "awaiting_checks", mergeable, unmergeable, locked, unknown
+    static var unknownCase: Self { .unknown }
+}
+
+/// A PR that is in its merge queue: the state and, when GitHub said, its 1-based position (bounded).
+public struct AuthoredPrQueue: Equatable, Sendable {
+    public static let maxPosition = 9999
+    public var state: AuthoredPrQueueState
+    public var position: Int?
+    public init(state: AuthoredPrQueueState, position: Int? = nil) {
+        self.state = state; self.position = position
+    }
+}
+extension AuthoredPrQueue: Decodable {
+    private enum K: String, CodingKey { case state, position }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: K.self)
+        state = c.lenient(.state, AuthoredPrQueueState.self)
+        let p = (try? c.decodeIfPresent(Int.self, forKey: .position)).flatMap { $0 }
+        position = p.flatMap { $0 >= 1 ? min($0, Self.maxPosition) : nil }
+    }
+}
+
 public struct AuthoredPr: Equatable, Sendable, Identifiable {
     public var repo: String
     public var number: Int
@@ -338,6 +370,11 @@ public struct AuthoredPr: Equatable, Sendable, Identifiable {
     public var headShaShort: String?
     /// Perri's verdict, when one was recorded for this PR (`authored_prs_perri_v1`).
     public var perri: AuthoredPrPerri?
+    /// How the Merge button will take the PR in (`authored_prs_merge_queue_v1`); nil when the daemon does not say
+    /// (an older daemon, which only ever merges directly, or one that could not read it).
+    public var mergeVia: AuthoredPrMergeVia?
+    /// Present while the PR is in its merge queue (`authored_prs_merge_queue_v1`).
+    public var queue: AuthoredPrQueue?
 
     public var id: String { "\(repo)#\(number)" }
 
@@ -348,7 +385,9 @@ public struct AuthoredPr: Equatable, Sendable, Identifiable {
                 review: AuthoredPrReview = AuthoredPrReview(state: .none),
                 newComments: Int = 0, unresolvedThreads: Int = 0, threadsTruncated: Bool = false,
                 owner: AuthoredPrOwner = .unknown, told: AuthoredPrTold? = nil, pill: Bool = false,
-                headShaShort: String? = nil, perri: AuthoredPrPerri? = nil) {
+                headShaShort: String? = nil, perri: AuthoredPrPerri? = nil,
+                mergeVia: AuthoredPrMergeVia? = nil, queue: AuthoredPrQueue? = nil) {
+        self.mergeVia = mergeVia; self.queue = queue
         self.told = told; self.pill = pill; self.headShaShort = headShaShort; self.perri = perri
         self.repo = repo; self.number = number; self.url = url; self.title = title; self.draft = draft
         self.updatedAt = updatedAt; self.group = group; self.lifecycle = lifecycle; self.endedAt = endedAt
@@ -362,7 +401,7 @@ extension AuthoredPr: Decodable {
         case repo, number, url, title, draft, updatedAt = "updated_at", group, lifecycle, endedAt = "ended_at"
         case baseRef = "base_ref", detailsUnavailable = "details_unavailable", checks, review
         case newComments = "new_comments", unresolvedThreads = "unresolved_threads", threadsTruncated = "threads_truncated", owner
-        case told, pill, headShaShort = "head_sha_short", perri
+        case told, pill, headShaShort = "head_sha_short", perri, mergeVia = "merge_via", queue
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)
@@ -390,6 +429,14 @@ extension AuthoredPr: Decodable {
         headShaShort = (try? c.decodeIfPresent(String.self, forKey: .headShaShort)).flatMap { $0 }
             .flatMap { AuthoredPrsText.isShortSha($0) ? $0 : nil }
         perri = (try? c.decodeIfPresent(AuthoredPrPerri.self, forKey: .perri)).flatMap { $0 }
+        // Absent stays nil (an old daemon); a value this build does not know is `.unknown`, never `.direct`.
+        if !c.contains(.mergeVia) || ((try? c.decodeNil(forKey: .mergeVia)) ?? false) {
+            mergeVia = nil
+        } else {
+            let via = (try? c.decodeIfPresent(String.self, forKey: .mergeVia)).flatMap { $0 }
+            mergeVia = via.flatMap(AuthoredPrMergeVia.init(rawValue:)) ?? .unknown
+        }
+        queue = (try? c.decodeIfPresent(AuthoredPrQueue.self, forKey: .queue)).flatMap { $0 }
     }
 }
 

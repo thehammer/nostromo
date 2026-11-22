@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, TimeZone, Utc};
+use nostromo::data::authored_prs::merge::MergeDone;
 use nostromo::data::authored_prs::snapshot::*;
 use nostromo::ipc::protocol::ServerMsg;
 
@@ -80,6 +81,8 @@ fn base_row(repo: &str, number: u64, title: &str, group: Group) -> AuthoredPr {
         pill: false,
         head_sha_short: None,
         perri: None,
+        merge_via: None,
+        queue: None,
         attention_key: String::new(),
     }
 }
@@ -505,6 +508,17 @@ mod verbs {
                     repo: "thehammer/nostromo".into(),
                     number: 458,
                     expected_head_sha_short: "0123abcd".into(),
+                    expected_via: None,
+                },
+            ),
+            (
+                "frame-authored-pr-merge-queue.json",
+                ClientMsg::AuthoredPrMerge {
+                    request_id: "r8".into(),
+                    repo: "thehammer/nostromo".into(),
+                    number: 458,
+                    expected_head_sha_short: "0123abcd".into(),
+                    expected_via: Some(MergeVia::Queue),
                 },
             ),
             (
@@ -579,7 +593,16 @@ mod verbs {
                 "frame-authored-pr-merge-result.json",
                 ServerMsg::AuthoredPrMergeResult {
                     request_id: "r7".into(),
-                    result: AuthoredPrResult::Ok(Done {}),
+                    result: AuthoredPrResult::Ok(MergeDone::default()),
+                },
+            ),
+            (
+                "frame-authored-pr-merge-result-queued.json",
+                ServerMsg::AuthoredPrMergeResult {
+                    request_id: "r8".into(),
+                    result: AuthoredPrResult::Ok(MergeDone {
+                        code: Some("queued".into()),
+                    }),
                 },
             ),
             (
@@ -735,6 +758,85 @@ mod perri {
                     .prs
                     .iter()
                     .all(|p| p.perri.is_none() && p.head_sha_short.is_none()));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+// ── The merge queue on a row ─────────────────────────────────────────────────
+
+mod merge_queue {
+    use super::*;
+
+    const FRAME: &str = "frame-authored-prs-merge-queue.json";
+
+    fn frame() -> ServerMsg {
+        let mut snap = snapshot();
+        let row = |n: u64, via: Option<MergeVia>, queue: Option<QueueRow>| {
+            let mut r = base_row("thehammer/nostromo", n, "A change", Group::Ready);
+            r.merge_via = via;
+            r.queue = queue;
+            r
+        };
+        snap.prs = vec![
+            row(1, Some(MergeVia::Direct), None),
+            row(2, Some(MergeVia::Queue), None),
+            row(
+                3,
+                Some(MergeVia::Queue),
+                Some(QueueRow {
+                    state: QueueState::Queued,
+                    position: Some(2),
+                }),
+            ),
+            row(
+                4,
+                Some(MergeVia::Queue),
+                Some(QueueRow {
+                    state: QueueState::AwaitingChecks,
+                    position: None,
+                }),
+            ),
+            row(5, None, None),
+        ];
+        snap.total_open = 5;
+        snap.shown = 5;
+        ServerMsg::AuthoredPrs { snapshot: snap }
+    }
+
+    #[test]
+    fn the_frame_with_queue_rows_matches_its_golden_file_and_round_trips() {
+        let mut want = serde_json::to_string_pretty(&frame()).unwrap();
+        want.push('\n');
+        let path = fixture_path(FRAME);
+        if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
+            std::fs::write(&path, &want).unwrap();
+            return;
+        }
+        let have = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("{FRAME} is missing ({e}); UPDATE_GOLDEN=1 cargo test --test authored_prs_wire_golden")
+        });
+        assert_eq!(have, want, "{FRAME} no longer matches what serde produces");
+        let back: ServerMsg = serde_json::from_str(&have).unwrap();
+        assert_eq!(
+            serde_json::to_value(&back).unwrap(),
+            serde_json::to_value(frame()).unwrap()
+        );
+    }
+
+    /// An old daemon's rows have neither key; an old app ignores both.
+    #[test]
+    fn the_existing_golden_rows_have_no_queue_keys_and_still_decode() {
+        let text = golden_text();
+        assert!(!text.contains("merge_via") && !text.contains("\"queue\""));
+        let msg: ServerMsg = serde_json::from_str(&text).unwrap();
+        match msg {
+            ServerMsg::AuthoredPrs { snapshot } => {
+                assert!(snapshot
+                    .prs
+                    .iter()
+                    .all(|p| p.merge_via.is_none() && p.queue.is_none()));
             }
             other => panic!("{other:?}"),
         }

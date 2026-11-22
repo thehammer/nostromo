@@ -61,18 +61,31 @@ final class AuthoredPrMergeAppearanceTests: XCTestCase {
 
     private enum Scenario: String, CaseIterable {
         case ready, olderApproval, changesRequested, comments, noVerdict, merging, merged, notice
+        // The merge queue: how the button reads for a PR that goes in through one.
+        case queueReady, queueNeedsUpdate, adding, inQueue, inQueueAtPosition, dropped
 
         var hasBadge: Bool { self != .noVerdict }
         var buttonTitle: String {
             switch self {
             case .merging: return "Merging…"
             case .merged: return "Merged"
+            case .queueReady, .queueNeedsUpdate, .dropped: return "Add to merge queue"
+            case .adding: return "Adding…"
+            case .inQueue: return "In merge queue"
+            case .inQueueAtPosition: return "In merge queue (9999)"
             default: return "Merge"
             }
         }
-        var hasNotice: Bool { self == .notice }
+        var hasNotice: Bool { self == .notice || self == .dropped }
         /// The button is on: the person may press it.
-        var isReady: Bool { self == .ready || self == .notice }
+        var isReady: Bool { self == .ready || self == .notice || self == .queueReady || self == .dropped }
+        /// The row says it goes in through the merge queue.
+        var isQueue: Bool {
+            switch self {
+            case .queueReady, .queueNeedsUpdate, .adding, .inQueue, .inQueueAtPosition, .dropped: return true
+            default: return false
+            }
+        }
     }
 
     private static func model(_ scenario: Scenario) -> AuthoredPrRowModel {
@@ -90,14 +103,21 @@ final class AuthoredPrMergeAppearanceTests: XCTestCase {
                             perri: perri, owner: APT.motherOwner())
         pr.newComments = 1234
         pr.unresolvedThreads = 12
+        if scenario.isQueue { pr.mergeVia = .queue }
+        if scenario == .inQueueAtPosition { pr.queue = AuthoredPrQueue(state: .queued, position: 9999) }
         var attempt: AuthoredPrMergeAttempt?
         switch scenario {
+        case .adding: attempt = AuthoredPrMergeAttempt(head: MF.headA, progress: .merging)
+        case .inQueue: attempt = AuthoredPrMergeAttempt(head: MF.headA, progress: .queued)
+        case .dropped: attempt = AuthoredPrMergeAttempt(head: MF.headA, progress: .failed(.droppedFromQueue), sawQueueEntry: true)
         case .merging: attempt = AuthoredPrMergeAttempt(head: MF.headA, progress: .merging)
         case .merged: attempt = AuthoredPrMergeAttempt(head: MF.headA, progress: .merged)
         case .notice: attempt = AuthoredPrMergeAttempt(head: MF.headA, progress: .failed(.perriStale))
         default: attempt = nil
         }
-        return AuthoredPrsPresentation.row(pr, chip: "owner/name", now: APT.t0, perri: true, merge: true, mergeAttempt: attempt)
+        return AuthoredPrsPresentation.row(pr, chip: "owner/name", now: APT.t0, perri: true, merge: true,
+                                           mergeQueue: scenario.isQueue && scenario != .queueNeedsUpdate,
+                                           mergeAttempt: attempt)
     }
 
     private struct Rendered {
@@ -304,12 +324,15 @@ final class AuthoredPrMergeAppearanceTests: XCTestCase {
                                              "\(r.context): inside the row's right padding")
                     frames.append((scenario, r.row.mergeButton.frame))
                 }
-                guard let first = frames.first else { continue }
-                for (scenario, frame) in frames {
+                // One width per way in: every state of a direct row, and every state of a queue row.
+                for group in [frames.filter { !$0.0.isQueue }, frames.filter { $0.0.isQueue }] {
+                guard let first = group.first else { continue }
+                for (scenario, frame) in group {
                     let context = "'\(scenario.rawValue)' vs '\(first.0.rawValue)' at \(Int(width)) pt, \(appearance.label)"
                     XCTAssertEqual(frame.width, first.1.width, accuracy: 0.5, "\(context): the button's width jumped between states")
                     XCTAssertEqual(frame.height, first.1.height, accuracy: 0.5, "\(context): the button's height changed")
                     XCTAssertEqual(frame.maxX, first.1.maxX, accuracy: 0.5, "\(context): the button moved sideways")
+                }
                 }
             }
         }
@@ -509,7 +532,8 @@ final class AuthoredPrMergeAppearanceTests: XCTestCase {
                 XCTAssertTrue(r.row.noticeDismissButton.isHidden, "\(r.context): no dismiss button")
                 return
             }
-            let text = "Perri approved an older version: it needs a new review"
+            let text = r.scenario == .dropped ? "Dropped from the merge queue"
+                : "Perri approved an older version: it needs a new review"
             XCTAssertEqual(r.row.noticeLabel.stringValue, text, r.context)
             XCTAssertEqual(r.model.mergeNotice, text, r.context)
             let frame = r.rect(r.row.noticeLabel)
@@ -554,7 +578,8 @@ final class AuthoredPrMergeAppearanceTests: XCTestCase {
             }
 
             let names = Set((r.row.accessibilityCustomActions() ?? []).map(\.name))
-            XCTAssertEqual(names.contains("Merge"), r.scenario.isReady, "\(r.context): a Merge action only while the button is ready: \(names)")
+            XCTAssertEqual(names.contains(r.scenario.buttonTitle), r.scenario.isReady, "\(r.context): a Merge (or Add to merge queue) action only while the button is ready, named as the button is: \(names)")
+            XCTAssertEqual(!names.isDisjoint(with: ["Merge", "Add to merge queue"]), r.scenario.isReady, "\(r.context): \(names)")
             XCTAssertEqual(names.contains("Dismiss merge message"), r.scenario.hasNotice, "\(r.context): a dismiss action only with a notice: \(names)")
             XCTAssertTrue(names.contains("Show Mother job a1b2c3"), "\(r.context): the existing action stays: \(names)")
         }
@@ -590,5 +615,48 @@ final class AuthoredPrMergeAppearanceTests: XCTestCase {
             let names = (r.row.accessibilityCustomActions() ?? []).map(\.name)
             XCTAssertFalse(names.contains("Merge") || names.contains("Dismiss merge message"), "\(r.context): \(names)")
         }
+    }
+
+    // MARK: - The merge queue
+
+    func testTheQueueStatesNameThemselvesAndKeepTheRowsHeightAndTheButtonsWidth() {
+        for appearance in Self.appearances {
+            for width in Self.widths {
+                let base = render(.queueReady, width: width, appearance: appearance)
+                for scenario in [Scenario.queueReady, .queueNeedsUpdate, .adding, .inQueue, .inQueueAtPosition, .dropped] {
+                    guard let r = render(scenario, width: width, appearance: appearance), let base else { continue }
+                    XCTAssertEqual(r.row.mergeButton.title, r.model.mergeButton?.title, r.context)
+                    XCTAssertEqual(r.row.mergeButton.title, scenario.buttonTitle, r.context)
+                    XCTAssertEqual(r.row.mergeButton.isEnabled, scenario.isReady, r.context)
+                    XCTAssertEqual(r.row.mergeButton.accessibilityLabel(), r.model.mergeButton?.accessibilityLabel, r.context)
+                    XCTAssertEqual(r.row.frame.height, AuthoredPrRowView.rowHeight, accuracy: 0.5, "\(r.context): no row-height jump")
+                    XCTAssertEqual(r.row.fittingSize.height, AuthoredPrRowView.rowHeight, accuracy: 0.5, r.context)
+                    XCTAssertEqual(r.row.mergeButton.frame.width, base.row.mergeButton.frame.width, accuracy: 0.5,
+                                   "\(r.context): the button's width jumped")
+                    XCTAssertEqual(r.row.mergeButton.frame.maxX, base.row.mergeButton.frame.maxX, accuracy: 0.5, r.context)
+                    XCTAssertEqual(r.row.noticeLabel.stringValue, scenario == .dropped ? "Dropped from the merge queue" : "", r.context)
+                }
+            }
+        }
+    }
+
+    func testTheLongestQueueTitleIsDrawnWholeInsideTheButton() {
+        for scenario in [Scenario.queueReady, .inQueueAtPosition] {
+            for appearance in Self.appearances {
+                for width in Self.widths {
+                    guard let r = render(scenario, width: width, appearance: appearance, measuringTitles: true) else { continue }
+                    let check = titleCheck(r.row.mergeButton, title: scenario.buttonTitle, host: r.host, bitmap: r.bitmap,
+                                           appearance: r.appearance)
+                    XCTAssertTrue(check.ok, "\(r.context): \(check.detail)")
+                }
+            }
+        }
+    }
+
+    func testAQueueRowThatWillNotBeEnqueuedIsOffAndSaysWhy() throws {
+        guard let r = render(.queueNeedsUpdate, width: 380, appearance: Self.appearances[0]) else { return }
+        XCTAssertFalse(r.row.mergeButton.isEnabled)
+        XCTAssertTrue(r.model.reviewLine.contains("Update Nostromo to merge into a merge queue"), r.model.reviewLine)
+        XCTAssertTrue((r.row.accessibilityCustomActions() ?? []).allSatisfy { $0.name != "Merge" && $0.name != "Add to merge queue" })
     }
 }

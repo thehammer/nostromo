@@ -306,7 +306,11 @@ final class AuthoredPrRowView: NSView {
     /// Where the detail lines end: the row's edge, or the visible button.
     private var trailingEdge: [NSLayoutConstraint] = []
 
+    /// One width for every state of a direct row ("Merge", "Merging…", "Merged"), and a wider one for every state of a
+    /// queue row ("Add to merge queue", "In merge queue (2)"), so a row does not shift as its state changes.
     static let mergeButtonWidth: CGFloat = 78
+    static let queueButtonWidth: CGFloat = 132
+    private var mergeButtonWidthConstraint: NSLayoutConstraint?
 
     private(set) var model: AuthoredPrRowModel?
     /// Called with the Mother job id when its link is pressed.
@@ -407,6 +411,8 @@ final class AuthoredPrRowView: NSView {
         addSubview(mergeButton)
 
         let side = Self.sidePadding, indent = side + Self.detailIndent
+        let mergeWidth = mergeButton.widthAnchor.constraint(equalToConstant: Self.mergeButtonWidth)
+        mergeButtonWidthConstraint = mergeWidth
         NSLayoutConstraint.activate([
             first.topAnchor.constraint(equalTo: topAnchor, constant: Self.topPadding),
             first.leadingAnchor.constraint(equalTo: leadingAnchor, constant: side),
@@ -437,7 +443,7 @@ final class AuthoredPrRowView: NSView {
             tellButton.centerYAnchor.constraint(equalTo: reviewLabel.centerYAnchor),
             mergeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -side),
             mergeButton.centerYAnchor.constraint(equalTo: reviewLabel.centerYAnchor),
-            mergeButton.widthAnchor.constraint(equalToConstant: Self.mergeButtonWidth),
+            mergeWidth,
 
             // A repo chip never truncates, except a pathological owner/name past half the row.
             repoChip.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: 0.5),
@@ -520,7 +526,7 @@ final class AuthoredPrRowView: NSView {
         setAccessibilityChildren(children)
         var actions: [NSAccessibilityCustomAction] = []
         if model.mergeButton?.isEnabled == true {
-            actions.append(NSAccessibilityCustomAction(name: "Merge") { [weak self] in
+            actions.append(NSAccessibilityCustomAction(name: model.mergeButton?.title ?? "Merge") { [weak self] in
                 self?.mergePressed()
                 return true
             })
@@ -570,6 +576,7 @@ final class AuthoredPrRowView: NSView {
             return
         }
         mergeButton.isHidden = false
+        mergeButtonWidthConstraint?.constant = merge.isQueue ? Self.queueButtonWidth : Self.mergeButtonWidth
         mergeButton.title = merge.title
         mergeButton.isEnabled = merge.isEnabled
         mergeButton.toolTip = merge.tooltip

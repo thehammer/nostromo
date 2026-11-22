@@ -23,6 +23,37 @@ pub const MAX_CANDIDATES: usize = 8;
 pub const MAX_HIDDEN_ORGS: usize = 10;
 pub const MAX_ORG_NAME: usize = 60;
 pub const MAX_NEW_COMMENTS: u32 = 999;
+pub const MAX_QUEUE_POSITION: u64 = 9999;
+
+/// How GitHub takes this PR in: a direct squash merge, or through the base
+/// branch's merge queue. Absent on the wire when the daemon could not read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeVia {
+    Direct,
+    Queue,
+}
+
+/// A queued PR's entry state (GitHub's `MergeQueueEntryState`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueState {
+    Queued,
+    AwaitingChecks,
+    Mergeable,
+    Unmergeable,
+    Locked,
+    Unknown,
+}
+
+/// A PR that is in its merge queue: the state and, when GitHub says, the
+/// 1-based position (bounded). Nothing else of the entry reaches the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueRow {
+    pub state: QueueState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<u32>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -285,6 +316,12 @@ pub struct AuthoredPr {
     /// Perri's verdict, when one was recorded for this PR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perri: Option<PerriRow>,
+    /// How the Merge button will take the PR in. Absent when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_via: Option<MergeVia>,
+    /// Present while the PR is in its merge queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<QueueRow>,
     /// A hash of the facts a notify recorded; stays in the daemon.
     #[serde(skip)]
     pub attention_key: String,
@@ -478,6 +515,8 @@ mod tests {
             pill: false,
             head_sha_short: None,
             perri: None,
+            merge_via: None,
+            queue: None,
             attention_key: String::new(),
         };
         let v = serde_json::to_value(&pr).unwrap();
