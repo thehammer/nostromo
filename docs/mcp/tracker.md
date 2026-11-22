@@ -162,6 +162,19 @@ only, exactly what is drawn) and a **Ran it** checkbox (the pane's tick: the use
   details, move, remove and its undo) keeps its undo step: those change only the staged text or where it
   sits, never a status the person did not set, and nothing in them reaches a terminal. (Putting a removed
   command back restores the item as the person had it, a tick of their own included.)
+- **The daemon holds the same line for a stale status.** A pane `status` op on an item that is a command now
+  is refused (`invalid_args`, `stale: true`, "that item became a command (or its command changed) since you
+  saw it; look again before changing its status") when the item's `kind` or `command` changed after the op's
+  `base_version`, or when the log no longer reaches back to say. An agent can turn a plain item into a command
+  and a ⌘Z that predates it must not tick it. A person's tick of a command they saw as it is now is
+  accepted, whatever else changed on the board since. The same check runs when a `resolve_conflict` puts a
+  losing `status` back (keep-losing), since that writes a status from the person's old view too; keeping the
+  current value writes none and is not refused. No other pane op writes a status of an existing item (`edit`,
+  `add`, `move`, `remove`, `restore_text`, `clear_badge`, `ack_dropped` and the other fields' keep-losing never
+  touch it; `restore` puts back the exact bytes a removal kept). The Mac does not show the daemon's words:
+  `TrackerItemEditing.message` turns a refusal with `stale: true` into "Not saved: that changed since you
+  looked. Look again.", except one whose reason says the conflict is "no longer kept": that shows "That
+  conflict is no longer there: look again." Either way it reads as a failure, never as success.
 - Nothing in the tracker code writes to a terminal or a session. Two tests keep it that way:
   `tests/no_shell_surface.rs` (every tool is classified; no tool input or op names a shell or an execution verb;
   a new unclassified tool fails the build) and `tests/no_shell_behaviour.rs`. The latter drives every tracker
@@ -387,7 +400,11 @@ author L and either
   logs the values the item held (bounded like any logged value), so a stale
   save that brings a removed item's old note back over a newer one is a
   conflict. (An edit's old value, a `restore_text`'s included, counts the same
-  way; a move changes no field value.) A pane or agent removing an item the
+  way; a move changes no field value. Only the last 1,000 log entries are
+  kept: a value that left the board, by an edit or a removal, longer ago than
+  that can no longer be recognised as one the field once had, so a removal
+  is not recognised "at any age": one older than the log cannot be, the same as
+  an aged-out edit.) A pane or agent removing an item the
   log did not see added, across a history gap, keeps the item's markdown as a
   guess even when the only logged changes to it are its own.
 
@@ -413,7 +430,17 @@ losing values the item says so with `dropped_conflicts: n` (in the pane's view
 and in the agent's `conflict` entries, which carry a bare
 `{"conflict":{"dropped_conflicts":n}}` for an item whose value another item's
 conflict pushed off) until the user settles what is left of its conflicts or
-acknowledges it with `ack_dropped {id}`. One loss has no marker in the pane: a
+acknowledges it with `ack_dropped {id}`. The marker stays while the item holds
+any conflict: settling a conflict by putting its losing value back can displace
+the current value into a new conflict on the same item, and the marker outlives
+that. Settling from a view older than a drop does not clear the marker: only
+drops the view could show (none logged for the item after its `base_version`)
+are forgotten, the way `ack_dropped` refuses the same case. (A put-back whose
+value the field already holds, because a stale save restored it meanwhile, is
+logged as the person's own change of that field, so a later stale save over it
+is judged against the decision. That entry is never the field's last write for
+the person's own next write: a save the person has not seen, made before it,
+still conflicts.) One loss has no marker in the pane: a
 `removed` conflict (a removed item kept for `restore`) that a cap drops. The item
 is not on the board, so no row can carry `dropped_conflicts`; the count is
 kept under its id and the agent's delta still says a cap dropped something, but

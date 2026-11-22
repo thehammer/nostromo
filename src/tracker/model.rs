@@ -530,7 +530,7 @@ pub enum ChangeKind {
     /// `fields["section"]` = `(old section id, new section id)`; equal when
     /// reordered within a section.
     Moved,
-    /// `fields` holds the removed item's `section` and `text` as `(value, null)`.
+    /// `fields` holds every field the removed item held, as `(value, null)`.
     Removed,
     /// `fields["text"]` = `(null, "HH:MM text")`.
     Log,
