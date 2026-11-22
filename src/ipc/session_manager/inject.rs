@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
+use super::queue::{self, EntryKind};
 use super::{
     lock_recover, write_user_message, PendingMessage, SessionEvent, SessionManager, SessionState,
     LOGIN_QUEUE_CAP,
@@ -209,6 +210,9 @@ impl PendingMessage {
     /// A message the user sent.
     pub(super) fn user(text: &str, images: &[String]) -> Self {
         Self {
+            id: queue::next_entry_id(),
+            kind: EntryKind::Typed { client_ref: None },
+            original_text: None,
             text: text.to_string(),
             images: images.to_vec(),
             origin: PendingOrigin::User,
@@ -219,6 +223,9 @@ impl PendingMessage {
     fn injected(key: String, text: &str) -> Self {
         let injected = Injected::new(key, text.to_string());
         Self {
+            id: queue::next_entry_id(),
+            kind: EntryKind::Injected,
+            original_text: None,
             text: injected.render(),
             images: Vec::new(),
             origin: PendingOrigin::Injected(injected),

@@ -630,7 +630,12 @@ impl PicksSessionHost for SessionManagerHost {
 
     fn send(&self, tag: &str, text: &str) -> Result<(), String> {
         self.mgr()
-            .send_user_message(tag, text, &[])
+            .send_app_message(
+                tag,
+                text,
+                &[],
+                crate::ipc::session_manager::AppLabel::WorkItem,
+            )
             .map_err(|e| format!("{e:#}"))
     }
 

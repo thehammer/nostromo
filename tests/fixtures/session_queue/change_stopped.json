@@ -1,0 +1,1 @@
+{"type":"session_queue","tag":"cody-1","daemon_epoch":"3f9a1c2e-0000-4000-8000-000000000001","rev":10,"entries":[{"id":"q3f9a1c2e-2","kind":"typed","text":"/compact","image_count":0,"command":true,"can_take_back":true}],"change":{"reason":"stopped","ids":["q3f9a1c2e-1","q3f9a1c2e-2"]}}
