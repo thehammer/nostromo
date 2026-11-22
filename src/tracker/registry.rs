@@ -1226,7 +1226,35 @@ impl TrackerRegistry {
         entry.last_good_at = Some(now);
         if ctx.log {
             let mut changes = applied.changes;
-            record_conflicts(entry, &mut changes, found, &applied.board, ctx.settling);
+            // Putting a losing value back when the field already holds it
+            // (a stale save restored it meanwhile) changes nothing, yet it is
+            // the person's decision: logged, so a later save over it is
+            // judged against that decision, not against the stale save that
+            // happened to restore the value.
+            for (item_id, field) in ctx.resolving {
+                let changed = changes
+                    .iter()
+                    .any(|c| c.item_id.as_deref() == Some(item_id) && c.fields.contains_key(field));
+                if let (false, Some(item)) = (changed, applied.board.item(item_id)) {
+                    let value = field_value(item, field);
+                    let mut change =
+                        super::model::Change::new(author, Some(item_id), ChangeKind::Changed, now)
+                            .with_field(field, value.clone(), value);
+                    // Same window as the write: its next write to this field
+                    // must not be judged against its own decision.
+                    change.client = ctx.client.map(str::to_string);
+                    changes.push(change);
+                }
+            }
+            let shown_through = if ctx.foreign_base { None } else { ctx.seen };
+            record_conflicts(
+                entry,
+                &mut changes,
+                found,
+                &applied.board,
+                ctx.settling,
+                shown_through,
+            );
             let version = entry.log.append(changes);
             entry.conflicts.stamp_unversioned(version);
         }
@@ -1323,7 +1351,7 @@ impl TrackerRegistry {
                     );
                     let board = parsed.board.clone();
                     remember_long_texts(&mut entry.long_texts, &old.board, &board);
-                    record_conflicts(entry, &mut changes, found, &board, &[]);
+                    record_conflicts(entry, &mut changes, found, &board, &[], None);
                     let version = entry.log.append(changes);
                     entry.conflicts.stamp_unversioned(version);
                 }
@@ -2019,16 +2047,45 @@ fn remember_long_texts(long: &mut HashMap<String, String>, old: &Board, new: &Bo
 /// Keeps `found` on the entry and adds one log entry for each, after the
 /// write's own changes, so an agent reads it in its next delta. `settling` are
 /// conflicts the write settles: they go first, so the caps never drop (and
-/// count as lost) a value the user just settled.
+/// count as lost) a value the user just settled. `shown_through` is the log
+/// position of the view the writer settled from.
 fn record_conflicts(
     entry: &mut BoardEntry,
     changes: &mut Vec<super::model::Change>,
     found: Vec<Conflict>,
     board: &Board,
     settling: &[String],
+    shown_through: Option<u64>,
 ) {
-    for id in settling {
-        entry.conflicts.clear(id);
+    let settled_items: Vec<String> = settling
+        .iter()
+        .filter_map(|id| entry.conflicts.clear(id))
+        .collect();
+    // What each settled item had dropped before this batch pushes anything:
+    // only that much is forgotten below, a drop the pushes count survives.
+    let mut recorded: Vec<(String, u32)> = Vec::new();
+    for id in &settled_items {
+        // The person settles from a view at `shown_through`: a drop the log
+        // shows after it (or a log that no longer reaches back to show) was
+        // never put in front of them, so its marker stays (the way
+        // `ack_dropped` refuses the same case).
+        let unseen_drop = match shown_through {
+            Some(base) => {
+                entry.log.history_gap(base)
+                    || entry.log.entries.iter().any(|c| {
+                        c.seq > base
+                            && c.item_id.as_deref() == Some(id.as_str())
+                            && c.kind == ChangeKind::Conflict
+                    })
+            }
+            None => true,
+        };
+        if unseen_drop {
+            continue;
+        }
+        if !recorded.iter().any(|(r, _)| r == id) {
+            recorded.push((id.clone(), entry.conflicts.dropped_for(id)));
+        }
     }
     let mut elsewhere: Vec<(String, Conflict)> = Vec::new();
     for conflict in found {
@@ -2047,6 +2104,10 @@ fn record_conflicts(
             elsewhere.push((gone.item_id, conflict.clone()));
         }
     }
+    // Only now: a conflict recorded above on a settled item (the value the
+    // settling displaced) keeps that item's dropped marker, and so does a
+    // drop the pushes above counted.
+    entry.conflicts.forget_recorded_drops(&recorded);
     let mut told: HashSet<String> = HashSet::new();
     for (item_id, by) in elsewhere {
         if told.insert(item_id.clone()) {

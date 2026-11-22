@@ -520,7 +520,7 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     }
 
     private static func sameStrip(_ a: AuthoredPrsFilterResult, _ b: AuthoredPrsFilterResult) -> Bool {
-        a.selection == b.selection && a.repoEntries == b.repoEntries && a.sessionEntries == b.sessionEntries
+        a.selection == b.selection && a.orgEntries == b.orgEntries && a.repoEntries == b.repoEntries && a.sessionEntries == b.sessionEntries
     }
 
     private var filterResult: AuthoredPrsFilterResult { AuthoredPrsFilter.apply(displayed, selection: filter) }
