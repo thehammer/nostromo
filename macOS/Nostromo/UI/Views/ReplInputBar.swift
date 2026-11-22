@@ -706,6 +706,9 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
             .store(in: &queueBindings)
     }
 
+    /// Tells VoiceOver what a take-back or Stop restore did. A seam for tests.
+    lazy var announceQueue: (String) -> Void = { [weak self] text in self?.announce(text) }
+
     /// A chip's Edit: take `id` back into the (empty) composer. False when nothing was asked of the daemon.
     @discardableResult
     func takeBackForEdit(id: String) -> Bool {
@@ -746,16 +749,16 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
                 // The person typed while the request was out: their draft stays. The message is gone from
                 // the queue, so keep it in history where Up finds it.
                 if let store = historyStore, let tag = historyTag { store.record(tag: tag, text: text, agentName: historyAgentName) }
-                announce("Message back. Press up to recall it.")
+                announceQueue("Message back. Press up to recall it.")
                 return
             }
             historyNavigator.end()
             fill(text: text, images: images)
             if let store = historyStore, let tag = historyTag { store.removeNewest(tag: tag, matching: text) }
-            announce("Message back in the composer.")
+            announceQueue("Message back in the composer.")
         case .alreadyDelivered:
             showStatus("Already sent")
-            announce("Already sent.")
+            announceQueue("Already sent.")
             if recallHistoryOnFailure { recallHistory() }
         case .notFound, .notAllowed:
             if recallHistoryOnFailure { recallHistory() }
@@ -785,14 +788,14 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
         let noun = count == 1 ? "queued message" : "queued messages"
         guard draftIsEmpty else {
             if let store = historyStore, let tag = historyTag {
-                for entry in entries.reversed() { store.record(tag: tag, text: entry.text, agentName: historyAgentName) }
+                for entry in entries { store.record(tag: tag, text: entry.text, agentName: historyAgentName) }
             }
-            announce("\(count) \(noun) discarded, press up to recall \(count == 1 ? "it" : "them").")
+            announceQueue("\(count) \(noun) discarded, press up to recall \(count == 1 ? "it" : "them").")
             return
         }
         historyNavigator.end()
         fill(text: entries.map { $0.text }.joined(separator: "\n\n"), images: entries.flatMap { $0.images })
-        announce("\(count) \(noun) discarded, back in the composer.")
+        announceQueue("\(count) \(noun) discarded, back in the composer.")
     }
 
     /// Put `text` and `images` (file paths) in the empty composer, caret at the end.
