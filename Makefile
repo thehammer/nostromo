@@ -1,4 +1,4 @@
-.PHONY: doctor build release install daemon-restart-guard test fmt-check python-test qa-selftest ci-remote clean daemon install-daemon uninstall-daemon
+.PHONY: doctor build release install daemon-restart-guard test fmt-check python-test python-test-fast python-test-slow python-test-fast-par python-test-slow-par python-test-par gates-fast qa-selftest ci-remote clean daemon install-daemon uninstall-daemon
 
 build:
 	cargo build
@@ -49,6 +49,36 @@ python-test:
 	python3 -m unittest discover -s scripts/tracker/tests -v
 	python3 -m unittest discover -s tests/gates -v
 	python3 -m unittest discover -s tests/restart_guard -v
+
+## `python-test` is unchanged: every suite, serially, in this order (CI runs it, and
+## tests/restart_guard reads this recipe). The lists below split the same suites into fast and
+## slow for the extra targets; tests/gates/test_python_test_split.py fails if the recipe and the
+## two lists ever disagree, so nothing can drop out. The `-par` targets run a list in parallel
+## (scripts/python-test-parallel.sh, PY_JOBS=4 by default); each suite's output is printed whole.
+PY_FAST_SUITES := tests/transcript_load tests/doctor tests/doctor_preflight tests/ios_policy tests/hit_test_policy tests/app_control tests/launch_smoke scripts/tracker/tests tests/gates tests/restart_guard
+PY_SLOW_SUITES := tests/fake_mother tests/fake_claude_perm tests/mother_contract tests/mother_policy tests/qa_instance tests/ci_policy tests/operator_pin tests/ci_remote tests/mac_shards scripts/qa/tests
+
+python-test-fast:
+	set -e; for d in $(PY_FAST_SUITES); do python3 -m unittest discover -s $$d -v; done
+
+python-test-slow:
+	set -e; for d in $(PY_SLOW_SUITES); do python3 -m unittest discover -s $$d -v; done
+
+python-test-fast-par:
+	scripts/python-test-parallel.sh $(PY_FAST_SUITES)
+
+python-test-slow-par:
+	scripts/python-test-parallel.sh $(PY_SLOW_SUITES)
+
+python-test-par:
+	scripts/python-test-parallel.sh $(PY_SLOW_SUITES) $(PY_FAST_SUITES)
+
+## A quick local check (about 25-35 s, no Xcode, no cargo): the fast Python suites in parallel,
+## shellcheck over the shell files this branch changed, and actionlint (advisory: it has findings on main). The slow suites and the Swift/Rust
+## builds stay with `make python-test` and CI.
+gates-fast: python-test-fast-par
+	MOTHER_GATE_CHANGED_FILES="$$(git diff --name-only origin/main...HEAD; git diff --name-only HEAD)" scripts/gates/shellcheck-changed.sh
+	-scripts/gates/actionlint.sh
 
 ## Self-test of the read-only QA scripts (scripts/qa) against a fake app-control CLI.
 ## Hermetic: never touches the running app. Also part of `make python-test` (so CI).

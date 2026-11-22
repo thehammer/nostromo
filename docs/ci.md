@@ -152,6 +152,25 @@ per-shard times and the 5-slot cap result are recorded in the sharding PR descri
 The required check name `Build & Lint` is unchanged (it is the aggregate job), so
 branch protection needs no change.
 
+### Local quick set and parallel Python suites
+
+`make python-test` is unchanged (every suite, serially: it is what CI runs). Extra
+targets for local and gate use, over the same suites:
+
+| Target | What it runs | Time |
+|---|---|---|
+| `make gates-fast` | fast Python suites in parallel, shellcheck over the shell files the branch changed, actionlint (advisory) | ~25-35 s |
+| `make python-test-fast` / `-fast-par` | the ten fast suites, serial / parallel | ~34 s / ~23 s |
+| `make python-test-slow` / `-slow-par` | the ten slow suites, serial / parallel (a directory with several `test*.py` files is split per file) | about the longest single file (the QA smoke scripts) |
+| `make python-test-par` | all of them in parallel (`PY_JOBS`, default 4) | |
+
+`PY_FAST_SUITES` and `PY_SLOW_SUITES` in the Makefile hold the split;
+`tests/gates/test_python_test_split.py` fails if they and the `python-test` recipe ever
+name different suites. The slow suites are dominated by process spawns (a fake app CLI per
+call in `scripts/qa/tests`, `codesign` in `tests/operator_pin`), so on a host with a load
+average far above its core count they can hit the QA harness's 120 s per-script timeout;
+raise it with `QA_HARNESS_TIMEOUT=<seconds>`.
+
 ### Measured and not shipped
 
 - **SwiftPM source cache:** no faster (33 s hit, 19-45 s miss), removed.
