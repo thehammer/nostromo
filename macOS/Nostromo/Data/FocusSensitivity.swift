@@ -41,7 +41,7 @@ final class FocusSensitivity: FocusSensitivityProviding {
 
     /// Known once the daemon's first conversation list has been answered (or the daemon is known not to
     /// have one) and the persisted marks were read cleanly. Never known if the daemon never answers.
-    var isKnown: Bool { marksReadable && known() }
+    var isKnown: Bool { marksReadable && !marksWriteFailed && known() }
 
     /// SHA-256 hex of a focus tag: the name of its history file and the only form of it kept in the marks file.
     static func tagHash(_ tag: String) -> String {
@@ -106,6 +106,8 @@ final class FocusSensitivity: FocusSensitivityProviding {
     /// `tagHash` of every marked tag: the tag itself is never kept.
     private var markedHashes: Set<String> = []
     private var marksReadable = true
+    /// The last attempt to save the marks failed, so a relaunch would forget them: fail closed until one succeeds.
+    private var marksWriteFailed = false
 
     private struct MarksFile: Codable {
         var version: Int
@@ -143,7 +145,9 @@ final class FocusSensitivity: FocusSensitivityProviding {
             let data = try JSONEncoder().encode(MarksFile(version: 1, tags: markedHashes.sorted()))
             try ComposerHistoryStore.writePrivately(data, to: url, directory: directory,
                                                     tempPrefix: Self.marksTempPrefix)
+            marksWriteFailed = false
         } catch {
+            marksWriteFailed = true
             Self.log.error("sensitive marks write failed (\(String(describing: type(of: error)), privacy: .public))")
         }
     }

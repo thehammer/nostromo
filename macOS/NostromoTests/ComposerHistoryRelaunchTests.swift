@@ -589,6 +589,23 @@ final class ComposerHistoryRelaunchTests: XCTestCase {
         XCTAssertTrue(hasHistoryFile(for: "plain-1"))
     }
 
+    func testAMarkThatCannotBeSavedLeavesSensitivityUnknownSoNothingIsWritten() throws {
+        // The "directory" is a regular file, so the marks file cannot be created and a relaunch would forget the mark.
+        let blocker = root.appendingPathComponent("blocker")
+        try Data("x".utf8).write(to: blocker)
+        let s = sensitivity(marksDirectory: blocker)
+        XCTAssertTrue(s.isKnown)
+        s.noteWorkSend(tag: "work-1")
+        XCTAssertTrue(s.isSensitive(tag: "work-1", agentName: nil), "still sensitive for this run")
+        XCTAssertFalse(s.isKnown, "but sensitivity is no longer trusted: fail closed")
+
+        let history = store(s)
+        history.record(tag: "plain-1", text: "ordinary")
+        history.flush()
+        XCTAssertEqual(history.entries(tag: "plain-1"), ["ordinary"], "memory still works")
+        XCTAssertFalse(hasHistoryFile(for: "plain-1"), "nothing is written")
+    }
+
     func testAMarksFileHoldsOnlyDigestsAfterManyMarks() throws {
         let s = sensitivity()
         let tags = (0..<5).map { "CANARY-TAG-\($0)" }
