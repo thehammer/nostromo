@@ -440,8 +440,12 @@ value the field already holds, because a stale save restored it meanwhile, is
 logged as the person's own change of that field, so a later stale save over it
 is judged against the decision. That entry is never the field's last write for
 the person's own next write: a save the person has not seen, made before it,
-still conflicts.) One loss has no marker in the pane: a
-`removed` conflict (a removed item kept for `restore`) that a cap drops. The item
+still conflicts. The logged entry is not proof against every conflict a window
+has with itself, though: after a stale save, a keep-losing that changed nothing,
+then a change to the field within 10 seconds, the window gets a conflict
+holding the value it just kept, attributed to the file. That is noise, not a
+loss: nothing is overwritten, and the value is on the board.) One loss has no
+marker in the pane: a `removed` conflict (a removed item kept for `restore`) that a cap drops. The item
 is not on the board, so no row can carry `dropped_conflicts`; the count is
 kept under its id and the agent's delta still says a cap dropped something, but
 the pane shows nothing for it. It is the cap's one silent loss.
