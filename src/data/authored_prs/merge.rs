@@ -41,7 +41,7 @@ use std::sync::Mutex;
 
 use super::actions::AuthoredPrActions;
 use super::classify::{classify, is_human, RawPr};
-use super::github::{ApiError, MergeError, Target};
+use super::github::{ApiError, Failure, MergeError, Target, SECONDARY_WAIT};
 use super::links::key_string;
 use super::snapshot::{
     valid_repo, AuthoredPr, ChecksState, Lifecycle, MergeVia, PollState, ReviewState,
@@ -52,6 +52,10 @@ use serde::{Deserialize, Serialize};
 
 /// How many answers are remembered, for a repeated request id.
 const REMEMBERED_MERGES: usize = 64;
+
+/// The longest the verbs' own live reads stay quiet after GitHub says to wait
+/// (a hostile or mistaken `Retry-After` of a day must not lock them out).
+pub(super) const MAX_READ_WAIT_MINUTES: i64 = 15;
 
 /// Every answer code the verb gives.
 pub const CODES: [&str; 22] = [
@@ -272,11 +276,14 @@ impl AuthoredPrActions {
             Ok(Some(raw)) => raw,
             Ok(None) => return refuse("not_found"),
             Err(f) => {
+                if matches!(f.error, ApiError::RateLimited { .. }) {
+                    self.remember_rate_limit(&f);
+                }
                 return refuse(match f.error {
                     ApiError::RateLimited { .. } => "rate_limited",
                     ApiError::Unauthorized => "token_cannot_merge",
                     _ => "unreachable",
-                })
+                });
             }
         };
         // Already waiting in the queue: nothing to send, and nothing to gate.
@@ -391,12 +398,41 @@ impl AuthoredPrActions {
     /// waits with it. (`resumes_at` is only ever set while paused; the slower
     /// `rate_limited` poll state is a slow-down, not a stop.)
     pub(super) fn rate_limited_now(&self) -> bool {
+        if self.read_wait_pending() {
+            return true;
+        }
         let snap = self.snapshot.borrow();
         let Some(snap) = snap.as_ref() else {
             return false;
         };
         snap.poll.state == PollState::Paused
             && snap.poll.resumes_at.is_some_and(|t| t > self.clock.now())
+    }
+
+    /// GitHub answered one of the verbs' own live reads with a rate limit:
+    /// remember how long it said to wait (capped), so the next reads refuse
+    /// locally instead of spending the allowance while the poller, idle, has
+    /// not noticed. A wait that has not ended is never shortened.
+    pub(super) fn remember_rate_limit(&self, f: &Failure) {
+        let now = self.clock.now();
+        let until = match f.error {
+            ApiError::RateLimited { wait: Some(w) } => {
+                now + chrono::Duration::from_std(w).unwrap_or_default()
+            }
+            _ => f.meta.rate.map(|(_, o)| o.reset).unwrap_or_else(|| {
+                now + chrono::Duration::from_std(SECONDARY_WAIT).unwrap_or_default()
+            }),
+        }
+        .min(now + chrono::Duration::minutes(MAX_READ_WAIT_MINUTES));
+        let mut held = self.read_wait.lock().unwrap_or_else(|e| e.into_inner());
+        if held.is_none_or(|t| t < until) {
+            *held = Some(until);
+        }
+    }
+
+    fn read_wait_pending(&self) -> bool {
+        let held = self.read_wait.lock().unwrap_or_else(|e| e.into_inner());
+        held.is_some_and(|t| t > self.clock.now())
     }
 
     /// The PR `repo#number` in the latest snapshot, whatever its lifecycle.

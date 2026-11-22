@@ -246,7 +246,9 @@ impl Machine {
         });
         // Let the scheduler's first look pass: it ends on a signal, not a
         // guess at how long it takes under load.
-        src.handle.first_tick_done().await;
+        tokio::time::timeout(Duration::from_secs(30), src.handle.first_tick_done())
+            .await
+            .expect("the scheduler never finished its first look within 30 s");
         src
     }
 

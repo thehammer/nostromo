@@ -172,8 +172,9 @@ async fn harness(actions_wired: bool) -> Harness {
     fake.put(FakePr::new(REPO, N).head("feat/x", &sha('a')));
     fake.mount_on(&github, None).await;
     let verdicts = Arc::new(VerdictStore::in_memory());
-    // An engine with no token: it never asks GitHub anything. The list the
-    // verbs see is fed by hand.
+    // An engine with no token, so the poller never asks GitHub anything. The
+    // list the verbs see is fed by hand. The verbs do read: an approval makes
+    // one live read of the PR through the `Api` below, against the fake.
     let (jobs_tx, jobs_rx) = watch::channel(Vec::new());
     let engine = AuthoredPrsSource::spawn(Deps {
         state_root: None,

@@ -705,6 +705,45 @@ async fn a_pr_cannot_be_merged_while_the_list_is_paused_on_a_rate_limit_and_noth
     assert!(rig.fake.merges().is_empty());
 }
 
+/// GitHub limits the merge verb's own read while the list is idle (nobody is
+/// looking, so the engine has not noticed): the verb remembers the wait and
+/// answers the next merges itself, without spending the allowance.
+#[tokio::test]
+async fn a_merge_after_github_limited_the_verbs_own_read_waits_out_the_wait_without_a_read() {
+    let mut rig = start(vec![ready_pr(N)]).await;
+    record(&mut rig, N, &sha('a'), Verdict::Approved).await;
+    rig.set_demand("idle").await;
+    rig.fake.force(
+        "graphql",
+        Some(Forced {
+            status: 429,
+            retry_after: Some(600),
+        }),
+    );
+    let answer = rig.merge("r1", REPO, N, &short('a')).await;
+    assert_eq!(code_of(&answer), "rate_limited", "{answer:?}");
+    rig.fake.force("graphql", None);
+
+    let mark = rig.fake.log_len();
+    for i in 0..3 {
+        rig.advance(secs(30)).await;
+        let answer = rig.merge(&format!("again-{i}"), REPO, N, &short('a')).await;
+        assert_eq!(
+            code_of(&answer),
+            "rate_limited",
+            "inside the wait: {answer:?}"
+        );
+    }
+    assert_eq!(rig.since(mark).len(), 0, "GitHub was read inside the wait");
+    assert!(rig.fake.merges().is_empty());
+
+    // Once the wait has ended the merge reads and goes through.
+    rig.advance(mins(10)).await;
+    let answer = rig.merge("last", REPO, N, &short('a')).await;
+    assert_eq!(code_of(&answer), "ok", "{answer:?}");
+    assert_eq!(merge_requests_for(&rig, N).len(), 1);
+}
+
 /// Under 20% of GitHub's allowance the list only polls more slowly
 /// (`poll: rate_limited`): that is not a pause, and a merge still goes through.
 #[tokio::test]
@@ -885,6 +924,11 @@ async fn when_github_cannot_be_read_the_answer_is_a_code_and_no_merge_is_sent() 
             *want,
             "read answered {status}: {answer:?}"
         );
+        // A rate limit is remembered for the wait GitHub gave (at most fifteen
+        // minutes): let it end, with GitHub well again, so the next row is
+        // answered by GitHub and not by that memory.
+        rig.fake.force("graphql", None);
+        rig.advance(mins(16)).await;
     }
     rig.fake.force("graphql", None);
     assert!(rig.fake.merges().is_empty());

@@ -380,6 +380,17 @@ struct World {
     unacked_drops: BTreeMap<String, Vec<u64>>,
     /// The conflicts after the last step: (id, item, field, guess, version).
     prev_list: Vec<(String, String, String, bool, u64)>,
+    /// Whether the run also takes the extra steps (an acknowledgement, a
+    /// settling, each from a view taken just before), drawn from their own
+    /// generator so the steps of every other kind are the ones a seed always
+    /// made: the pinned seeds run without them.
+    extras: bool,
+    extra: Rng,
+    /// Items the person just acknowledged, or settled the last conflict of,
+    /// from a current view. Each has no marker until something drops one of
+    /// its values again or it gets a new conflict: a marker that stays is a
+    /// leak.
+    must_be_clear: BTreeSet<String>,
 }
 
 fn agent(i: usize, session: &str) -> Author {
@@ -401,7 +412,7 @@ fn without_items(text: &str, ids: &[String]) -> String {
 }
 
 impl World {
-    fn new(seed: u64) -> World {
+    fn new(seed: u64, extras: bool) -> World {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path().canonicalize().unwrap();
         let (repo, home, state) = (base.join("repo"), base.join("home"), base.join("state"));
@@ -478,6 +489,9 @@ impl World {
             cap_dropped_now: Vec::new(),
             unacked_drops: BTreeMap::new(),
             prev_items: BTreeSet::new(),
+            extras,
+            extra: Rng(seed ^ 0xE57A_E57A),
+            must_be_clear: BTreeSet::new(),
         };
         for i in 0..2 {
             world.read(i);
@@ -1448,12 +1462,27 @@ impl World {
             }
         }
         let dropped = self.reg.conflicts_dropped(TAG[0]);
-        if dropped > self.dropped_seen && marked.is_empty() {
+        let rose = dropped > self.dropped_seen;
+        if rose && marked.is_empty() {
             self.failures.push(format!(
                 "step {step}: a cap dropped a losing value ({dropped} so far) and no item says so"
             ));
         }
         self.dropped_seen = dropped;
+        // A marker the person cleared stays cleared until a cap drops
+        // something again or the item gets a conflict (which can displace a
+        // value into a new one): after that it is a leak.
+        if rose {
+            self.must_be_clear.clear();
+        }
+        self.must_be_clear.retain(|id| !with_conflicts.contains(id));
+        for id in &self.must_be_clear {
+            if marked.contains(id) {
+                self.failures.push(format!(
+                    "step {step}: {id} still has a dropped marker after the person acknowledged it or settled its last conflict from a current view: a marker that never clears"
+                ));
+            }
+        }
         for id in &self.marked_now {
             let item_there = view
                 .nodes
@@ -1481,7 +1510,10 @@ impl World {
         }
         // Conservation at the end of every step: an item's marker is never
         // lower than the drops the person has not been shown. (An item off
-        // the board has no marker to show; its tally goes.)
+        // the board has no marker to show, but the daemon keeps its count: if
+        // the item comes back, the marker comes back with it, for drops the
+        // person may well have been shown before it went. So the tally stays,
+        // unchecked while the item is away.)
         let on_board: BTreeMap<&str, u32> = view
             .nodes
             .iter()
@@ -1490,11 +1522,11 @@ impl World {
                 _ => None,
             })
             .collect();
-        self.unacked_drops
-            .retain(|item, _| on_board.contains_key(item.as_str()));
         let mut too_early = Vec::new();
         for (item, drops) in &self.unacked_drops {
-            let shown = on_board[item.as_str()];
+            let Some(&shown) = on_board.get(item.as_str()) else {
+                continue;
+            };
             if (shown as usize) < drops.len() {
                 too_early.push((item.clone(), shown, drops.len()));
             }
@@ -1788,6 +1820,132 @@ impl World {
             }
             self.snapshot();
             self.audit(step);
+            if self.extras && self.extra.chance(25) {
+                self.current_view_step(step);
+                self.snapshot();
+                self.audit(step);
+            }
+        }
+    }
+
+    /// A window looks, then acknowledges a dropped marker or settles a
+    /// conflict it was just shown: a person acting on a current view. Nothing
+    /// can excuse a refusal, and the marker of an item it acknowledged (or
+    /// settled the last conflict of) must be gone: the only way to find a
+    /// marker that never clears. Draws only from `self.extra`.
+    fn current_view_step(&mut self, step: usize) {
+        let w = self.extra.below(2);
+        self.look(w);
+        let view = self.reg.board_view(TAG[0]).expect("a board");
+        let base = view.version;
+        let epoch = self.views[w].epoch.clone();
+        let marked: Vec<String> = view
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                ViewNode::Item(i) if i.dropped_conflicts > 0 => Some(i.id.clone()),
+                _ => None,
+            })
+            .collect();
+        let shown: Vec<Shown> = self.views[w]
+            .shown
+            .iter()
+            .filter(|s| s.field != "removed")
+            .cloned()
+            .collect();
+        // Items with a marker are the point: prefer them.
+        let on_marked: Vec<Shown> = shown
+            .iter()
+            .filter(|s| marked.contains(&s.item))
+            .cloned()
+            .collect();
+        let ack = !marked.is_empty() && (shown.is_empty() || self.extra.chance(50));
+        let (ops, item, conflict): (Vec<TrackerPaneOp>, String, Option<(Shown, ConflictKeep)>) =
+            if ack {
+                let id = self.extra.pick(&marked).clone();
+                (vec![TrackerPaneOp::AckDropped { id: id.clone() }], id, None)
+            } else if !shown.is_empty() {
+                let pool = if !on_marked.is_empty() && self.extra.chance(70) {
+                    &on_marked
+                } else {
+                    &shown
+                };
+                let c = self.extra.pick(pool).clone();
+                let keep = if self.extra.chance(50) {
+                    ConflictKeep::Current
+                } else {
+                    ConflictKeep::Losing
+                };
+                let op = TrackerPaneOp::ResolveConflict {
+                    id: c.item.clone(),
+                    field: c.field.clone(),
+                    keep,
+                    conflict_id: Some(c.conflict_id.clone()),
+                    index: None,
+                };
+                (vec![op], c.item.clone(), Some((c, keep)))
+            } else {
+                return;
+            };
+        let before = self.bytes();
+        let drops_before = self.reg.conflicts_dropped(TAG[0]);
+        let result = self
+            .reg
+            .apply_pane_ops_in(TAG[0], WINDOW[w], base, Some(&epoch), &ops);
+        self.steps.push(format!(
+            "window {w} (current view, base {base}) {ops:?} -> {}",
+            match &result {
+                Ok(o) => format!("ok v{}", o.version),
+                Err(e) => format!("{} {:?}", e.code, e.reason),
+            }
+        ));
+        if let Err(e) = &result {
+            self.failures.push(format!(
+                "step {step}: {ops:?} from a view taken just before was refused: {} {:?}",
+                e.code, e.reason
+            ));
+            return;
+        }
+        let drops_after = self.reg.conflicts_dropped(TAG[0]);
+        // The view was current: every drop so far is one it showed.
+        let settled_last = match &conflict {
+            None => true,
+            Some((c, keep)) => {
+                self.settled_now.push(c.conflict_id.clone());
+                if matches!(keep, ConflictKeep::Current) {
+                    self.excused.push(c.clone());
+                }
+                !self
+                    .reg
+                    .conflicts(TAG[0])
+                    .iter()
+                    .any(|k| k.item_id == c.item)
+            }
+        };
+        if conflict.is_none() && self.bytes() != before {
+            self.failures
+                .push(format!("step {step}: an acknowledgement changed the file"));
+        }
+        if conflict.is_some() {
+            self.settle(
+                Who::Pane(w),
+                base,
+                &before,
+                std::slice::from_ref(&item),
+                false,
+                step,
+            );
+        }
+        if conflict.is_none() {
+            // Acknowledging clears the marker whatever conflicts the item
+            // still holds: it is not "cleared while it still has conflicts".
+            self.marked_now.remove(&item);
+        }
+        if settled_last {
+            self.unacked_drops.remove(&item);
+            if drops_after == drops_before {
+                self.must_be_clear.insert(item);
+            }
         }
     }
 
@@ -1861,8 +2019,19 @@ impl World {
     }
 }
 
+/// An interleaving with the extra steps (the fuzzer's default).
 fn one(seed: u64) -> Result<(), String> {
-    let mut world = World::new(seed);
+    run_seed(seed, true)
+}
+
+/// An interleaving without the extra steps: exactly what a pinned seed made
+/// when its counterexample was found.
+fn pinned(seed: u64) -> Result<(), String> {
+    run_seed(seed, false)
+}
+
+fn run_seed(seed: u64, extras: bool) -> Result<(), String> {
+    let mut world = World::new(seed, extras);
     world.run();
     let failures = world.check();
     if failures.is_empty() {
@@ -1897,14 +2066,14 @@ fn one(seed: u64) -> Result<(), String> {
 /// board, set back by a stale save over a newer note, was silently lost.
 #[test]
 fn a_stale_save_restoring_a_value_a_removal_took_off_loses_no_edit() {
-    one(0x7a11_0a5a).unwrap_or_else(|e| panic!("{e}"));
+    pinned(0x7a11_0a5a).unwrap_or_else(|e| panic!("{e}"));
 }
 
 /// Another interleaving of the same family: a removal's value coming back
 /// through a stale save.
 #[test]
 fn a_stale_save_after_a_removal_loses_no_edit_seed_7a110c9a() {
-    one(0x7a11_0c9a).unwrap_or_else(|e| panic!("{e}"));
+    pinned(0x7a11_0c9a).unwrap_or_else(|e| panic!("{e}"));
 }
 
 /// Interleavings Perri's review of #490 found (they fail on main too): a stale
@@ -1912,18 +2081,18 @@ fn a_stale_save_after_a_removal_loses_no_edit_seed_7a110c9a() {
 /// an item's dropped marker while it still had conflicts (7a1228e0, 7a126120).
 #[test]
 fn a_flooded_board_keeps_the_dropped_marker_seed_7a1228e0() {
-    one(0x7a12_28e0).unwrap_or_else(|e| panic!("{e}"));
+    pinned(0x7a12_28e0).unwrap_or_else(|e| panic!("{e}"));
 }
 
 #[test]
 fn a_flooded_board_keeps_the_dropped_marker_seed_7a126120() {
-    one(0x7a12_6120).unwrap_or_else(|e| panic!("{e}"));
+    pinned(0x7a12_6120).unwrap_or_else(|e| panic!("{e}"));
 }
 
 /// Seed 7a1145aa was a lost edit (not a marker problem): kept as a pin.
 #[test]
 fn a_flooded_board_loses_no_edit_seed_7a1145aa() {
-    one(0x7a11_45aa).unwrap_or_else(|e| panic!("{e}"));
+    pinned(0x7a11_45aa).unwrap_or_else(|e| panic!("{e}"));
 }
 
 /// Round 2: a keep-losing that put back a value the field already held was
@@ -1932,7 +2101,31 @@ fn a_flooded_board_loses_no_edit_seed_7a1145aa() {
 /// unseen save before it.
 #[test]
 fn a_flooded_board_loses_no_edit_seed_7a126776() {
-    one(0x7a12_6776).unwrap_or_else(|e| panic!("{e}"));
+    pinned(0x7a12_6776).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Four more interleavings Perri's review of #491 found failing on main before
+/// #491 (they pass now; each was checked to fail against the code from before
+/// #491): two lost edits made by window 1 (its `done`, its text), and two
+/// dropped markers cleared too early.
+#[test]
+fn a_flooded_board_loses_no_edit_seed_7a12b6ab() {
+    pinned(0x7a12_b6ab).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn a_flooded_board_loses_no_edit_seed_7a16a5de() {
+    pinned(0x7a16_a5de).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn a_flooded_board_keeps_the_dropped_marker_until_shown_seed_7a159958() {
+    pinned(0x7a15_9958).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn a_flooded_board_keeps_the_dropped_marker_until_shown_seed_7a165a50() {
+    pinned(0x7a16_5a50).unwrap_or_else(|e| panic!("{e}"));
 }
 
 #[test]
