@@ -227,6 +227,8 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     private var collapsed: Set<AuthoredPrGroup> = []
     private var skeletonDeadline: Date
     private var isReloading = false
+    /// The remembered filter is checked against the first list only (see `AuthoredPrsFilter.droppingUnmatched`).
+    private var checkedStoredFilter = false
     private var ticks = 0
     private var timer: Timer?
     private var groupNodes: [AuthoredPrGroup: OverviewNode] = [:]
@@ -446,6 +448,14 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
         }
         let now = clock()
         let incoming = snapshot.prs.filter { !AuthoredPrsPresentation.isExpired($0, now: now) }
+        if !checkedStoredFilter, !incoming.isEmpty {
+            checkedStoredFilter = true
+            let kept = AuthoredPrsFilter.droppingUnmatched(filter, in: incoming)
+            if kept != filter {
+                filter = kept
+                filterStore.save(kept)
+            }
+        }
         let merged = AuthoredPrsHold.merge(displayed: displayed, incoming: incoming, held: heldIds)
         if merged != displayed {
             displayed = merged

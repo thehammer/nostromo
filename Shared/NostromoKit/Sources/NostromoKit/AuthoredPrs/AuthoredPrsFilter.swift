@@ -137,6 +137,21 @@ public enum AuthoredPrsFilter {
         }
     }
 
+    /// A remembered org or repo that matches no PR in `prs` is dropped to `All`: after the daemon stops listing an
+    /// org (`authored_prs_exclude_orgs`) a stored choice of it would otherwise stay in the pop-up with a count of
+    /// 0. Meant for the first list after launch only; an empty list changes nothing, since nothing is known yet.
+    public static func droppingUnmatched(_ selection: AuthoredPrsFilterSelection, in prs: [AuthoredPr]) -> AuthoredPrsFilterSelection {
+        guard !prs.isEmpty else { return selection }
+        var kept = selection
+        if case .org(let key) = selection.org, !prs.contains(where: { orgKey(ofRepo: $0.repo) == key }) {
+            kept.org = .all
+        }
+        if case .repo(let name) = selection.repo, !prs.contains(where: { $0.repo == name }) {
+            kept.repo = .all
+        }
+        return kept
+    }
+
     public static func apply(_ prs: [AuthoredPr], selection: AuthoredPrsFilterSelection) -> AuthoredPrsFilterResult {
         var orgCounts: [String: Int] = [:]
         var orgNames: [String: String] = [:]
