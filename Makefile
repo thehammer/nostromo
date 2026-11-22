@@ -1,5 +1,18 @@
 .PHONY: doctor build release install daemon-restart-guard test fmt-check python-test qa-selftest ci-remote clean daemon install-daemon uninstall-daemon
 
+# Where cargo writes build output. If the dedicated build-scratch volume is mounted
+# (/Volumes/Scratch: an APFS volume Time Machine excludes, so its churn never pins
+# local snapshots on the system volume) builds go there, one directory per checkout so
+# worktrees never share a target directory. Everywhere else (CI, other machines) nothing
+# changes: cargo's default `target`. An explicit CARGO_TARGET_DIR always wins.
+# Nothing here is read by the daemon: only builds.
+ifeq ($(origin CARGO_TARGET_DIR),undefined)
+ifneq ($(wildcard /Volumes/Scratch/.),)
+export CARGO_TARGET_DIR := /Volumes/Scratch/cargo-target/$(notdir $(CURDIR))
+endif
+endif
+NOSTROMO_TARGET_DIR := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target)
+
 build:
 	cargo build
 
@@ -115,9 +128,9 @@ install-daemon: daemon
 	  if [ -z "$$bridge" ]; then if [ -e "$$bdest" ]; then bridge="$$bdest"; else bridge="$$(dirname "$$real")/nostromo-mcp-bridge"; fi; fi; \
 	  stage_daemon="$$real.new.$$$$"; stage_guard="$$guard.new.$$$$"; stage_bridge="$$bridge.new.$$$$"; \
 	  rm -f "$$stage_daemon" "$$stage_guard" "$$stage_bridge"; \
-	  if cp target/release/nostromd "$$stage_daemon" && codesign --force -s - --identifier nostromd "$$stage_daemon" \
-	      && cp target/release/nostromo-guard "$$stage_guard" && codesign --force -s - --identifier nostromo-guard "$$stage_guard" \
-	      && cp target/release/nostromo-mcp-bridge "$$stage_bridge" && codesign --force -s - --identifier nostromo-mcp-bridge "$$stage_bridge"; then :; \
+	  if cp $(NOSTROMO_TARGET_DIR)/release/nostromd "$$stage_daemon" && codesign --force -s - --identifier nostromd "$$stage_daemon" \
+	      && cp $(NOSTROMO_TARGET_DIR)/release/nostromo-guard "$$stage_guard" && codesign --force -s - --identifier nostromo-guard "$$stage_guard" \
+	      && cp $(NOSTROMO_TARGET_DIR)/release/nostromo-mcp-bridge "$$stage_bridge" && codesign --force -s - --identifier nostromo-mcp-bridge "$$stage_bridge"; then :; \
 	  else \
 	    rm -f "$$stage_daemon" "$$stage_guard" "$$stage_bridge"; \
 	    echo "install-daemon: could not copy and sign nostromd, nostromo-guard and nostromo-mcp-bridge; nothing was replaced" >&2; exit 1; \

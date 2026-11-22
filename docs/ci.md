@@ -519,3 +519,30 @@ actually caught. Do not flip it on just because the streak is met.
   multi-pane split for the observation window," not "the GUI is correct."**
 - No retry logic exists anywhere in the workflow. A flaky INCONCLUSIVE is
   re-run by a human, on purpose, one job at a time — never automatically.
+
+## Local build scratch volume (`/Volumes/Scratch`, optional)
+
+On the owner's Mac, build output is churn: several GB of Rust and Xcode output written and replaced
+by every build, review and job. Time Machine's local snapshots are whole-volume, so they pin the old
+blocks of everything deleted or replaced on the system volume, and free space reads low long after the
+files are gone (exclusions only keep a folder out of the backup, not out of a snapshot).
+
+The fix is a separate APFS volume that Time Machine never snapshots:
+
+```
+diskutil apfs addVolume disk3 APFS Scratch        # shares the container's free space, no size reserved
+touch /Volumes/Scratch/.metadata_never_index      # no Spotlight indexing
+sudo tmutil addexclusion -v Scratch               # needs root: keep the volume out of Time Machine
+```
+
+What uses it, with no environment variables to set and nothing for the daemon to restart:
+
+- **`make`** (the `Makefile` top): when `/Volumes/Scratch` is mounted and `CARGO_TARGET_DIR` is not already
+  set, it exports `CARGO_TARGET_DIR=/Volumes/Scratch/cargo-target/<checkout directory name>` (one directory
+  per checkout, so worktrees never share a target directory), and `install-daemon` copies the binaries from
+  there. Everywhere else (CI, other machines, a volume that is not mounted) it stays `target/`. An explicit
+  `CARGO_TARGET_DIR` always wins. The first `make install-daemon` after the change is a full rebuild; the old
+  `target/` can then be deleted.
+- Not covered here: Xcode derived data (`-derivedDataPath build`, inside each worktree), Mother's worktree
+  location, and the `~/.claude` review scratch (`perri-clean.sh` and `perri.md` use `/Volumes/Scratch/perri-shared`
+  when the volume is mounted).
