@@ -483,6 +483,10 @@ struct HostState {
     model_input_at_send: Mutex<Vec<Option<String>>>,
     stops: AtomicUsize,
     alive: AtomicBool,
+    /// The scripted model's tasks, one per message sent. They outlive the
+    /// run: the run ends the moment the bridge refuses or accepts, and the
+    /// script logs what the bridge answered only after that call returns.
+    scripts: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 struct FakeHost {
@@ -502,10 +506,22 @@ impl FakeHost {
                 model_input_at_send: Mutex::new(Vec::new()),
                 stops: AtomicUsize::new(0),
                 alive: AtomicBool::new(false),
+                scripts: Mutex::new(Vec::new()),
             }),
             bridge,
             script,
         })
+    }
+
+    /// Wait for every scripted model task to finish, so what it logged after
+    /// the run ended is there to read. Every script ends on its own once the
+    /// run has: the bridge answers a call made after the run at once.
+    async fn settle(&self) {
+        loop {
+            let next = self.state.scripts.lock().unwrap().pop();
+            let Some(task) = next else { return };
+            let _ = task.await;
+        }
     }
 
     fn sent(&self) -> Vec<String> {
@@ -577,7 +593,8 @@ impl PicksSessionHost for FakeHost {
             bridge: self.bridge.clone(),
             host: self.state.clone(),
         });
-        tokio::spawn(fut);
+        let task = tokio::spawn(fut);
+        self.state.scripts.lock().unwrap().push(task);
         Ok(())
     }
 
@@ -739,7 +756,7 @@ async fn rig_with(w: World, o: Opts) -> Rig {
         // then sleeps for an hour: only the test's own triggers run.
         let src =
             HueyEngine::spawn(w.deps(curator, bridge.clone(), o.config, Duration::from_secs(3600)));
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        src.handle.first_tick_done().await;
         w.confirm();
         src
     };
@@ -756,10 +773,13 @@ async fn rig_with(w: World, o: Opts) -> Rig {
 
 impl Rig {
     async fn trigger(&self, trigger: Trigger) -> RunOutcome {
-        tokio::time::timeout(Duration::from_secs(30), self.src.handle.trigger(trigger))
-            .await
-            .expect("the run ended")
-            .expect("the trigger was accepted")
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(30), self.src.handle.trigger(trigger))
+                .await
+                .expect("the run ended")
+                .expect("the trigger was accepted");
+        self.host.settle().await;
+        outcome
     }
 
     fn report_dir(&self, date: NaiveDate, version: u32) -> PathBuf {
@@ -773,6 +793,7 @@ impl Rig {
             store.runs().len() == n && !self.src.handle.is_running()
         })
         .await;
+        self.host.settle().await;
     }
 
     /// The session's working directories and transcripts are gone, and

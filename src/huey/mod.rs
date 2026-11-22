@@ -92,6 +92,9 @@ pub enum TriggerRefused {
 struct Inner {
     env: RunEnv,
     view_tx: watch::Sender<HueyView>,
+    /// Set once the scheduler has finished its first look (see
+    /// [`HueyHandle::first_tick_done`]).
+    first_tick_tx: watch::Sender<bool>,
     /// Held for the whole of a run: one run at a time (T7).
     run_lock: tokio::sync::Mutex<()>,
     last_run_end: std::sync::Mutex<Option<DateTime<Utc>>>,
@@ -141,6 +144,17 @@ impl HueyHandle {
 
     pub fn store(&self) -> Store {
         Store::new((*self.paths).clone())
+    }
+
+    /// Resolves once the scheduler has finished its first look: it ticks
+    /// once at once, and a tick that finds the run due takes the run lock and
+    /// refuses a `trigger` made meanwhile. A caller that wants the scheduler
+    /// out of the way (a test that sets the world up around a parked engine)
+    /// waits for this instead of guessing how long the first tick takes.
+    pub async fn first_tick_done(&self) {
+        let mut done = self.inner.first_tick_tx.subscribe();
+        // The sender lives in `Inner`, which this handle holds: it cannot close.
+        let _ = done.wait_for(|done| *done).await;
     }
 
     pub fn is_running(&self) -> bool {
@@ -499,6 +513,7 @@ impl HueyEngine {
                     limits: deps.limits,
                 },
                 view_tx,
+                first_tick_tx: watch::channel(false).0,
                 run_lock: tokio::sync::Mutex::new(()),
                 last_run_end: std::sync::Mutex::new(None),
                 scheduled_attempts: std::sync::Mutex::new((NaiveDate::MIN, 0)),
@@ -547,6 +562,7 @@ async fn run_scheduler(handle: HueyHandle, tick: Duration) {
                 }
             }
         }
+        handle.inner.first_tick_tx.send_replace(true);
         tokio::time::sleep(tick).await;
     }
 }
