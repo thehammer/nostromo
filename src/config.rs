@@ -281,6 +281,7 @@ impl Config {
         };
         let mut orgs: Vec<String> = Vec::new();
         let mut ignored = 0usize;
+        let mut beyond = 0usize;
         for entry in entries {
             let Some(s) = entry.as_str() else {
                 ignored += 1;
@@ -295,18 +296,29 @@ impl Config {
                 continue;
             }
             let lc = s.to_ascii_lowercase();
-            if !orgs.contains(&lc) {
-                orgs.push(lc);
+            if orgs.contains(&lc) {
+                continue;
             }
+            if orgs.len() >= crate::data::authored_prs::exclude::MAX_EXCLUDED_ORGS {
+                beyond += 1;
+                continue;
+            }
+            orgs.push(lc);
         }
-        let warnings = if ignored > 0 {
-            vec![format!(
-                "{KEY}: {ignored} entr{} ignored (each must be a GitHub owner login)",
+        let mut warnings = Vec::new();
+        if ignored > 0 {
+            warnings.push(format!(
+                "{KEY}: {ignored} entr{} ignored (each must be a GitHub owner login such as \"my-org\"); PRs from those orgs will still appear",
                 if ignored == 1 { "y" } else { "ies" }
-            )]
-        } else {
-            Vec::new()
-        };
+            ));
+        }
+        if beyond > 0 {
+            warnings.push(format!(
+                "{KEY}: {beyond} entr{} beyond the limit of {} ignored; those orgs' PRs will still appear",
+                if beyond == 1 { "y" } else { "ies" },
+                crate::data::authored_prs::exclude::MAX_EXCLUDED_ORGS
+            ));
+        }
         (orgs, warnings)
     }
 
@@ -856,6 +868,24 @@ mod authored_prs_exclude_orgs_tests {
         for v in ["secretorg", "bad org", "un_der"] {
             assert!(!w[0].contains(v), "{}", w[0]);
         }
+    }
+
+    #[test]
+    fn entries_beyond_five_are_ignored_with_a_count_only_warning() {
+        let (orgs, w) =
+            resolve("authored_prs_exclude_orgs = [\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\"]\n");
+        assert_eq!(orgs, ["a", "b", "c", "d", "e"]);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("2 entries beyond the limit"));
+        assert!(w[0].contains("will still appear"));
+        assert!(!w[0].contains("\"f\"") && !w[0].contains("g,"));
+    }
+
+    #[test]
+    fn an_ignored_invalid_entry_says_its_prs_will_still_appear() {
+        let (_, w) = resolve("authored_prs_exclude_orgs = [\"secret/repo\"]\n");
+        assert!(w[0].contains("will still appear"), "{}", w[0]);
+        assert!(!w[0].contains("secret"), "{}", w[0]);
     }
 
     #[test]

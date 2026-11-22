@@ -957,6 +957,13 @@ impl Engine {
                 true
             }
             Err(f) => {
+                if f.error == ApiError::Status(422) && !self.exclude.is_empty() {
+                    warn!(
+                        status = 422,
+                        excluded = self.exclude.len(),
+                        "authored-prs search rejected: exclusion list may be too long"
+                    );
+                }
                 self.on_failure(f, Source::Poll);
                 false
             }
@@ -1120,6 +1127,12 @@ impl Engine {
                 self.prs.remove(key);
                 continue;
             }
+            // A repo that moved into an excluded owner leaves the list whatever
+            // state it is in (a closed or merged one included).
+            if self.exclude.covers_repo(&raw.repository.name_with_owner) {
+                self.prs.remove(key);
+                continue;
+            }
             let told_at = self
                 .store
                 .get(&key_string(&key.repo, key.number))
@@ -1142,11 +1155,6 @@ impl Engine {
             } else {
                 target.repo.clone()
             };
-            if self.exclude.covers_repo(&repo) {
-                // A repo that moved into an excluded owner.
-                self.prs.remove(key);
-                continue;
-            }
             let updated = raw.updated_at.unwrap_or(wall);
             let pr = self.prs.entry(key.clone()).or_insert_with(|| Pr {
                 repo: repo.clone(),

@@ -208,10 +208,245 @@ async fn saved_links_and_verdicts_of_an_excluded_repo_are_not_resurrected() {
     again.visible_and_settled().await;
     again.run(secs(10), secs(1)).await;
 
+    for file in ["authored-pr-links.json", "perri-verdicts.json"] {
+        let text = std::fs::read_to_string(first.state_root.join(file)).unwrap();
+        assert!(
+            !text.to_lowercase().contains("carefeed"),
+            "{file} still names the excluded owner"
+        );
+        assert!(text.contains("thehammer/nostromo"), "{file} kept the rest");
+    }
     assert!(again.row("Carefeed/app", 1).is_none());
     assert!(again.store.get("carefeed/app#1").is_none());
     assert!(again.verdicts.newest("carefeed/app", 1).is_none());
     assert!(again.store.get("thehammer/nostromo#2").is_some());
     assert!(again.verdicts.newest("thehammer/nostromo", 2).is_some());
     assert!(again.row("thehammer/nostromo", 2).is_some());
+}
+
+// ── the verbs ────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn no_verb_takes_an_excluded_repo_and_none_reads_or_writes_for_it() {
+    let mut rig = Rig::start(two_orgs(), excluding(&["carefeed"])).await;
+    rig.visible_and_settled().await;
+    let mark = rig.fake.log_len();
+    let a = rig.actions.clone();
+
+    // preview, notify and start-a-session all compose from the list first.
+    assert_eq!(a.compose_for("Carefeed/app", 1).err(), Some("unknown_pr"));
+    assert_eq!(a.compose_for("carefeed/app", 1).err(), Some("unknown_pr"));
+    // link and unlink
+    assert!(!a.set_link("Carefeed/app", 1, Some("alpha")));
+    assert!(rig.store.get("carefeed/app#1").is_none());
+    // merge
+    match rig.merge("m1", "Carefeed/app", 1, "abcdef12").await {
+        nostromo::data::authored_prs::wire::AuthoredPrResult::Err(e) => {
+            assert_eq!(e.code, "not_found")
+        }
+        _ => panic!("merged an excluded repo"),
+    }
+    // record_verdict, approved and not, with the repo in either case
+    for verdict in [Verdict::Approved, Verdict::ChangesRequested] {
+        let r = a
+            .record_verdict(
+                "Carefeed/app",
+                1,
+                &"a".repeat(40),
+                verdict,
+                Some("perri"),
+                Some("a note"),
+            )
+            .await;
+        assert_eq!(r, Err("pr_unknown"));
+    }
+    assert!(rig.verdicts.newest("carefeed/app", 1).is_none());
+    assert_eq!(rig.fake.log_len(), mark, "no read: {:?}", rig.since(mark));
+    let on_disk =
+        std::fs::read_to_string(rig.state_root.join("perri-verdicts.json")).unwrap_or_default();
+    assert!(!on_disk.to_lowercase().contains("carefeed"));
+
+    // The same verbs still work for another owner.
+    assert!(
+        a.compose_for("thehammer/nostromo", 2).is_ok() || a.row("thehammer/nostromo", 2).is_some()
+    );
+}
+
+// ── relay events ─────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn closed_and_merged_events_for_an_excluded_repo_change_and_cost_nothing() {
+    let fake = two_orgs();
+    let mut rig = Rig::start(
+        fake.clone(),
+        RigOpts {
+            relay: true,
+            ..excluding(&["carefeed"])
+        },
+    )
+    .await;
+    rig.relay_up().await;
+    rig.set_demand("visible").await;
+    rig.run(secs(10), secs(1)).await;
+    let before = rig.snapshot().unwrap().prs.len();
+    let mark = rig.fake.log_len();
+    for ty in ["pr.closed", "pr.merged"] {
+        let mut ev = relay_pr_ev(ty, "Carefeed/app", 1);
+        ev.merged = Some(ty == "pr.merged");
+        rig.relay_event(ev).await;
+    }
+    rig.run(secs(5), secs(1)).await;
+    assert_eq!(rig.fake.log_len(), mark);
+    assert_eq!(rig.snapshot().unwrap().prs.len(), before);
+}
+
+// ── the snapshot ─────────────────────────────────────────────────────────────
+
+async fn relay_org_with(orgs: &[&str]) -> Rig {
+    let mut rig = Rig::start(
+        two_orgs(),
+        RigOpts {
+            relay: true,
+            ..excluding(orgs)
+        },
+    )
+    .await;
+    rig.relay_up().await;
+    rig.set_demand("visible").await;
+    rig.run(secs(10), secs(1)).await;
+    rig
+}
+
+#[tokio::test]
+async fn the_relay_org_is_published_empty_when_it_is_excluded() {
+    let rig = relay_org_with(&["carefeed"]).await;
+    assert_eq!(rig.snapshot().unwrap().relay.org, "");
+    for (_, s) in &rig.published {
+        assert_eq!(s.relay.org, "");
+    }
+}
+
+#[tokio::test]
+async fn the_relay_org_is_published_as_it_is_when_another_org_is_excluded() {
+    let rig = relay_org_with(&["other-org"]).await;
+    assert_eq!(rig.snapshot().unwrap().relay.org, "Carefeed");
+}
+
+#[tokio::test]
+async fn an_sso_org_is_withheld_until_it_is_named_even_in_the_first_snapshots() {
+    let fake = two_orgs();
+    fake.set_sso(Some("partial-results; organizations=111,222"));
+    fake.set_org(111, Some("Carefeed"));
+    fake.set_org(222, Some("Other-Org"));
+    let mut rig = Rig::start(fake, excluding(&["carefeed"])).await;
+    rig.set_demand("visible").await;
+    rig.run(mins(12), secs(10)).await;
+    // Every snapshot the engine ever published, the first ones (the search has
+    // reported the ids, no lookup has answered yet) included: an id that is not
+    // named yet is withheld, so no generic label and no excluded name shows.
+    assert!(rig.published.len() > 1);
+    for (_, s) in &rig.published {
+        assert!(
+            s.hidden_orgs.iter().all(|o| o == "Other-Org"),
+            "{:?}",
+            s.hidden_orgs
+        );
+    }
+    assert_eq!(rig.snapshot().unwrap().hidden_orgs, ["Other-Org"]);
+    for (_, s) in &rig.published {
+        assert!(!serde_json::to_string(s)
+            .unwrap()
+            .to_lowercase()
+            .contains("carefeed"));
+    }
+}
+
+#[tokio::test]
+async fn total_open_is_what_github_said_when_it_returned_no_excluded_item() {
+    let fake = Fake::new();
+    fake.put(FakePr::new("thehammer/a", 1).passing("build"));
+    fake.put(FakePr::new("thehammer/b", 2).passing("build"));
+    let mut rig = Rig::start(fake, excluding(&["carefeed"])).await;
+    rig.visible_and_settled().await;
+    assert_eq!(rig.snapshot().unwrap().total_open, 2);
+}
+
+// ── a repo that moved into an excluded owner ────────────────────────────────
+
+#[tokio::test]
+async fn a_pr_whose_detail_names_an_excluded_owner_is_dropped_open_or_not() {
+    let fake = Fake::new();
+    fake.put(FakePr::new("thehammer/moved", 1).passing("build"));
+    fake.put(FakePr::new("thehammer/moved", 2).passing("build"));
+    let mut rig = Rig::start(fake.clone(), excluding(&["carefeed"])).await;
+    rig.visible_and_settled().await;
+    assert!(rig.row("thehammer/moved", 1).is_some());
+    assert!(rig.row("thehammer/moved", 2).is_some());
+
+    // Both are transferred into the excluded owner; #2 is also closed.
+    fake.edit("thehammer/moved", 1, |p| {
+        p.detail_repo = Some("Carefeed/moved".into());
+        p.updated_at += chrono::Duration::minutes(5);
+    });
+    fake.edit("thehammer/moved", 2, |p| {
+        p.detail_repo = Some("Carefeed/moved".into());
+        p.state = "CLOSED".into();
+        p.in_search = false;
+    });
+    rig.refresh().await;
+    rig.run(mins(3), secs(5)).await;
+    assert!(rig.row("thehammer/moved", 1).is_none(), "open, transferred");
+    assert!(
+        rig.row("thehammer/moved", 2).is_none(),
+        "closed, transferred"
+    );
+}
+
+// ── logs ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn no_log_line_names_an_excluded_org_and_a_rejected_search_says_why() {
+    let (log, _guard) = capture_logs();
+    let fake = two_orgs();
+    fake.set_sso(Some("partial-results; organizations=111"));
+    fake.set_org(111, Some("Carefeed"));
+    let mut rig = Rig::start(
+        fake.clone(),
+        RigOpts {
+            relay: true,
+            ..excluding(&["carefeed"])
+        },
+    )
+    .await;
+    rig.relay_up().await;
+    rig.set_demand("visible").await;
+    rig.run(secs(30), secs(1)).await;
+    let mut opened = relay_pr_ev("pr.opened", "Carefeed/app", 9);
+    opened.author = Some(ME.to_owned());
+    rig.relay_event(opened).await;
+    fake.force(
+        "search",
+        Some(Forced {
+            status: 422,
+            retry_after: None,
+        }),
+    );
+    rig.run(mins(5), secs(5)).await;
+
+    let text = log.text();
+    assert!(
+        text.contains("exclusion list may be too long") && text.contains("422"),
+        "{text}"
+    );
+    assert!(!text.to_lowercase().contains("carefeed"), "{text}");
+}
+
+#[test]
+fn the_daemon_builds_its_exclusions_from_the_config() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/nostromd.rs"))
+        .unwrap();
+    assert!(
+        src.contains("ExcludedOrgs::from_config(config)") && src.contains("exclude_orgs,"),
+        "start_authored_prs must pass the configured exclusions to Deps"
+    );
 }

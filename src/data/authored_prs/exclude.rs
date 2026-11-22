@@ -5,6 +5,11 @@
 //! a caller cannot put anything but a login into the search query. Nothing in
 //! this module logs or formats a name.
 
+/// The most owners excluded. Each is a `-org:` qualifier in the search query,
+/// and GitHub's limits on negation operators and query length are not
+/// verified, so the list is kept short; the rest are ignored with a warning.
+pub const MAX_EXCLUDED_ORGS: usize = 5;
+
 /// Lowercased GitHub owner logins to leave out. Empty changes nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExcludedOrgs(Vec<String>);
@@ -21,11 +26,33 @@ impl ExcludedOrgs {
             let login = !o.is_empty()
                 && o.len() <= 39
                 && o.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
-            if login && !out.contains(&o) {
+            if login && !out.contains(&o) && out.len() < MAX_EXCLUDED_ORGS {
                 out.push(o);
             }
         }
         ExcludedOrgs(out)
+    }
+
+    /// The owners `authored_prs_exclude_orgs` names. Logs each config warning
+    /// (key only) and one count line; never a name. This is the one call the
+    /// daemon makes, so a test of it covers the wiring.
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        let (orgs, warnings) = config.resolve_authored_prs_exclude_orgs();
+        for w in &warnings {
+            tracing::warn!("{w}");
+        }
+        let excluded = ExcludedOrgs::new(orgs);
+        if !excluded.is_empty() {
+            tracing::info!(
+                count = excluded.len(),
+                "authored-prs: owners excluded by config"
+            );
+        }
+        excluded
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -77,6 +104,22 @@ mod tests {
     fn anything_that_is_not_a_login_is_dropped() {
         let x = ExcludedOrgs::new(["a/b", "c d", "", "ok", "x&y=1", "OK"]);
         assert_eq!(x.search_qualifiers(), "+-org:ok");
+    }
+
+    #[test]
+    fn at_most_five_owners_are_kept() {
+        let x = ExcludedOrgs::new(["a", "b", "c", "d", "e", "f", "g"]);
+        assert_eq!(x.search_qualifiers(), "+-org:a+-org:b+-org:c+-org:d+-org:e");
+    }
+
+    #[test]
+    fn from_config_reads_the_key_and_logs_no_name() {
+        let cfg: crate::config::Config =
+            toml::from_str("authored_prs_exclude_orgs = [\"Secret-Org\", \"bad/entry\"]").unwrap();
+        let x = ExcludedOrgs::from_config(&cfg);
+        assert!(x.covers_repo("secret-org/x"));
+        assert!(!x.covers_repo("bad/entry"));
+        assert!(ExcludedOrgs::from_config(&crate::config::Config::default()).is_empty());
     }
 
     #[test]

@@ -143,6 +143,9 @@ pub struct FakePr {
     pub base_queue: Option<bool>,
     /// GitHub could not resolve the base branch's queue (`null` beside an error).
     pub base_queue_error: bool,
+    /// The repository GraphQL names for the PR, when it is not the one it was
+    /// found under (a repo transferred to another owner).
+    pub detail_repo: Option<String>,
 }
 
 impl FakePr {
@@ -184,6 +187,7 @@ impl FakePr {
             queue_field_error: false,
             base_queue: None,
             base_queue_error: false,
+            detail_repo: None,
         }
     }
 
@@ -475,7 +479,7 @@ fn pr_graphql(pr: &FakePr, query: &str) -> Value {
         "baseRefName": pr.base_ref,
         "headRefName": pr.head_ref,
         "headRefOid": pr.head_sha,
-        "repository": {"nameWithOwner": pr.repo, "defaultBranchRef": {"name": pr.default_branch}},
+        "repository": {"nameWithOwner": pr.detail_repo.as_deref().unwrap_or(&pr.repo), "defaultBranchRef": {"name": pr.default_branch}},
         "commits": {"nodes": [{"commit": {"committedDate": iso(pr.committed), "statusCheckRollup": rollup}}]},
         "latestOpinionatedReviews": {"nodes": pr.reviews.iter().map(|(s, l, t)| json!({
             "state": s, "author": actor(l, t), "body": CANARY_BODY
@@ -1234,7 +1238,8 @@ impl Rig {
                 Arc::clone(&clock),
             )
             .with_merge(Arc::clone(&handle.verdicts), Arc::clone(&handle.api))
-            .with_heads(Arc::clone(&handle.heads)),
+            .with_heads(Arc::clone(&handle.heads))
+            .with_exclusions(handle.exclude.clone()),
         );
         let mut rig = Rig {
             fake,

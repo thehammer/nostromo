@@ -352,7 +352,7 @@ held, published or counted:
 - **Saved state:** the engine starts with no PRs, so nothing held can outlive a
   restart. On start the link/told entries (`authored-pr-links.json`) and Perri
   verdicts (`perri-verdicts.json`) of excluded owners are forgotten in memory
-  (the next write leaves them out of the file too). `focus-memory.json` keeps
+  (and the files are rewritten at once, so their names do not stay on disk). `focus-memory.json` keeps
   no repo (a focus's tag, agent, folder and name), so it cannot be filtered by
   owner; it is only ever shown through a PR that is listed.
 - **The relay's org:** `relay.org` (the organisation the relay sends events for,

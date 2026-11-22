@@ -242,13 +242,31 @@ impl VerdictStore {
         }
     }
 
-    /// Forget the verdicts of excluded owners' repos (on load; the next write
-    /// leaves them out of the file). Returns how many.
+    /// Forget the verdicts of excluded owners' repos (on load), and write the
+    /// file at once so their names do not stay on disk. Returns how many.
     pub fn forget_excluded(&self, excluded: &super::exclude::ExcludedOrgs) -> usize {
         let mut g = self.lock();
         let before = g.len();
         g.retain(|r| !excluded.covers_repo(&r.repo));
-        before - g.len()
+        let gone = before - g.len();
+        if gone > 0 {
+            self.persist(&g);
+        }
+        gone
+    }
+
+    fn persist(&self, records: &[VerdictRecord]) {
+        if let Some(path) = &self.path {
+            let file = File {
+                records: records
+                    .iter()
+                    .filter_map(|r| serde_json::to_value(r).ok())
+                    .collect(),
+            };
+            if write_private(path, &file).is_err() {
+                tracing::warn!("perri verdicts could not be written");
+            }
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<VerdictRecord>> {
@@ -269,17 +287,7 @@ impl VerdictStore {
             let extra = g.len() - MAX_RECORDS;
             g.drain(..extra);
         }
-        if let Some(path) = &self.path {
-            let file = File {
-                records: g
-                    .iter()
-                    .filter_map(|r| serde_json::to_value(r).ok())
-                    .collect(),
-            };
-            if write_private(path, &file).is_err() {
-                tracing::warn!("perri verdicts could not be written");
-            }
-        }
+        self.persist(&g);
     }
 
     /// The verdict for exactly this head, if any.

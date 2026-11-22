@@ -256,6 +256,8 @@ pub struct AuthoredPrsHandle {
     pub api: ApiSlot,
     /// The full heads the engine holds, for `perri.record_verdict`.
     pub heads: HeadBook,
+    /// Owners that never enter the list; the verbs refuse their repos.
+    pub exclude: exclude::ExcludedOrgs,
     /// The latest snapshot; `None` until the engine publishes its first.
     pub snapshot: watch::Receiver<Option<AuthoredPrsSnapshot>>,
     pub task: tokio::task::JoinHandle<()>,
@@ -289,6 +291,7 @@ impl AuthoredPrsSource {
                 "authored-prs: excluded entries left out of saved state"
             );
         }
+        let exclude = deps.exclude_orgs.clone();
         let api: ApiSlot = Arc::new(Mutex::new(None));
         let heads: HeadBook = Arc::new(Mutex::new(HashMap::new()));
         let task = tokio::spawn(
@@ -313,6 +316,7 @@ impl AuthoredPrsSource {
             verdicts,
             api,
             heads,
+            exclude,
             snapshot: rx,
             task,
         }
