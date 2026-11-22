@@ -281,6 +281,8 @@ struct Shared {
     /// finished. Set under `state`, cleared by the writer once the message is
     /// either written or back on `pending`.
     writing: Arc<AtomicBool>,
+    /// The id of the message `writing` is about (set with it, cleared with it).
+    writing_id: Arc<Mutex<Option<String>>>,
     /// Orders a switch request's store/ledger writes against `apply_switch`'s
     /// (see the lock-order note above). Holds no data.
     model_io: Arc<Mutex<()>>,
@@ -1546,6 +1548,7 @@ impl SessionManager {
             model: Arc::new(Mutex::new(runtime)),
             waiters: Arc::new(Mutex::new(HashMap::new())),
             writing: Arc::new(AtomicBool::new(false)),
+            writing_id: Arc::new(Mutex::new(None)),
             model_io: Arc::new(Mutex::new(())),
             ctx: Arc::new(SessionCtx {
                 tag: tag.clone(),
@@ -3822,6 +3825,7 @@ fn step(shared: &Shared, finished_apply: bool) {
             };
             match msg {
                 Some(msg) => {
+                    *lock_recover(&shared.writing_id) = Some(msg.id.clone());
                     shared.writing.store(true, Ordering::SeqCst);
                     *state = SessionState::MidTurn;
                     Next::Write(msg)
@@ -3896,6 +3900,7 @@ impl WriteInFlight<'_> {
                 lock_recover(&self.shared.pending).push_front(msg);
                 *state = SessionState::Idle;
             }
+            *lock_recover(&self.shared.writing_id) = None;
             self.shared.writing.store(false, Ordering::SeqCst);
         }
         if let Some(id) = back {

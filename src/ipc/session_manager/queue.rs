@@ -453,9 +453,10 @@ pub(super) fn in_flight_pause() {}
 /// under `state`: a message `step` took off the queue is either delivered or
 /// back on it by then, never in between.
 ///
-/// If the limit elapses with the write still in flight, the answer for an id
-/// that is not queued is `already_delivered`: that message was off the queue,
-/// and its write path decides the rest (it is not ours to undo).
+/// If the limit elapses with the write still in flight, the id being written
+/// answers `already_delivered`: that message was off the queue, and its write
+/// path decides the rest (it is not ours to undo). Any other id that is not
+/// queued keeps its own answer (`not_found`, or `already_delivered` if it was).
 pub(super) fn answer_verb(shared: &Shared, id: &str, verb: QueueVerb) -> QueueAnswer {
     let started = Instant::now();
     let deadline = started + WRITE_WAIT_LIMIT;
@@ -469,7 +470,9 @@ pub(super) fn answer_verb(shared: &Shared, id: &str, verb: QueueVerb) -> QueueAn
         }
         // Still writing after the limit (never under the test mutation, which
         // decides as if it had not looked).
-        let in_flight = writing && !wait_skipped();
+        let in_flight = writing && !wait_skipped() && {
+            lock_recover(&shared.writing_id).as_deref() == Some(id)
+        };
         let mut pending = lock_recover(&shared.pending);
         let position = pending
             .iter()

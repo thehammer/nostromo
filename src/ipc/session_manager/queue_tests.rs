@@ -801,3 +801,41 @@ async fn the_race_test_catches_a_decision_made_without_waiting_for_the_in_flight
         "the mutation went unnoticed in {RACE_SEEDS} interleavings"
     );
 }
+
+/// After the wait limit passes with a write stuck, only the id being written
+/// answers `already_delivered`; an unknown id is still `not_found`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stuck_write_makes_only_its_own_id_already_delivered_others_stay_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut mgr = busy("t", &dir.path().join("in"));
+    let writing_id = mgr.send_typed_message("t", "stuck", &[], None).unwrap();
+    let removed = mgr.send_typed_message("t", "gone", &[], None).unwrap();
+    assert_eq!(
+        mgr.queue_verb("t", &removed, QueueVerb::Remove).code,
+        QueueResultCode::Removed
+    );
+    // A write of `writing_id` that never finishes (the limit is five seconds).
+    let shared = shared_of(&mgr, "t");
+    lock_recover(&shared.pending).retain(|m| m.id != writing_id);
+    *lock_recover(&shared.writing_id) = Some(writing_id.clone());
+    shared.writing.store(true, Ordering::SeqCst);
+
+    let answers = tokio::task::spawn_blocking(move || {
+        [
+            mgr.queue_verb("t", &writing_id, QueueVerb::TakeBack).code,
+            mgr.queue_verb("t", "q-never-issued", QueueVerb::Remove)
+                .code,
+            mgr.queue_verb("t", &removed, QueueVerb::TakeBack).code,
+        ]
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        answers,
+        [
+            QueueResultCode::AlreadyDelivered,
+            QueueResultCode::NotFound,
+            QueueResultCode::NotFound
+        ]
+    );
+}

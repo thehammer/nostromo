@@ -86,8 +86,9 @@ After a gap in the stream (the daemon's per-client buffer overflowed) the daemon
 `text` and `images` are present only on `taken_back`. The daemon is the single judge: it waits (bounded by the same
 5 s `WRITE_WAIT_LIMIT` Stop uses, with the session lock released) for a write `step` has in flight, then decides
 under the session's locks. A message is therefore either queued, or written, or gone, never in between: exactly one
-of delivered, taken back, removed or dropped by Stop. If the wait limit elapses with the write still in flight, an id
-that is not queued answers `already_delivered`: that message was off the queue and its write path decides the rest.
+of delivered, taken back, removed or dropped by Stop. If the wait limit elapses with the write still in flight, only
+the id being written answers `already_delivered`: that message was off the queue and its write path decides the rest.
+Any other id that is not queued keeps its own answer (`not_found`, or `already_delivered` if it was delivered).
 
 A message that leaves by take-back, remove or Stop never runs its delivered hook (a Tell notify never shows "Told")
 and stops being the conversation's first-prompt candidate: candidacy passes to the oldest message still queued, or is
@@ -135,6 +136,17 @@ New log lines about the queue carry counts, ids, codes and durations only: never
 | Stop (interrupt) | dropped; typed entries handed back as above |
 | User stop / new session | discarded; watchers told (`session_stopped`) |
 | Daemon restart | lost. The queue lives in memory only and is not persisted. The delivered ring and every id are gone too, and the `daemon_epoch` changes, so a client holding an old id gets `not_found`. S2 shows a notice when it sees the epoch change with entries it was showing. |
+
+## Limits
+
+- **Snapshot size.** Every `session_queue` snapshot carries the full text of every queued typed entry, and
+  `write_outbound` (`src/ipc/server.rs`) silently drops a frame over 4 MiB. Two queued pastes of about 2.5 MB each
+  therefore make later snapshots, and the Stop `session_queue_returned` frame, vanish. This is a known limit; S2 or a
+  later slice should use per-entry previews and one frame per returned entry.
+- **Lock hold.** Take-back and remove wait up to `WRITE_WAIT_LIMIT` (5 s) for an in-flight write while holding the
+  global `SessionManager` mutex on a tokio worker thread. `interrupt` does the same today.
+- **User stop discards the queue.** Before this slice, Stop then Restart delivered the queued messages; now a user
+  stop discards them, and nothing lets the user recall that text until S2 ships.
 
 ## Not in this slice
 

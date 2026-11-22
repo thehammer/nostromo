@@ -49,7 +49,7 @@ use super::{
         FEATURE_TRACKER_EDIT, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
     session_manager::{
-        ModelRequestOutcome, QueueVerb, ResendTrigger, SessionManager, SwitchRequest,
+        AppLabel, ModelRequestOutcome, QueueVerb, ResendTrigger, SessionManager, SwitchRequest,
     },
 };
 use crate::approvals::broker::ApprovalBroker;
@@ -3965,13 +3965,14 @@ fn refusal_line_allowed() -> bool {
 /// Session tag of Fred's own session.
 const FRED_TAG: &str = "fred";
 
-/// Send `text` into Fred's session as a user message.
+/// Send `text` into Fred's session as an app-composed message (a work-item
+/// send: the operator never typed it, so it cannot be taken back).
 fn seed_fred(session_mgr: &Arc<Mutex<SessionManager>>, text: &str) -> WorkResult<SendOutcome> {
     let mut mgr = session_mgr.lock().unwrap();
     if !mgr.has_live_session(FRED_TAG) {
         return WorkResult::err("fred_not_running", "Fred's session is not running");
     }
-    match mgr.send_user_message(FRED_TAG, text, &[]) {
+    match mgr.send_app_message(FRED_TAG, text, &[], AppLabel::WorkItem) {
         Ok(()) => WorkResult::Ok(SendOutcome {
             kind: "seeded".into(),
             focus_tag: Some(FRED_TAG.into()),

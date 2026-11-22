@@ -923,6 +923,56 @@ fn an_app_entry_is_not_allowed_to_be_taken_back_or_removed_and_is_delivered_with
     });
 }
 
+#[test]
+fn a_fred_seed_to_a_busy_session_is_an_app_entry_that_cannot_be_taken_back_and_stop_does_not_return_it(
+) {
+    run(|mut rig| async move {
+        let (fake, _hold) = rig.busy("fred").await;
+        let mut app = rig.app(vec![]).await;
+        app.watch("fred").await;
+
+        app.send(&ClientMsg::FredSeed {
+            request_id: "seed-1".into(),
+            text: "SEED-TEXT-FOR-FRED".into(),
+        })
+        .await;
+        let snaps = app
+            .snaps_until("the seed queued", |s| s.entries.len() == 1)
+            .await;
+        let entry = snaps.last().unwrap().entries[0].clone();
+        assert_eq!(entry.app_label.as_deref(), Some("work_item"));
+        assert!(!entry.can_take_back, "a Fred seed is app-composed");
+
+        assert_eq!(
+            app.take_back("fred", &entry.id).await.0,
+            QueueResultCode::NotAllowed
+        );
+        assert_eq!(
+            app.remove("fred", &entry.id).await,
+            QueueResultCode::NotAllowed
+        );
+
+        app.send(&ClientMsg::SessionInterrupt { tag: "fred".into() })
+            .await;
+        settle().await;
+        app.sync().await;
+        let returned: Vec<_> = app
+            .all()
+            .iter()
+            .filter_map(|m| match m {
+                ServerMsg::SessionQueueReturned { entries, .. } => Some(entries.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert!(
+            returned.iter().all(|e| !e.text.contains("SEED-TEXT")),
+            "Stop must not hand a Fred seed back to the composer: {returned:?}"
+        );
+        assert!(fake.user_texts().iter().all(|t| !t.contains("SEED-TEXT")));
+    });
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // who may do what
 // ═════════════════════════════════════════════════════════════════════════════
