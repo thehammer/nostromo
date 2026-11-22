@@ -188,7 +188,9 @@ impl AuthoredPrActions {
     /// `invalid` (`repo`, `number` or `head_sha` is not valid), `pr_unknown`
     /// (GitHub has no such PR), `head_not_current`, or `unreachable` /
     /// `rate_limited` (an approval that could not be checked; nothing is
-    /// recorded).
+    /// recorded). A repo of an excluded owner (`authored_prs_exclude_orgs`) that
+    /// passes the argument checks gets `pr_unknown` with no read, no write and
+    /// no echo.
     pub async fn record_verdict(
         &self,
         repo: &str,
@@ -198,13 +200,15 @@ impl AuthoredPrActions {
         by: Option<&str>,
         note: Option<&str>,
     ) -> Result<bool, &'static str> {
-        // An excluded owner's PR is not in the list: answer as for any unknown
-        // PR, with no read, no write and no echo.
+        let rec = VerdictRecord::new(repo, number, head_sha, verdict, self.clock.now(), by, note)
+            .ok_or("invalid")?;
+        // An excluded owner's PR is refused with `pr_unknown`: no read, no write,
+        // no echo. Unlike an unknown repo, a `changes_requested` or `comment` for
+        // it is not recorded (that would write the name to disk), so a local
+        // caller can tell the two apart; that is accepted.
         if self.exclude.covers_repo(repo) {
             return Err("pr_unknown");
         }
-        let rec = VerdictRecord::new(repo, number, head_sha, verdict, self.clock.now(), by, note)
-            .ok_or("invalid")?;
         let current = if verdict == Verdict::Approved {
             self.live_head_is(repo, number, head_sha).await?;
             true

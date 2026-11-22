@@ -352,9 +352,17 @@ held, published or counted:
 - **Saved state:** the engine starts with no PRs, so nothing held can outlive a
   restart. On start the link/told entries (`authored-pr-links.json`) and Perri
   verdicts (`perri-verdicts.json`) of excluded owners are forgotten in memory
-  (and the files are rewritten at once, so their names do not stay on disk). `focus-memory.json` keeps
-  no repo (a focus's tag, agent, folder and name), so it cannot be filtered by
-  owner; it is only ever shown through a PR that is listed.
+  (and the files are rewritten at once, so their names do not stay on disk). If
+  that write fails, the entries are gone from memory but stay on disk until the
+  next successful write or start (one warning, no names). `focus-memory.json`
+  keeps no repo (a focus's tag, agent, folder and name), so it cannot be
+  filtered by owner; it is only ever shown through a PR that is listed.
+- **Verbs:** every verb that takes a repo resolves it through the list, so an
+  excluded repo is refused (`unknown_pr`, `not_found`). `perri.record_verdict`
+  with valid arguments for an excluded repo gets `pr_unknown` with no read, no
+  write and no echo. Unlike an unknown repo, a `changes_requested` or `comment`
+  for it is not recorded (that would write the name to disk), so a local caller
+  can tell the two apart; that is accepted.
 - **The relay's org:** `relay.org` (the organisation the relay sends events for,
   shown beside its status) is published empty when it is an excluded owner.
 - **SSO-hidden orgs:** an id is still looked up once by `GET /organizations/{id}`

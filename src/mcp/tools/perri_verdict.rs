@@ -24,6 +24,10 @@
 //! `changes_requested` and `comment` can only block, so they are recorded for
 //! any head, flagged `for_current_head`.
 //!
+//! A repo of an owner the daemon excludes (`authored_prs_exclude_orgs`) is refused
+//! with `pr_unknown`: nothing is read from GitHub, recorded or echoed. Unlike an
+//! unknown repo, a `changes_requested` or `comment` for it is not recorded.
+//!
 //! Errors: `invalid_args` (with a fixed `detail`), `unidentified_caller` (the
 //! caller is no registered focus), `pr_unknown` (GitHub has no such PR),
 //! `head_not_current` (an `approved` for a commit that is not the PR's live

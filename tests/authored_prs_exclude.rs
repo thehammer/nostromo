@@ -266,6 +266,33 @@ async fn no_verb_takes_an_excluded_repo_and_none_reads_or_writes_for_it() {
         std::fs::read_to_string(rig.state_root.join("perri-verdicts.json")).unwrap_or_default();
     assert!(!on_disk.to_lowercase().contains("carefeed"));
 
+    // Malformed arguments answer the same for an excluded repo and any other.
+    let bad = |repo: &'static str| {
+        let a = a.clone();
+        async move {
+            a.record_verdict(repo, 1, "not-a-sha", Verdict::Comment, None, None)
+                .await
+        }
+    };
+    assert_eq!(bad("Carefeed/app").await, Err("invalid"));
+    assert_eq!(bad("thehammer/nostromo").await, bad("Carefeed/app").await);
+    // Not identical to an unknown repo: a non-approval verdict for an unknown,
+    // non-excluded repo is recorded (and answered Ok); an excluded repo's never is.
+    assert_eq!(
+        a.record_verdict(
+            "other-org/unknown",
+            99,
+            &"b".repeat(40),
+            Verdict::Comment,
+            None,
+            None
+        )
+        .await,
+        Ok(false)
+    );
+    assert!(rig.verdicts.newest("other-org/unknown", 99).is_some());
+    assert!(rig.verdicts.newest("carefeed/app", 1).is_none());
+
     // The same verbs still work for another owner.
     assert!(
         a.compose_for("thehammer/nostromo", 2).is_ok() || a.row("thehammer/nostromo", 2).is_some()
