@@ -1216,6 +1216,92 @@ pub const FEATURE_SLASH_COMMANDS: &str = "slash_commands_v1";
 /// app only; never offered to a network or non-operator peer).
 pub const FEATURE_CONVERSATION_HISTORY: &str = "conversation_history_v1";
 
+/// The optional capability advertised in `Welcome.features`: this daemon gives
+/// queued user messages stable ids and takes `session_queue_watch`,
+/// `session_queue_take_back` and `session_queue_remove` (see `docs/message-queue.md`).
+pub const FEATURE_SESSION_QUEUE: &str = "session_queue_v1";
+
+// ── message queue (session_queue_v1) ──────────────────────────────────────────
+
+/// What a queued entry is, on the wire. Daemon-injected items are never shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueEntryKindWire {
+    /// A person typed it into a client.
+    Typed,
+    /// The app composed it (a Tell notify, a work-item send, a seeded first message).
+    App,
+}
+
+/// One queued message the client may show. `text` is exactly what will be written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueEntryWire {
+    pub id: String,
+    pub kind: QueueEntryKindWire,
+    pub text: String,
+    pub image_count: u32,
+    /// The text is a typed slash command (the CLI runs it as a command).
+    pub command: bool,
+    /// For an `app` entry: `mother_overview`, `work_item` or `agent_seed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_label: Option<String>,
+    /// The opaque `client_ref` the sender gave, echoed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_ref: Option<String>,
+    /// True only for a typed entry.
+    pub can_take_back: bool,
+}
+
+/// The typed message held for a Claude sign-in. It carries no text: the sign-in
+/// card owns it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldEntryWire {
+    pub id: String,
+    pub hold_id: String,
+    pub can_take_back: bool,
+}
+
+/// Why a `SessionQueue` snapshot was sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueChangeReason {
+    Delivered,
+    TakenBack,
+    Removed,
+    /// Stop (the interrupt) dropped the queue.
+    Stopped,
+    /// The session was stopped by the user (or replaced): the queue is gone.
+    SessionStopped,
+    Queued,
+}
+
+/// What changed, for a client that wants to say so. `ids` are the entries concerned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueChangeWire {
+    pub reason: QueueChangeReason,
+    pub ids: Vec<String>,
+}
+
+/// The daemon's answer to a take-back or a remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueResultCode {
+    TakenBack,
+    Removed,
+    AlreadyDelivered,
+    NotFound,
+    NotAllowed,
+}
+
+/// One entry Stop dropped, handed back to the operator that pressed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueReturnedEntry {
+    pub id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+}
+
 /// Where a conversation stands, computed at list time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1677,6 +1763,39 @@ pub enum ClientMsg {
         /// Absolute paths to image files; daemon reads + base64-encodes them.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<String>,
+        /// Opaque, at most 64 printable ASCII characters; echoed in the queue
+        /// view so the sender can recognise its own message. Anything else is
+        /// ignored, never refused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_ref: Option<String>,
+    },
+
+    /// Watch a session's message queue (`session_queue_v1`): answered at once
+    /// with the current `SessionQueue`, then one on every change, on this
+    /// connection only. Refused for network peers.
+    SessionQueueWatch {
+        tag: String,
+    },
+
+    /// Take a queued typed message back to edit it (answered with
+    /// `SessionQueueResult`, text and images included). Verified Mac app only,
+    /// with the connection's `operator_nonce`.
+    SessionQueueTakeBack {
+        tag: String,
+        id: String,
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
+    },
+
+    /// Remove a queued typed message without returning its text. Same gate as
+    /// `SessionQueueTakeBack`.
+    SessionQueueRemove {
+        tag: String,
+        id: String,
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
     },
 
     /// Close the tab `pane_id` in focus `tag` (the tab's × button). Refused for
@@ -3347,6 +3466,42 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         warning: Option<String>,
     },
+    // ── message queue ─────────────────────────────────────────────────────────
+    /// A session's queued user messages, oldest first (REPLACE semantics), sent
+    /// to a connection that watches the tag: at once, then on every change.
+    /// `rev` increases with every snapshot of a session in one `daemon_epoch`.
+    /// `LocalOnly`.
+    SessionQueue {
+        tag: String,
+        daemon_epoch: String,
+        rev: u64,
+        entries: Vec<QueueEntryWire>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        held: Option<HeldEntryWire>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change: Option<QueueChangeWire>,
+    },
+    /// The answer to `SessionQueueTakeBack` / `SessionQueueRemove`, to the asker
+    /// only. `text` and `images` are present only for `taken_back`. `LocalOnly`.
+    SessionQueueResult {
+        tag: String,
+        request_id: String,
+        id: String,
+        code: QueueResultCode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<String>,
+    },
+    /// What Stop dropped, for the operator connection that pressed it (and
+    /// watches the tag): the typed messages, held one first. `reason` is
+    /// `"stopped"`. `LocalOnly`.
+    SessionQueueReturned {
+        tag: String,
+        reason: String,
+        entries: Vec<QueueReturnedEntry>,
+    },
+
     // ── background tasks ──────────────────────────────────────────────────────
     /// Every background task of a session, retained ended ones included. A
     /// full snapshot (REPLACE semantics), sent on attach and on every change
@@ -3791,11 +3946,13 @@ mod tests {
             tag: "fred".into(),
             text: "hello".into(),
             images: vec![],
+            client_ref: None,
         });
         round_trip_client(ClientMsg::SessionSend {
             tag: "fred".into(),
             text: "look at this".into(),
             images: vec!["/tmp/a.png".into()],
+            client_ref: None,
         });
         round_trip_client(ClientMsg::SessionControl {
             tag: "fred".into(),
@@ -3911,6 +4068,7 @@ mod tests {
             tag: "t".into(),
             text: "x".into(),
             images: vec![],
+            client_ref: None,
         })
         .unwrap();
         assert_eq!(v.get("type").unwrap(), "session_send");
@@ -10026,5 +10184,121 @@ mod no_codebase_wire_tests {
             panic!()
         };
         assert_eq!(spaces_root, None);
+    }
+}
+
+// ── message queue wire (session_queue_v1) ────────────────────────────────────
+
+#[cfg(test)]
+mod session_queue_wire_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/session_queue")
+    }
+
+    fn fixtures() -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = std::fs::read_dir(fixture_dir())
+            .expect("the fixture directory")
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .map(|p| {
+                (
+                    p.file_stem().unwrap().to_string_lossy().into_owned(),
+                    std::fs::read_to_string(&p).unwrap(),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn the_feature_flag_is_pinned() {
+        assert_eq!(FEATURE_SESSION_QUEUE, "session_queue_v1");
+    }
+
+    #[test]
+    fn every_golden_fixture_round_trips_byte_for_byte() {
+        let all = fixtures();
+        assert!(all.len() >= 20, "{} fixtures", all.len());
+        for (name, body) in &all {
+            if name.starts_with("old_") {
+                continue;
+            }
+            let body = body.trim_end();
+            let again = if name.starts_with("client_") {
+                let msg: ClientMsg = serde_json::from_str(body)
+                    .unwrap_or_else(|e| panic!("{name} does not decode: {e}"));
+                serde_json::to_string(&msg).unwrap()
+            } else {
+                let msg: ServerMsg = serde_json::from_str(body)
+                    .unwrap_or_else(|e| panic!("{name} does not decode: {e}"));
+                serde_json::to_string(&msg).unwrap()
+            };
+            assert_eq!(again, body, "{name} does not round-trip");
+        }
+    }
+
+    #[test]
+    fn the_fixtures_cover_every_change_reason_and_result_code() {
+        let names: Vec<String> = fixtures().into_iter().map(|(n, _)| n).collect();
+        for want in [
+            "snapshot_typed_app_command",
+            "snapshot_held",
+            "change_delivered",
+            "change_taken_back",
+            "change_removed",
+            "change_stopped",
+            "change_session_stopped",
+            "change_queued",
+            "result_taken_back",
+            "result_removed",
+            "result_already_delivered",
+            "result_not_found",
+            "result_not_allowed",
+            "returned",
+            "client_session_queue_watch",
+            "client_session_queue_take_back",
+            "client_session_queue_remove",
+            "client_session_send_client_ref",
+        ] {
+            assert!(names.iter().any(|n| n == want), "missing fixture {want}");
+        }
+    }
+
+    #[test]
+    fn a_session_send_without_client_ref_still_decodes_and_stays_without_it() {
+        let old =
+            std::fs::read_to_string(fixture_dir().join("old_client_session_send.json")).unwrap();
+        let msg: ClientMsg = serde_json::from_str(old.trim_end()).unwrap();
+        match &msg {
+            ClientMsg::SessionSend { client_ref, .. } => assert!(client_ref.is_none()),
+            other => panic!("{other:?}"),
+        }
+        assert!(!serde_json::to_string(&msg).unwrap().contains("client_ref"));
+    }
+
+    #[test]
+    fn a_welcome_without_the_feature_still_decodes() {
+        let old = std::fs::read_to_string(fixture_dir().join("old_server_welcome.json")).unwrap();
+        match serde_json::from_str::<ServerMsg>(old.trim_end()).unwrap() {
+            ServerMsg::Welcome { features, .. } => {
+                assert!(!features.iter().any(|f| f == FEATURE_SESSION_QUEUE));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_and_images_are_on_a_result_only_for_taken_back() {
+        for (name, body) in fixtures() {
+            if let Some(code) = name.strip_prefix("result_") {
+                let v: serde_json::Value = serde_json::from_str(body.trim_end()).unwrap();
+                let has = v.get("text").is_some() || v.get("images").is_some();
+                assert_eq!(has, code == "taken_back", "{name}");
+            }
+        }
     }
 }

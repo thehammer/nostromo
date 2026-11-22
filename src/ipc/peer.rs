@@ -793,6 +793,11 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::AuthoredPrStartSessionResult { .. }
         | ServerMsg::AuthoredPrLinkResult { .. }
         | ServerMsg::AuthoredPrMergeResult { .. } => ServerClass::LocalOnly,
+        // A session's queued messages (their text), the answer to a take-back
+        // and what Stop dropped: the operator's own, never a network peer's.
+        ServerMsg::SessionQueue { .. }
+        | ServerMsg::SessionQueueResult { .. }
+        | ServerMsg::SessionQueueReturned { .. } => ServerClass::LocalOnly,
         // A focus's model is withheld exactly like its transcript.
         ServerMsg::SessionModelState(state) => ServerClass::Focus(&state.tag),
 
@@ -1085,6 +1090,11 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::ApprovalsLogEntry { .. }
         // Resends or drops a session's held message: it writes to a session.
         | ClientMsg::ClaudeLoginAction { .. }
+        // Watches a session's queued messages (their text), and takes one back
+        // or removes it: the operator app's alone.
+        | ClientMsg::SessionQueueWatch { .. }
+        | ClientMsg::SessionQueueTakeBack { .. }
+        | ClientMsg::SessionQueueRemove { .. }
         // Acts on a document pane (Huey's setup, regenerate, verdicts): operator app only.
         | ClientMsg::PaneAction { .. }
         | ClientMsg::RenderedShape { .. }
@@ -1197,6 +1207,9 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::SessionTaskOutput { tag, .. }
         | ClientMsg::SessionCommandsGet { tag, .. }
         | ClientMsg::ClaudeLoginAction { tag, .. }
+        | ClientMsg::SessionQueueWatch { tag }
+        | ClientMsg::SessionQueueTakeBack { tag, .. }
+        | ClientMsg::SessionQueueRemove { tag, .. }
         | ClientMsg::PaneAction { tag, .. }
         | ClientMsg::TrackerOpenLink { tag, .. }
         | ClientMsg::TrackerEdit { tag, .. } => tags.tag_is_sensitive(tag),
@@ -2048,6 +2061,7 @@ mod tests {
                 tag: "x1".into(),
                 text: "t".into(),
                 images: vec![],
+                client_ref: None,
             },
             ClientMsg::ClosePane {
                 tag: "x1".into(),
@@ -2404,6 +2418,19 @@ mod tests {
                 mode: Some(crate::mother::origin::NotifyLevel::Quiet),
                 enabled: None,
             },
+            ClientMsg::SessionQueueWatch { tag: "x1".into() },
+            ClientMsg::SessionQueueTakeBack {
+                tag: "x1".into(),
+                id: "q1-1".into(),
+                request_id: "r".into(),
+                operator_nonce: None,
+            },
+            ClientMsg::SessionQueueRemove {
+                tag: "x1".into(),
+                id: "q1-1".into(),
+                request_id: "r".into(),
+                operator_nonce: None,
+            },
         ]
     }
 
@@ -2442,7 +2469,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 94;
+    const CLIENT_MSG_VARIANTS: usize = 97;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2541,6 +2568,9 @@ mod tests {
             ClientMsg::AuthoredPrLink { .. } => 91,
             ClientMsg::TrackerEdit { .. } => 92,
             ClientMsg::AuthoredPrMerge { .. } => 93,
+            ClientMsg::SessionQueueWatch { .. } => 94,
+            ClientMsg::SessionQueueTakeBack { .. } => 95,
+            ClientMsg::SessionQueueRemove { .. } => 96,
         }
     }
 
@@ -2585,9 +2615,9 @@ mod tests {
         // 77 with `TerminalFollowInviteStagingOnly` (S3a); 78 with `SessionCommandsGet`;
         // 80 with the two authored-PR verbs; 87 with the seven conversation-history verbs; 88 with the rename;
         // 92 with the four authored-PR hand-off verbs (preview, notify, start session, link);
-        // 93 with `TrackerEdit` (T3a); 94 with `AuthoredPrMerge`.
-        assert_eq!(CLIENT_MSG_VARIANTS, 94);
-        assert_eq!(every_client_msg().len(), 94);
+        // 93 with `TrackerEdit` (T3a); 94 with `AuthoredPrMerge`; 97 with the three queue verbs.
+        assert_eq!(CLIENT_MSG_VARIANTS, 97);
+        assert_eq!(every_client_msg().len(), 97);
     }
 
     #[test]
@@ -2684,6 +2714,7 @@ mod tests {
                     tag: tag.into(),
                     text: "hi".into(),
                     images: vec![],
+                    client_ref: None,
                 },
                 ClientMsg::SessionInterrupt { tag: tag.into() },
                 ClientMsg::SessionControl {

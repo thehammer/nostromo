@@ -134,6 +134,7 @@ async fn session_round_trip_drives_real_claude() {
             tag: "it".into(),
             text: "Reply with exactly the word: pong".into(),
             images: vec![],
+            client_ref: None,
         },
     )
     .await;

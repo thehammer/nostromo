@@ -20,6 +20,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use super::queue::EntryKind;
 use super::{
     advance, lock_recover, resolve_claude, write_user_frame, PendingMessage, SessionEvent,
     SessionManager, Shared, TurnAuthor, TurnNote,
@@ -28,7 +29,10 @@ use crate::ipc::auth_failure::TurnAuthOutcome;
 use crate::ipc::claude_login::{
     CredentialStamp, LoginCoordinator, AUTO_RESEND_TTL, MAX_AUTO_RESENDS,
 };
-use crate::ipc::protocol::{ClaudeLoginPhase, ClaudeLoginSession, ClaudeLoginWatch, ServerMsg};
+use crate::ipc::protocol::{
+    ClaudeLoginPhase, ClaudeLoginSession, ClaudeLoginWatch, HeldEntryWire, QueueReturnedEntry,
+    ServerMsg,
+};
 use crate::ipc::stream_json::{
     local_command, strip_nostromo_note, SessionState, TASK_NOTIFICATION_OPEN,
 };
@@ -245,17 +249,70 @@ impl LoginLink {
 
     /// Stop was pressed: drop the hold unless its message is being resent (that
     /// turn's interrupted end clears it). True when a hold was dropped.
-    pub(super) fn discard_for_stop(&self) -> bool {
+    ///
+    /// `Some` when a hold was dropped: the typed message it held (as typed,
+    /// no note in front), if it held one.
+    pub(super) fn discard_for_stop(&self) -> Option<Option<QueueReturnedEntry>> {
         let mut cell = lock_recover(&self.cell);
         if cell
             .hold
             .as_ref()
             .is_some_and(|h| h.phase != HoldPhase::Resending)
         {
-            cell.hold = None;
-            return true;
+            let hold = cell.hold.take()?;
+            let typed = hold
+                .frame
+                .filter(|f| matches!(f.kind, EntryKind::Typed { .. }))
+                .map(|f| QueueReturnedEntry {
+                    id: f.id.clone(),
+                    text: f.original_text().to_owned(),
+                    images: f.images,
+                });
+            return Some(typed);
         }
-        false
+        None
+    }
+
+    /// The typed message the hold keeps, for the queue view: only while it is
+    /// held (a resend has written it again), and never one the app or the
+    /// daemon wrote.
+    pub(super) fn held_entry(&self) -> Option<HeldEntryWire> {
+        let cell = lock_recover(&self.cell);
+        let hold = cell.hold.as_ref()?;
+        let frame = hold.frame.as_ref()?;
+        if hold.phase != HoldPhase::Held || !matches!(frame.kind, EntryKind::Typed { .. }) {
+            return None;
+        }
+        Some(HeldEntryWire {
+            id: frame.id.clone(),
+            hold_id: hold.id.clone(),
+            can_take_back: true,
+        })
+    }
+
+    /// Take the held typed message `id` out of the hold (the caller holds
+    /// `state`). Its original text and images come back, never the frame's
+    /// note prefix. `remove` discards the hold like `discard_held` does;
+    /// otherwise the hold becomes a pause with nothing to resend. `None` when
+    /// `id` is not the held typed message.
+    pub(super) fn take_held(&self, id: &str, remove: bool) -> Option<(String, Vec<String>)> {
+        let mut cell = lock_recover(&self.cell);
+        let hold = cell.hold.as_mut()?;
+        let frame = hold.frame.as_ref()?;
+        if hold.phase != HoldPhase::Held
+            || frame.id != id
+            || !matches!(frame.kind, EntryKind::Typed { .. })
+        {
+            return None;
+        }
+        let taken = (frame.original_text().to_owned(), frame.images.clone());
+        if remove {
+            cell.hold = None;
+        } else {
+            hold.frame = None;
+            hold.resendable = false;
+        }
+        Some(taken)
     }
 
     /// Take the hold for a replacement process.
@@ -455,6 +512,7 @@ pub(super) fn on_turn_end(shared: &Shared, tag: &str, outcome: Option<TurnAuthOu
         };
         if cleared {
             info!(tag, "held message resent: ok");
+            shared.publish_queue(None);
             link.notify();
         }
         return;
@@ -504,6 +562,7 @@ pub(super) fn on_turn_end(shared: &Shared, tag: &str, outcome: Option<TurnAuthOu
         }
         None => info!(tag, "held message resent: auth_failed"),
     }
+    shared.publish_queue(None);
     link.notify();
 }
 
@@ -541,7 +600,7 @@ fn capture_stamp(link: &Arc<LoginLink>, hold_id: String) {
 enum ResendPlan {
     /// The hold is now `Resending` and the session `MidTurn`: write `frame`.
     Write {
-        frame: PendingMessage,
+        frame: Box<PendingMessage>,
         attempt: u8,
         prev_attempt_stamp: Option<String>,
     },
@@ -590,7 +649,7 @@ fn plan_resend(
     }
     *state = SessionState::MidTurn;
     ResendPlan::Write {
-        frame,
+        frame: Box::new(frame),
         attempt: hold.attempts,
         prev_attempt_stamp,
     }
@@ -813,6 +872,8 @@ impl SessionManager {
                     attempt,
                     "resending held message"
                 );
+                // The held message is being written again: the view stops showing it.
+                shared.publish_queue(None);
                 if write_recorded(&shared, &frame, None).is_ok() {
                     shared.broadcast(SessionEvent::State(SessionState::MidTurn));
                     shared.login.notify();
@@ -820,6 +881,7 @@ impl SessionManager {
                 }
                 warn!(tag, "held message could not be written");
                 undo_resend(&shared, hold_id, prev_attempt_stamp);
+                shared.publish_queue(None);
                 shared.broadcast(SessionEvent::State(SessionState::Idle));
                 shared.login.notify();
                 ResendOutcome::Busy
@@ -856,6 +918,7 @@ impl SessionManager {
             self.rebroadcast_login();
             return false;
         }
+        shared.publish_queue(None);
         if discarded {
             self.conversations.discard_candidate(&shared.ctx.session_id);
             info!(tag, "held message discarded");

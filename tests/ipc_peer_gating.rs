@@ -1641,6 +1641,7 @@ async fn unix_completes_a_turn(
             tag: tag.into(),
             text: marker.into(),
             images: vec![],
+            client_ref: None,
         },
     )
     .await;
@@ -1808,6 +1809,7 @@ async fn a_tcp_client_cannot_send_interrupt_or_control_a_sensitive_session_and_n
                 tag: "fred".into(),
                 text: "ATTACKER-TEXT".into(),
                 images: vec![],
+                client_ref: None,
             },
         ),
         (
@@ -1853,6 +1855,7 @@ async fn a_tcp_client_cannot_send_interrupt_or_control_a_sensitive_session_and_n
             tag: "fred".into(),
             text: "UNIX-MARKER-2".into(),
             images: vec![],
+            client_ref: None,
         },
     )
     .await;
@@ -1907,6 +1910,7 @@ async fn a_tcp_client_s_fred_seed_and_session_send_deliver_nothing_to_a_live_fre
             tag: "fred".into(),
             text: "ATTACKER-SEND".into(),
             images: vec![],
+            client_ref: None,
         },
     )
     .await;
@@ -1935,6 +1939,7 @@ async fn a_tcp_client_s_fred_seed_and_session_send_deliver_nothing_to_a_live_fre
             tag: "fred".into(),
             text: "UNIX-SEND".into(),
             images: vec![],
+            client_ref: None,
         },
     )
     .await;
@@ -2082,6 +2087,7 @@ async fn a_tcp_client_can_still_attach_to_a_non_sensitive_session_but_cannot_wri
             tag: "cody-x".into(),
             text: "TCP-HELLO".into(),
             images: vec![],
+            client_ref: None,
         },
     )
     .await;
@@ -2095,6 +2101,7 @@ async fn a_tcp_client_can_still_attach_to_a_non_sensitive_session_but_cannot_wri
             tag: "cody-x".into(),
             text: "UNIX-HELLO".into(),
             images: vec![],
+            client_ref: None,
         },
     )
     .await;
@@ -2210,6 +2217,7 @@ async fn a_tcp_client_cannot_attach_to_or_drive_a_focus_that_was_created_by_send
                 tag: W.into(),
                 text: "ATTACKER-TEXT".into(),
                 images: vec![],
+                client_ref: None,
             },
         ),
         (
@@ -2237,6 +2245,7 @@ async fn a_tcp_client_cannot_attach_to_or_drive_a_focus_that_was_created_by_send
             tag: W.into(),
             text: "UNIX-MARKER-3".into(),
             images: vec![],
+            client_ref: None,
         },
     )
     .await;
@@ -2277,6 +2286,7 @@ async fn a_tcp_client_cannot_attach_to_or_drive_a_focus_created_through_create_f
                 tag: tag.clone(),
                 text: "ATTACKER-TEXT".into(),
                 images: vec![],
+                client_ref: None,
             },
         ),
         (
@@ -4259,6 +4269,7 @@ async fn a_tcp_client_cannot_spawn_a_session_even_for_an_ordinary_agent_and_tag_
             tag: "x1".into(),
             text: "ATTACKER-TEXT".into(),
             images: vec![],
+            client_ref: None,
         },
     )
     .await;
@@ -4459,6 +4470,7 @@ async fn a_session_marked_network_driven_is_denied_the_fred_teri_and_mother_tool
             tag: "cody-b".into(),
             text: "UNIX-B".into(),
             images: vec![],
+            client_ref: None,
         },
     )
     .await;
@@ -4511,6 +4523,7 @@ async fn a_refused_tcp_send_does_not_mark_the_session_and_a_tcp_client_can_still
             tag: "cody-chat".into(),
             text: "TCP-ONE".into(),
             images: vec![],
+            client_ref: None,
         },
     )
     .await;
@@ -4570,6 +4583,7 @@ async fn a_tcp_peer_cannot_drive_an_existing_ordinary_session_through_list_send_
             tag: "cody-live".into(),
             text: prompt.into(),
             images: vec![],
+            client_ref: None,
         },
     )
     .await;
@@ -4624,6 +4638,7 @@ async fn a_tcp_peer_cannot_drive_an_existing_ordinary_session_through_list_send_
             tag: "cody-live".into(),
             text: "UNIX-OK".into(),
             images: vec![],
+            client_ref: None,
         },
     )
     .await;
@@ -5362,6 +5377,7 @@ async fn a_session_resumed_while_the_registry_is_degraded_is_sensitive_and_a_fre
             tag: "cody-resumed".into(),
             text: "ATTACKER-TEXT".into(),
             images: vec![],
+            client_ref: None,
         },
     )
     .await;
@@ -5844,6 +5860,7 @@ async fn sessions_under_whitespace_case_and_qualified_fred_and_teri_tags_are_unr
                     tag: tag.clone(),
                     text: format!("ATTACKER-{i}"),
                     images: vec![],
+                    client_ref: None,
                 },
             ),
             (
@@ -6925,6 +6942,7 @@ async fn a_tcp_client_cannot_interrupt_stop_restart_or_reset_an_ordinary_session
             tag: "cody-ctl".into(),
             text: "UNIX-STILL-HERE".into(),
             images: vec![],
+            client_ref: None,
         },
     )
     .await;
@@ -8357,6 +8375,7 @@ mod background_tasks {
                 tag: session.tag.clone(),
                 text: "GO-TASKS".into(),
                 images: vec![],
+                client_ref: None,
             },
         )
         .await;
@@ -9239,6 +9258,7 @@ mod background_tasks {
                         tag: self.io.tag.clone(),
                         text: cue.into(),
                         images: vec![],
+                        client_ref: None,
                     })
                     .await;
                 wait_for_log(&self.io.view, cue, |l| l.contains(cue)).await;
@@ -9414,6 +9434,7 @@ mod background_tasks {
                     tag: io.tag.clone(),
                     text: format!("BA1-SHELL:{id}"),
                     images: vec![],
+                    client_ref: None,
                 },
             )
             .await;
@@ -10889,6 +10910,7 @@ mod background_tasks {
                 tag: session.tag.clone(),
                 text: "GO-WAKE".into(),
                 images: vec![],
+                client_ref: None,
             },
         )
         .await;

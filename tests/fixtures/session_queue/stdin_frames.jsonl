@@ -1,0 +1,4 @@
+{"message":{"content":"idle first HOLD:/tmp/nostromo-session-queue-bytes-hold","role":"user"},"type":"user"}
+{"message":{"content":"queued second","role":"user"},"type":"user"}
+{"message":{"content":"/compact keep the decisions","role":"user"},"type":"user"}
+{"message":{"content":[{"text":"with a picture","type":"text"},{"source":{"data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==","media_type":"image/png","type":"base64"},"type":"image"}],"role":"user"},"type":"user"}

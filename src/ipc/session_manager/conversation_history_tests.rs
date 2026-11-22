@@ -3133,3 +3133,277 @@ async fn a_rescan_that_finds_nothing_new_does_not_bump_the_revision() {
     }
     panic!("a changed list did not bump the revision");
 }
+
+// ── the queue: who the first prompt comes from when a queued message leaves ───
+
+mod queue_candidates {
+    use super::*;
+    use crate::ipc::protocol::{ClaudeLoginPhase, QueueResultCode};
+    use crate::ipc::session_manager::QueueVerb;
+
+    const TAG: &str = "cody-aaaa1111";
+
+    /// A session whose turn is running (no message of ours started it), so
+    /// every send queues and none is a candidate by having been written.
+    fn busy(rig: &mut Rig) -> String {
+        let sid = rig.spawn(TAG, "cody");
+        *lock_recover(&rig.mgr.sessions[TAG].shared.state) = SessionState::MidTurn;
+        sid
+    }
+
+    fn turn_ends(rig: &Rig) {
+        advance(&rig.mgr.sessions[TAG].shared);
+    }
+
+    fn first_prompt(rig: &Rig, sid: &str) -> FirstPrompt {
+        rig.mgr.conversations().get(sid).unwrap().first_prompt
+    }
+
+    fn idle(rig: &Rig) {
+        *lock_recover(&rig.mgr.sessions[TAG].shared.state) = SessionState::Idle;
+    }
+
+    fn typed(rig: &mut Rig, text: &str) -> String {
+        rig.mgr.send_typed_message(TAG, text, &[], None).unwrap()
+    }
+
+    #[tokio::test]
+    async fn taking_back_the_candidate_hands_candidacy_to_the_next_queued_message() {
+        let mut rig = Rig::new();
+        let sid = busy(&mut rig);
+        let a = typed(&mut rig, "AAAWORDS");
+        typed(&mut rig, "BBBWORDS");
+        let answer = rig.mgr.queue_verb(TAG, &a, QueueVerb::TakeBack);
+        assert_eq!(answer.code, QueueResultCode::TakenBack);
+        turn_ends(&rig);
+        rig.deliver(TAG);
+        assert_eq!(
+            first_prompt(&rig, &sid),
+            FirstPrompt::Text("BBBWORDS".into())
+        );
+        assert!(!history_file(&rig).contains("AAAWORDS"));
+    }
+
+    #[tokio::test]
+    async fn removing_the_candidate_hands_candidacy_on_too() {
+        let mut rig = Rig::new();
+        let sid = busy(&mut rig);
+        let a = typed(&mut rig, "AAAWORDS");
+        typed(&mut rig, "BBBWORDS");
+        assert_eq!(
+            rig.mgr.queue_verb(TAG, &a, QueueVerb::Remove).code,
+            QueueResultCode::Removed
+        );
+        turn_ends(&rig);
+        rig.deliver(TAG);
+        assert_eq!(
+            first_prompt(&rig, &sid),
+            FirstPrompt::Text("BBBWORDS".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_message_taken_back_behind_the_candidate_changes_nothing() {
+        let mut rig = Rig::new();
+        let sid = busy(&mut rig);
+        typed(&mut rig, "AAAWORDS");
+        let b = typed(&mut rig, "BBBWORDS");
+        rig.mgr.queue_verb(TAG, &b, QueueVerb::TakeBack);
+        turn_ends(&rig);
+        rig.deliver(TAG);
+        assert_eq!(
+            first_prompt(&rig, &sid),
+            FirstPrompt::Text("AAAWORDS".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn taking_back_the_only_candidate_leaves_none_and_the_next_message_becomes_it() {
+        let mut rig = Rig::new();
+        let sid = busy(&mut rig);
+        let a = typed(&mut rig, "AAAWORDS");
+        rig.mgr.queue_verb(TAG, &a, QueueVerb::TakeBack);
+        idle(&rig);
+        rig.send(TAG, "SECONDWORDS");
+        assert_eq!(
+            first_prompt(&rig, &sid),
+            FirstPrompt::Text("SECONDWORDS".into())
+        );
+        assert!(!history_file(&rig).contains("AAAWORDS"));
+    }
+
+    #[tokio::test]
+    async fn removing_the_only_candidate_leaves_none_and_the_next_message_becomes_it() {
+        let mut rig = Rig::new();
+        let sid = busy(&mut rig);
+        let a = typed(&mut rig, "AAAWORDS");
+        rig.mgr.queue_verb(TAG, &a, QueueVerb::Remove);
+        idle(&rig);
+        rig.send(TAG, "SECONDWORDS");
+        assert_eq!(
+            first_prompt(&rig, &sid),
+            FirstPrompt::Text("SECONDWORDS".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_dropping_the_only_candidate_leaves_none_and_the_next_message_becomes_it() {
+        let mut rig = Rig::new();
+        let sid = busy(&mut rig);
+        typed(&mut rig, "AAAWORDS");
+        let (outcome, dropped) = rig.mgr.interrupt_returning(TAG);
+        assert!(outcome.is_ok());
+        assert_eq!(dropped.typed.len(), 1);
+        idle(&rig);
+        rig.send(TAG, "SECONDWORDS");
+        assert_eq!(
+            first_prompt(&rig, &sid),
+            FirstPrompt::Text("SECONDWORDS".into())
+        );
+        assert!(!history_file(&rig).contains("AAAWORDS"));
+    }
+
+    #[tokio::test]
+    async fn a_delivered_candidate_keeps_todays_behaviour() {
+        let mut rig = Rig::new();
+        let sid = rig.spawn(TAG, "cody");
+        let a = typed(&mut rig, "AAAWORDS");
+        typed(&mut rig, "BBBWORDS");
+        // `a` was written at once; taking `b` back changes nothing about `a`.
+        let ids = lock_recover(&rig.mgr.sessions[TAG].shared.pending)
+            .iter()
+            .map(|m| m.id.clone())
+            .collect::<Vec<_>>();
+        rig.mgr.queue_verb(TAG, &ids[0], QueueVerb::TakeBack);
+        assert_eq!(
+            rig.mgr.queue_verb(TAG, &a, QueueVerb::TakeBack).code,
+            QueueResultCode::AlreadyDelivered
+        );
+        rig.deliver(TAG);
+        assert_eq!(
+            first_prompt(&rig, &sid),
+            FirstPrompt::Text("AAAWORDS".into())
+        );
+    }
+
+    fn login_phase(rig: &Rig) -> (ClaudeLoginPhase, Option<String>) {
+        match rig.mgr.login_snapshot() {
+            ServerMsg::ClaudeLoginState { sessions, .. } => {
+                let s = sessions.into_iter().find(|s| s.tag == TAG).expect("paused");
+                (s.phase, s.hold_id)
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    async fn stdin_has(rig: &Rig, needle: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !rig.stdin_log().contains(needle) {
+            assert!(Instant::now() < deadline, "the child never read {needle}");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn take_back_of_the_held_message_returns_what_was_typed_and_pauses_with_nothing_to_resend(
+    ) {
+        let mut rig = Rig::new();
+        let sid = rig.spawn(TAG, "cody");
+        // The model note goes in front of the frame that is written (and held).
+        *lock_recover(&rig.mgr.sessions[TAG].shared.note_prefix) = Some("NOTEWORDS".into());
+        let hold = hold_first_message(&mut rig, TAG, "HELDWORDS please");
+        stdin_has(&rig, "NOTEWORDS").await;
+        let behind = typed(&mut rig, "BEHINDWORDS");
+
+        let snap = rig.mgr.sessions[TAG].shared.queue_view().current();
+        let held = snap.held.clone().expect("the held message is in the view");
+        assert_eq!(held.hold_id, hold);
+        assert!(held.can_take_back);
+        assert_eq!(snap.entries.len(), 1, "queued behind the hold, visible");
+        assert_eq!(snap.entries[0].id, behind);
+
+        let answer = rig.mgr.queue_verb(TAG, &held.id, QueueVerb::TakeBack);
+
+        assert_eq!(answer.code, QueueResultCode::TakenBack);
+        assert_eq!(answer.text.as_deref(), Some("HELDWORDS please"));
+        assert_eq!(login_phase(&rig), (ClaudeLoginPhase::PausedNoHold, None));
+        assert!(rig.mgr.sessions[TAG]
+            .shared
+            .queue_view()
+            .current()
+            .held
+            .is_none());
+        // Nothing is ever written for it, and the queue behind stays put.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(rig.stdin_log().matches("HELDWORDS").count(), 1);
+        assert!(!rig.stdin_log().contains("BEHINDWORDS"));
+        // The entry behind the hold is still take-back-able.
+        assert_eq!(
+            rig.mgr.queue_verb(TAG, &behind, QueueVerb::TakeBack).code,
+            QueueResultCode::TakenBack
+        );
+        // What is typed next may open the conversation.
+        idle(&rig);
+        *lock_recover(&rig.mgr.sessions[TAG].shared.note_prefix) = None;
+        assert!(
+            rig.mgr.discard_held(TAG, None),
+            "the pause can still be released"
+        );
+        rig.send(TAG, "SECONDWORDS");
+        assert_eq!(
+            first_prompt(&rig, &sid),
+            FirstPrompt::Text("SECONDWORDS".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_of_the_held_message_discards_it_like_discard_held_and_the_queue_goes_on() {
+        let mut rig = Rig::new();
+        let sid = rig.spawn(TAG, "cody");
+        hold_first_message(&mut rig, TAG, "HELDWORDS please");
+        typed(&mut rig, "BEHINDWORDS");
+        let held = rig.mgr.sessions[TAG]
+            .shared
+            .queue_view()
+            .current()
+            .held
+            .unwrap();
+        idle(&rig);
+
+        let answer = rig.mgr.queue_verb(TAG, &held.id, QueueVerb::Remove);
+
+        assert_eq!(answer.code, QueueResultCode::Removed);
+        assert!(answer.text.is_none());
+        assert!(!rig.mgr.has_login_hold(), "no hold, no pause");
+        stdin_has(&rig, "BEHINDWORDS").await;
+        assert_eq!(rig.stdin_log().matches("HELDWORDS").count(), 1);
+        rig.deliver(TAG);
+        // As for `discard_held` today: what was queued behind a held first
+        // message is never a first prompt.
+        assert_eq!(first_prompt(&rig, &sid), FirstPrompt::None);
+        assert_eq!(
+            rig.mgr.queue_verb(TAG, &held.id, QueueVerb::Remove).code,
+            QueueResultCode::AlreadyDelivered,
+            "a repeat names an id that was written once"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_returns_the_held_message_first_with_its_original_text() {
+        let mut rig = Rig::new();
+        rig.spawn(TAG, "cody");
+        *lock_recover(&rig.mgr.sessions[TAG].shared.note_prefix) = Some("NOTEWORDS".into());
+        hold_first_message(&mut rig, TAG, "HELDWORDS please");
+        typed(&mut rig, "BEHINDWORDS");
+        idle(&rig);
+
+        let (outcome, dropped) = rig.mgr.interrupt_returning(TAG);
+
+        assert!(
+            matches!(outcome, Ok(InterruptOutcome::DiscardedHold)),
+            "{outcome:?}"
+        );
+        let got: Vec<&str> = dropped.typed.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(got, ["HELDWORDS please", "BEHINDWORDS"]);
+    }
+}
