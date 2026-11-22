@@ -286,12 +286,15 @@ final class ReplInputBarHistoryTests: XCTestCase {
         let rig = makeRig()
         send(rig, "a")
         send(rig, "b")
+        up(rig); up(rig)                                     // b, then a: the walk is at the oldest
+        XCTAssertEqual(text(rig), "a")
+        rig.textView.onSubmit?()                             // sends "a": history is now a, b, a
+        XCTAssertEqual(text(rig), "")
+        XCTAssertFalse(rig.bar.historyNavigator.isNavigating)
         up(rig)
-        rig.textView.onSubmit?()
-        down(rig)
-        XCTAssertEqual(text(rig), "", "Down after a send is not a walk")
+        XCTAssertEqual(text(rig), "a", "the next Up starts a fresh walk at the newest")
         up(rig)
-        XCTAssertEqual(text(rig), "b", "and the next Up starts at the newest")
+        XCTAssertEqual(text(rig), "b")
     }
 
     func testRecallingASlashCommandDoesNotOpenThePickerSoTheNextUpWalksOn() {
