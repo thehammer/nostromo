@@ -221,7 +221,7 @@ def run_script(script, scenario=None, env=None, preexisting=None, args=(), profi
     list of display names per GPU, {"exit": 1} / {"raw": "..."}, or "missing" (the binary does not exist).
     """
     root, app_dir, scratch, home, argv, full = _prepare(script, scenario, env, preexisting, profiler)
-    proc = subprocess.run([*argv, *args], capture_output=True, text=True, timeout=120, env=full, cwd=root)
+    proc = subprocess.run([*argv, *args], capture_output=True, text=True, timeout=float(os.environ.get("QA_HARNESS_TIMEOUT", "120")), env=full, cwd=root)
     run = Run(proc, app_dir, scratch)
     run.root, run.home = root, home
     return run
