@@ -24,10 +24,10 @@ so **none is INCONCLUSIVE**. The runs always agreed on behaviour; they differ on
 ## Short answers
 
 1. A mid-turn user frame is **accepted and read mid-turn, at the next tool boundary, in the same turn**
-   (absorbed). Not rejected, not deferred to a new turn. (Scenario a, b: 6 of 6 runs.)
+   (absorbed). Not rejected, not deferred to a new turn. (Scenarios a and b: absorbed in every run, 6 runs of each; scenario c runs are counted separately below.)
 2. The model sees a `<system-reminder>` wrapper (verbatim below) alongside the next tool result. The stream shows
    **no new turn**: no second `system/init`, one `result`. The `isReplay` echo of the frame appears **when it is
-   absorbed**, right after the tool result that ends the boundary, not when it was written.
+   absorbed**, at the tool boundary that ends the running tool call (after the tool result, with a delay of seconds that varied by run, 2-12 s in these runs; the cause was not isolated: hooks or CLI work are guesses), not when it was written.
 3. **Images work.** The model named the PNG's colour in all six runs of (b) ("red").
 4. The stored session file does **not** hold a `user` record for it. It holds `queue-operation` enqueue/remove
    lines and a `queued_command` **attachment**. Nostromo's reader ignores both, so a reloaded transcript would
@@ -62,7 +62,7 @@ The model acted on the mid-turn text ("done\nbanana" / "done banana") in all six
 follow-on turn finished. The control (d) answers just "done". Stored `queue-operation` for it ends with
 `"operation":"remove","reason":"absorbed_mid_turn"`.
 
-**Confidence:** high (a and b: 12/12 runs absorbed; the control and the other scenarios agree).
+**Confidence:** high (a and b: 12 of 12 runs absorbed, 6 per scenario; the control and the other scenarios agree).
 
 ## 2. What the model sees, what the stream reports, when the echo appears
 
@@ -231,4 +231,5 @@ protocol is needed. What stands in the way is Nostromo's own bookkeeping, which 
 
 Not covered here (out of scope): `--resume` sessions, other CLI versions (behaviour here is 2.1.326 only: the
 `system-reminder` wrapper and `absorbed_mid_turn` are the CLI's own, so a future version may change them), permission
-prompts or long single tool calls (a frame written during one long tool call waits for that tool), subagents.
+prompts or long single tool calls (a frame written during one long tool call waits for that tool), subagents; and
+**the real Nostromo argv** (`--dangerously-skip-permissions --agent … -n …`) was NOT tested, so absorption under it is assumed, not shown. The runs also had the owner's hooks, plugins and MCP servers loaded (the probe does not pass `--strict-mcp-config` or `--setting-sources`), which affects timing. Cost: about $0.40 per haiku run on this setup (one reviewer-observed control run), so a full probe is several dollars. Treat the `src/ipc/stream_json.rs` line numbers above as approximate (checked against main at the time of writing); re-check before planning from them.
