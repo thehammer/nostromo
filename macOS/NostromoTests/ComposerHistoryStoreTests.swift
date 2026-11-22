@@ -16,6 +16,14 @@ final class FakeFocusSensitivity: FocusSensitivityProviding {
     var sensitiveTags: Set<String> = []
     private let subject = PassthroughSubject<String, Never>()
     var becameSensitive: AnyPublisher<String, Never> { subject.eraseToAnyPublisher() }
+    var isKnown = true
+    private let knownSubject = PassthroughSubject<Void, Never>()
+    var becameKnown: AnyPublisher<Void, Never> { knownSubject.eraseToAnyPublisher() }
+
+    func becomeKnown() {
+        isKnown = true
+        knownSubject.send()
+    }
 
     func isSensitive(tag: String, agentName: String?) -> Bool { sensitiveTags.contains(tag) }
 
