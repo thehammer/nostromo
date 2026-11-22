@@ -517,11 +517,17 @@ impl FakeHost {
     /// the run ended is there to read. Every script ends on its own once the
     /// run has: the bridge answers a call made after the run at once.
     async fn settle(&self) {
-        loop {
-            let next = self.state.scripts.lock().unwrap().pop();
-            let Some(task) = next else { return };
-            let _ = task.await;
-        }
+        // Bounded: a script that never ends fails with a name, not at CI's
+        // step limit.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let next = self.state.scripts.lock().unwrap().pop();
+                let Some(task) = next else { return };
+                let _ = task.await;
+            }
+        })
+        .await
+        .expect("a scripted model task never ended within 30 s of the run");
     }
 
     fn sent(&self) -> Vec<String> {
@@ -756,7 +762,9 @@ async fn rig_with(w: World, o: Opts) -> Rig {
         // then sleeps for an hour: only the test's own triggers run.
         let src =
             HueyEngine::spawn(w.deps(curator, bridge.clone(), o.config, Duration::from_secs(3600)));
-        src.handle.first_tick_done().await;
+        tokio::time::timeout(Duration::from_secs(30), src.handle.first_tick_done())
+            .await
+            .expect("the scheduler never finished its first look within 30 s");
         w.confirm();
         src
     };

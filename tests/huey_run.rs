@@ -2463,7 +2463,9 @@ async fn sunday_report_exists() -> (World, HueySources, Arc<Scripted>, Arc<Atomi
         }
     });
     let src = HueyEngine::spawn(w.deps(curator.clone(), Duration::from_secs(3600)));
-    src.handle.first_tick_done().await;
+    tokio::time::timeout(Duration::from_secs(30), src.handle.first_tick_done())
+        .await
+        .expect("the scheduler never finished its first look within 30 s");
     w.confirm();
     w.items(
         VN,
@@ -3568,7 +3570,9 @@ async fn first_tick_done_means_a_due_first_run_is_over() {
     let w = one_item_world().await;
     let src = HueyEngine::spawn(w.deps(Scripted::picking(1, false), Duration::from_secs(3600)));
 
-    src.handle.first_tick_done().await;
+    tokio::time::timeout(Duration::from_secs(30), src.handle.first_tick_done())
+        .await
+        .expect("the scheduler never finished its first look within 30 s");
 
     assert!(!src.handle.is_running());
     assert_eq!(w.store().versions(oct(26)), vec![1], "the first tick's run");
