@@ -263,6 +263,12 @@ final class TranscriptModeChipAppearanceTests: XCTestCase {
             host.addSubview(chip)
             chip.apply(mode)
             window.orderFront(nil)
+            // The chip draws its OWN focus ring while it holds the keyboard, and the ring is bright ink: measured
+            // as text it fills the whole region. Whether a key window hands the chip first responder on
+            // order-front depends on the machine (Full Keyboard Access, `AppleKeyboardUIMode` = 2, does), so the
+            // test settles that itself instead of inheriting it: no first responder, then prove the chip has none.
+            window.makeFirstResponder(nil)
+            XCTAssertFalse(chip.hasKeyboardFocus, "\(mode): precondition: the chip is not drawing a focus ring while its text is measured")
 
             let fill = measureRegion(of: host, region: frame, textArea: frame.insetBy(dx: 6, dy: 4)).fill
             let ink = fv4InkBounds(of: host, region: frame.insetBy(dx: 2, dy: 2), brighterThan: fill + 0.2)

@@ -280,32 +280,40 @@ final class RepoOrgTests: XCTestCase {
         }
     }
 
-    private func makeSheet(_ g: GatedLookup, onCreate: @escaping (Focus) -> Void) -> CreateFocusSheet {
-        CreateFocusSheet(orgResolver: RepoOrgResolver(lookup: g.lookup),
+    private func makeSheet(_ g: GatedLookup, resolver: RepoOrgResolver? = nil,
+                           onCreate: @escaping (Focus) -> Void) -> CreateFocusSheet {
+        CreateFocusSheet(orgResolver: resolver ?? RepoOrgResolver(lookup: g.lookup),
                          agents: ["claudia"], projects: ["/tmp/alpha", "/tmp/beta"],
                          onCreate: onCreate)
     }
 
-    private func pumpMain(_ seconds: TimeInterval = 0.3) {
-        let e = expectation(description: "pump")
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { e.fulfill() }
-        wait(for: [e], timeout: 20)
+    /// Releases the gated lookup for `path` and waits until its answer has been DELIVERED on the main thread.
+    /// The resolver hands one lookup's answer to its waiters in registration order, so a probe registered
+    /// after the sheet's own waiter (and before the release) runs only after the sheet has seen the answer.
+    /// A "must not happen" assertion made after this waited for the very moment the thing WOULD have
+    /// happened; a fixed pause could pass before the lookup had even answered.
+    private func releaseAndAwaitDelivery(_ g: GatedLookup, _ resolver: RepoOrgResolver, path: String,
+                                         file: StaticString = #filePath, line: UInt = #line) {
+        var delivered = false
+        resolver.resolve(path) { _ in delivered = true }
+        g.release(path: path)
+        waitUntil("the lookup answer for \(path) was never delivered to the main thread", file: file, line: line) { delivered }
+        drainMain()
     }
 
     func testStaleLookupDoesNotOverwriteNewerPreview() {
         let g = GatedLookup(["/tmp/alpha": .resolved("Carefeed"), "/tmp/beta": .resolved("Personal")])
-        let sheet = makeSheet(g) { _ in }
+        let resolver = RepoOrgResolver(lookup: g.lookup)
+        let sheet = makeSheet(g, resolver: resolver) { _ in }
         sheet.selectProject(at: 1)   // moves on before alpha's lookup completes
         // Alpha (the stale selection) completes FIRST; without the staleness
         // guard its result would now be applied to the preview.
-        g.release(path: "/tmp/alpha")
-        pumpMain()
+        releaseAndAwaitDelivery(g, resolver, path: "/tmp/alpha")
         XCTAssertTrue(sheet.previewText.contains("Beta"), sheet.previewText)
         XCTAssertFalse(sheet.previewText.contains("Alpha"), sheet.previewText)
         // Beta (the current selection) completes second; the preview stays on Beta
         // (and its lookup thread is released so the test doesn't leak a blocked thread).
-        g.release(path: "/tmp/beta")
-        pumpMain()
+        releaseAndAwaitDelivery(g, resolver, path: "/tmp/beta")
         XCTAssertTrue(sheet.previewText.contains("Beta"), sheet.previewText)
         XCTAssertFalse(sheet.previewText.contains("Alpha"), sheet.previewText)
     }
@@ -318,7 +326,8 @@ final class RepoOrgTests: XCTestCase {
         XCTAssertFalse(sheet.isCreateEnabled)
         sheet.createTapped()   // re-entrant tap while pending
         g.release(2)
-        pumpMain()
+        waitUntil("the create callback never fired (the lookup never answered)") { !created.isEmpty }
+        drainMain()   // a stray late second create would still be counted
         XCTAssertEqual(created.count, 1)
         XCTAssertEqual(created.first?.org, "Carefeed")
         XCTAssertEqual(created.first?.projectPath, "/tmp/alpha")
@@ -327,11 +336,11 @@ final class RepoOrgTests: XCTestCase {
     func testCancelWhilePendingCreatesNothing() {
         let g = GatedLookup(["/tmp/alpha": .resolved("Carefeed")])
         var created: [Focus] = []
-        let sheet = makeSheet(g) { created.append($0) }
+        let resolver = RepoOrgResolver(lookup: g.lookup)
+        let sheet = makeSheet(g, resolver: resolver) { created.append($0) }
         sheet.createTapped()
         sheet.cancelTapped()
-        g.release(2)
-        pumpMain()
+        releaseAndAwaitDelivery(g, resolver, path: "/tmp/alpha")   // the answer arrives; only now can a create be wrong
         XCTAssertTrue(created.isEmpty)
     }
 
@@ -343,7 +352,8 @@ final class RepoOrgTests: XCTestCase {
                                      projects: ["/tmp/alpha"]) { created.append($0) }
         sheet.createTapped()
         g.release(2)
-        pumpMain()
+        waitUntil("the create callback never fired (the lookup never answered)") { !created.isEmpty }
+        drainMain()   // a stray late second create would still be counted
         XCTAssertEqual(created.count, 1)
         XCTAssertNil(created.first?.org)
         XCTAssertNil(resolver.cached("/tmp/alpha"))   // not cached; retried next time

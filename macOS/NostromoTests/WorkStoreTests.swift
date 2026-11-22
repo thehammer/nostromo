@@ -87,7 +87,7 @@ final class WorkStoreTests: XCTestCase {
         return false
     }
 
-    /// Let any continuation the store scheduled on the main queue run.
+    /// Real-time pump for the timer-window test below (the 0.3 s spacing between the two waiters IS the scenario).
     private func pumpMainQueue(for seconds: TimeInterval = 0.05) {
         RunLoop.main.run(until: Date().addingTimeInterval(seconds))
     }
@@ -98,7 +98,7 @@ final class WorkStoreTests: XCTestCase {
         var second: [WorkResponse] = []
         store.expect(requestId: "r1") { first.append($0) }
         store.expect(requestId: "r1") { second.append($0) }
-        pumpMainQueue()
+        flushMain()   // the displaced answer is synchronous; the flush catches any late main-queue echo
 
         XCTAssertEqual(first.count, 1, "the displaced waiter must be told, not left hanging until its timeout")
         if let response = first.first {

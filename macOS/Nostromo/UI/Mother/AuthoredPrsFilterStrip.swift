@@ -123,8 +123,8 @@ final class AuthoredPrsFilterStripView: NSView {
         selection = result.selection
         repoSelections = result.repoEntries.map(\.selection)
         sessionSelections = result.sessionEntries.map(\.selection)
-        fill(repoPopUp, titles: result.repoEntries.map(\.menuTitle), selected: repoSelections.firstIndex(of: selection.repo))
-        fill(sessionPopUp, titles: result.sessionEntries.map(\.menuTitle), selected: sessionSelections.firstIndex(of: selection.session))
+        fill(repoPopUp, entries: result.repoEntries, selected: repoSelections.firstIndex(of: selection.repo))
+        fill(sessionPopUp, entries: result.sessionEntries, selected: sessionSelections.firstIndex(of: selection.session))
         repoPopUp.toolTip = Self.tooltip(result.repoEntries.first { $0.selection == selection.repo })
         sessionPopUp.toolTip = Self.tooltip(result.sessionEntries.first { $0.selection == selection.session })
         repoPopUp.setAccessibilityValue(repoPopUp.titleOfSelectedItem)
@@ -132,14 +132,32 @@ final class AuthoredPrsFilterStripView: NSView {
         clearButton.isHidden = !selection.isActive
     }
 
-    private static func tooltip<S>(_ entry: AuthoredPrsFilterEntry<S>?) -> String? { entry?.menuTitle }
+    /// The whole sanitised name, not the capped menu title (which also carries the count).
+    private static func tooltip<S>(_ entry: AuthoredPrsFilterEntry<S>?) -> String? { entry?.fullTitle }
 
     /// Entries have no key equivalents: the job list's `From:` and the main menu own the keys.
-    private func fill(_ popUp: NSPopUpButton, titles: [String], selected: Int?) {
+    ///
+    /// A snapshot can land while the pop-up's menu is open, and `removeAllItems` would close it under the
+    /// reader's pointer. So when the entries are the same ones in the same order (only a count moved), the
+    /// existing items are updated in place and the menu is left alone; the menu is rebuilt only when the
+    /// set of entries itself changes.
+    private func fill<S>(_ popUp: NSPopUpButton, entries: [AuthoredPrsFilterEntry<S>], selected: Int?) {
+        let titles = entries.map(\.menuTitle)
+        if let items = popUp.menu?.items, items.count == entries.count,
+           zip(items, entries).allSatisfy({ ($0.representedObject as? AnyHashable) == AnyHashable($1.selection) }) {
+            for (item, entry) in zip(items, entries) {
+                if item.title != entry.menuTitle { item.title = entry.menuTitle }
+                if item.toolTip != entry.fullTitle { item.toolTip = entry.fullTitle }
+            }
+            let index = selected ?? 0
+            if popUp.indexOfSelectedItem != index { popUp.selectItem(at: index) }
+            return
+        }
         popUp.removeAllItems()
-        for title in titles {
+        for (title, entry) in zip(titles, entries) {
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            item.toolTip = title
+            item.toolTip = entry.fullTitle
+            item.representedObject = AnyHashable(entry.selection)
             popUp.menu?.addItem(item)
         }
         popUp.selectItem(at: selected ?? 0)

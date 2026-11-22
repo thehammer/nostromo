@@ -71,6 +71,11 @@ private func firstDescendant<T>(of type: T.Type, in view: NSView) -> T? {
 /// constraints and checking arithmetic does.
 final class ChatTurnViewLayoutTests: XCTestCase {
 
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        try requireFiraCodeNerdFont(self)   // a missing font must fail loudly, not as height mismatches
+    }
+
     // MARK: - Constraint-graph helpers
 
     /// Every constraint held anywhere in `view`'s subtree, `view` included.

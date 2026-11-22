@@ -47,25 +47,13 @@ final class NoCodebaseCreateTests: XCTestCase {
         return sheet
     }
 
-    /// Spins the main run loop until `created` holds `count` focuses (the create callback is the event), then
-    /// a few more turns so a stray second create would still be seen by the exact-count assertions. Returns
-    /// the moment the condition holds; a callback that never comes fails here, naming what is missing,
-    /// instead of leaving a later assertion to guess.
+    /// Waits (shared `waitUntil`) until `created` holds `count` focuses: the create callback is the event. Then a
+    /// modest bounded drain (0.15 s) so a stray LATE second create, e.g. one queued 0.1 s after the first, is
+    /// still seen by the exact-count assertions.
     private func waitForCreated(_ count: Int = 1, timeout: TimeInterval = 15, file: StaticString = #filePath, line: UInt = #line) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while created.count < count, Date() < deadline {
-            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
-        }
-        if created.count < count {
-            XCTFail("the create callback fired \(created.count) time(s) in \(timeout) s; expected \(count). The org lookup never answered.",
-                    file: file, line: line)
-        }
-        for _ in 0..<3 { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005)) }
-    }
-
-    /// For the paths that answer synchronously: lets already-queued main work run so a stray create would show.
-    private func drainMain() {
-        for _ in 0..<5 { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005)) }
+        waitUntil("the create callback fired \(created.count) time(s); expected \(count). The org lookup never answered.",
+                  timeout: timeout, file: file, line: line) { created.count >= count }
+        drainMain()
     }
 
     private func allViews(_ root: NSView) -> [NSView] {

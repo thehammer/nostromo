@@ -26,10 +26,6 @@ final class WorkStoreConnectionLossTests: XCTestCase {
         return false
     }
 
-    private func pumpMainQueue(for seconds: TimeInterval = 0.05) {
-        RunLoop.main.run(until: Date().addingTimeInterval(seconds))
-    }
-
     func testFailingPendingRequestsAnswersEveryWaiterWithAnErrorThatCarriesTheReason() {
         let store = WorkStore()
         var answers: [String: WorkResponse] = [:]
@@ -38,7 +34,7 @@ final class WorkStoreConnectionLossTests: XCTestCase {
         XCTAssertEqual(store.pendingRequestCount, 2)
 
         store.failPendingRequests(reason: "daemon connection lost")
-        pumpMainQueue()
+        flushMain()
 
         XCTAssertEqual(Set(answers.keys), ["detail-1", "send-1"], "every in-flight request must be answered")
         for (id, response) in answers {
@@ -55,7 +51,7 @@ final class WorkStoreConnectionLossTests: XCTestCase {
         var calls = 0
         store.expect(requestId: "r1") { _ in calls += 1 }
         store.failPendingRequests(reason: "daemon connection lost")
-        pumpMainQueue()
+        flushMain()
 
         let outcome = try! JSONDecoder().decode(SendOutcome.self, from: #"{"kind":"seeded"}"#.data(using: .utf8)!)
         store.resolve(requestId: "r1", with: .sendResult(.ok(outcome)))
