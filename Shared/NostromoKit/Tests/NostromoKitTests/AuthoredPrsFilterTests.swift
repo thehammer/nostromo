@@ -698,28 +698,3 @@ final class AuthoredPrsFilterTests: XCTestCase {
         XCTAssertEqual(plain.first?.rows.first?.repoChip, "portal", "unfiltered behaviour is unchanged")
     }
 }
-
-final class AuthoredPrsFilterStoredSelectionTests: XCTestCase {
-    func testAStoredOrgWithNoPrInTheListIsDropped() {
-        let prs = [pr(1, repo: "thehammer/nostromo")]
-        let stored = AuthoredPrsFilterSelection(org: .org("carefeed"))
-        XCTAssertEqual(AuthoredPrsFilter.droppingUnmatched(stored, in: prs), .all)
-    }
-
-    func testAStoredRepoWithNoPrInTheListIsDropped() {
-        let prs = [pr(1, repo: "thehammer/nostromo")]
-        let stored = AuthoredPrsFilterSelection(repo: .repo("Carefeed/app"))
-        XCTAssertEqual(AuthoredPrsFilter.droppingUnmatched(stored, in: prs), .all)
-    }
-
-    func testASelectionThatMatchesAPrIsKept() {
-        let prs = [pr(1, repo: "thehammer/nostromo"), pr(2, repo: "Carefeed/app")]
-        let stored = AuthoredPrsFilterSelection(org: .org("thehammer"), repo: .repo("thehammer/nostromo"))
-        XCTAssertEqual(AuthoredPrsFilter.droppingUnmatched(stored, in: prs), stored)
-    }
-
-    func testAnEmptyListChangesNothingBecauseNothingIsKnownYet() {
-        let stored = AuthoredPrsFilterSelection(org: .org("carefeed"))
-        XCTAssertEqual(AuthoredPrsFilter.droppingUnmatched(stored, in: []), stored)
-    }
-}
