@@ -55,6 +55,9 @@ pub struct AuthoredPrActions {
     heads: Option<HeadBook>,
     /// Merges in flight and answered.
     pub(super) merges: MergeBook,
+    /// Until when the verbs' own live reads stay quiet: GitHub answered one
+    /// with a rate limit and said to wait (see `remember_rate_limit`).
+    pub(super) read_wait: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     starts: Mutex<VecDeque<(String, AuthoredPrResult<StartOk>)>>,
     /// Previews already sent, so a replayed send (a dropped connection and a
     /// second press) delivers nothing. A new preview of the PR re-arms it.
@@ -128,6 +131,7 @@ impl AuthoredPrActions {
             api: Arc::new(Mutex::new(None)),
             heads: None,
             merges: MergeBook::default(),
+            read_wait: Mutex::new(None),
             starts: Mutex::new(VecDeque::new()),
             sent: Mutex::new(VecDeque::new()),
             start_gate: tokio::sync::Mutex::new(()),
@@ -203,8 +207,9 @@ impl AuthoredPrActions {
     }
 
     /// One live read of the PR: is `head_sha` its head on GitHub right now?
-    /// Never from the snapshot. It honours the engine's rate-limit pause and
-    /// reuses the Merge verb's read.
+    /// Never from the snapshot. It honours the engine's rate-limit pause, and
+    /// the wait GitHub gave the verbs' own last read (so a looping agent
+    /// cannot spend the allowance), and reuses the Merge verb's read.
     async fn live_head_is(
         &self,
         repo: &str,
@@ -229,7 +234,10 @@ impl AuthoredPrActions {
             Ok(Some(_)) => Err("head_not_current"),
             Ok(None) => Err("pr_unknown"),
             Err(f) => Err(match f.error {
-                ApiError::RateLimited { .. } => "rate_limited",
+                ApiError::RateLimited { .. } => {
+                    self.remember_rate_limit(&f);
+                    "rate_limited"
+                }
                 _ => "unreachable",
             }),
         }

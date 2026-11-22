@@ -1927,7 +1927,14 @@ impl World {
                 .push(format!("step {step}: an acknowledgement changed the file"));
         }
         if conflict.is_some() {
-            self.settle(Who::Pane(w), base, &before, &[item.clone()], false, step);
+            self.settle(
+                Who::Pane(w),
+                base,
+                &before,
+                std::slice::from_ref(&item),
+                false,
+                step,
+            );
         }
         if conflict.is_none() {
             // Acknowledging clears the marker whatever conflicts the item
