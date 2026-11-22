@@ -66,6 +66,7 @@ final class ComposerHistoryStore {
         sensitivitySubscription = sensitivity.becameSensitive.sink { [weak self] tag in
             self?.becameSensitive(tag: tag)
         }
+        if persists { sweepOrphanedTempFiles() }
     }
 
     // MARK: Reading
@@ -180,11 +181,36 @@ final class ComposerHistoryStore {
     private func removeFile(_ tag: String) {
         guard writesToDisk else { return }
         let url = fileURL(tag)
-        writeQueue.async { try? FileManager.default.removeItem(at: url) }
+        writeQueue.async {
+            do {
+                try FileManager.default.removeItem(at: url)
+            } catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {
+                // Nothing was there.
+            } catch {
+                Self.log.error("composer history delete failed (\(String(describing: type(of: error)), privacy: .public))")
+            }
+        }
+    }
+
+    /// A temporary file left by a write the app did not finish (a crash between create and rename) would
+    /// outlive a delete of its focus's file. Ours are the hidden `.<uuid>.tmp` names.
+    private func sweepOrphanedTempFiles() {
+        let directory = directory
+        writeQueue.async {
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+            for name in names where name.hasPrefix(".") && name.hasSuffix(".tmp") {
+                try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+            }
+        }
     }
 
     private func loadIfNeeded(_ tag: String) {
         guard loaded.insert(tag).inserted, writesToDisk, !memoryOnly.contains(tag) else { return }
+        // Already sensitive but not yet reported to this store: its file is deleted, not read.
+        if sensitivity.isSensitive(tag: tag, agentName: nil) {
+            becameSensitive(tag: tag)
+            return
+        }
         let url = fileURL(tag)
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         do {

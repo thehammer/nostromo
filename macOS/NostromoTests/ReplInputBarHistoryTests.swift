@@ -547,6 +547,14 @@ final class ReplInputBarHistoryTests: XCTestCase {
         }
     }
 
+    func testTheTranscriptPaneBindsHistoryWithItsAgentNameAndTheSharedStore() throws {
+        let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Nostromo")
+        let pane = try String(contentsOf: sources.appendingPathComponent("UI/Views/ReplView.swift"), encoding: .utf8)
+        XCTAssertTrue(pane.contains("inputBar.bindHistory(tag: session.tag, agentName: session.agentName, store: ComposerHistoryStore.shared)"),
+                      "a fred, teri or huey focus must reach the store as one")
+    }
+
     func testTheSharedStoreLivesUnderTheHomesDotNostromoFolder() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Nostromo")

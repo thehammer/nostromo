@@ -335,6 +335,28 @@ final class ComposerHistoryStoreTests: XCTestCase {
         XCTAssertEqual(store.entries(tag: "work"), [])
     }
 
+    func testATemporaryFileLeftByACrashedWriteIsSweptWhenTheStoreStarts() throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let orphan = directory.appendingPathComponent(".\(UUID().uuidString).tmp")
+        try Data("{\"version\":1,\"entries\":[\"left behind\"]}".utf8).write(to: orphan)
+        let store = makeStore()
+        store.flush()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphan.path))
+        XCTAssertEqual(store.entries(tag: "t"), [])
+    }
+
+    func testAFileOfAFocusAlreadySensitiveIsDeletedNotRecalled() throws {
+        let first = makeStore()
+        first.record(tag: "work", text: "old note")
+        first.flush()
+        XCTAssertEqual(files().count, 1)
+        sensitivity.sensitiveTags = ["work"]   // sensitive, but the store was never told
+        let relaunched = makeStore()
+        XCTAssertEqual(relaunched.entries(tag: "work"), [], "not served from the file")
+        relaunched.flush()
+        XCTAssertEqual(files().count, 0, "and the file is gone")
+    }
+
     // MARK: FocusSensitivity
 
     private func conversation(_ id: String, tag: String?, sensitive: Bool) -> ConversationEntryWire {
