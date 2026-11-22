@@ -576,7 +576,7 @@ final class AuthoredPrsFilterTests: XCTestCase {
     // MARK: Untrusted org names
 
     func testAHostileOwnerNameIsSanitisedAndCappedInTheOrgMenuWithAnUncappedSanitisedTooltipName() {
-        let hostile = "Ev\u{202E}il\u{0007}\u{2066}" + String(repeating: "o", count: 100)
+        let hostile = "Ev\u{202E}il\u{0007}\u{2066}" + String(repeating: "o", count: 150)
         let repo = hostile + "/repo"
         let prs = [pr(1, repo: repo), pr(2, repo: "carefeed/portal")]
         let result = F.apply(prs, selection: .all)
@@ -594,8 +594,9 @@ final class AuthoredPrsFilterTests: XCTestCase {
         let full = entry?.fullTitle ?? ""
         XCTAssertFalse(hasBidiOrControl(full), "the tooltip name is sanitised too")
         XCTAssertTrue(full.hasPrefix("Evil"))
-        XCTAssertGreaterThan(full.count, 100, "but not capped: \(full.count)")
-        XCTAssertFalse(full.hasSuffix("…"))
+        XCTAssertGreaterThan(full.count, title.count, "longer than the menu title: \(full.count)")
+        XCTAssertLessThanOrEqual(full.count, MotherOriginDisplay.tooltipCap, "but capped at the tooltip cap")
+        XCTAssertTrue(full.hasSuffix("…"))
 
         // It still selects by what the daemon named it, and the empty message is clean.
         let selected = F.apply(prs, selection: Selection(org: .org(key ?? ""), session: .noSession))
@@ -605,6 +606,17 @@ final class AuthoredPrsFilterTests: XCTestCase {
         XCTAssertFalse(hasBidiOrControl(text))
         XCTAssertFalse(hasBidiOrControl(none.orgTitle))
         XCTAssertLessThanOrEqual(none.orgTitle.count, 60)
+    }
+
+    func testRepoAndSessionTooltipsAreCappedToo() {
+        let longRepo = "carefeed/" + String(repeating: "r", count: 200)
+        let name = String(repeating: "s", count: 200)
+        let prs = [pr(1, repo: longRepo, owner: owner(tag: "t", name: name))]
+        let result = F.apply(prs, selection: .all)
+        for full in [result.repoEntries[1].fullTitle, result.sessionEntries[1].fullTitle] {
+            XCTAssertEqual(full.count, MotherOriginDisplay.tooltipCap)
+            XCTAssertTrue(full.hasSuffix("…"))
+        }
     }
 
     func testAnOwnerWithNothingPrintableIsCalledUnnamedAndAShortNameIsItsOwnTooltip() {

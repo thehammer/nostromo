@@ -50,7 +50,7 @@ import NostromoKit
 //        -> testASnapshotThatMovesAnOrgCountKeepsTheOrgMenuAndItsItemsInPlace,
 //           testASnapshotThatOnlyChangesOrgCountsUnderAnOrgSelectionStillUpdatesTheOrgPopUp
 //   (s) an owner's name shown unsanitised in the Org pop-up, or its tooltip capped
-//        -> testAHostileOrgNameReachesThePopUpCleanedCappedWithAFullTooltip
+//        -> testAHostileOrgNameReachesThePopUpCleanedCappedWithACappedTooltip
 //   (t) Org pop-up loses its VoiceOver label / value, leaves the Tab order, or takes key equivalents
 //        -> testAllThreePopUpsAreNamedSpokenWithTheirSelectionAndTakeNoKeys, testTabWalksOrgThenRepoThenSession
 final class AuthoredPrsFilterBarTests: XCTestCase {
@@ -257,8 +257,8 @@ final class AuthoredPrsFilterBarTests: XCTestCase {
         XCTAssertEqual(overview.displayedRowIds.count, 5)
     }
 
-    func testAHostileOrgNameReachesThePopUpCleanedCappedWithAFullTooltip() throws {
-        let hostileOrg = "Ev\u{202E}il\u{0007}" + String(repeating: "o", count: 100)
+    func testAHostileOrgNameReachesThePopUpCleanedCappedWithACappedTooltip() throws {
+        let hostileOrg = "Ev\u{202E}il\u{0007}" + String(repeating: "o", count: 150)
         let overview = makeOverview([APT.pr(1, repo: hostileOrg + "/repo"), APT.pr(2, repo: Self.portal)])
         let items = overview.filterStrip.orgPopUp.itemArray
         XCTAssertEqual(items.count, 3)
@@ -269,7 +269,8 @@ final class AuthoredPrsFilterBarTests: XCTestCase {
         XCTAssertLessThanOrEqual(entry.title.count, 60 + " (1)".count)
         let tip = entry.toolTip ?? ""
         XCTAssertTrue(tip.hasPrefix("Evil"))
-        XCTAssertGreaterThan(tip.count, 100, "the tooltip is the whole sanitised name")
+        XCTAssertLessThanOrEqual(tip.count, MotherOriginDisplay.tooltipCap, "the tooltip is capped")
+        XCTAssertGreaterThan(tip.count, entry.title.count, "but still longer than the menu title")
         XCTAssertTrue(tip.unicodeScalars.allSatisfy { $0.value >= 0x20 && !(0x202A...0x202E).contains($0.value) })
     }
 
@@ -564,21 +565,18 @@ final class AuthoredPrsFilterBarTests: XCTestCase {
         XCTAssertTrue(window.makeFirstResponder(strip.sessionPopUp))
     }
 
+    /// The order is the explicit `nextKeyView` chain the strip sets, not the window's key-view loop: on a headless CI
+    /// window (no key window, keyboard navigation off) `nextValidKeyView` does not walk pop-ups at all.
     func testTabWalksOrgThenRepoThenSession() throws {
         let overview = makeOverview()
         let strip = overview.filterStrip
-        let window = try XCTUnwrap(overview.window)
-        window.recalculateKeyViewLoop()
-        XCTAssertTrue(strip.orgPopUp.nextValidKeyView === strip.repoPopUp, "Tab from Org lands on Repo")
-        XCTAssertTrue(strip.repoPopUp.nextValidKeyView === strip.sessionPopUp, "Tab from Repo lands on Session")
-        XCTAssertTrue(strip.sessionPopUp.previousValidKeyView === strip.repoPopUp, "Shift-Tab goes back")
-        XCTAssertTrue(strip.repoPopUp.previousValidKeyView === strip.orgPopUp)
+        XCTAssertTrue(strip.orgPopUp.nextKeyView === strip.repoPopUp, "Tab from Org lands on Repo")
+        XCTAssertTrue(strip.repoPopUp.nextKeyView === strip.sessionPopUp, "Tab from Repo lands on Session")
 
         // With a selection made too (Clear is then in the strip): the three pop-ups keep their order.
         choose(strip.orgPopUp, "carefeed")
-        window.recalculateKeyViewLoop()
-        XCTAssertTrue(strip.orgPopUp.nextValidKeyView === strip.repoPopUp)
-        XCTAssertTrue(strip.repoPopUp.nextValidKeyView === strip.sessionPopUp)
+        XCTAssertTrue(strip.orgPopUp.nextKeyView === strip.repoPopUp)
+        XCTAssertTrue(strip.repoPopUp.nextKeyView === strip.sessionPopUp)
     }
 
     func testCommandOAndCommandRAreNotTheListsWhileAPopUpHasTheKeyboard() throws {
@@ -722,6 +720,12 @@ final class AuthoredPrsFilterBarTests: XCTestCase {
             let captions = APT.descendants(of: strip).compactMap { $0 as? NSTextField }.filter { ["Org:", "Repo:", "Session:"].contains($0.stringValue) }
             XCTAssertEqual(captions.count, 3, context)
             XCTAssertTrue(captions.allSatisfy(\.isHidden), "\(context): the captions give way to the pop-ups in a narrow pane")
+            // The problem the captions cause: with them shown (about 100 pt of captions and gaps) each pop-up gets only
+            // about 40 pt at 320 pt wide, too little to read a name. Hiding them gives that room to the pop-ups.
+            let minReadable: CGFloat = width == 320 ? 70 : 85
+            for popUp in [strip.orgPopUp, strip.repoPopUp, strip.sessionPopUp] {
+                XCTAssertGreaterThanOrEqual(popUp.frame.width, minReadable, "\(context): each pop-up is wide enough to show a name")
+            }
             for (name, view) in parts where !view.isHidden {
                 let frame = APT.rect(of: view, in: strip)
                 XCTAssertGreaterThanOrEqual(frame.minX, -0.5, "\(context): \(name) starts inside the strip")
@@ -744,8 +748,14 @@ final class AuthoredPrsFilterBarTests: XCTestCase {
                 let full = try XCTUnwrap(popUp.titleOfSelectedItem)
                 let natural = (full as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11)]).width
                 XCTAssertLessThan(popUp.frame.width, natural, "\(context): '\(full)' is truncated, not allowed to push the strip wider")
-                // The tooltip is the whole sanitised name: not the capped menu title, and not its "(n)" count.
-                XCTAssertEqual(popUp.toolTip, expectedFull, "\(context): the tooltip carries the full name")
+                // The tooltip is the sanitised name up to the tooltip cap: not the capped menu title, and not its "(n)" count.
+                let tip = try XCTUnwrap(popUp.toolTip, context)
+                if expectedFull.count <= MotherOriginDisplay.tooltipCap {
+                    XCTAssertEqual(tip, expectedFull, "\(context): a name that fits the cap is not truncated")
+                } else {
+                    XCTAssertEqual(tip.count, MotherOriginDisplay.tooltipCap, "\(context): a longer name is capped")
+                    XCTAssertTrue(tip.hasSuffix("…") && expectedFull.hasPrefix(String(tip.dropLast())), "\(context): capped from the front of the name")
+                }
                 XCTAssertNotEqual(popUp.toolTip, full, "\(context): and is not the capped menu title with its count")
                 XCTAssertTrue(popUp.itemArray.allSatisfy { item in
                     item.toolTip.map { !$0.isEmpty && item.title.hasPrefix(String($0.prefix(8))) } ?? false

@@ -202,7 +202,7 @@ public enum AuthoredPrsFilter {
         let orgEntries = [AuthoredPrsFilterEntry(selection: AuthoredPrsOrgSelection.all, title: "All", count: prs.count)]
             + orgKeys
                 .map { AuthoredPrsFilterEntry(selection: AuthoredPrsOrgSelection.org($0), title: orgTitle($0), count: orgCounts[$0] ?? 0,
-                                              fullTitle: orgTitle($0, cap: .max)) }
+                                              fullTitle: orgTitle($0, cap: MotherOriginDisplay.tooltipCap)) }
                 .sorted {
                     if $0.count != $1.count { return $0.count > $1.count }
                     return byTitle($0.title, $1.title, tieBreak: "\($0.selection)" < "\($1.selection)")
@@ -214,7 +214,7 @@ public enum AuthoredPrsFilter {
         let repoEntries = [AuthoredPrsFilterEntry(selection: AuthoredPrsRepoSelection.all, title: "All", count: orgScoped)]
             + repoNames
                 .map { AuthoredPrsFilterEntry(selection: AuthoredPrsRepoSelection.repo($0), title: repoTitle($0), count: repoCounts[$0] ?? 0,
-                                                       fullTitle: repoTitle($0, cap: .max)) }
+                                                       fullTitle: repoTitle($0, cap: MotherOriginDisplay.tooltipCap)) }
                 .sorted { byTitle($0.title, $1.title, tieBreak: "\($0.selection)" < "\($1.selection)") }
 
         var focusSelections = Set(sessionCounts.keys.filter { $0 != .noSession })
@@ -222,7 +222,7 @@ public enum AuthoredPrsFilter {
         var sessionEntries = [AuthoredPrsFilterEntry(selection: AuthoredPrsSessionSelection.all, title: "All", count: orgScoped)]
         sessionEntries += focusSelections
             .map { AuthoredPrsFilterEntry(selection: $0, title: sessionTitle($0), count: sessionCounts[$0] ?? 0,
-                                                       fullTitle: sessionTitle($0, cap: .max)) }
+                                                       fullTitle: sessionTitle($0, cap: MotherOriginDisplay.tooltipCap)) }
             .sorted { byTitle($0.title, $1.title, tieBreak: "\($0.selection)" < "\($1.selection)") }
         if sessionCounts[.noSession] != nil || selection.session == .noSession {
             sessionEntries.append(AuthoredPrsFilterEntry(selection: .noSession, title: noSessionTitle, count: sessionCounts[.noSession] ?? 0))

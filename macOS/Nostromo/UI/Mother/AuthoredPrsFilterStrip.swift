@@ -112,6 +112,10 @@ final class AuthoredPrsFilterStripView: NSView {
             stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ] + widths)
+        // Tab order is set here, not left to the window's key-view loop (which is geometry-ordered and depends on
+        // the system's keyboard-navigation setting): Org, then Repo, then Session.
+        orgPopUp.nextKeyView = repoPopUp
+        repoPopUp.nextKeyView = sessionPopUp
         setAccessibilityElement(false)
     }
     required init?(coder: NSCoder) { fatalError() }
