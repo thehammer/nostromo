@@ -15,6 +15,7 @@ use super::budget::{
     TOKEN_EARLY_RETRY, TOKEN_RETRY,
 };
 use super::classify::{classify, group_of, Classified, RawPr};
+use super::exclude::ExcludedOrgs;
 use super::github::{Api, ApiError, Failure, Meta, SearchItem, SearchPage, Target, MAX_ALIASES};
 use super::links::{key_string, AuthoredPrStore};
 use super::memory::FocusMemory;
@@ -97,6 +98,8 @@ pub(super) struct Engine {
     verdicts: Arc<VerdictStore>,
     heads: super::HeadBook,
     api_base: String,
+    /// Owners that never enter the list (`authored_prs_exclude_orgs`).
+    exclude: ExcludedOrgs,
     clock: Arc<dyn Clock>,
     relay_status: Arc<RelayStatus>,
     relay_configured: bool,
@@ -153,6 +156,9 @@ pub(super) struct Engine {
     refresh_blocked: Option<(RefreshBlocked, Instant)>,
 
     hidden_orgs: BTreeSet<u64>,
+    /// Hidden organisations whose looked-up name is an excluded owner. Their
+    /// ids (never the names) are remembered so they are not published.
+    excluded_org_ids: BTreeSet<u64>,
     org_names: HashMap<u64, String>,
     org_lookups: Vec<Instant>,
 
@@ -164,8 +170,8 @@ pub(super) struct Engine {
     next_usage_log: Instant,
 }
 
-fn make_api(c: &GithubClient, base: &str) -> Api {
-    Api::new(c.http.clone(), c.token().to_owned(), base.to_owned())
+fn make_api(c: &GithubClient, base: &str, exclude: &ExcludedOrgs) -> Api {
+    Api::new(c.http.clone(), c.token().to_owned(), base.to_owned()).excluding(exclude)
 }
 
 fn key_of(repo: &str, number: u64) -> PrKey {
@@ -190,7 +196,10 @@ impl Engine {
             heads,
         } = shared;
         let (api, token) = match &deps.github {
-            Some(c) => (Some(make_api(c, &deps.api_base)), TokenState::Connected),
+            Some(c) => (
+                Some(make_api(c, &deps.api_base, &deps.exclude_orgs)),
+                TokenState::Connected,
+            ),
             None => (None, TokenState::Missing),
         };
         *api_slot.lock().unwrap_or_else(|e| e.into_inner()) = api.clone();
@@ -200,6 +209,7 @@ impl Engine {
             verdicts,
             heads,
             api_base: deps.api_base,
+            exclude: deps.exclude_orgs,
             clock: deps.clock,
             relay_status: deps.relay_status,
             relay_configured: deps.relay_configured,
@@ -247,6 +257,7 @@ impl Engine {
             reconcile_again: false,
             refresh_blocked: None,
             hidden_orgs: BTreeSet::new(),
+            excluded_org_ids: BTreeSet::new(),
             org_names: HashMap::new(),
             org_lookups: Vec::new(),
             copies: WorkingCopies::default(),
@@ -357,6 +368,10 @@ impl Engine {
         let Some(repo) = ev.repo.as_deref().filter(|r| valid_repo(r)) else {
             return;
         };
+        // An excluded owner's event is dropped before it can cost a read.
+        if self.exclude.covers_repo(repo) {
+            return;
+        }
         let ty = ev.event_type.as_str();
         match ty {
             "pr.closed" | "pr.merged" => {
@@ -579,7 +594,7 @@ impl Engine {
             .flatten();
         if let Some(c) = found {
             info!("authored-prs: a GitHub token is available now");
-            let api = make_api(&c, &self.api_base);
+            let api = make_api(&c, &self.api_base, &self.exclude);
             *self.api_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(api.clone());
             self.api = Some(api);
             self.token = TokenState::Connected;
@@ -859,7 +874,7 @@ impl Engine {
         let Some(id) = self
             .hidden_orgs
             .iter()
-            .find(|id| !self.org_names.contains_key(id))
+            .find(|id| !self.org_names.contains_key(id) && !self.excluded_org_ids.contains(id))
             .copied()
         else {
             return false;
@@ -882,7 +897,13 @@ impl Engine {
                 self.observe(&meta);
                 let rec = self.record(true, false, 0, Source::Poll);
                 self.charge(Instant::now(), Source::Poll, rec);
-                self.org_names.insert(id, login);
+                if self.exclude.covers_owner(&login) {
+                    // Looked up (the id has no other way to a name), never kept
+                    // or published.
+                    self.excluded_org_ids.insert(id);
+                } else {
+                    self.org_names.insert(id, login);
+                }
             }
             Err(f) => {
                 self.observe(&f.meta);
@@ -947,9 +968,20 @@ impl Engine {
     }
 
     fn apply_search(&mut self, page: SearchPage, full: bool) {
-        self.total_open = page.total_count;
+        // Belt and braces: the query already says `-org:`. Counts only.
+        let before = page.items.len();
+        let items: Vec<SearchItem> = page
+            .items
+            .into_iter()
+            .filter(|i| !self.exclude.covers_repo(&i.repo))
+            .collect();
+        let dropped = (before - items.len()) as u32;
+        if dropped > 0 {
+            debug!(dropped, "authored-prs: excluded results left out");
+        }
+        self.total_open = page.total_count.saturating_sub(dropped);
         let mut seen = BTreeSet::new();
-        for item in page.items {
+        for item in items {
             let SearchItem {
                 repo,
                 number,
@@ -1110,6 +1142,11 @@ impl Engine {
             } else {
                 target.repo.clone()
             };
+            if self.exclude.covers_repo(&repo) {
+                // A repo that moved into an excluded owner.
+                self.prs.remove(key);
+                continue;
+            }
             let updated = raw.updated_at.unwrap_or(wall);
             let pr = self.prs.entry(key.clone()).or_insert_with(|| Pr {
                 repo: repo.clone(),
@@ -1234,7 +1271,13 @@ impl Engine {
 
     fn relay_info(&self) -> RelayInfo {
         // The relay's ack names the org: one line and bounded before it is sent on.
-        let org = one_line(&self.relay_status.org(), MAX_ORG_NAME);
+        let org = self.relay_status.org();
+        // The relay's own org is a name too: an excluded one is not published.
+        let org = if self.exclude.covers_owner(&org) {
+            String::new()
+        } else {
+            one_line(&org, MAX_ORG_NAME)
+        };
         if !self.relay_configured {
             return RelayInfo {
                 state: RelayState::NotConfigured,
@@ -1508,6 +1551,10 @@ impl Engine {
         let hidden_orgs = self
             .hidden_orgs
             .iter()
+            .filter(|id| !self.excluded_org_ids.contains(id))
+            // With owners excluded, an id whose name is not known yet is withheld:
+            // it might be one of them.
+            .filter(|id| self.exclude.is_empty() || self.org_names.contains_key(id))
             .take(MAX_HIDDEN_ORGS)
             .map(|id| {
                 one_line(

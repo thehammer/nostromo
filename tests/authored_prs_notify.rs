@@ -273,6 +273,7 @@ async fn env_with(board: bool, actions: bool) -> Env {
     let (jobs_tx, jobs_rx) = watch::channel(Vec::new());
     let handle = AuthoredPrsSource::spawn(Deps {
         state_root: None,
+        exclude_orgs: Default::default(),
         api_base: "http://127.0.0.1:1".into(),
         github: None,
         token_resolver: None,

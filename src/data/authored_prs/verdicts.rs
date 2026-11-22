@@ -242,6 +242,15 @@ impl VerdictStore {
         }
     }
 
+    /// Forget the verdicts of excluded owners' repos (on load; the next write
+    /// leaves them out of the file). Returns how many.
+    pub fn forget_excluded(&self, excluded: &super::exclude::ExcludedOrgs) -> usize {
+        let mut g = self.lock();
+        let before = g.len();
+        g.retain(|r| !excluded.covers_repo(&r.repo));
+        before - g.len()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<VerdictRecord>> {
         self.records.lock().unwrap_or_else(|e| e.into_inner())
     }

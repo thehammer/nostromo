@@ -106,6 +106,15 @@ impl AuthoredPrStore {
         }
     }
 
+    /// Forget the entries of excluded owners (on load: they are never shown,
+    /// and the next write leaves them out of the file). Returns how many.
+    pub fn forget_excluded(&self, excluded: &super::exclude::ExcludedOrgs) -> usize {
+        let mut g = self.lock();
+        let before = g.len();
+        g.retain(|k, _| !excluded.covers_key(k));
+        before - g.len()
+    }
+
     pub fn get(&self, key: &str) -> Option<Entry> {
         self.lock().get(key).cloned()
     }

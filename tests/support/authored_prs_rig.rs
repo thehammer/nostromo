@@ -996,6 +996,8 @@ pub struct RigOpts {
     pub wall_jump: Option<WallJump>,
     /// How the engine looks for a token again when it started without one.
     pub token_resolver: Option<TokenResolver>,
+    /// `authored_prs_exclude_orgs`.
+    pub exclude_orgs: Vec<String>,
 }
 
 impl Default for RigOpts {
@@ -1005,6 +1007,7 @@ impl Default for RigOpts {
             token: true,
             wall_jump: None,
             token_resolver: None,
+            exclude_orgs: Vec::new(),
         }
     }
 }
@@ -1206,6 +1209,9 @@ impl Rig {
         };
         let handle = AuthoredPrsSource::spawn(Deps {
             state_root: Some(state_root.clone()),
+            exclude_orgs: nostromo::data::authored_prs::exclude::ExcludedOrgs::new(
+                &opts.exclude_orgs,
+            ),
             api_base: server.uri(),
             github,
             token_resolver: opts.token_resolver.clone(),

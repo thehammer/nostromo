@@ -15,6 +15,7 @@ pub mod actions;
 pub mod budget;
 pub mod classify;
 mod engine;
+pub mod exclude;
 pub mod github;
 pub mod links;
 pub mod memory;
@@ -231,6 +232,9 @@ pub struct Deps {
     /// Where links, told records and the focus memory persist; `None` keeps
     /// them in memory only (tests).
     pub state_root: Option<PathBuf>,
+    /// Owners (`authored_prs_exclude_orgs`) whose PRs never enter the list.
+    /// Empty changes nothing.
+    pub exclude_orgs: exclude::ExcludedOrgs,
 }
 
 /// The GitHub client the engine currently holds (it can find a token after it
@@ -276,6 +280,15 @@ impl AuthoredPrsSource {
                 Arc::new(verdicts::VerdictStore::in_memory()),
             ),
         };
+        // Persisted state of an excluded owner is never read back into the list.
+        let forgotten = store.forget_excluded(&deps.exclude_orgs)
+            + verdicts.forget_excluded(&deps.exclude_orgs);
+        if forgotten > 0 {
+            tracing::info!(
+                forgotten,
+                "authored-prs: excluded entries left out of saved state"
+            );
+        }
         let api: ApiSlot = Arc::new(Mutex::new(None));
         let heads: HeadBook = Arc::new(Mutex::new(HashMap::new()));
         let task = tokio::spawn(

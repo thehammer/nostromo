@@ -126,6 +126,11 @@ pub struct Config {
     /// task, no relay interest. See `docs/authored-prs.md`.
     #[serde(rename = "authored_prs")]
     pub authored_prs_enabled: bool,
+    /// GitHub owner logins whose PRs the author's PR list leaves out
+    /// (`authored_prs_exclude_orgs = ["some-org"]`). Kept raw so a value of
+    /// the wrong type never fails the load; see
+    /// [`Config::resolve_authored_prs_exclude_orgs`].
+    pub authored_prs_exclude_orgs: Option<toml::Value>,
 
     /// VIP sender addresses (lowercase); emails from these addresses are
     /// highlighted in the mailbox panel.
@@ -217,6 +222,7 @@ impl Default for Config {
             relay_token: None,
             perri_targeted_relay: true,
             authored_prs_enabled: true,
+            authored_prs_exclude_orgs: None,
             vip_senders: Vec::new(),
             jira_site: None,
             jira_email: None,
@@ -256,6 +262,52 @@ impl Config {
     /// warnings naming keys only.
     pub fn resolve_huey(&self) -> (crate::huey::HueyConfig, Vec<String>) {
         crate::huey::config::resolve(self.agents.as_ref())
+    }
+
+    /// The owners `authored_prs_exclude_orgs` names, lowercased and de-duplicated,
+    /// plus warnings for the caller to log. An entry is trimmed; an empty one is
+    /// dropped; one that is not a GitHub login (`[A-Za-z0-9-]`, 1 to 39) is
+    /// ignored. A warning names the key only, never an entry's value.
+    pub fn resolve_authored_prs_exclude_orgs(&self) -> (Vec<String>, Vec<String>) {
+        const KEY: &str = "authored_prs_exclude_orgs";
+        let Some(raw) = self.authored_prs_exclude_orgs.as_ref() else {
+            return (Vec::new(), Vec::new());
+        };
+        let Some(entries) = raw.as_array() else {
+            return (
+                Vec::new(),
+                vec![format!("{KEY} must be an array of strings; ignoring it")],
+            );
+        };
+        let mut orgs: Vec<String> = Vec::new();
+        let mut ignored = 0usize;
+        for entry in entries {
+            let Some(s) = entry.as_str() else {
+                ignored += 1;
+                continue;
+            };
+            let s = s.trim();
+            if s.is_empty() {
+                continue;
+            }
+            if s.len() > 39 || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+                ignored += 1;
+                continue;
+            }
+            let lc = s.to_ascii_lowercase();
+            if !orgs.contains(&lc) {
+                orgs.push(lc);
+            }
+        }
+        let warnings = if ignored > 0 {
+            vec![format!(
+                "{KEY}: {ignored} entr{} ignored (each must be a GitHub owner login)",
+                if ignored == 1 { "y" } else { "ies" }
+            )]
+        } else {
+            Vec::new()
+        };
+        (orgs, warnings)
     }
 
     /// The Fred accounts from `[[fred_accounts]]`, plus warnings (naming the
@@ -758,5 +810,65 @@ mod fred_accounts_tests {
             .ends_with("google-oauth-client.json"));
         let cfg = parse("google_oauth_client = \"~/c.json\"\n");
         assert_eq!(cfg.google_oauth_client_path(), home_dir().join("c.json"));
+    }
+}
+
+#[cfg(test)]
+mod authored_prs_exclude_orgs_tests {
+    use super::*;
+
+    fn resolve(s: &str) -> (Vec<String>, Vec<String>) {
+        toml::from_str::<Config>(s)
+            .unwrap()
+            .resolve_authored_prs_exclude_orgs()
+    }
+
+    #[test]
+    fn absent_means_nothing_is_excluded() {
+        let (orgs, warnings) = resolve("");
+        assert!(orgs.is_empty() && warnings.is_empty());
+        assert!(Config::default().authored_prs_exclude_orgs.is_none());
+    }
+
+    #[test]
+    fn a_valid_list_is_lowercased_and_deduplicated() {
+        let (orgs, w) =
+            resolve("authored_prs_exclude_orgs = [\"Carefeed\", \" other-org \", \"carefeed\"]\n");
+        assert_eq!(orgs, ["carefeed", "other-org"]);
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn empty_entries_are_dropped_without_a_warning() {
+        let (orgs, w) = resolve("authored_prs_exclude_orgs = [\"\", \"  \", \"a\"]\n");
+        assert_eq!(orgs, ["a"]);
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn invalid_entries_are_ignored_with_one_warning_naming_only_the_key() {
+        let (orgs, w) = resolve(
+            "authored_prs_exclude_orgs = [\"secretorg/repo\", \"bad org\", \"un_der\", 7, \"fine\"]\n",
+        );
+        assert_eq!(orgs, ["fine"]);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("authored_prs_exclude_orgs"));
+        for v in ["secretorg", "bad org", "un_der"] {
+            assert!(!w[0].contains(v), "{}", w[0]);
+        }
+    }
+
+    #[test]
+    fn a_value_that_is_not_an_array_never_fails_the_load() {
+        for src in [
+            "authored_prs_exclude_orgs = \"carefeed\"\n",
+            "authored_prs_exclude_orgs = 3\n",
+            "[authored_prs_exclude_orgs]\nx = 1\n",
+        ] {
+            let (orgs, w) = resolve(src);
+            assert!(orgs.is_empty(), "{src}");
+            assert_eq!(w.len(), 1, "{src}");
+            assert!(!w[0].contains("carefeed"), "{src}");
+        }
     }
 }
