@@ -600,7 +600,7 @@ fn capture_stamp(link: &Arc<LoginLink>, hold_id: String) {
 enum ResendPlan {
     /// The hold is now `Resending` and the session `MidTurn`: write `frame`.
     Write {
-        frame: PendingMessage,
+        frame: Box<PendingMessage>,
         attempt: u8,
         prev_attempt_stamp: Option<String>,
     },
@@ -649,7 +649,7 @@ fn plan_resend(
     }
     *state = SessionState::MidTurn;
     ResendPlan::Write {
-        frame,
+        frame: Box::new(frame),
         attempt: hold.attempts,
         prev_attempt_stamp,
     }

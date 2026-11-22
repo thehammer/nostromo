@@ -611,7 +611,7 @@ pub(super) async fn forward_session_events_with(
                     SessionEvent::Tasks(snapshot) => tasks_msg(&tag, &snapshot),
                     SessionEvent::TaskDetail(detail) => detail_msg(&tag, &detail),
                     SessionEvent::Queue(snapshot) => match &queue {
-                        Some(feed) if feed.forwards(snapshot.rev) => snapshot.into_msg(&tag),
+                        Some(feed) if feed.forwards(snapshot.rev) => snapshot.to_msg(&tag),
                         _ => continue,
                     },
                 };
@@ -632,7 +632,7 @@ pub(super) async fn forward_session_events_with(
                 }
                 // The skipped events may have held the latest queue too.
                 if let Some(snapshot) = queue.as_ref().and_then(QueueFeed::resend) {
-                    if !send(snapshot.into_msg(&tag)) {
+                    if !send(snapshot.to_msg(&tag)) {
                         return;
                     }
                 }

@@ -25,7 +25,7 @@ use tracing::info;
 
 use super::login::LoginLink;
 use super::task_runtime::daemon_epoch;
-use super::{advance, lock_recover, local_command, SessionManager, SessionState};
+use super::{advance, local_command, lock_recover, SessionManager, SessionState};
 use super::{PendingMessage, Shared, WRITE_WAIT_LIMIT};
 use crate::ipc::protocol::{
     HeldEntryWire, QueueChangeReason, QueueChangeWire, QueueEntryKindWire, QueueEntryWire,
@@ -77,9 +77,8 @@ impl EntryKind {
 /// The `client_ref` as the wire allows it: at most 64 printable ASCII
 /// characters, otherwise dropped (never refused).
 pub(super) fn sanitize_client_ref(client_ref: Option<String>) -> Option<String> {
-    client_ref.filter(|r| {
-        !r.is_empty() && r.len() <= 64 && r.bytes().all(|b| (0x20..=0x7e).contains(&b))
-    })
+    client_ref
+        .filter(|r| !r.is_empty() && r.len() <= 64 && r.bytes().all(|b| (0x20..=0x7e).contains(&b)))
 }
 
 /// A new entry id: opaque, unique in this daemon run, and carrying the epoch
@@ -87,7 +86,11 @@ pub(super) fn sanitize_client_ref(client_ref: Option<String>) -> Option<String> 
 pub(super) fn next_entry_id() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let epoch = daemon_epoch();
-    let short: String = epoch.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect();
+    let short: String = epoch
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
     format!("q{short}-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
@@ -159,6 +162,11 @@ impl QueueState {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn delivered_ids(&self) -> Vec<String> {
+        lock_recover(&self.delivered).iter().cloned().collect()
+    }
+
     fn was_delivered(&self, id: &str) -> bool {
         lock_recover(&self.delivered).iter().any(|d| d == id)
     }
@@ -215,7 +223,7 @@ pub struct QueueSnapshot {
 }
 
 impl QueueSnapshot {
-    pub(super) fn into_msg(&self, tag: &str) -> ServerMsg {
+    pub(super) fn to_msg(&self, tag: &str) -> ServerMsg {
         ServerMsg::SessionQueue {
             tag: tag.to_owned(),
             daemon_epoch: daemon_epoch().to_owned(),
@@ -277,6 +285,13 @@ impl QueueView {
             held: self.login.held_entry(),
             change: change.map(|(reason, ids)| QueueChangeWire { reason, ids }),
         }
+    }
+
+    /// The current snapshot with a fresh revision (tests).
+    #[cfg(test)]
+    pub(super) fn current(&self) -> QueueSnapshot {
+        let _order = lock_recover(&self.queue.publish);
+        self.build(None)
     }
 
     /// Answer a watch: register `cell` and hand the current snapshot to
@@ -446,12 +461,15 @@ pub(super) fn answer_verb(shared: &Shared, id: &str, verb: QueueVerb) -> QueueAn
     let deadline = started + WRITE_WAIT_LIMIT;
     let (answer, left, held_gone, idle) = loop {
         let state = lock_recover(&shared.state);
-        let in_flight = shared.writing.load(Ordering::SeqCst);
-        if in_flight && !wait_skipped() && Instant::now() < deadline {
+        let writing = shared.writing.load(Ordering::SeqCst);
+        if writing && !wait_skipped() && Instant::now() < deadline {
             drop(state);
             std::thread::sleep(Duration::from_millis(1));
             continue;
         }
+        // Still writing after the limit (never under the test mutation, which
+        // decides as if it had not looked).
+        let in_flight = writing && !wait_skipped();
         let mut pending = lock_recover(&shared.pending);
         let position = pending
             .iter()
@@ -514,7 +532,10 @@ pub(super) fn answer_verb(shared: &Shared, id: &str, verb: QueueVerb) -> QueueAn
             if held_gone {
                 // The held message never opens the conversation, and what is
                 // typed next may (as `discard_held` does).
-                shared.conversations.discard_candidate(&shared.ctx.session_id);
+                shared
+                    .conversations
+                    .discard_candidate(&shared.ctx.session_id);
+                shared.queue.set_candidate(None);
                 shared.login.notify();
                 if idle && answer.code == QueueResultCode::Removed {
                     // Nothing is held now: the queue drains unless a turn runs.
@@ -592,7 +613,7 @@ impl SessionManager {
         let cell = session.shared.queue.watch_cell(client);
         let view = session.shared.queue_view();
         view.watch(&cell, |snap| {
-            self.send_to_client(client, snap.into_msg(tag));
+            self.send_to_client(client, snap.to_msg(tag));
         });
         info!(tag, client_id = client, "queue watch");
         Ok(())
@@ -609,9 +630,9 @@ impl SessionManager {
 
     /// Does `client` watch `tag`'s queue?
     pub fn queue_watching(&self, tag: &str, client: &str) -> bool {
-        self.sessions.get(tag).is_some_and(|s| {
-            s.shared.queue.watch_cell(client).load(Ordering::SeqCst) != 0
-        })
+        self.sessions
+            .get(tag)
+            .is_some_and(|s| s.shared.queue.watch_cell(client).load(Ordering::SeqCst) != 0)
     }
 
     /// A user stop or a new session is about to end `tag`'s session: take the
@@ -654,13 +675,9 @@ impl SessionManager {
         let mut snap = view.build(change);
         snap.held = None;
         for client in clients {
-            let watching = view
-                .queue
-                .watch_cell(client)
-                .load(Ordering::SeqCst)
-                != 0;
+            let watching = view.queue.watch_cell(client).load(Ordering::SeqCst) != 0;
             if watching {
-                self.send_to_client(client, snap.into_msg(tag));
+                self.send_to_client(client, snap.to_msg(tag));
             }
         }
         info!(tag, lost = lost.len(), "queue ended with the session");

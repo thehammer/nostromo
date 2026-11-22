@@ -20,13 +20,13 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::mother_mutators::apply_origin;
-use crate::ipc::session_manager::AppLabel;
 use super::untrusted::{
     one_line, sanitize_instruction, unescape_id, NonceFence, MAX_FENCED_TITLE_CHARS, MAX_LINE_CHARS,
 };
 use crate::data::work::model::SentMarker;
 use crate::data::work::sent;
 use crate::ipc::protocol::{FocusMeta, PaneTree, ServerMsg};
+use crate::ipc::session_manager::AppLabel;
 use crate::ipc::SessionManager;
 use crate::mcp::state::{DaemonMcpBackend, McpSharedState};
 use crate::mother::origin::{Stamp, Via};

@@ -325,9 +325,9 @@ impl SessionManager {
         };
         let agent = session.agent_name.clone();
         let sensitive = self.sensitive.focus_is_sensitive(tag, &agent);
-        let candidate = self
-            .conversations
-            .note_user_send(&sid, text, has_images, sensitive, now_ms());
+        let candidate =
+            self.conversations
+                .note_user_send(&sid, text, has_images, sensitive, now_ms());
         if candidate {
             session.shared.queue.set_candidate(Some(id.to_owned()));
         }

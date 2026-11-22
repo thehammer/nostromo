@@ -121,13 +121,13 @@ pub use inject::{
     MOTHER_NOTICE_KEY_PREFIX, SELECTION_KEY_PREFIX,
 };
 pub use login::{ResendOutcome, ResendTrigger};
-use queue::EntryKind;
-pub use queue::{AppLabel, DroppedQueue, QueueAnswer, QueueSnapshot, QueueVerb};
 use model_switch::{
     emit_note, model_args, on_model_report, publish_model_state, spawn_apply, ModelRuntime,
     SessionCtx,
 };
 pub use model_switch::{ModelRequestOutcome, ModelSweep, SwitchRequest, SwitchTicket};
+use queue::EntryKind;
+pub use queue::{AppLabel, DroppedQueue, QueueAnswer, QueueSnapshot, QueueVerb};
 use task_runtime::{
     detail_msg, drive_timer, ensure_poller, ensure_probe, forward_session_events_with, read_output,
     stop_task, tasks_msg, TaskRuntime,
@@ -1904,11 +1904,14 @@ impl SessionManager {
         }
         if !dropped.ids.is_empty() {
             session.shared.candidate_left(&dropped.ids);
-            session.shared.publish_queue(Some((
-                QueueChangeReason::Stopped,
-                dropped.ids.clone(),
-            )));
-            info!(tag, dropped = dropped.ids.len(), "queued messages dropped: stopped by the user");
+            session
+                .shared
+                .publish_queue(Some((QueueChangeReason::Stopped, dropped.ids.clone())));
+            info!(
+                tag,
+                dropped = dropped.ids.len(),
+                "queued messages dropped: stopped by the user"
+            );
         }
         if !running {
             let outcome = if discarded {

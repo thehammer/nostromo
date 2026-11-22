@@ -10186,3 +10186,119 @@ mod no_codebase_wire_tests {
         assert_eq!(spaces_root, None);
     }
 }
+
+// ── message queue wire (session_queue_v1) ────────────────────────────────────
+
+#[cfg(test)]
+mod session_queue_wire_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/session_queue")
+    }
+
+    fn fixtures() -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = std::fs::read_dir(fixture_dir())
+            .expect("the fixture directory")
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .map(|p| {
+                (
+                    p.file_stem().unwrap().to_string_lossy().into_owned(),
+                    std::fs::read_to_string(&p).unwrap(),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn the_feature_flag_is_pinned() {
+        assert_eq!(FEATURE_SESSION_QUEUE, "session_queue_v1");
+    }
+
+    #[test]
+    fn every_golden_fixture_round_trips_byte_for_byte() {
+        let all = fixtures();
+        assert!(all.len() >= 20, "{} fixtures", all.len());
+        for (name, body) in &all {
+            if name.starts_with("old_") {
+                continue;
+            }
+            let body = body.trim_end();
+            let again = if name.starts_with("client_") {
+                let msg: ClientMsg = serde_json::from_str(body)
+                    .unwrap_or_else(|e| panic!("{name} does not decode: {e}"));
+                serde_json::to_string(&msg).unwrap()
+            } else {
+                let msg: ServerMsg = serde_json::from_str(body)
+                    .unwrap_or_else(|e| panic!("{name} does not decode: {e}"));
+                serde_json::to_string(&msg).unwrap()
+            };
+            assert_eq!(again, body, "{name} does not round-trip");
+        }
+    }
+
+    #[test]
+    fn the_fixtures_cover_every_change_reason_and_result_code() {
+        let names: Vec<String> = fixtures().into_iter().map(|(n, _)| n).collect();
+        for want in [
+            "snapshot_typed_app_command",
+            "snapshot_held",
+            "change_delivered",
+            "change_taken_back",
+            "change_removed",
+            "change_stopped",
+            "change_session_stopped",
+            "change_queued",
+            "result_taken_back",
+            "result_removed",
+            "result_already_delivered",
+            "result_not_found",
+            "result_not_allowed",
+            "returned",
+            "client_session_queue_watch",
+            "client_session_queue_take_back",
+            "client_session_queue_remove",
+            "client_session_send_client_ref",
+        ] {
+            assert!(names.iter().any(|n| n == want), "missing fixture {want}");
+        }
+    }
+
+    #[test]
+    fn a_session_send_without_client_ref_still_decodes_and_stays_without_it() {
+        let old =
+            std::fs::read_to_string(fixture_dir().join("old_client_session_send.json")).unwrap();
+        let msg: ClientMsg = serde_json::from_str(old.trim_end()).unwrap();
+        match &msg {
+            ClientMsg::SessionSend { client_ref, .. } => assert!(client_ref.is_none()),
+            other => panic!("{other:?}"),
+        }
+        assert!(!serde_json::to_string(&msg).unwrap().contains("client_ref"));
+    }
+
+    #[test]
+    fn a_welcome_without_the_feature_still_decodes() {
+        let old = std::fs::read_to_string(fixture_dir().join("old_server_welcome.json")).unwrap();
+        match serde_json::from_str::<ServerMsg>(old.trim_end()).unwrap() {
+            ServerMsg::Welcome { features, .. } => {
+                assert!(!features.iter().any(|f| f == FEATURE_SESSION_QUEUE));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_and_images_are_on_a_result_only_for_taken_back() {
+        for (name, body) in fixtures() {
+            if let Some(code) = name.strip_prefix("result_") {
+                let v: serde_json::Value = serde_json::from_str(body.trim_end()).unwrap();
+                let has = v.get("text").is_some() || v.get("images").is_some();
+                assert_eq!(has, code == "taken_back", "{name}");
+            }
+        }
+    }
+}
