@@ -292,7 +292,9 @@ def recipe(target):
 class MakefileWiringTests(unittest.TestCase):
     def dry_run(self, target):
         result = subprocess.run(
-            ["make", "-n", "-C", os.path.dirname(MAKEFILE), target],
+            # pin the target dir so the output does not depend on whether the
+            # machine has /Volumes/Scratch mounted or CARGO_TARGET_DIR set
+            ["make", "-n", "-C", os.path.dirname(MAKEFILE), "NOSTROMO_TARGET_DIR=target", target],
             capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -344,7 +346,7 @@ class MakefileWiringTests(unittest.TestCase):
 
     def test_install_daemon_stages_signs_and_moves_the_bridge_after_the_other_checks(self):
         out = self.dry_run("install-daemon")
-        stage = out.index('cp target/release/nostromo-mcp-bridge "$stage_bridge"')
+        stage = out.index('cp "target/release/nostromo-mcp-bridge" "$stage_bridge"')
         sign = out.index("--identifier nostromo-mcp-bridge")
         move = out.index('mv "$stage_bridge" "$bridge"')
         self.assertLess(out.index("--identifier nostromd"), stage)
@@ -360,8 +362,8 @@ class MakefileWiringTests(unittest.TestCase):
 
     def test_install_daemon_never_copies_the_bridge_over_its_destination_in_place(self):
         out = self.dry_run("install-daemon")
-        self.assertNotIn('cp target/release/nostromo-mcp-bridge "$bridge"', out)
-        self.assertNotIn('cp target/release/nostromo-mcp-bridge "$bdest"', out)
+        self.assertNotIn('cp "target/release/nostromo-mcp-bridge" "$bridge"', out)
+        self.assertNotIn('cp "target/release/nostromo-mcp-bridge" "$bdest"', out)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ bin=""
 if [ -n "${NOSTROMO_RESTART_GUARD_NOSTROMD:-}" ]; then
   bin="$NOSTROMO_RESTART_GUARD_NOSTROMD"
 else
-  for candidate in "${HOME}/.local/bin/nostromd" "target/release/nostromd"; do
+  for candidate in "${HOME}/.local/bin/nostromd" "${CARGO_TARGET_DIR:-target}/release/nostromd"; do
     if qualifies "$candidate"; then
       bin="$candidate"
       break
