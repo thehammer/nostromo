@@ -1935,6 +1935,30 @@ fn a_flooded_board_loses_no_edit_seed_7a126776() {
     one(0x7a12_6776).unwrap_or_else(|e| panic!("{e}"));
 }
 
+/// Four more interleavings Perri's review of #491 found failing on main before
+/// #491 (they pass now; each was checked to fail against the code from before
+/// #491): two lost edits made by window 1 (its `done`, its text), and two
+/// dropped markers cleared too early.
+#[test]
+fn a_flooded_board_loses_no_edit_seed_7a12b6ab() {
+    one(0x7a12_b6ab).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn a_flooded_board_loses_no_edit_seed_7a16a5de() {
+    one(0x7a16_a5de).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn a_flooded_board_keeps_the_dropped_marker_until_shown_seed_7a159958() {
+    one(0x7a15_9958).unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn a_flooded_board_keeps_the_dropped_marker_until_shown_seed_7a165a50() {
+    one(0x7a16_5a50).unwrap_or_else(|e| panic!("{e}"));
+}
+
 #[test]
 fn four_hundred_interleavings_lose_no_edit() {
     let seeds: Vec<u64> = match std::env::var("TRACKER_FUZZ_SEED") {
