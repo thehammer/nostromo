@@ -244,8 +244,9 @@ impl Machine {
                 self.context(),
             )
         });
-        // Let the scheduler's first look pass: nothing is set up yet.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Let the scheduler's first look pass: it ends on a signal, not a
+        // guess at how long it takes under load.
+        src.handle.first_tick_done().await;
         src
     }
 
@@ -4176,8 +4177,22 @@ async fn h6_9_a_run_finishing_repaints_the_report_pane_with_the_new_report() {
     })
     .await;
 
+    // The run is real work (HTTP, files) whose length depends on the machine;
+    // the repaint is the thing under test. Wait for the run's own end (it
+    // bumps the view once when it starts and once when it ends) so the five
+    // seconds below time only the repaint. The first tick is already over
+    // (`boot`), so this is the only run there is.
+    let mut view = src.view_rx.clone();
+    let before = view.borrow_and_update().version;
     m.clock.set(ts(AFTER_START));
     start_run_now(&src.handle);
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        view.wait_for(|v| v.version >= before + 2),
+    )
+    .await
+    .expect("the run ends")
+    .expect("the view is open");
 
     next_document(&mut d.bcast, "huey/report", |title, blocks, _| {
         title.contains("Oct 26, 2026") && plain(blocks).contains("Gizmo 2 ships batch mode")

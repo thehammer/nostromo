@@ -2463,7 +2463,7 @@ async fn sunday_report_exists() -> (World, HueySources, Arc<Scripted>, Arc<Atomi
         }
     });
     let src = HueyEngine::spawn(w.deps(curator.clone(), Duration::from_secs(3600)));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    src.handle.first_tick_done().await;
     w.confirm();
     w.items(
         VN,
@@ -3558,6 +3558,25 @@ impl LiveSource for HangingLive {
 /// Callers start the world either unconfirmed or before the run time.
 async fn first_tick_done() {
     tokio::task::yield_now().await;
+}
+
+/// The signal the tests wait on after `spawn` is the scheduler's first look
+/// being over, run included: it must not fire while a due run is still going
+/// (a `trigger` made then would be refused).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_tick_done_means_a_due_first_run_is_over() {
+    let w = one_item_world().await;
+    let src = HueyEngine::spawn(w.deps(Scripted::picking(1, false), Duration::from_secs(3600)));
+
+    src.handle.first_tick_done().await;
+
+    assert!(!src.handle.is_running());
+    assert_eq!(w.store().versions(oct(26)), vec![1], "the first tick's run");
+    let again = src.handle.trigger(Trigger::RunNow).await;
+    assert!(
+        !matches!(again, Err(TriggerRefused::AlreadyRunning)),
+        "{again:?}"
+    );
 }
 
 fn limits(gather_ms: u64, curate_ms: u64, run_ms: u64) -> RunLimits {

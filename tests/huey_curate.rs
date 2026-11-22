@@ -739,7 +739,7 @@ async fn rig_with(w: World, o: Opts) -> Rig {
         // then sleeps for an hour: only the test's own triggers run.
         let src =
             HueyEngine::spawn(w.deps(curator, bridge.clone(), o.config, Duration::from_secs(3600)));
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        src.handle.first_tick_done().await;
         w.confirm();
         src
     };
