@@ -17,7 +17,7 @@ import Combine
 // `flush()` waits for the file queue.
 
 /// A scheduler the test runs by hand (the debounce firing), unlike the idle one that never runs anything.
-private final class ManualScheduler {
+private final class RelaunchManualScheduler {
     private final class Item {
         let work: () -> Void
         var cancelled = false
@@ -142,7 +142,7 @@ final class ComposerHistoryRelaunchTests: XCTestCase {
 
     func testAfterARelaunchTheDebounceFiringNeverWritesAWorkSentFocus() {
         markInEarlierRun("work-1")
-        let manual = ManualScheduler()
+        let manual = RelaunchManualScheduler()
         let relaunched = store(sensitivity(), scheduler: manual.scheduler)
 
         relaunched.record(tag: "work-1", text: "secret")
@@ -207,7 +207,7 @@ final class ComposerHistoryRelaunchTests: XCTestCase {
     func testNothingIsWrittenWhileSensitivityIsNotKnownAndThePendingEntriesAreWrittenOnceItIs() {
         var known = false
         let becameKnown = PassthroughSubject<Void, Never>()
-        let manual = ManualScheduler()
+        let manual = RelaunchManualScheduler()
         let s = sensitivity(known: { known }, knownChanged: becameKnown.eraseToAnyPublisher())
         let history = store(s, scheduler: manual.scheduler)
 
@@ -249,7 +249,7 @@ final class ComposerHistoryRelaunchTests: XCTestCase {
         let listChanged = PassthroughSubject<Void, Never>()
         let s = sensitivity(known: { known }, knownChanged: becameKnown.eraseToAnyPublisher(),
                             entries: { listed }, entriesChanged: listChanged.eraseToAnyPublisher())
-        let manual = ManualScheduler()
+        let manual = RelaunchManualScheduler()
         let history = store(s, scheduler: manual.scheduler)
 
         history.record(tag: "work-1", text: "secret typed before the answer")
@@ -430,7 +430,7 @@ final class ComposerHistoryRelaunchTests: XCTestCase {
     func testIfTheDaemonNeverAnswersNothingIsWrittenForTheWholeRun() {
         let sender = RecordingHistorySender()
         let (conversations, s) = wired(sender)
-        let manual = ManualScheduler()
+        let manual = RelaunchManualScheduler()
         let history = store(s, scheduler: manual.scheduler)
         conversations.connectionChanged(true)
         conversations.connectionChanged(false)
@@ -559,7 +559,7 @@ final class ComposerHistoryRelaunchTests: XCTestCase {
         becameKnown.send()
         XCTAssertEqual(fired, 0, "\(label): and never becomes known", file: file, line: line)
 
-        let manual = ManualScheduler()
+        let manual = RelaunchManualScheduler()
         let history = store(s, scheduler: manual.scheduler)
         history.record(tag: "plain-1", text: "ordinary")
         manual.runAll()
