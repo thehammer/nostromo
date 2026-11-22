@@ -87,7 +87,6 @@ class ChatSession: ObservableObject {
     /// here, or any whole-array subscriber, reintroduces that cost.
     private(set) var turns: [ChatTurn] = []
     @Published private(set) var isRunning:      Bool          = false
-    @Published private(set) var pendingCount:   Int           = 0     // daemon queues; reserved
     /// Derived from daemon health events. Drives the sidebar badge and pace-bars status strip.
     @Published private(set) var health:         SessionHealth = .healthy
     /// Fraction of the context window used (0–1), derived from the most recent
@@ -142,6 +141,18 @@ class ChatSession: ObservableObject {
 
     private let client: NostromodClient
 
+    /// The messages waiting behind the running turn, as the daemon's queue snapshots say (never an echo).
+    let queue: SessionQueueModel
+
+    /// A send the daemon refused because the sign-in queue is full: the composer that sent it gets its
+    /// text and images back. Fires only for a send made in the last `refusalWindow` seconds.
+    let sendRefused = PassthroughSubject<(text: String, images: [URL]), Never>()
+    static let refusalWindow: TimeInterval = 3
+    static let signInQueueFullMarker = "waiting_for_sign_in: queue full"
+    private var lastSend: (text: String, images: [URL], at: Date)?
+    /// Idle-time echoes by `client_ref`: the daemon queued the message anyway, so its snapshot retires them.
+    private var echoesByClientRef: [String: UUID] = [:]
+
     /// Whether the daemon's last `welcome` advertised `slash_commands_v1`.
     var daemonAdvertisesSlashCommands: Bool { client.daemonAdvertisesSlashCommands }
 
@@ -159,6 +170,10 @@ class ChatSession: ObservableObject {
         self.workingDirectory = workingDirectory
         self.requiresWorkingDirectory = requiresWorkingDirectory
         self.client           = client
+        self.queue = SessionQueueModel(
+            tag: tag,
+            sendTakeBack: { [client] id, requestId in client.sendSessionQueueTakeBack(tag: tag, id: id, requestId: requestId) },
+            sendRemove: { [client] id, requestId in client.sendSessionQueueRemove(tag: tag, id: id, requestId: requestId) })
         log.info("ChatSession[\(tag, privacy: .public)] init (daemon-hosted)")
 
         client.messages
@@ -202,6 +217,8 @@ class ChatSession: ObservableObject {
                             cwd: workingDirectory, sessionId: nil, remoteControl: false,
                             noCodebase: requiresWorkingDirectory)
         client.sessionAttach(tag: tag)
+        // On every attach (a reconnect included): the daemon keeps watchers per connection.
+        client.sessionQueueWatch(tag: tag)
     }
 
     /// Clear the local display and start a fresh daemon session (new claude
@@ -235,8 +252,12 @@ class ChatSession: ObservableObject {
     /// stops the turn but keeps the session alive, and drops anything queued
     /// behind it. `isRunning` is not touched here: the daemon's `SessionState`
     /// reconciles it once the turn actually ends.
-    func interrupt() {
+    ///
+    /// `requester` is the composer that pressed Stop: the daemon hands the typed messages it dropped
+    /// back to this connection, and only that composer puts them back (see `SessionQueueModel.returned`).
+    func interrupt(requester: ObjectIdentifier? = nil) {
         guard isRunning else { return }
+        if let requester { queue.noteStop(requester: requester) }
         client.sessionInterrupt(tag: tag)
     }
 
@@ -248,6 +269,10 @@ class ChatSession: ObservableObject {
     func send(_ text: String, images: [URL] = []) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        if client.daemonAdvertisesSessionQueue {
+            sendThroughQueue(trimmed, images: images)
+            return
+        }
         isRunning = true   // optimistic; SessionState(mid_turn) reconciles
         // Optimistic echo: show the user's message instantly instead of waiting
         // for the daemon to parse + replay it back over IPC (that round-trip is
@@ -265,6 +290,56 @@ class ChatSession: ObservableObject {
         changes.send(.appended(index: turns.count - 1))
         client.sessionSend(tag: tag, text: trimmed, imagePaths: images.map { $0.path })
         FocusStore.shared.clearResumed(tag: tag)
+    }
+
+    /// `send` against a daemon with `session_queue_v1`. A message sent while the agent is busy is queued by
+    /// the daemon and shown as a chip from its snapshot: it is not a transcript bubble until delivered, so
+    /// it gets no echo. An idle send keeps the echo; if the daemon queues it anyway (its `client_ref` shows
+    /// in a snapshot), `retireEchoes` removes the echo.
+    private func sendThroughQueue(_ trimmed: String, images: [URL]) {
+        let clientRef = UUID().uuidString
+        if !isRunning {
+            var echo = ChatTurn(userInput: trimmed, timestamp: Date(), epoch: currentEpoch)
+            echo.imageURLs = images
+            echo.pendingCommand = images.isEmpty && Self.isTypedSlashCommand(trimmed)
+                && client.daemonAdvertisesSlashCommands
+            turns.append(echo)
+            echoesByClientRef[clientRef] = echo.id
+            changes.send(.appended(index: turns.count - 1))
+        }
+        isRunning = true
+        lastSend = (trimmed, images, Date())
+        client.sessionSend(tag: tag, text: trimmed, imagePaths: images.map { $0.path }, clientRef: clientRef)
+        FocusStore.shared.clearResumed(tag: tag)
+    }
+
+    /// Remove the idle echoes the daemon queued after all, so the message is a chip and then one bubble.
+    private func retireEchoes(queuedRefs: Set<String>) {
+        for ref in queuedRefs {
+            guard let echoId = echoesByClientRef.removeValue(forKey: ref),
+                  let i = turns.firstIndex(where: { $0.id == echoId }),
+                  turns[i].daemonId == nil else { continue }
+            removeLocalTurn(at: i)
+        }
+    }
+
+    private func removeLocalTurn(at i: Int) {
+        payloadStore.drop(turns[i].id)
+        turns.remove(at: i)
+        changes.send(.spliced(replacedFrom: i))
+    }
+
+    /// The daemon refused a send for a full sign-in queue. Only the send just made is meant: the
+    /// refusal frame names no session.
+    private func handleSendRefusal(_ message: String) {
+        guard message.contains(Self.signInQueueFullMarker),
+              let sent = lastSend,
+              Date().timeIntervalSince(sent.at) <= Self.refusalWindow else { return }
+        lastSend = nil
+        if let i = turns.lastIndex(where: { $0.daemonId == nil && $0.marker == nil && $0.userInput == sent.text }) {
+            removeLocalTurn(at: i)
+        }
+        sendRefused.send((sent.text, sent.images))
     }
 
     /// Text that starts with a slash command: `/` and a name with no `/` or whitespace, then whitespace
@@ -337,6 +412,24 @@ class ChatSession: ObservableObject {
 
         case .sessionTurnDelta(let t, let delta) where t == tag:
             apply(delta)
+
+        case .sessionQueue(let wire) where wire.tag == tag:
+            let applied = queue.apply(wire)
+            guard applied.applied else { break }
+            retireEchoes(queuedRefs: queue.clientRefs)
+            if applied.lostTyped > 0 {
+                turns.append(.marker(.queuedNotSent(count: applied.lostTyped)))
+                changes.send(.appended(index: turns.count - 1))
+            }
+
+        case .sessionQueueResult(let wire) where wire.tag == tag:
+            queue.handle(wire)
+
+        case .sessionQueueReturned(let wire) where wire.tag == tag:
+            queue.handle(wire)
+
+        case .error(let message):
+            handleSendRefusal(message)
 
         case .sessionTurnOrigin(let t, let turnId, let origin) where t == tag:
             applyOrigin(origin, toDaemonTurn: turnId)

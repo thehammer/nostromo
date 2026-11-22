@@ -88,6 +88,9 @@ struct ChatTurn: Identifiable {
         /// no turn to hang it on. `ChatSession` drops it when the first turn
         /// arrives carrying the same note as a leading block.
         case note(String)
+        /// Queued typed messages were lost with the session or the daemon (message queue S2). Local only:
+        /// the reconciler sets it aside and puts it back, so it is never matched or duplicated.
+        case queuedNotSent(count: Int)
     }
 
     var isGapMarker: Bool { marker == .gap }

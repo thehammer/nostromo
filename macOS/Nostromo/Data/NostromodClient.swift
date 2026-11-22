@@ -298,6 +298,14 @@ enum ServerMsg {
     /// Every session waiting for a Claude sign-in (full picture; replaces the last).
     case claudeLoginState(ClaudeLoginStateFrame)
 
+    // ── message queue (`session_queue_v1`; message queue S2) ──────────────────
+    /// The session's queued messages (full snapshot; replaces the last). Only after a `session_queue_watch`.
+    case sessionQueue(SessionQueueWire)
+    /// The answer to a take-back or remove of this connection.
+    case sessionQueueResult(SessionQueueResultWire)
+    /// The typed messages Stop dropped, to the connection that pressed Stop.
+    case sessionQueueReturned(SessionQueueReturnedWire)
+
     // ── background tasks ──────────────────────────────────────────────────────
     /// Every background task of a session (full snapshot; replaces the last).
     case sessionTasks(SessionTasksWire)
@@ -695,7 +703,35 @@ private struct SessionSendMsg: Encodable {
     let tag: String
     let text: String
     let images: [String]
-    enum CodingKeys: String, CodingKey { case type_ = "type", tag, text, images }
+    /// Only against a daemon that advertised `session_queue_v1`; omitted otherwise (and when nil).
+    var clientRef: String? = nil
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag, text, images, clientRef = "client_ref" }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type_, forKey: .type_)
+        try c.encode(tag, forKey: .tag)
+        try c.encode(text, forKey: .text)
+        try c.encode(images, forKey: .images)
+        try c.encodeIfPresent(clientRef, forKey: .clientRef)
+    }
+}
+
+private struct ClientSessionQueueWatch: Encodable {
+    let type_ = "session_queue_watch"
+    let tag: String
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag }
+}
+
+/// `session_queue_take_back` / `session_queue_remove`: the verified app only, with this connection's nonce.
+private struct ClientSessionQueueEntryAction: Encodable {
+    let type_: String
+    let tag: String
+    let id: String
+    let requestId: String
+    let operatorNonce: String
+    enum CodingKeys: String, CodingKey {
+        case type_ = "type", tag, id, requestId = "request_id", operatorNonce = "operator_nonce"
+    }
 }
 
 private struct SessionControlMsg: Encodable {
@@ -1135,6 +1171,51 @@ class NostromodClient {
         send(SessionSendMsg(tag: tag, text: text, images: imagePaths), type: "session_send", tag: tag)
     }
 
+    /// `sessionSend` that names the message, so a queue snapshot can say which entry is this app's own.
+    /// The `client_ref` goes out only when the daemon advertised `session_queue_v1`; otherwise this is
+    /// the frame `sessionSend(tag:text:imagePaths:)` writes.
+    func sessionSend(tag: String, text: String, imagePaths: [String] = [], clientRef: String?) {
+        let ref = daemonAdvertisesSessionQueue ? clientRef : nil
+        send(SessionSendMsg(tag: tag, text: text, images: imagePaths, clientRef: ref), type: "session_send", tag: tag)
+    }
+
+    /// Watch `tag`'s queue: a `session_queue` snapshot now and on every change. Nothing is sent to a
+    /// daemon without `session_queue_v1`.
+    func sessionQueueWatch(tag: String) {
+        guard daemonAdvertisesSessionQueue else { return }
+        send(ClientSessionQueueWatch(tag: tag), type: "session_queue_watch", tag: tag)
+    }
+
+    /// Take back a queued message (answered with `ServerMsg.sessionQueueResult` for `requestId`). Carries
+    /// this connection's operator nonce, like `sendPaneAction`. Returns whether the frame was written:
+    /// false (nothing sent) without the feature, a connection or a nonce for it.
+    @discardableResult
+    func sendSessionQueueTakeBack(tag: String, id: String, requestId: String) -> Bool {
+        sendSessionQueueEntryAction("session_queue_take_back", tag: tag, id: id, requestId: requestId)
+    }
+
+    /// Remove a queued message (same rules as `sendSessionQueueTakeBack`).
+    @discardableResult
+    func sendSessionQueueRemove(tag: String, id: String, requestId: String) -> Bool {
+        sendSessionQueueEntryAction("session_queue_remove", tag: tag, id: id, requestId: requestId)
+    }
+
+    private func sendSessionQueueEntryAction(_ type: String, tag: String, id: String, requestId: String) -> Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0 else { log.debug("\(type, privacy: .public) dropped — not connected"); return false }
+        guard advertisedFeatures.contains(sessionQueueFeature) else { return false }
+        guard let nonce = operatorNonce.flatMap({ $0.sock == curFd ? $0.value : nil }) else {
+            log.debug("\(type, privacy: .public) dropped — no operator nonce for this connection")
+            return false
+        }
+        guard let body = try? encoder.encode(ClientSessionQueueEntryAction(type_: type, tag: tag, id: id,
+                                                                           requestId: requestId, operatorNonce: nonce))
+        else { return false }
+        writeFrameLocked(body, to: curFd, type: type, tag: tag)
+        return true
+    }
+
     /// Lifecycle control: "stop" | "restart" | "new_session".
     func sessionControl(tag: String, action: String) {
         send(SessionControlMsg(tag: tag, action: action), type: "session_control", tag: tag)
@@ -1494,6 +1575,12 @@ class NostromodClient {
     var daemonAdvertisesClaudeLogin: Bool {
         sendLock.lock(); defer { sendLock.unlock() }
         return advertisedFeatures.contains(claudeLoginFeature)
+    }
+
+    /// Whether the connection's last `welcome` advertised `session_queue_v1`.
+    var daemonAdvertisesSessionQueue: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return advertisedFeatures.contains(sessionQueueFeature)
     }
 
     /// Send the held message again, or drop it (CL2). Carries the connection's operator nonce, like
@@ -2242,6 +2329,27 @@ class NostromodClient {
                 return .paneActionResult(m)
             } else {
                 log.error("failed to decode pane_action_result")
+            }
+
+        case "session_queue":
+            if let m = try? decoder.decode(SessionQueueWire.self, from: raw) {
+                return .sessionQueue(m)
+            } else {
+                log.error("failed to decode session_queue")
+            }
+
+        case "session_queue_result":
+            if let m = try? decoder.decode(SessionQueueResultWire.self, from: raw) {
+                return .sessionQueueResult(m)
+            } else {
+                log.error("failed to decode session_queue_result")
+            }
+
+        case "session_queue_returned":
+            if let m = try? decoder.decode(SessionQueueReturnedWire.self, from: raw) {
+                return .sessionQueueReturned(m)
+            } else {
+                log.error("failed to decode session_queue_returned")
             }
 
         case "session_tasks":

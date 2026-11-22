@@ -90,6 +90,8 @@ class MarkerTurnView: NSView, TurnIsland {
             text = "⋯  Earlier history is no longer available in this pane. The full record remains on disk in the Claude session transcript."
         case .note(let note):
             text = note
+        case .queuedNotSent(let count):
+            text = SessionQueueNotice.text(count: count)
         }
 
         let label = CopyMenuTextField(labelWithString: text)

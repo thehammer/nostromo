@@ -69,6 +69,46 @@ enum TurnReconciler {
     static func reconcile(retained: [ChatTurn],
                           snapshot: [ChatTurn],
                           sessionIdChanged: Bool) -> Outcome {
+        // A "queued messages were not sent" notice is local, like the echoes below, but it sits among the
+        // turns and would end the retained list with a turn that can never match (a spurious gap and a
+        // duplicated tail). Set aside, then put back after the turn it followed.
+        guard retained.contains(where: isQueueNotice) else {
+            return reconcileTurns(retained: retained, snapshot: snapshot, sessionIdChanged: sessionIdChanged)
+        }
+        var clean: [ChatTurn] = []
+        var notices: [(after: ChatTurn?, notice: ChatTurn)] = []
+        for turn in retained {
+            if isQueueNotice(turn) { notices.append((clean.last, turn)) } else { clean.append(turn) }
+        }
+        var outcome = reconcileTurns(retained: clean, snapshot: snapshot, sessionIdChanged: sessionIdChanged)
+        guard !outcome.didReplaceAll else { return outcome }   // a different conversation: the notice is stale
+        var merged = outcome.turns
+        var replacedFrom = outcome.replacedFrom
+        for (anchor, notice) in notices {
+            var at = merged.count
+            if let anchor {
+                if let i = merged.firstIndex(where: { $0.id == anchor.id }) { at = i + 1 }
+            } else {
+                at = merged.firstIndex(where: { $0.marker != .historyUnavailable }) ?? 0
+            }
+            merged.insert(notice, at: at)
+            // Views before the first replaced turn are kept; a notice inserted before it shifts that index.
+            if at <= replacedFrom { replacedFrom += 1 }
+        }
+        outcome = Outcome(turns: merged, replacedFrom: min(replacedFrom, merged.count),
+                          didReplaceAll: false, insertedGapMarker: outcome.insertedGapMarker,
+                          overlap: outcome.overlap)
+        return outcome
+    }
+
+    private static func isQueueNotice(_ turn: ChatTurn) -> Bool {
+        if case .queuedNotSent? = turn.marker { return true }
+        return false
+    }
+
+    private static func reconcileTurns(retained: [ChatTurn],
+                                       snapshot: [ChatTurn],
+                                       sessionIdChanged: Bool) -> Outcome {
 
         // An empty snapshot carries no information — a daemon that has not read
         // any turns yet must not be allowed to erase what we have.

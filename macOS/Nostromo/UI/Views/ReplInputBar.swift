@@ -113,6 +113,19 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     private var historyTag: String?
     private var historyAgentName: String?
     private var historyBinding: AnyCancellable?
+    /// The queue this composer takes messages back from (message queue S2); nil until `bindQueue`.
+    private var queueModel: SessionQueueModel?
+    private var queueBindings: Set<AnyCancellable> = []
+    /// Up is running history recall after a take-back came to nothing: the interceptor must not run again.
+    private var recallingAfterTakeBack = false
+    /// What this composer last sent, for restoring it if the daemon refuses it (`restoreRefusedSend`).
+    private var lastSubmit: (text: String, images: [URL], at: Date)?
+    /// A short message for the host to show near the composer ("Already sent"); also kept for tests.
+    var onStatus: ((String) -> Void)?
+    private(set) var lastStatus: String?
+    /// The composer's draft (text or images) changed between empty and not, for the chips' Edit state.
+    var onDraftEmptyChange: ((Bool) -> Void)?
+    private var lastDraftEmpty = true
     /// Horizontal strip of image thumbnails shown above the text field when images are attached.
     private let imageTray    = NSStackView()
 
@@ -670,6 +683,136 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
         textView.scrollRangeToVisible(textView.selectedRange())
     }
 
+    // MARK: Queued messages (message queue S2)
+
+    /// Nothing typed and no image attached: the state Up and Edit take a queued message back in.
+    var draftIsEmpty: Bool { textView.string.isEmpty && pendingImages.isEmpty }
+
+    /// Take queued messages back from `model`: Up with an empty composer takes the newest one, a chip's
+    /// Edit takes its own, and Stop puts back what it dropped when this composer pressed it. Without a
+    /// queue (an old daemon) Up is history only, as before.
+    func bindQueue(model: SessionQueueModel) {
+        queueBindings.removeAll()
+        queueModel = model
+        historyNavigator.upInterceptor = { [weak self] context in
+            guard let self, context.text.isEmpty, !context.hasDraftImages, !self.recallingAfterTakeBack else { return false }
+            return self.takeBackNewest()
+        }
+        model.returned
+            .sink { [weak self] returned in
+                guard let self, returned.requester == ObjectIdentifier(self) else { return }
+                self.restoreStopped(returned.entries)
+            }
+            .store(in: &queueBindings)
+    }
+
+    /// A chip's Edit: take `id` back into the (empty) composer. False when nothing was asked of the daemon.
+    @discardableResult
+    func takeBackForEdit(id: String) -> Bool {
+        guard draftIsEmpty else { return false }
+        return beginTakeBack(id: id, recallHistoryOnFailure: false)
+    }
+
+    /// The daemon refused the send just made with a full sign-in queue: the text comes back, if this
+    /// composer sent it and is still empty, and says why.
+    func restoreRefusedSend(text: String, images: [URL]) {
+        guard let sent = lastSubmit, Date().timeIntervalSince(sent.at) <= ChatSession.refusalWindow,
+              sent.images == images, sent.text == text || (sent.text.isEmpty && text == ChatSession.imageOnlyText)
+        else { return }
+        lastSubmit = nil
+        showStatus("Queue full while waiting for sign-in")
+        guard draftIsEmpty else { return }
+        fill(text: sent.text, images: images.map { $0.path })
+    }
+
+    private func takeBackNewest() -> Bool {
+        guard let id = queueModel?.takeBackTarget() else { return false }
+        return beginTakeBack(id: id, recallHistoryOnFailure: true)
+    }
+
+    /// Ask for `id` back; the composer stays as it is until the answer arrives. True means a request is out.
+    private func beginTakeBack(id: String, recallHistoryOnFailure: Bool) -> Bool {
+        guard let queue = queueModel else { return false }
+        let start = queue.takeBack(id: id) { [weak self] outcome in
+            self?.finishTakeBack(outcome, recallHistoryOnFailure: recallHistoryOnFailure)
+        }
+        return start == .sent
+    }
+
+    private func finishTakeBack(_ outcome: TakeBackOutcome, recallHistoryOnFailure: Bool) {
+        switch outcome {
+        case .takenBack(let text, let images):
+            guard draftIsEmpty else {
+                // The person typed while the request was out: their draft stays. The message is gone from
+                // the queue, so keep it in history where Up finds it.
+                if let store = historyStore, let tag = historyTag { store.record(tag: tag, text: text, agentName: historyAgentName) }
+                announce("Message back. Press up to recall it.")
+                return
+            }
+            historyNavigator.end()
+            fill(text: text, images: images)
+            if let store = historyStore, let tag = historyTag { store.removeNewest(tag: tag, matching: text) }
+            announce("Message back in the composer.")
+        case .alreadyDelivered:
+            showStatus("Already sent")
+            announce("Already sent.")
+            if recallHistoryOnFailure { recallHistory() }
+        case .notFound, .notAllowed:
+            if recallHistoryOnFailure { recallHistory() }
+        case .noAnswer:
+            showStatus("Couldn't reach Nostromo")
+        }
+    }
+
+    /// Up's history step, as if the take-back had not been tried.
+    private func recallHistory() {
+        guard draftIsEmpty else { return }
+        recallingAfterTakeBack = true
+        defer { recallingAfterTakeBack = false }
+        let key = ComposerKeyContext(text: "", caret: 0, selectionLength: 0, hasMarkedText: false,
+                                     hasModifiers: false, isHuman: true, hasDraftImages: false)
+        if case .show(let text, let announcement) = historyNavigator.up(key) {
+            showRecalled(text)
+            announceHistory(announcement)
+        }
+    }
+
+    /// Stop dropped these typed messages: back into this composer, in order, one blank line apart, when it
+    /// is empty. With a draft in it, nothing is put in (history keeps them) and the person is told.
+    private func restoreStopped(_ entries: [SessionQueueReturn.Entry]) {
+        guard !entries.isEmpty else { return }
+        let count = entries.count
+        let noun = count == 1 ? "queued message" : "queued messages"
+        guard draftIsEmpty else {
+            if let store = historyStore, let tag = historyTag {
+                for entry in entries.reversed() { store.record(tag: tag, text: entry.text, agentName: historyAgentName) }
+            }
+            announce("\(count) \(noun) discarded, press up to recall \(count == 1 ? "it" : "them").")
+            return
+        }
+        historyNavigator.end()
+        fill(text: entries.map { $0.text }.joined(separator: "\n\n"), images: entries.flatMap { $0.images })
+        announce("\(count) \(noun) discarded, back in the composer.")
+    }
+
+    /// Put `text` and `images` (file paths) in the empty composer, caret at the end.
+    private func fill(text: String, images: [String]) {
+        showRecalled(text)
+        for path in images { addImage(URL(fileURLWithPath: path)) }
+    }
+
+    private func showStatus(_ text: String) {
+        lastStatus = text
+        onStatus?(text)
+    }
+
+    private func notifyDraftState() {
+        let empty = draftIsEmpty
+        guard empty != lastDraftEmpty else { return }
+        lastDraftEmpty = empty
+        onDraftEmptyChange?(empty)
+    }
+
     @objc private func sendButtonAction() { submitAction() }
 
     @objc private func stopButtonAction() { onInterrupt?() }
@@ -728,6 +871,7 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
         }
         historyNavigator.end()
         slashPicker.close()
+        lastSubmit = (typedText, imagesToSend, Date())
         textView.string  = ""
         pendingImages    = []
         placeholder.isHidden = false
@@ -736,6 +880,7 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
         // `removeImageChip` got this right and the send path did not.
         clearImageTray()
         onHeightChange?(Self.minHeight)
+        notifyDraftState()
         onSend?(text, imagesToSend)
     }
 
@@ -747,10 +892,6 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
         chipTrailingToStop.isActive = running
         button.alphaValue = running ? 0.5 : 1.0
         running ? spinner.startAnimation(nil) : spinner.stopAnimation(nil)
-    }
-
-    func setPendingCount(_ count: Int) {
-        placeholder.stringValue = count > 0 ? "Message… (\(count) queued)" : "Message…"
     }
 
     // MARK: Drag-and-drop (images)
@@ -852,6 +993,7 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
         imageTray.isHidden = !hasImages
         textTopConstraint.constant = hasImages ? 9 + Self.trayExtra : 9
         onHeightChange?(idealBarHeight())
+        notifyDraftState()
     }
 
     /// Tear the tray down to nothing. `NSStackView.removeArrangedSubview` only
@@ -878,6 +1020,7 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
 
     func textDidChange(_ notification: Notification) {
         placeholder.isHidden = !textView.string.isEmpty
+        notifyDraftState()
         onHeightChange?(idealBarHeight())
         updateSlashPicker()
     }
