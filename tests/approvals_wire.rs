@@ -2101,7 +2101,7 @@ fn no_allow_is_ever_produced_except_allow_once_from_the_operator_app() {
         // The app's two refusals are for two independent answers, each handled
         // (and audited) on a task of its own, so they arrive in either order:
         // match each by its request id.
-        let mut refusals = vec![app.next_refused().await, app.next_refused().await];
+        let mut refusals = [app.next_refused().await, app.next_refused().await];
         refusals.sort_by(|a, b| a.0.cmp(&b.0));
         let mut expected = [
             (wire.request_id.clone(), AnswerRefusal::NotOperatorApp),
