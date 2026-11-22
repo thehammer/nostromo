@@ -121,8 +121,8 @@ final class AuthoredPrsFilterStripView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     /// Where Tab goes from the Session pop-up: the list below the strip. Set by the owner; named explicitly so
-    /// leaving the strip does not depend on the window's key-view loop (a `recalculateKeyViewLoop()` would
-    /// otherwise overwrite the links to wherever the geometry sends it).
+    /// leaving the strip does not depend on the window's key-view loop. (A `recalculateKeyViewLoop()` would
+    /// overwrite these links too; nothing in the app calls it.)
     weak var viewAfterStrip: NSView? {
         didSet { sessionPopUp.nextKeyView = viewAfterStrip }
     }

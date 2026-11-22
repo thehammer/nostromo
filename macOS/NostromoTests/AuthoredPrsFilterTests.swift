@@ -779,7 +779,7 @@ final class AuthoredPrsFilterBarTests: XCTestCase {
                     let name = item.title.replacingOccurrences(of: #" \(\d+\)$"#, with: "", options: .regularExpression)
                     if name.hasSuffix("…") {
                         XCTAssertTrue(tooltip.hasPrefix(String(name.dropLast())), "\(context): '\(item.title)' tooltip continues its title")
-                        XCTAssertGreaterThan(tooltip.count, name.count - 1, "\(context): '\(item.title)' tooltip is the longer name")
+                        XCTAssertGreaterThan(tooltip.count, name.count, "\(context): '\(item.title)' tooltip is longer than the capped title (ellipsis included)")
                     } else {
                         XCTAssertEqual(tooltip, name, "\(context): '\(item.title)' tooltip is exactly its name, without the count")
                     }

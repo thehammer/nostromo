@@ -178,14 +178,14 @@ final class TranscriptWidthAnchorTests: XCTestCase {
         rig.followTail.setPinned(false, cause: .userScroll)
         rig.runPass()
         XCTAssertFalse(rig.followTail.isPinned, "the operator stopped following; the pass does not turn it back on")
-        XCTAssertGreaterThan(rig.snapshot().bottomOffsetPt, rig.viewportHeight, "and the view is still where they scrolled to, far from the bottom")
+        XCTAssertGreaterThan(rig.snapshot().bottomOffsetPt, rig.viewportHeight, "and the view is far from the bottom, not pulled down (it is not held at the exact spot: see the PR notes)")
     }
 
     /// The restore puts the line on the side of its old offset that its fraction of the item's new height
     /// says, within the tolerance. A restore that ignored the fraction would always land half a line above.
     func testTheRestoredOffsetFollowsTheFractionOfTheItemsNewHeightWithinTheTolerance() throws {
         let rig = makeRig()
-        park(rig, at: .prose, into: 20)
+        park(rig, at: .prose, into: 6)   // shallow, so the fraction lands inside the band, not on its edge
         let turn = rig.turns[3]
         func height(of key: String) throws -> CGFloat {
             let island = try XCTUnwrap(rig.materialized[turn.id])
@@ -204,7 +204,10 @@ final class TranscriptWidthAnchorTests: XCTestCase {
         let tolerance = TranscriptViewportCoordinator.widthAnchorTolerance
         let expected = min(max(oldOffset / oldHeight * newHeight, oldOffset - tolerance), oldOffset + tolerance)
         let after = CGFloat(try XCTUnwrap(rig.snapshot().firstVisible?.offsetPt))
-        XCTAssertNotEqual(expected, oldOffset - tolerance, accuracy: 1, "setup: the fraction decides here, so ignoring it is visible")
+        for (name, edge) in [("the old offset", oldOffset), ("the band's lower edge", max(0, oldOffset - tolerance)), ("the band's upper edge", oldOffset + tolerance)] {
+            XCTAssertNotEqual(expected, edge, accuracy: 1, "setup: the fraction decides here (inside the band), so a restore that used \(name) is visible")
+        }
+        XCTAssertEqual(rig.snapshot().firstVisible?.itemKey, "b10", "still in the same item")
         XCTAssertEqual(after, expected, accuracy: 1, "old \(oldOffset) of \(oldHeight), new height \(newHeight)")
     }
 }
