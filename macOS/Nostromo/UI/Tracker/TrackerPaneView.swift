@@ -128,6 +128,9 @@ final class TrackerPaneView: NSView {
     private var backgroundSummary = TrackerBackgroundSummary(chip: .hidden)
     private var cancellables = Set<AnyCancellable>()
     private var observers: [NSObjectProtocol] = []
+    /// Watches the window's first responder so a pending editor's focus request is forgotten once focus goes
+    /// to something outside the pane's rows (the composer).
+    private var responderObservation: NSKeyValueObservation?
     private var tickTimer: Timer?
     private var isApplying = false
     private var laidOutWidth: CGFloat = -1
@@ -1550,6 +1553,9 @@ final class TrackerPaneView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         updateTickTimer()
+        responderObservation = window?.observe(\.firstResponder) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.firstResponderChanged() }
+        }
         if window != nil {
             installClickMonitor()
         } else if let clickMonitor {
@@ -1567,6 +1573,17 @@ final class TrackerPaneView: NSView {
         if wasAway {
             wasAway = false
             reopened()
+        }
+    }
+
+    /// Focus went to a control outside the pane's rows (the composer): a pending editor that was only asked for
+    /// focus (it refuses it while read-only) is no longer wanted there, so a late refusal must not pull focus
+    /// back into it. Focus on the bare window, or in one of the rows, changes nothing.
+    private func firstResponderChanged() {
+        guard let window, let responder = Self.focusOwner(window.firstResponder), responder !== window else { return }
+        if let view = responder as? NSView, view.isDescendant(of: documentView) { return }
+        for (id, session) in editSessions where session.phase == .saving && session.editorWantsFocus {
+            editSessions[id]?.editorWantsFocus = false
         }
     }
 
