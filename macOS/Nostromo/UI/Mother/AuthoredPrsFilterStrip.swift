@@ -73,7 +73,7 @@ final class AuthoredPrsFilterStripView: NSView {
             popUp.setContentCompressionResistancePriority(.init(250), for: .horizontal)
             popUp.setContentHuggingPriority(.init(250), for: .horizontal)
             popUp.widthAnchor.constraint(lessThanOrEqualToConstant: 200).isActive = true
-            popUp.widthAnchor.constraint(greaterThanOrEqualToConstant: 56).isActive = true
+            popUp.widthAnchor.constraint(greaterThanOrEqualToConstant: 40).isActive = true
         }
         orgPopUp.action = #selector(orgChanged)
         repoPopUp.action = #selector(repoChanged)
@@ -99,10 +99,10 @@ final class AuthoredPrsFilterStripView: NSView {
         let stack = NSStackView(views: [orgCaption, orgPopUp, repoCaption, repoPopUp, sessionCaption, sessionPopUp, clearButton])
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = 6
+        stack.spacing = 4
         stack.detachesHiddenViews = true
-        stack.setCustomSpacing(12, after: orgPopUp)
-        stack.setCustomSpacing(12, after: repoPopUp)
+        stack.setCustomSpacing(8, after: orgPopUp)
+        stack.setCustomSpacing(8, after: repoPopUp)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         let widths = [repoPopUp, sessionPopUp].map { $0.widthAnchor.constraint(equalTo: orgPopUp.widthAnchor) }
@@ -115,6 +115,18 @@ final class AuthoredPrsFilterStripView: NSView {
         setAccessibilityElement(false)
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Below this width the captions give way to the pop-ups: three pop-ups and their captions do not fit a
+    /// narrow pane, and each pop-up is already named by its accessibility label and tooltip.
+    static let captionsMinWidth: CGFloat = 420
+
+    override func layout() {
+        let showCaptions = bounds.width >= Self.captionsMinWidth
+        for caption in [orgCaption, repoCaption, sessionCaption] where caption.isHidden == showCaptions {
+            caption.isHidden = !showCaptions
+        }
+        super.layout()
+    }
 
     private static func caption(_ text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text)

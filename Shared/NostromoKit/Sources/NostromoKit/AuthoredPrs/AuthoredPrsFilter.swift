@@ -153,12 +153,13 @@ public enum AuthoredPrsFilter {
                     orgNames[key] = pr.repo[..<slash].trimmingCharacters(in: .whitespacesAndNewlines)
                 }
             }
+            let session = session(of: pr)
+            // A focus keeps its name even when its PRs are outside the selected org.
+            if case .focus(let tag) = session, focusNames[tag] == nil { focusNames[tag] = pr.owner.name }
             guard selection.org == .all || orgOf(pr) == selection.org else { continue }
             repoCounts[pr.repo, default: 0] += 1
-            let session = session(of: pr)
             sessionOf[pr.id] = session
             sessionCounts[session, default: 0] += 1
-            if case .focus(let tag) = session, focusNames[tag] == nil { focusNames[tag] = pr.owner.name }
         }
 
         let matching = prs.filter { pr in

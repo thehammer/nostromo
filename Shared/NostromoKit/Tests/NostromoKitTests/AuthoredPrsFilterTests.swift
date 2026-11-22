@@ -1,6 +1,6 @@
 // NostromoKit — AuthoredPrsFilterTests.swift
 //
-// The My open PRs Overview's Repo and Session filter, as pure functions of the PRs and a selection: which
+// The My open PRs Overview's Org, Repo and Session filter, as pure functions of the PRs and a selection: which
 // PRs show, what the two pop-ups offer and call each entry, what the empty message says, how a selection is
 // remembered, and the "n of m" wording the header and the group headers take from it.
 //
@@ -27,10 +27,27 @@
 //        -> testNoSessionHoldsEveryPrWhoseOwnerIsClosedUnknownAmbiguousOrTagless
 //   (h) a repo chip's wording changes when the filter hides the repo it shared a name with
 //        -> testRepoChipsAreComputedOverTheUnfilteredList
-//   (i) counts in the pop-ups follow the selection instead of the whole list
-//        -> testPopUpCountsDoNotChangeWithTheSelection
+//   (i) counts in the pop-ups follow the repo / session selection instead of the (org-scoped) list
+//        -> testRepoAndSessionCountsDoNotChangeWithTheRepoOrSessionSelection
 //   (j) entries not sorted A-Z (case-insensitively), or `No session` not last
 //        -> testRepoEntriesAreAToZIgnoringCase, testSessionEntriesAreAToZByNameThenNoSession
+//   (k) Org AND turned into OR with repo / session in `matching`
+//        -> testOrgRepoAndSessionCombineWithAndNotOr
+//   (l) org grouping is case-sensitive (drop `.lowercased()` in `orgKey`), or shows the last-seen spelling
+//        -> testOneOrgWhateverTheCaseShowsTheFirstSeenSpelling
+//   (m) an owner's name shown unsanitised or uncapped in the Org pop-up / empty message (or the tooltip text
+//       capped or unsanitised)
+//        -> testAHostileOwnerNameIsSanitisedAndCappedInTheOrgMenuWithAnUncappedSanitisedTooltipName
+//   (n) rows with no owner part (`noslash`, `/x`, ` /x`) get an org entry, or leave `All`
+//        -> testRowsWithNoOwnerPartHaveNoOrgButAreUnderAll
+//   (o) Repo / Session entries ignore the Org selection, or an org change resets the selected repo
+//        -> testRepoAndSessionEntriesNarrowToTheSelectedOrg, testChangingTheOrgNeverResetsTheSelectedRepo
+//   (p) org entries not sorted count-descending then A-Z, or org counts following repo / session
+//        -> testOrgEntriesAreAllThenEachOwnerMostPrsFirstThenAToZ, testOrgCountsAreOverTheWholeListWhateverTheRepoAndSessionSelection
+//   (q) a selected org that has no PRs left is reset or dropped, or its empty message is generic
+//        -> testASelectedOrgWithNoPrsStaysSelectedListedWithZeroAndNamedInTheEmptyMessage
+//   (r) the org is not persisted, or a garbage / uppercase / slashed / overlong stored org is believed
+//        -> testASelectionRoundTripsThroughItsStoredForm, testStaleOrMalformedStoredOrgsReadAsAll
 
 import XCTest
 @testable import NostromoKit
@@ -159,7 +176,7 @@ final class AuthoredPrsFilterTests: XCTestCase {
         XCTAssertEqual(result.sessionEntries.first { $0.title == "Alpha" }?.menuTitle, "Alpha (2)")
     }
 
-    func testPopUpCountsDoNotChangeWithTheSelection() {
+    func testRepoAndSessionCountsDoNotChangeWithTheRepoOrSessionSelection() {
         let all = F.apply(fixture(), selection: .all)
         let filtered = F.apply(fixture(), selection: Selection(repo: .repo("carefeed/portal"), session: .focus(tag: "alpha-tag")))
         XCTAssertEqual(filtered.repoEntries, all.repoEntries)
@@ -301,15 +318,19 @@ final class AuthoredPrsFilterTests: XCTestCase {
             Selection(session: .noSession),
             Selection(repo: .repo("a/b"), session: .focus(tag: "weird tag: with colon")),
             Selection(repo: .repo("a/b"), session: .noSession),
+            Selection(org: .org("carefeed")),
+            Selection(org: .org("the-hammer_1"), repo: .repo("the-hammer_1/x"), session: .focus(tag: "alpha-tag")),
+            Selection(org: .org("carefeed"), session: .noSession),
         ]
         for selection in selections {
             let stored = F.stored(selection)
-            XCTAssertEqual(F.selection(storedRepo: stored.repo, storedSession: stored.session), selection, "\(selection)")
+            XCTAssertEqual(F.selection(storedOrg: stored.org, storedRepo: stored.repo, storedSession: stored.session), selection, "\(selection)")
         }
     }
 
     func testAllIsStoredAsNothing() {
         let stored = F.stored(.all)
+        XCTAssertNil(stored.org)
         XCTAssertNil(stored.repo)
         XCTAssertNil(stored.session)
     }
@@ -333,6 +354,271 @@ final class AuthoredPrsFilterTests: XCTestCase {
         XCTAssertEqual(F.selection(storedRepo: nil, storedSession: "none").session, .noSession)
         XCTAssertEqual(F.selection(storedRepo: nil, storedSession: "focus:abc").session, .focus(tag: "abc"))
         XCTAssertEqual(F.selection(storedRepo: 7, storedSession: 7), .all)
+    }
+
+    func testStaleOrMalformedStoredOrgsReadAsAll() {
+        let long = String(repeating: "x", count: 500)
+        let garbage: [Any?] = [nil, 42, 3.5, true, [String](), "", "Carefeed", "CAREFEED", "carefeed/portal", "a/b", "/", " carefeed",
+                               "carefeed ", "\ncarefeed", long]
+        for value in garbage {
+            let selection = F.selection(storedOrg: value, storedRepo: nil, storedSession: nil)
+            XCTAssertEqual(selection, .all, "org from \(String(describing: value))")
+        }
+        XCTAssertEqual(F.selection(storedOrg: "carefeed", storedRepo: nil, storedSession: nil), Selection(org: .org("carefeed")))
+        // A bad org does not take a good repo or session down with it.
+        let mixed = F.selection(storedOrg: 42, storedRepo: "a/b", storedSession: "none")
+        XCTAssertEqual(mixed, Selection(repo: .repo("a/b"), session: .noSession))
+    }
+
+    func testTheOrgIsStoredAsItsLowercasedOwnerUnderItsOwnValue() {
+        let stored = F.stored(Selection(org: .org("carefeed"), repo: .repo("Carefeed/portal"), session: .noSession))
+        XCTAssertEqual(stored.org, "carefeed")
+        XCTAssertEqual(stored.repo, "Carefeed/portal")
+        XCTAssertEqual(stored.session, "none")
+    }
+
+    // MARK: - Org
+
+    /// 1 Carefeed/portal (Alpha), 2 carefeed/api (bravo), 3 CAREFEED/web (Alpha), 4 thehammer/nostromo (Alpha),
+    /// 5 thehammer/nostromo (no owner), 6 solo/tool (bravo).
+    private func orgFixture() -> [AuthoredPr] {
+        [pr(1, repo: "Carefeed/portal", owner: alpha),
+         pr(2, repo: "carefeed/api", owner: bravo),
+         pr(3, repo: "CAREFEED/web", owner: alpha),
+         pr(4, repo: "thehammer/nostromo", owner: alpha),
+         pr(5, repo: "thehammer/nostromo", owner: .unknown),
+         pr(6, repo: "solo/tool", owner: bravo)]
+    }
+
+    func testOrgKeyIsTheLowercasedOwnerPartAndNilWithoutOne() {
+        XCTAssertEqual(F.orgKey(ofRepo: "Carefeed/portal"), "carefeed")
+        XCTAssertEqual(F.orgKey(ofRepo: "carefeed/portal"), "carefeed")
+        XCTAssertEqual(F.orgKey(ofRepo: "a/b/c"), "a", "only the part before the first slash")
+        XCTAssertNil(F.orgKey(ofRepo: "noslash"))
+        XCTAssertNil(F.orgKey(ofRepo: "/x"))
+        XCTAssertNil(F.orgKey(ofRepo: " /x"))
+        XCTAssertNil(F.orgKey(ofRepo: ""))
+    }
+
+    func testOrgEntriesAreAllThenEachOwnerMostPrsFirstThenAToZ() {
+        let prs = orgFixture() + [pr(7, repo: "zeta/one"), pr(8, repo: "Alpha/two")]
+        let entries = F.apply(prs, selection: .all).orgEntries
+        XCTAssertEqual(entries.map(\.title), ["All", "Carefeed", "thehammer", "Alpha", "solo", "zeta"],
+                       "3, 2, then the one-PR orgs A-Z ignoring case")
+        XCTAssertEqual(entries.map(\.count), [8, 3, 2, 1, 1, 1])
+        XCTAssertEqual(entries.map(\.menuTitle), ["All (8)", "Carefeed (3)", "thehammer (2)", "Alpha (1)", "solo (1)", "zeta (1)"])
+        XCTAssertEqual(entries.first?.selection, .all)
+        XCTAssertEqual(entries[1].selection, .org("carefeed"))
+    }
+
+    func testOrgCountsTiedAtTheTopStillSortAToZ() {
+        let prs = [pr(1, repo: "zed/a"), pr(2, repo: "zed/b"), pr(3, repo: "Amy/a"), pr(4, repo: "amy/b"), pr(5, repo: "mid/a")]
+        XCTAssertEqual(F.apply(prs, selection: .all).orgEntries.map(\.title), ["All", "Amy", "zed", "mid"])
+    }
+
+    func testOneOrgWhateverTheCaseShowsTheFirstSeenSpelling() {
+        let result = F.apply(orgFixture(), selection: .all)
+        let carefeed = result.orgEntries.filter { $0.selection == .org("carefeed") }
+        XCTAssertEqual(carefeed.count, 1, "Carefeed, carefeed and CAREFEED are one org")
+        XCTAssertEqual(carefeed.first?.title, "Carefeed", "the spelling of the first PR in the list")
+        XCTAssertEqual(carefeed.first?.count, 3)
+
+        let reversed = F.apply(Array(orgFixture().reversed()), selection: .all)
+        XCTAssertEqual(reversed.orgEntries.first { $0.selection == .org("carefeed") }?.title, "CAREFEED", "first seen in this order")
+        XCTAssertEqual(reversed.orgEntries.filter { $0.title.lowercased() == "carefeed" }.count, 1)
+
+        let selected = F.apply(orgFixture(), selection: Selection(org: .org("carefeed")))
+        XCTAssertEqual(numbers(selected), [1, 2, 3], "every spelling matches")
+        XCTAssertEqual(selected.orgTitle, "Carefeed")
+        XCTAssertEqual(F.apply(orgFixture(), selection: Selection(org: .org("thehammer"))).orgTitle, "thehammer")
+        XCTAssertEqual(F.apply(orgFixture(), selection: .all).orgTitle, "All")
+    }
+
+    func testRowsWithNoOwnerPartHaveNoOrgButAreUnderAll() {
+        let prs = [pr(1, repo: "noslash"), pr(2, repo: "/x"), pr(3, repo: " /x"), pr(4, repo: "a/b/c"), pr(5, repo: "Real/one")]
+        let all = F.apply(prs, selection: .all)
+        XCTAssertEqual(numbers(all), [1, 2, 3, 4, 5], "all of them show under All")
+        XCTAssertEqual(all.orgEntries.map(\.title), ["All", "a", "Real"], "only a/b/c and Real/one name an org")
+        XCTAssertEqual(all.orgEntries.first?.count, 5, "All counts every PR, owner part or not")
+        XCTAssertEqual(all.orgEntries.map(\.count), [5, 1, 1])
+        XCTAssertEqual(all.repoEntries.first?.count, 5)
+
+        XCTAssertEqual(numbers(F.apply(prs, selection: Selection(org: .org("a")))), [4], "a/b/c belongs to a")
+        XCTAssertEqual(numbers(F.apply(prs, selection: Selection(org: .org("real")))), [5])
+        XCTAssertEqual(numbers(F.apply(prs, selection: Selection(org: .org("")))), [], "an empty org key matches nothing, not the owner-less rows")
+    }
+
+    func testAnOrgSelectionShowsOnlyThatOrgsPrsInTheirOrder() {
+        let result = F.apply(orgFixture(), selection: Selection(org: .org("thehammer")))
+        XCTAssertEqual(numbers(result), [4, 5])
+        XCTAssertEqual(result.matched, 2)
+        XCTAssertEqual(result.total, 6)
+        XCTAssertTrue(result.selection.isActive, "an org alone is a filter")
+        XCTAssertEqual(result.orgEntries.first?.count, 6, "All (N) in the Org pop-up stays the whole list")
+    }
+
+    func testOrgRepoAndSessionCombineWithAndNotOr() {
+        // carefeed holds 1, 2, 3; Alpha owns 1, 3, 4; portal (as the daemon spells it) holds 1.
+        XCTAssertEqual(numbers(F.apply(orgFixture(), selection: Selection(org: .org("carefeed"), session: .focus(tag: "alpha-tag")))), [1, 3],
+                       "OR would add 4 (Alpha, other org) and 2")
+        XCTAssertEqual(numbers(F.apply(orgFixture(), selection: Selection(org: .org("carefeed"), repo: .repo("Carefeed/portal")))), [1])
+        XCTAssertEqual(numbers(F.apply(orgFixture(), selection: Selection(org: .org("thehammer"), session: .noSession))), [5],
+                       "ownerless PRs of the selected org only")
+        XCTAssertEqual(numbers(F.apply(orgFixture(), selection: Selection(org: .org("thehammer"), session: .focus(tag: "bravo-tag")))), [],
+                       "bravo has PRs, thehammer has PRs, but not in common")
+        XCTAssertEqual(numbers(F.apply(orgFixture(), selection: Selection(org: .org("carefeed"), repo: .repo("Carefeed/portal"),
+                                                                           session: .focus(tag: "bravo-tag")))), [],
+                       "all three together are an intersection")
+        XCTAssertEqual(numbers(F.apply(orgFixture(), selection: Selection(org: .org("solo"), repo: .repo("thehammer/nostromo")))), [],
+                       "a repo outside the selected org matches nothing")
+    }
+
+    // MARK: Repo and Session follow the Org
+
+    func testRepoAndSessionEntriesNarrowToTheSelectedOrg() {
+        let result = F.apply(orgFixture(), selection: Selection(org: .org("thehammer")))
+        XCTAssertEqual(result.repoEntries.map(\.menuTitle), ["All (2)", "thehammer/nostromo (2)"], "only the org's repos, All counts the org's PRs")
+        XCTAssertEqual(result.sessionEntries.map(\.menuTitle), ["All (2)", "Alpha (1)", "No session (1)"],
+                       "bravo owns nothing in this org, so it is not offered")
+
+        let carefeed = F.apply(orgFixture(), selection: Selection(org: .org("carefeed")))
+        XCTAssertEqual(carefeed.repoEntries.map(\.menuTitle), ["All (3)", "carefeed/api (1)", "Carefeed/portal (1)", "CAREFEED/web (1)"])
+        XCTAssertEqual(carefeed.sessionEntries.map(\.menuTitle), ["All (3)", "Alpha (2)", "bravo (1)"], "no No session entry: every PR here has an owner")
+
+        let all = F.apply(orgFixture(), selection: .all)
+        XCTAssertEqual(all.repoEntries.first?.count, 6, "no org: the whole list, as before")
+        XCTAssertEqual(all.sessionEntries.first?.count, 6)
+    }
+
+    func testRepoAndSessionCountsFollowTheOrgButNotTheOtherPopUp() {
+        let withRepo = F.apply(orgFixture(), selection: Selection(org: .org("carefeed"), repo: .repo("carefeed/api")))
+        let orgOnly = F.apply(orgFixture(), selection: Selection(org: .org("carefeed")))
+        XCTAssertEqual(withRepo.sessionEntries, orgOnly.sessionEntries, "Session counts are over the org, not the repo")
+        let withSession = F.apply(orgFixture(), selection: Selection(org: .org("carefeed"), session: .focus(tag: "alpha-tag")))
+        XCTAssertEqual(withSession.repoEntries, orgOnly.repoEntries, "Repo counts are over the org, not the session")
+    }
+
+    func testOrgCountsAreOverTheWholeListWhateverTheRepoAndSessionSelection() {
+        let all = F.apply(orgFixture(), selection: .all).orgEntries
+        let selections: [Selection] = [
+            Selection(repo: .repo("solo/tool")),
+            Selection(session: .focus(tag: "alpha-tag")),
+            Selection(org: .org("thehammer"), repo: .repo("thehammer/nostromo"), session: .noSession),
+            Selection(org: .org("carefeed"), session: .focus(tag: "bravo-tag")),
+        ]
+        for selection in selections {
+            XCTAssertEqual(F.apply(orgFixture(), selection: selection).orgEntries, all, "\(selection)")
+        }
+    }
+
+    func testASelectedRepoOutsideTheSelectedOrgStaysSelectedAndListedWithZero() {
+        let result = F.apply(orgFixture(), selection: Selection(org: .org("carefeed"), repo: .repo("thehammer/nostromo")))
+        XCTAssertEqual(result.selection.repo, .repo("thehammer/nostromo"), "not reset to All")
+        XCTAssertEqual(result.matched, 0)
+        XCTAssertEqual(result.repoEntries.first { $0.selection == .repo("thehammer/nostromo") }?.menuTitle, "thehammer/nostromo (0)")
+        XCTAssertEqual(result.repoEntries.first?.count, 3, "All is the org's PRs")
+        XCTAssertEqual(result.repoTitle, "thehammer/nostromo")
+    }
+
+    func testChangingTheOrgNeverResetsTheSelectedRepo() {
+        let before = F.apply(orgFixture(), selection: Selection(repo: .repo("thehammer/nostromo")))
+        XCTAssertEqual(numbers(before), [4, 5], "precondition")
+        // What the strip does on an Org pick: only the org part of the selection changes.
+        var selection = before.selection
+        selection.org = .org("carefeed")
+        let after = F.apply(orgFixture(), selection: selection)
+        XCTAssertEqual(after.selection.repo, .repo("thehammer/nostromo"))
+        XCTAssertEqual(after.emptyState, .noMatch(text: "No PRs in org Carefeed in thehammer/nostromo."))
+
+        selection.org = .all
+        XCTAssertEqual(numbers(F.apply(orgFixture(), selection: selection)), [4, 5], "and back: the repo was kept all along")
+    }
+
+    func testASelectedSessionOutsideTheSelectedOrgStaysSelectedAndListedWithZero() {
+        // bravo owns 2 and 6, but nothing in thehammer.
+        let result = F.apply(orgFixture(), selection: Selection(org: .org("thehammer"), session: .focus(tag: "bravo-tag")))
+        XCTAssertEqual(result.selection.session, .focus(tag: "bravo-tag"))
+        let entry = result.sessionEntries.first { $0.selection == .focus(tag: "bravo-tag") }
+        XCTAssertEqual(entry?.count, 0, "still listed, with zero")
+        XCTAssertTrue(entry?.menuTitle.hasSuffix(" (0)") ?? false, entry?.menuTitle ?? "not listed")
+        XCTAssertFalse(entry?.title.isEmpty ?? true)
+        XCTAssertEqual(result.matched, 0)
+    }
+
+    // MARK: Selected org that vanished
+
+    func testASelectedOrgWithNoPrsStaysSelectedListedWithZeroAndNamedInTheEmptyMessage() {
+        let result = F.apply(orgFixture(), selection: Selection(org: .org("gone")))
+        XCTAssertEqual(result.selection.org, .org("gone"), "not reset to All")
+        XCTAssertEqual(result.matched, 0)
+        XCTAssertEqual(result.total, 6)
+        let entry = result.orgEntries.first { $0.selection == .org("gone") }
+        XCTAssertEqual(entry?.count, 0)
+        XCTAssertEqual(entry?.menuTitle, "gone (0)")
+        XCTAssertEqual(result.orgTitle, "gone")
+        XCTAssertEqual(result.orgEntries.count, 5, "All, the three real orgs and the selected one")
+        XCTAssertEqual(result.orgEntries.last?.selection, .org("gone"), "zero PRs sorts last")
+        XCTAssertEqual(result.emptyState, .noMatch(text: "No PRs in org gone."))
+        XCTAssertEqual(result.repoEntries.map(\.menuTitle), ["All (0)"])
+    }
+
+    func testEmptyStateNamesTheOrgAlongsideRepoAndSession() {
+        let result = F.apply(orgFixture(), selection: Selection(org: .org("solo"), session: .focus(tag: "alpha-tag")))
+        guard case .noMatch(let text) = result.emptyState else { return XCTFail("expected a no-match message") }
+        XCTAssertTrue(text.hasPrefix("No PRs in org solo from "), text)
+        XCTAssertEqual(F.apply(orgFixture(), selection: Selection(org: .org("solo"), session: .noSession)).emptyState,
+                       .noMatch(text: "No PRs in org solo without a session."))
+        guard case .noMatch(let text) = F.apply(orgFixture(), selection: Selection(org: .org("solo"), repo: .repo("a/b"), session: .noSession)).emptyState
+        else { return XCTFail("expected a no-match message") }
+        for part in ["org solo", "a/b", "without a session"] { XCTAssertTrue(text.contains(part), "'\(text)' names \(part)") }
+    }
+
+    // MARK: Untrusted org names
+
+    func testAHostileOwnerNameIsSanitisedAndCappedInTheOrgMenuWithAnUncappedSanitisedTooltipName() {
+        let hostile = "Ev\u{202E}il\u{0007}\u{2066}" + String(repeating: "o", count: 100)
+        let repo = hostile + "/repo"
+        let prs = [pr(1, repo: repo), pr(2, repo: "carefeed/portal")]
+        let result = F.apply(prs, selection: .all)
+        let key = F.orgKey(ofRepo: repo)
+        let entry = result.orgEntries.first { $0.selection == .org(key ?? "") }
+        XCTAssertNotNil(key)
+        XCTAssertNotNil(entry, "the hostile org is listed")
+        let title = entry?.title ?? ""
+        XCTAssertFalse(hasBidiOrControl(title))
+        XCTAssertFalse(hasBidiOrControl(entry?.menuTitle ?? ""))
+        XCTAssertTrue(title.hasPrefix("Evil"), "what is printable is kept: \(title)")
+        XCTAssertLessThanOrEqual(title.count, 60, "capped like a repo name")
+        XCTAssertTrue(title.hasSuffix("…"))
+
+        let full = entry?.fullTitle ?? ""
+        XCTAssertFalse(hasBidiOrControl(full), "the tooltip name is sanitised too")
+        XCTAssertTrue(full.hasPrefix("Evil"))
+        XCTAssertGreaterThan(full.count, 100, "but not capped: \(full.count)")
+        XCTAssertFalse(full.hasSuffix("…"))
+
+        // It still selects by what the daemon named it, and the empty message is clean.
+        let selected = F.apply(prs, selection: Selection(org: .org(key ?? ""), session: .noSession))
+        XCTAssertEqual(numbers(selected), [1])
+        let none = F.apply(prs, selection: Selection(org: .org(key ?? ""), repo: .repo("carefeed/portal")))
+        guard case .noMatch(let text) = none.emptyState else { return XCTFail("expected a no-match message") }
+        XCTAssertFalse(hasBidiOrControl(text))
+        XCTAssertFalse(hasBidiOrControl(none.orgTitle))
+        XCTAssertLessThanOrEqual(none.orgTitle.count, 60)
+    }
+
+    func testAnOwnerWithNothingPrintableIsCalledUnnamedAndAShortNameIsItsOwnTooltip() {
+        let result = F.apply([pr(1, repo: "\u{202E}\u{0007}/x"), pr(2, repo: "short/x")], selection: .all)
+        XCTAssertTrue(result.orgEntries.contains { $0.title == "unnamed org" })
+        let short = result.orgEntries.first { $0.title == "short" }
+        XCTAssertEqual(short?.fullTitle, "short", "a name that fits is its own tooltip")
+    }
+
+    func testAnOwnerNameOfExactlyTheCapIsNotTruncated() {
+        let name = String(repeating: "q", count: 60)
+        let entry = F.apply([pr(1, repo: name + "/x")], selection: .all).orgEntries[1]
+        XCTAssertEqual(entry.title, name)
+        XCTAssertEqual(entry.fullTitle, name)
     }
 
     // MARK: - Header and group wording
