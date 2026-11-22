@@ -1510,7 +1510,10 @@ impl World {
         }
         // Conservation at the end of every step: an item's marker is never
         // lower than the drops the person has not been shown. (An item off
-        // the board has no marker to show; its tally goes.)
+        // the board has no marker to show, but the daemon keeps its count: if
+        // the item comes back, the marker comes back with it, for drops the
+        // person may well have been shown before it went. So the tally stays,
+        // unchecked while the item is away.)
         let on_board: BTreeMap<&str, u32> = view
             .nodes
             .iter()
@@ -1519,11 +1522,11 @@ impl World {
                 _ => None,
             })
             .collect();
-        self.unacked_drops
-            .retain(|item, _| on_board.contains_key(item.as_str()));
         let mut too_early = Vec::new();
         for (item, drops) in &self.unacked_drops {
-            let shown = on_board[item.as_str()];
+            let Some(&shown) = on_board.get(item.as_str()) else {
+                continue;
+            };
             if (shown as usize) < drops.len() {
                 too_early.push((item.clone(), shown, drops.len()));
             }
