@@ -963,6 +963,7 @@ fn a_session_send_to_a_waiting_session_with_a_full_queue_is_refused_over_the_wir
                 tag: "cody-1".into(),
                 text: format!("WIRE-QUEUED-FULL-{i}"),
                 images: vec![],
+                client_ref: None,
             })
             .await;
         }
@@ -977,6 +978,7 @@ fn a_session_send_to_a_waiting_session_with_a_full_queue_is_refused_over_the_wir
             tag: "cody-1".into(),
             text: "WIRE-OVERFLOW".into(),
             images: vec![],
+            client_ref: None,
         })
         .await;
         app.wait_seen("the queue-full refusal", |m| {

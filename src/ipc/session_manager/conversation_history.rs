@@ -306,7 +306,17 @@ impl SessionManager {
     }
 
     /// A user message was written into `tag`'s session.
-    pub(super) fn note_conversation_send(&mut self, tag: &str, text: &str, has_images: bool) {
+    ///
+    /// `id` is the message's queue id: when it becomes the candidate for the
+    /// conversation's first prompt, the queue remembers which message that is
+    /// (so taking it back hands candidacy on, see `Shared::candidate_left`).
+    pub(super) fn note_conversation_send(
+        &mut self,
+        tag: &str,
+        text: &str,
+        has_images: bool,
+        id: &str,
+    ) {
         let Some(session) = self.sessions.get(tag) else {
             return;
         };
@@ -315,8 +325,12 @@ impl SessionManager {
         };
         let agent = session.agent_name.clone();
         let sensitive = self.sensitive.focus_is_sensitive(tag, &agent);
-        self.conversations
+        let candidate = self
+            .conversations
             .note_user_send(&sid, text, has_images, sensitive, now_ms());
+        if candidate {
+            session.shared.queue.set_candidate(Some(id.to_owned()));
+        }
         let meta = self.conversation_meta(tag, true);
         self.conversations.refresh_meta(&sid, meta, now_ms());
     }

@@ -937,6 +937,9 @@ impl SessionManager {
         }
         lock_recover(&session.shared.pending).extend(carry.messages);
         lock_recover(&session.shared.model).waiting = carry.waiting;
+        // Same ids, same order: the watchers' forwarders (re-attached by the
+        // restart) hear the carried queue.
+        session.shared.publish_queue(None);
         if session.state() == SessionState::Idle {
             advance(&session.shared);
         }

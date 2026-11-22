@@ -65,7 +65,9 @@ use super::pane_registry::{
 use super::peer::{
     in_work_send, is_huey_agent, is_teri_or_fred_agent, registry_path_beside, SensitiveTags,
 };
-use super::protocol::{FocusMeta, ServerMsg, SessionInfo, TaskDetailMsg, TasksSnapshot};
+use super::protocol::{
+    FocusMeta, QueueChangeReason, ServerMsg, SessionInfo, TaskDetailMsg, TasksSnapshot,
+};
 use super::stream_json::{
     injected_line, load_scrollback, local_command, parse_line, ParsedLine, SessionState,
     SessionTranscript, TurnDelta, TurnOrigin, NOSTROMO_NOTE_CLOSE, NOSTROMO_NOTE_OPEN,
@@ -99,6 +101,9 @@ mod login;
 mod model_switch;
 #[cfg(test)]
 mod notice_inject_tests;
+mod queue;
+#[cfg(test)]
+mod queue_tests;
 #[cfg(test)]
 mod slash_command_tests;
 pub mod slash_commands;
@@ -116,13 +121,15 @@ pub use inject::{
     MOTHER_NOTICE_KEY_PREFIX, SELECTION_KEY_PREFIX,
 };
 pub use login::{ResendOutcome, ResendTrigger};
+use queue::EntryKind;
+pub use queue::{AppLabel, DroppedQueue, QueueAnswer, QueueSnapshot, QueueVerb};
 use model_switch::{
     emit_note, model_args, on_model_report, publish_model_state, spawn_apply, ModelRuntime,
     SessionCtx,
 };
 pub use model_switch::{ModelRequestOutcome, ModelSweep, SwitchRequest, SwitchTicket};
 use task_runtime::{
-    detail_msg, drive_timer, ensure_poller, ensure_probe, forward_session_events, read_output,
+    detail_msg, drive_timer, ensure_poller, ensure_probe, forward_session_events_with, read_output,
     stop_task, tasks_msg, TaskRuntime,
 };
 pub use task_runtime::{OutputReply, StopReport, TaskIoConfig};
@@ -191,6 +198,9 @@ pub enum SessionEvent {
         turn_id: String,
         origin: TurnOrigin,
     },
+    /// The session's queued messages changed: the whole queue (REPLACE).
+    /// Forwarded only to a client that watches the queue (see `queue`).
+    Queue(Arc<QueueSnapshot>),
 }
 
 // ── pending-message queue ─────────────────────────────────────────────────────
@@ -199,6 +209,12 @@ pub enum SessionEvent {
 /// survive the queued-until-idle path without being dropped.
 #[derive(Clone, Debug)]
 struct PendingMessage {
+    /// Stable for the daemon run, from send time (see `queue`).
+    id: String,
+    /// A person's message, the app's, or the daemon's.
+    kind: EntryKind,
+    /// The text as sent, when `text` is a copy with a note in front of it.
+    original_text: Option<String>,
     text: String,
     /// Absolute file paths; daemon reads + base64-encodes at drain time.
     images: Vec<String>,
@@ -299,6 +315,9 @@ struct Shared {
     /// The slash commands this focus's CLI reports (kept per tag by the manager,
     /// so a restarted session's picker is not empty).
     commands: Arc<slash_commands::CommandCatalog>,
+    /// The session's queue view: revision, delivered ring, watchers (kept per
+    /// tag by the manager, so a restarted session continues them).
+    queue: Arc<queue::QueueState>,
 }
 
 /// Where the manager keeps its [`TurnHook`] for every session's reader.
@@ -740,6 +759,8 @@ pub struct SessionManager {
     activity: ActivityBook,
     /// Every focus's slash commands, for the daemon's lifetime (memory only).
     commands: slash_commands::CommandBook,
+    /// Every focus's queue view state, for the daemon's lifetime (memory only).
+    queues: queue::QueueBook,
 }
 
 impl SessionManager {
@@ -846,6 +867,7 @@ impl SessionManager {
             authored_pr_actions: None,
             activity: ActivityBook::default(),
             commands: slash_commands::CommandBook::default(),
+            queues: queue::QueueBook::default(),
         }
     }
 
@@ -1542,6 +1564,7 @@ impl SessionManager {
             sensitive: self.sensitive.clone(),
             activity: self.activity.for_session(&tag, &session_id),
             commands: self.commands.for_tag(&tag),
+            queue: self.queues.for_tag(&tag),
         };
         // Ends vanished tasks and flushes coalesced task snapshots; stops
         // when the CLI has exited.
@@ -1649,10 +1672,36 @@ impl SessionManager {
 
     /// Enqueue a user message. Writes immediately to stdin if the session is
     /// idle, otherwise queues it to drain after the current turn completes.
+    /// The message is a typed one (see [`send_typed_message`](Self::send_typed_message)).
     pub fn send_user_message(&mut self, tag: &str, text: &str, images: &[String]) -> Result<()> {
-        self.write_user_message_to(tag, text, images, None)?;
-        self.note_conversation_send(tag, text, !images.is_empty());
-        Ok(())
+        self.send_message(tag, PendingMessage::user(text, images))
+            .map(|_| ())
+    }
+
+    /// A message a person typed into a client: [`send_user_message`](Self::send_user_message)
+    /// with the sender's opaque `client_ref` (echoed in the queue view).
+    /// Returns the message's id, which it has from now on, queued or not.
+    pub fn send_typed_message(
+        &mut self,
+        tag: &str,
+        text: &str,
+        images: &[String],
+        client_ref: Option<String>,
+    ) -> Result<String> {
+        self.send_message(tag, PendingMessage::typed(text, images, client_ref))
+    }
+
+    /// A message the app composed (never taken back by a client): as
+    /// [`send_user_message`](Self::send_user_message), labelled `label`.
+    pub fn send_app_message(
+        &mut self,
+        tag: &str,
+        text: &str,
+        images: &[String],
+        label: AppLabel,
+    ) -> Result<()> {
+        self.send_message(tag, PendingMessage::app(text, images, label))
+            .map(|_| ())
     }
 
     /// [`send_user_message`](Self::send_user_message), running `on_delivered`
@@ -1665,18 +1714,35 @@ impl SessionManager {
         text: &str,
         on_delivered: impl Fn() + Send + Sync + 'static,
     ) -> Result<()> {
-        self.write_user_message_to(tag, text, &[], Some(DeliveredHook(Arc::new(on_delivered))))?;
-        self.note_conversation_send(tag, text, false);
-        Ok(())
+        let mut message = PendingMessage::user(text, &[]);
+        message.on_delivered = Some(DeliveredHook(Arc::new(on_delivered)));
+        self.send_message(tag, message).map(|_| ())
     }
 
-    fn write_user_message_to(
+    /// [`send_user_message_then`](Self::send_user_message_then) for a message
+    /// the app composed.
+    pub fn send_app_message_then(
         &mut self,
         tag: &str,
         text: &str,
-        images: &[String],
-        on_delivered: Option<DeliveredHook>,
+        label: AppLabel,
+        on_delivered: impl Fn() + Send + Sync + 'static,
     ) -> Result<()> {
+        let mut message = PendingMessage::app(text, &[], label);
+        message.on_delivered = Some(DeliveredHook(Arc::new(on_delivered)));
+        self.send_message(tag, message).map(|_| ())
+    }
+
+    fn send_message(&mut self, tag: &str, message: PendingMessage) -> Result<String> {
+        let id = message.id.clone();
+        let text = message.text.clone();
+        let has_images = !message.images.is_empty();
+        self.write_user_message_to(tag, message)?;
+        self.note_conversation_send(tag, &text, has_images, &id);
+        Ok(id)
+    }
+
+    fn write_user_message_to(&mut self, tag: &str, message: PendingMessage) -> Result<()> {
         // Text sent during a work-item send is that item's content: the
         // session it lands in is sensitive before the text is written.
         if in_work_send() {
@@ -1696,8 +1762,6 @@ impl SessionManager {
         // message is queued, not written, while a turn runs or a model switch
         // is being applied; queueing happens under the same lock so a turn end
         // draining the queue can't miss it.
-        let mut message = PendingMessage::user(text, images);
-        message.on_delivered = on_delivered;
         let should_write = {
             let mut state = lock_recover(&session.shared.state);
             let applying = lock_recover(&session.shared.model).applying.is_some();
@@ -1719,6 +1783,10 @@ impl SessionManager {
             }
         };
         if !should_write {
+            // Queued: the view gains an entry (state is released).
+            session
+                .shared
+                .publish_queue(Some((QueueChangeReason::Queued, vec![message.id.clone()])));
             session.shared.login.notify();
         }
 
@@ -1736,10 +1804,7 @@ impl SessionManager {
                     .and_then(|b| b.peek_restart_note(tag))
             };
             let outgoing = match &note {
-                Some(note) => PendingMessage {
-                    text: format!("{note}\n\n{}", message.text),
-                    ..message.clone()
-                },
+                Some(note) => message.framed_with(format!("{note}\n\n{}", message.text)),
                 None => message.clone(),
             };
             if let Err(e) = write_user_message(&session.shared, &outgoing) {
@@ -1780,12 +1845,27 @@ impl SessionManager {
     ///
     /// A no-op ([`InterruptOutcome::NotRunning`]) when the session is idle.
     pub fn interrupt(&mut self, tag: &str) -> Result<InterruptOutcome> {
-        let session = self
-            .sessions
-            .get(tag)
-            .ok_or_else(|| anyhow!("unknown session tag: {tag}"))?;
+        self.interrupt_returning(tag).0
+    }
+
+    /// [`interrupt`](Self::interrupt), also saying which entries it dropped: the
+    /// typed ones with their text and image paths, the held message first, then
+    /// the queue in order (the caller may hand them back to the person who
+    /// pressed Stop). Dropped messages are no longer title candidates and
+    /// never run their delivered hooks. The entries come back even when the
+    /// interrupt itself could not be written.
+    pub fn interrupt_returning(&mut self, tag: &str) -> (Result<InterruptOutcome>, DroppedQueue) {
+        let Some(session) = self.sessions.get(tag) else {
+            return (
+                Err(anyhow!("unknown session tag: {tag}")),
+                DroppedQueue::default(),
+            );
+        };
         if !session.alive() {
-            anyhow::bail!("session {tag} is not alive");
+            return (
+                Err(anyhow!("session {tag} is not alive")),
+                DroppedQueue::default(),
+            );
         }
         // A message `step` took off the queue may still be on its way to
         // stdin. The interrupt goes behind it (it ends that message's turn:
@@ -1796,7 +1876,7 @@ impl SessionManager {
         // that same hold, so a writer that pops after it finds nothing. The
         // wait is bounded like `take_carry`'s.
         let deadline = std::time::Instant::now() + WRITE_WAIT_LIMIT;
-        let (running, discarded) = loop {
+        let (running, discarded, dropped) = loop {
             let state = lock_recover(&session.shared.state);
             if session.shared.writing.load(Ordering::SeqCst) && std::time::Instant::now() < deadline
             {
@@ -1809,10 +1889,12 @@ impl SessionManager {
                 SessionState::MidTurn | SessionState::AwaitingPermission
             );
             let discarded = session.shared.login.discard_for_stop();
-            if running || discarded {
-                lock_recover(&session.shared.pending).clear();
-            }
-            break (running, discarded);
+            let dropped = if running || discarded.is_some() {
+                queue::drain_for_stop(&session.shared, discarded.clone().flatten())
+            } else {
+                DroppedQueue::default()
+            };
+            break (running, discarded.is_some(), dropped);
         };
         if discarded {
             info!(tag, "held message discarded: stopped by the user");
@@ -1820,22 +1902,31 @@ impl SessionManager {
                 .discard_candidate(&session.shared.ctx.session_id);
             session.shared.login.notify();
         }
+        if !dropped.ids.is_empty() {
+            session.shared.candidate_left(&dropped.ids);
+            session.shared.publish_queue(Some((
+                QueueChangeReason::Stopped,
+                dropped.ids.clone(),
+            )));
+            info!(tag, dropped = dropped.ids.len(), "queued messages dropped: stopped by the user");
+        }
         if !running {
-            return Ok(if discarded {
+            let outcome = if discarded {
                 InterruptOutcome::DiscardedHold
             } else {
                 InterruptOutcome::NotRunning
-            });
+            };
+            return (Ok(outcome), dropped);
         }
 
         lock_recover(&session.shared.transcript).mark_interrupt_requested();
         let request_id = format!("interrupt-{}", chrono::Utc::now().timestamp_millis());
-        write_control_request(
+        let written = write_control_request(
             &session.shared.stdin,
             &request_id,
             serde_json::json!({ "subtype": "interrupt" }),
-        )?;
-        Ok(InterruptOutcome::Requested)
+        );
+        (written.map(|()| InterruptOutcome::Requested), dropped)
     }
 
     // ── attach / detach ─────────────────────────────────────────────────────
@@ -1843,7 +1934,7 @@ impl SessionManager {
     /// Attach `client_id` to `tag`: send a `SessionTurns` snapshot + current
     /// `SessionState`, then forward live events. Multiple clients may attach.
     pub fn attach(&mut self, tag: &str, client_id: &str) -> Result<()> {
-        let (turns, state, event_rx, tasks) = {
+        let (turns, state, event_rx, tasks, feed) = {
             let session = self
                 .sessions
                 .get_mut(tag)
@@ -1874,7 +1965,11 @@ impl SessionManager {
                 .recent_turns(SCROLLBACK_TURNS);
             let state = session.state();
             let rx = session.shared.event_tx.subscribe();
-            (turns, state, rx, Arc::clone(&session.shared.tasks))
+            let feed = queue::QueueFeed {
+                cell: session.shared.queue.watch_cell(client_id),
+                view: session.shared.queue_view(),
+            };
+            (turns, state, rx, Arc::clone(&session.shared.tasks), feed)
         };
 
         self.send_to_client(
@@ -1913,7 +2008,7 @@ impl SessionManager {
         let senders = Arc::clone(&self.client_senders);
         let tag_s = tag.to_string();
         let client_s = client_id.to_string();
-        let task = tokio::spawn(forward_session_events(
+        let task = tokio::spawn(forward_session_events_with(
             event_rx,
             move |msg| match senders.lock().unwrap().get(&client_s) {
                 Some(tx) => {
@@ -1924,6 +2019,7 @@ impl SessionManager {
             },
             tag_s,
             tasks,
+            Some(feed),
         ));
         if let Some(session) = self.sessions.get_mut(tag) {
             session
@@ -1952,6 +2048,7 @@ impl SessionManager {
             if let Some(h) = session.forwarders.remove(client_id) {
                 h.abort();
             }
+            session.shared.queue.forget_client(client_id);
         }
     }
 
@@ -1972,7 +2069,20 @@ impl SessionManager {
         {
             session.shared.activity.note_problem(ProblemKind::Stopped);
         }
+        // The queue is discarded with the session; its watchers are told what
+        // was lost once the forwarders are gone (straight on their channels).
+        let lost = self.discard_queue_for_session_stop(tag);
+        let watchers = self.attached_to(tag);
         self.stop_session(tag);
+        self.queue_session_stopped(tag, &watchers, lost);
+    }
+
+    /// The clients attached to `tag`.
+    fn attached_to(&self, tag: &str) -> Vec<String> {
+        self.sessions
+            .get(tag)
+            .map(|s| s.attached_clients.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// [`Self::stop`] without the problem event: what a restart, a new session
@@ -2175,7 +2285,10 @@ impl SessionManager {
     /// Drop the persisted session id and stop the child; the next spawn starts
     /// a fresh conversation.
     pub fn new_session(&mut self, tag: &str) {
+        let lost = self.discard_queue_for_session_stop(tag);
+        let watchers = self.attached_to(tag);
         self.stop_session(tag);
+        self.queue_session_stopped(tag, &watchers, lost);
         self.sessions.remove(tag);
         save_id(&self.store_path, tag, None);
         self.forget_place(tag);
@@ -3048,6 +3161,7 @@ impl SessionManager {
             if let Some(h) = session.forwarders.remove(client_id) {
                 h.abort();
             }
+            session.shared.queue.forget_client(client_id);
         }
         self.network_clients.remove(client_id);
         self.client_senders.lock().unwrap().remove(client_id);
@@ -3722,6 +3836,11 @@ fn step(shared: &Shared, finished_apply: bool) {
             spawn_apply(shared, target, actor, None);
         }
         Next::Write(msg) => {
+            // The message left the queue: the view drops it now (state is
+            // released). A failed write puts it back (see `settle`).
+            if !matches!(msg.kind, EntryKind::Injected) {
+                shared.publish_queue(Some((QueueChangeReason::Delivered, vec![msg.id.clone()])));
+            }
             let in_flight = WriteInFlight {
                 shared,
                 msg: Some(msg),
@@ -3754,6 +3873,7 @@ struct WriteInFlight<'a> {
 
 impl WriteInFlight<'_> {
     fn write(&self) -> Result<()> {
+        queue::in_flight_pause();
         match &self.msg {
             Some(msg) => write_user_message(self.shared, msg),
             None => Ok(()),
@@ -3766,6 +3886,7 @@ impl WriteInFlight<'_> {
 
     fn settle(&mut self, wrote: bool) {
         let Some(msg) = self.msg.take() else { return };
+        let back = (!wrote && !matches!(msg.kind, EntryKind::Injected)).then(|| msg.id.clone());
         {
             let mut state = lock_recover(&self.shared.state);
             if !wrote {
@@ -3773,6 +3894,10 @@ impl WriteInFlight<'_> {
                 *state = SessionState::Idle;
             }
             self.shared.writing.store(false, Ordering::SeqCst);
+        }
+        if let Some(id) = back {
+            self.shared
+                .publish_queue(Some((QueueChangeReason::Queued, vec![id])));
         }
         self.shared.broadcast(SessionEvent::State(if wrote {
             SessionState::MidTurn
@@ -3949,6 +4074,7 @@ fn write_frame(stdin: &Arc<Mutex<Option<ChildStdin>>>, frame: &serde_json::Value
 fn write_user_message(shared: &Shared, msg: &PendingMessage) -> Result<()> {
     let result = write_user_message_framed(shared, msg);
     if result.is_ok() {
+        shared.note_delivered(msg);
         if let Some(hook) = &msg.on_delivered {
             (hook.0)();
         }
@@ -3987,10 +4113,8 @@ fn write_user_message_framed(shared: &Shared, msg: &PendingMessage) -> Result<()
     let result = login::write_recorded(
         shared,
         &PendingMessage {
-            text,
-            images: msg.images.clone(),
-            origin: msg.origin.clone(),
             on_delivered: None,
+            ..msg.framed_with(text)
         },
         tracker_note,
     );

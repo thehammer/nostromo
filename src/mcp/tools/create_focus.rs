@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::mother_mutators::apply_origin;
+use crate::ipc::session_manager::AppLabel;
 use super::untrusted::{
     one_line, sanitize_instruction, unescape_id, NonceFence, MAX_FENCED_TITLE_CHARS, MAX_LINE_CHARS,
 };
@@ -485,7 +486,7 @@ async fn create_focus_session(
             initial_context.as_deref(),
         );
         let mut mgr = daemon.session_mgr.lock().unwrap();
-        if let Err(e) = mgr.send_user_message(&tag, &message, &[]) {
+        if let Err(e) = mgr.send_app_message(&tag, &message, &[], AppLabel::AgentSeed) {
             tracing::warn!(tag = %tag, "create_focus: failed to seed the first message: {e}");
             mgr.stop(&tag);
             return Err(CreateFocusError::SeedFailed(format!(
@@ -496,7 +497,7 @@ async fn create_focus_session(
 
     if let Some(first) = first_message {
         let mut mgr = daemon.session_mgr.lock().unwrap();
-        if let Err(e) = mgr.send_user_message(&tag, &first, &[]) {
+        if let Err(e) = mgr.send_app_message(&tag, &first, &[], AppLabel::AgentSeed) {
             tracing::warn!("create_focus: failed to write the first message: {e}");
             mgr.stop(&tag);
             return Err(CreateFocusError::SeedFailed(format!(

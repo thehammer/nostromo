@@ -40,15 +40,17 @@ use super::{
         MAC_APP_CLIENT_KIND,
     },
     protocol::{
-        ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, ServerMsg,
-        SessionAction, Topic, TrackerEditError, FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_MERGE,
+        ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, QueueResultCode,
+        QueueReturnedEntry, ServerMsg, SessionAction, Topic, TrackerEditError, FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_MERGE,
         FEATURE_AUTHORED_PRS_MERGE_QUEUE, FEATURE_AUTHORED_PRS_NOTIFY, FEATURE_AUTHORED_PRS_PERRI,
         FEATURE_CONVERSATION_HISTORY, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN,
-        FEATURE_SLASH_COMMANDS, FEATURE_TERMINAL_STAGING_ONLY, FEATURE_TRACKER_ACK_DROPPED,
+        FEATURE_SESSION_QUEUE, FEATURE_SLASH_COMMANDS, FEATURE_TERMINAL_STAGING_ONLY, FEATURE_TRACKER_ACK_DROPPED,
         FEATURE_TRACKER_CONFLICT_IDS, FEATURE_TRACKER_EDIT, MAX_FRAME_LEN, MIN_CLIENT_VERSION,
         PROTOCOL_VERSION,
     },
-    session_manager::{ModelRequestOutcome, ResendTrigger, SessionManager, SwitchRequest},
+    session_manager::{
+        ModelRequestOutcome, QueueVerb, ResendTrigger, SessionManager, SwitchRequest,
+    },
 };
 use crate::approvals::broker::ApprovalBroker;
 use crate::approvals::wire::{AnswerRefusal, RefusalChannel};
@@ -573,6 +575,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
         FEATURE_FOCUS_ACTIVITY.to_string(),
         FEATURE_SLASH_COMMANDS.to_string(),
         FEATURE_CONVERSATION_HISTORY.to_string(),
+        FEATURE_SESSION_QUEUE.to_string(),
         FEATURE_TRACKER_EDIT.to_string(),
         FEATURE_TRACKER_CONFLICT_IDS.to_string(),
         FEATURE_TRACKER_ACK_DROPPED.to_string(),
@@ -1214,6 +1217,8 @@ where
                             | ClientMsg::ApprovalsLogQuery { operator_nonce: sent, .. }
                             | ClientMsg::ApprovalsLogEntry { operator_nonce: sent, .. }
                             | ClientMsg::ClaudeLoginAction { operator_nonce: sent, .. }
+                            | ClientMsg::SessionQueueTakeBack { operator_nonce: sent, .. }
+                            | ClientMsg::SessionQueueRemove { operator_nonce: sent, .. }
                             | ClientMsg::PaneAction { operator_nonce: sent, .. }
                             | ClientMsg::TrackerEdit { operator_nonce: sent, .. }
                                 if trust == PeerTrust::OperatorApp =>
@@ -1362,6 +1367,44 @@ where
         return Ok(());
     }
     write_frame(writer, bytes).await
+}
+
+/// Answer a take-back or remove of a queued message. Only the verified Mac
+/// app, with the connection's nonce from a process still verified (checked by
+/// the caller), changes a queue; anyone else changes nothing and is answered
+/// `not_allowed` with no content. The log carries a code, the connection key,
+/// the trust class and the pid, never the message, its text or its images.
+fn answer_queue_verb(
+    verb: QueueVerb,
+    (tag, id, request_id): (String, String, String),
+    trust: PeerTrust,
+    answer_check: Option<Result<(), String>>,
+    (conn_key, peer): (&str, Option<&PeerInfo>),
+    session_mgr: &Arc<Mutex<SessionManager>>,
+    targeted_tx: &mpsc::UnboundedSender<ServerMsg>,
+) {
+    let allowed = trust == PeerTrust::OperatorApp && matches!(answer_check, Some(Ok(())));
+    let (code, text, images) = if allowed {
+        let answer = session_mgr.lock().unwrap().queue_verb(&tag, &id, verb);
+        (answer.code, answer.text, answer.images)
+    } else {
+        debug!(
+            conn_key,
+            ?trust,
+            peer_pid = peer.map(|p| p.pid),
+            code = "not_allowed",
+            "session queue verb refused"
+        );
+        (QueueResultCode::NotAllowed, None, Vec::new())
+    };
+    let _ = targeted_tx.send(ServerMsg::SessionQueueResult {
+        tag,
+        request_id,
+        id,
+        code,
+        text,
+        images,
+    });
 }
 
 // ── client command dispatch ──────────────────────────────────────────────────────
@@ -1607,7 +1650,12 @@ fn handle_client_msg(
             mgr.detach(&tag, conn_key);
         }
 
-        ClientMsg::SessionSend { tag, text, images } => {
+        ClientMsg::SessionSend {
+            tag,
+            text,
+            images,
+            client_ref,
+        } => {
             let mut mgr = session_mgr.lock().unwrap();
             // A network peer never reaches here (`session_send` is refused for
             // it, see `peer::refused_for_network`). Kept as defense in
@@ -1617,7 +1665,7 @@ fn handle_client_msg(
             if trust.is_network() && mgr.has_live_session(&tag) {
                 sensitive.mark_network_driven(&tag);
             }
-            if let Err(e) = mgr.send_user_message(&tag, &text, &images) {
+            if let Err(e) = mgr.send_typed_message(&tag, &text, &images, client_ref) {
                 warn!(conn_key, %tag, "SessionSend error: {e}");
                 let _ = targeted_tx.send(ServerMsg::Error {
                     message: format!("SessionSend failed: {e}"),
@@ -1665,9 +1713,70 @@ fn handle_client_msg(
             }
         }
 
+        ClientMsg::SessionQueueWatch { tag } => {
+            let mut mgr = session_mgr.lock().unwrap();
+            if let Err(e) = mgr.queue_watch(&tag, conn_key) {
+                warn!(conn_key, %tag, "SessionQueueWatch error: {e}");
+                let _ = targeted_tx.send(ServerMsg::Error {
+                    message: format!("SessionQueueWatch failed: {e}"),
+                });
+            }
+        }
+
+        ClientMsg::SessionQueueTakeBack {
+            tag,
+            id,
+            request_id,
+            ..
+        } => answer_queue_verb(
+            QueueVerb::TakeBack,
+            (tag, id, request_id),
+            trust,
+            answer_check,
+            (conn_key, peer),
+            session_mgr,
+            targeted_tx,
+        ),
+
+        ClientMsg::SessionQueueRemove {
+            tag,
+            id,
+            request_id,
+            ..
+        } => answer_queue_verb(
+            QueueVerb::Remove,
+            (tag, id, request_id),
+            trust,
+            answer_check,
+            (conn_key, peer),
+            session_mgr,
+            targeted_tx,
+        ),
+
         ClientMsg::SessionInterrupt { tag } => {
             let mut mgr = session_mgr.lock().unwrap();
-            match mgr.interrupt(&tag) {
+            let (outcome, dropped) = mgr.interrupt_returning(&tag);
+            // What Stop dropped goes back, text and all, to the operator app
+            // that pressed it and watches this queue: nobody else gets texts.
+            if trust == PeerTrust::OperatorApp
+                && !dropped.typed.is_empty()
+                && mgr.queue_watching(&tag, conn_key)
+            {
+                let _ = targeted_tx.send(ServerMsg::SessionQueueReturned {
+                    tag: tag.clone(),
+                    reason: "stopped".to_string(),
+                    entries: dropped
+                        .typed
+                        .into_iter()
+                        .map(|e| QueueReturnedEntry {
+                            id: e.id,
+                            text: e.text,
+                            images: e.images,
+                        })
+                        .collect(),
+                });
+            }
+            match outcome {
                 Ok(crate::ipc::session_manager::InterruptOutcome::DiscardedHold) => {
                     // Said without content: what was held is gone, and nothing is sent after the sign-in.
                     let _ = targeted_tx.send(ServerMsg::Notification {

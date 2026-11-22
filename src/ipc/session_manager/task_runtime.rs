@@ -26,6 +26,7 @@ pub(super) use verbs::{ensure_probe, read_output, stop_task};
 pub use verbs::{OutputReply, StopReport};
 
 use super::control::{control, says_unsupported, CONTROL_TIMEOUT};
+use super::queue::QueueFeed;
 use super::{lock_recover, SessionEvent, Shared};
 use crate::ipc::protocol::{ServerMsg, TaskDetailMsg, TaskMeta, TasksSnapshot};
 use crate::ipc::stream_json::SessionTranscript;
@@ -562,11 +563,25 @@ async fn read_preview(shared: &Shared, target: &PreviewTarget) -> Option<String>
 /// Forward one session's events to one client, in order. On `Lagged` the
 /// events skipped may have held the latest snapshot or detail, so the current
 /// ones are sent before carrying on.
+#[cfg(test)]
 pub(super) async fn forward_session_events(
+    rx: broadcast::Receiver<SessionEvent>,
+    send: impl Fn(ServerMsg) -> bool,
+    tag: String,
+    runtime: Arc<TaskRuntime>,
+) {
+    forward_session_events_with(rx, send, tag, runtime, None).await;
+}
+
+/// [`forward_session_events`], carrying the session's queue snapshots to a
+/// client that watches the queue (`queue`; `None` forwards none, and a client
+/// that never watches gets none either).
+pub(super) async fn forward_session_events_with(
     mut rx: broadcast::Receiver<SessionEvent>,
     send: impl Fn(ServerMsg) -> bool,
     tag: String,
     runtime: Arc<TaskRuntime>,
+    queue: Option<QueueFeed>,
 ) {
     loop {
         match rx.recv().await {
@@ -595,6 +610,10 @@ pub(super) async fn forward_session_events(
                     },
                     SessionEvent::Tasks(snapshot) => tasks_msg(&tag, &snapshot),
                     SessionEvent::TaskDetail(detail) => detail_msg(&tag, &detail),
+                    SessionEvent::Queue(snapshot) => match &queue {
+                        Some(feed) if feed.forwards(snapshot.rev) => snapshot.into_msg(&tag),
+                        _ => continue,
+                    },
                 };
                 if !send(msg) {
                     break; // client disconnected
@@ -608,6 +627,12 @@ pub(super) async fn forward_session_events(
                 }
                 for detail in details {
                     if !send(detail_msg(&tag, &detail)) {
+                        return;
+                    }
+                }
+                // The skipped events may have held the latest queue too.
+                if let Some(snapshot) = queue.as_ref().and_then(QueueFeed::resend) {
+                    if !send(snapshot.into_msg(&tag)) {
                         return;
                     }
                 }

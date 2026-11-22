@@ -129,8 +129,13 @@ pub fn notify(
     let sent = {
         let mut g = mgr.lock().unwrap();
         g.ensure_session(tag).is_ok()
-            && g.send_user_message_then(tag, &composed.text, delivered)
-                .is_ok()
+            && g.send_app_message_then(
+                tag,
+                &composed.text,
+                crate::ipc::session_manager::AppLabel::MotherOverview,
+                delivered,
+            )
+            .is_ok()
     };
     if !sent {
         actions.release_send(&composed.row.repo, composed.row.number, tag, digest);

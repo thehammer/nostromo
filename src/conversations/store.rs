@@ -377,6 +377,9 @@ impl ConversationHistory {
     /// first prompt is stored, when a turn completes with it delivered
     /// ([`Self::turn_completed`]). A held message never counts; a discarded one
     /// ([`Self::discard_candidate`]) never reaches the file.
+    ///
+    /// True when this message became the candidate (so the caller can tell
+    /// which queued message the first prompt would come from).
     pub fn note_user_send(
         &self,
         sid: &str,
@@ -384,10 +387,10 @@ impl ConversationHistory {
         has_images: bool,
         sensitive: bool,
         now: i64,
-    ) {
+    ) -> bool {
         let mut s = lock(&self.inner);
         let Some(e) = s.data.entries.iter_mut().find(|e| e.sid == sid) else {
-            return;
+            return false;
         };
         let newly_sensitive = sensitive && !e.sensitive;
         if newly_sensitive {
@@ -395,10 +398,13 @@ impl ConversationHistory {
         }
         e.last_active_ms = now;
         let first = !e.has_turn;
+        let mut became_candidate = false;
         if first {
-            s.candidates
-                .entry(sid.to_owned())
-                .or_insert_with(|| Some((text.to_owned(), has_images)));
+            if let std::collections::hash_map::Entry::Vacant(v) = s.candidates.entry(sid.to_owned())
+            {
+                v.insert(Some((text.to_owned(), has_images)));
+                became_candidate = true;
+            }
         }
         let how = if newly_sensitive {
             Write::Now
@@ -406,6 +412,28 @@ impl ConversationHistory {
             Write::Later
         };
         self.commit(s, now, how);
+        became_candidate
+    }
+
+    /// The queued message that was the candidate for `sid`'s first prompt left
+    /// the queue without being delivered (taken back, removed, dropped by
+    /// Stop): hand candidacy to `next` (the oldest message still queued), or
+    /// clear it when there is none. A conversation whose candidate was already
+    /// given up (a held message) is left as it is.
+    pub fn replace_candidate(&self, sid: &str, next: Option<(String, bool)>) {
+        let mut s = lock(&self.inner);
+        let Some(slot) = s.candidates.get_mut(sid) else {
+            return;
+        };
+        if slot.is_none() {
+            return;
+        }
+        match next {
+            Some(next) => *slot = Some(next),
+            None => {
+                s.candidates.remove(sid);
+            }
+        }
     }
 
     /// The message that was to open `sid` was discarded (Stop on a held
