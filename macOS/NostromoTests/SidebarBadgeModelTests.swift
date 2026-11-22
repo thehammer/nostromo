@@ -195,9 +195,7 @@ final class SidebarBadgeModelTests: XCTestCase {
 
         wait(for: [emissions], timeout: 5)
         // Give any (incorrect) trailing emission a chance to surface; over-fulfilment fails the test.
-        let settle = expectation(description: "settled")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { settle.fulfill() }
-        wait(for: [settle], timeout: 5)
+        drainMain(for: 0.2)
     }
 }
 

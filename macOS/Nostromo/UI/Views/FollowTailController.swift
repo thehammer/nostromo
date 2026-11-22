@@ -367,7 +367,11 @@ final class TranscriptViewportCoordinator {
     /// height changes, unless that was done before the change that asked for this pass.
     func beginPass() {
         // A width change moves the clip's origin itself (AppKit clamps it as the document is
-        // resized), so that is not the operator scrolling.
+        // resized), so that is not the operator scrolling. This exemption is deliberate and cannot be
+        // narrowed by comparing origins: a scroll the operator makes between the width change and
+        // this pass (one main-queue hop) cannot be told from AppKit's clamp, so for a pane that was
+        // reading the pass restores the position captured before the change. The pane that was
+        // following the tail does follow the live state (see `endPass`).
         if case .width? = pending {} else if pending != nil, abs(clip.bounds.minY - pendingViewportTop) > 0.5 {
             pending = nil
         }
@@ -384,7 +388,7 @@ final class TranscriptViewportCoordinator {
         switch pending {
         case .row(let anchor, let screenY, _)?:
             viewport.origin.y = virtualizer.restoredTop(for: anchor, itemOffset: itemOffset) - screenY
-        case .width(_, _, let wasPinned)? where wasPinned:
+        case .width(_, _, let wasPinned)? where wasPinned && followTail.isPinned:
             viewport.origin.y = lowest
         case .width(let anchor?, let fraction, _)?:
             viewport.origin.y = widthRestoredTop(anchor, fraction: fraction)
@@ -412,8 +416,9 @@ final class TranscriptViewportCoordinator {
                                                                     documentHeight: documentHeight)
                 followTail.setPinned(pinned, cause: .foldToggle)
             }
-        case .width(_, _, let wasPinned)? where wasPinned:
-            followTail.setPinned(true, cause: .boundsChange)
+        case .width(_, _, let wasPinned)? where wasPinned && followTail.isPinned:
+            // Only while it still follows: an operator who scrolled up since the width change is not
+            // pulled back down (a resize does not unpin a pane, so a pane no longer pinned was scrolled).
             followTail.scrollToBottom()
         case .width(let anchor?, let fraction, _)?:
             scroll(toTop: clamped(widthRestoredTop(anchor, fraction: fraction)))
@@ -437,6 +442,9 @@ final class TranscriptViewportCoordinator {
     /// Where the viewport top goes to keep the block `anchor` named at the old width. The item is found
     /// by key; the same fraction of its new height is the offset into it, but never more than
     /// `widthAnchorTolerance` from the offset it had, so the line the reader was on stays where it was.
+    /// The fraction picks the side of the old offset inside that band; the clamp is what keeps the line
+    /// in place. Each change is clamped on its own, so a long drag through many widths can drift further
+    /// in total (about 19.5 pt over a 40-step narrowing drag; it reverses on the way back).
     /// Before the island exists again (the pass has not built it), the turn-level offset is all there is.
     private func widthRestoredTop(_ anchor: TurnListVirtualizer.Anchor, fraction: CGFloat) -> CGFloat {
         let itemTop = virtualizer.restoredTop(for: TurnListVirtualizer.Anchor(

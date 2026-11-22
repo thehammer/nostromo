@@ -59,6 +59,11 @@ extension RigWindow {
     /// the label rather than in `sendEvent`: in a `RigWindow` that is not active, the label
     /// installs its field editor and gives it the mouse-down, whose tracking loop then follows
     /// the queued drag as in an active app. Nothing activates the app. Installed once.
+    ///
+    /// Process-wide and never uninstalled: it wraps `NSTextField.mouseDown` for every test in
+    /// the process from the first `makeRigWindow` on. It only acts when the field is in a
+    /// `RigWindow`, the app is inactive, and the field is selectable and not editable. A class
+    /// that builds a `RigWindow` without `makeRigWindow` never installs it (none does today).
     static let handsLabelClicksToFieldEditor: Void = {
         let sel = #selector(NSResponder.mouseDown(with:))
         guard let method = class_getInstanceMethod(NSTextField.self, sel) else { return }
@@ -398,6 +403,17 @@ final class ProseSelectionTests: MouseQueueTestCase {
     }
 
     // MARK: hit-testing
+
+    func testInstallingTheLabelClickShimTwiceWrapsTextFieldMouseDownOnlyOnce() throws {
+        let sel = #selector(NSResponder.mouseDown(with:))
+        _ = RigWindow.handsLabelClicksToFieldEditor   // the first install (makeRigWindow does it too)
+        let once = try XCTUnwrap(class_getInstanceMethod(NSTextField.self, sel).map(method_getImplementation))
+        _ = RigWindow.handsLabelClicksToFieldEditor
+        _ = makeRigWindow(self)
+        let again = try XCTUnwrap(class_getInstanceMethod(NSTextField.self, sel).map(method_getImplementation))
+        XCTAssertEqual(unsafeBitCast(again, to: Int.self), unsafeBitCast(once, to: Int.self),
+                       "a second install must not wrap the already-wrapped method again")
+    }
 
     func testAMouseDownOverTheTextReachesTheTextItself() {
         for element in ProseElement.allCases {
