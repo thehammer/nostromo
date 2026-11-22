@@ -891,8 +891,9 @@ async fn a_403_naming_abuse_detection_in_any_case_is_a_pause_of_about_a_minute()
     a_403_saying_pauses_about_a_minute("ABUSE detection mechanism triggered").await;
 }
 
-#[tokio::test]
-async fn a_permission_403_with_requests_remaining_is_an_error_with_backoff_not_a_pause() {
+/// A 403 with allowance left and no `Retry-After` whose body says `words`: an
+/// error with back-off, never a pause.
+async fn a_403_saying_is_an_error_not_a_pause(words: &str) {
     let fake = Fake::new();
     twenty(&fake);
     fake.set_rate(Some(Rate {
@@ -903,10 +904,7 @@ async fn a_permission_403_with_requests_remaining_is_an_error_with_backoff_not_a
     let mut rig = Rig::start(fake.clone(), RigOpts::default()).await;
     rig.set_demand("visible").await;
     rig.run(secs(10), secs(1)).await;
-    fake.force_words(
-        "search",
-        Some("Resource protected by organization SAML enforcement"),
-    );
+    fake.force_words("search", Some(words));
     fake.force(
         "search",
         Some(Forced {
@@ -933,6 +931,19 @@ async fn a_permission_403_with_requests_remaining_is_an_error_with_backoff_not_a
             .any(|(_, s)| s.poll.state == PollState::Error),
         "it is an error (retried with back-off)"
     );
+}
+
+#[tokio::test]
+async fn a_permission_403_with_requests_remaining_is_an_error_with_backoff_not_a_pause() {
+    a_403_saying_is_an_error_not_a_pause("Resource protected by organization SAML enforcement")
+        .await;
+}
+
+#[tokio::test]
+async fn only_the_first_few_kilobytes_of_a_403_body_are_read_for_the_limit_wording() {
+    // The phrase sits past the read bound, so it is never seen: not a limit.
+    let padded = format!("{} secondary rate limit", "x".repeat(8 * 1024));
+    a_403_saying_is_an_error_not_a_pause(&padded).await;
 }
 
 #[tokio::test]
