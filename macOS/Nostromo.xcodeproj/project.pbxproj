@@ -386,6 +386,7 @@
 		ZZ0000000000000000CH4C01 /* ComposerHistoryNavigator.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4C00 /* ComposerHistoryNavigator.swift */; };
 		ZZ0000000000000000CH4C02 /* ComposerHistoryNavigator.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4C00 /* ComposerHistoryNavigator.swift */; };
 		ZZ0000000000000000CH4D01 /* ComposerHistoryStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4D00 /* ComposerHistoryStoreTests.swift */; };
+		ZZ0000000000000000CH4G01 /* ComposerHistoryRelaunchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4G00 /* ComposerHistoryRelaunchTests.swift */; };
 		ZZ0000000000000000CH4E01 /* ComposerHistoryNavigatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4E00 /* ComposerHistoryNavigatorTests.swift */; };
 		ZZ0000000000000000CH4F01 /* ReplInputBarHistoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4F00 /* ReplInputBarHistoryTests.swift */; };
 		ZZ0000000000000000FV0301 /* TranscriptModeChip.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000FV0300 /* TranscriptModeChip.swift */; };
@@ -1149,6 +1150,7 @@
 		ZZ0000000000000000CH4B00 /* FocusSensitivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusSensitivity.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH4C00 /* ComposerHistoryNavigator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerHistoryNavigator.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH4D00 /* ComposerHistoryStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerHistoryStoreTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000CH4G00 /* ComposerHistoryRelaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerHistoryRelaunchTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH4E00 /* ComposerHistoryNavigatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerHistoryNavigatorTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH4F00 /* ReplInputBarHistoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplInputBarHistoryTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TF0400 /* TranscriptViewMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptViewMenu.swift; sourceTree = "<group>"; };
@@ -1890,6 +1892,7 @@
 				ZZ0000000000000000TF0900 /* ToolGroupLiveTests.swift */,
 				ZZ0000000000000000TF1000 /* TranscriptFoldStoreTests.swift */,
 				ZZ0000000000000000CH4D00 /* ComposerHistoryStoreTests.swift */,
+				ZZ0000000000000000CH4G00 /* ComposerHistoryRelaunchTests.swift */,
 				ZZ0000000000000000CH4E00 /* ComposerHistoryNavigatorTests.swift */,
 				ZZ0000000000000000CH4F00 /* ReplInputBarHistoryTests.swift */,
 				ZZ0000000000000000FV1800 /* FocusModeSyncTests.swift */,
@@ -2947,6 +2950,7 @@
 				ZZ0000000000000000TF0901 /* ToolGroupLiveTests.swift in Sources */,
 				ZZ0000000000000000TF1001 /* TranscriptFoldStoreTests.swift in Sources */,
 				ZZ0000000000000000CH4D01 /* ComposerHistoryStoreTests.swift in Sources */,
+				ZZ0000000000000000CH4G01 /* ComposerHistoryRelaunchTests.swift in Sources */,
 				ZZ0000000000000000CH4E01 /* ComposerHistoryNavigatorTests.swift in Sources */,
 				ZZ0000000000000000CH4F01 /* ReplInputBarHistoryTests.swift in Sources */,
 				ZZ0000000000000000FV1801 /* FocusModeSyncTests.swift in Sources */,
