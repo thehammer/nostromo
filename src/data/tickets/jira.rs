@@ -178,7 +178,7 @@ impl JiraProvider {
             credentials,
             unconfigured_message: unconfigured_message(&credentials_path),
             base_url,
-            http: reqwest::Client::new(),
+            http: http_client(),
         }
     }
 
@@ -193,7 +193,7 @@ impl JiraProvider {
             credentials,
             unconfigured_message: unconfigured_message(&default_credentials_path()),
             base_url,
-            http: reqwest::Client::new(),
+            http: http_client(),
         }
     }
 
@@ -628,6 +628,15 @@ fn extract_text(node: &Value) -> String {
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
+
+/// Never follow a redirect: the Basic credential must only reach the validated host.
+fn http_client() -> reqwest::Client {
+    // (No `unwrap_or_default`: a default client would follow redirects.)
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build the Jira HTTP client")
+}
 
 #[cfg(test)]
 mod tests {
@@ -1310,6 +1319,35 @@ mod tests {
         let provider = JiraProvider::for_test(Some(jira_creds()), server.uri());
         let err = provider.fetch("MISSING-1").await.unwrap_err();
         assert_eq!(err, TicketError::UnknownTicket);
+    }
+
+    /// The Basic credential must only ever reach the configured site: a 3xx is
+    /// an error and the redirect target (here a second server) sees nothing.
+    #[tokio::test]
+    async fn a_redirect_is_never_followed_so_the_credential_cannot_reach_another_host() {
+        let elsewhere = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "values": [{"key": "EVIL"}], "isLast": true
+            })))
+            .mount(&elsewhere)
+            .await;
+        let jira = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", elsewhere.uri().as_str()),
+            )
+            .mount(&jira)
+            .await;
+
+        let provider = JiraProvider::for_test(Some(jira_creds()), jira.uri());
+        assert!(provider.fetch("PROJ-1").await.is_err());
+        assert!(provider.project_keys().await.is_err());
+
+        assert!(
+            elsewhere.received_requests().await.unwrap().is_empty(),
+            "the redirect target must receive nothing"
+        );
     }
 
     /// `key` is spliced unescaped into the request path — a key shaped like

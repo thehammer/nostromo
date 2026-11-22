@@ -281,7 +281,7 @@ impl AuthoredPrActions {
                 }
                 return refuse(match f.error {
                     ApiError::RateLimited { .. } => "rate_limited",
-                    ApiError::Unauthorized => "token_cannot_merge",
+                    ApiError::Unauthorized | ApiError::Forbidden => "token_cannot_merge",
                     _ => "unreachable",
                 });
             }

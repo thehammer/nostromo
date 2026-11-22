@@ -44,13 +44,19 @@ pub const MAX_ALIASES: usize = 20;
 /// wait at least a minute.
 pub const SECONDARY_WAIT: Duration = Duration::from_secs(60);
 const MAX_BODY: usize = 16 * 1024 * 1024;
+/// How much of a 403's body is read to tell a secondary limit from a permission
+/// refusal. The body is only matched against fixed phrases; it is never kept or logged.
+const MAX_403_BODY: usize = 4 * 1024;
 
 /// Why a request failed. No variant carries a URL or any response text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiError {
     /// 401.
     Unauthorized,
-    /// 429 or 403: stop until `Retry-After`, the reset of an exhausted limit, or a minute.
+    /// 403 that is not a limit: the token or its SSO/permissions cannot do this. Not
+    /// a pause; retrying every minute would never help.
+    Forbidden,
+    /// 429, or a 403 that is a limit: stop until `Retry-After`, the reset of an exhausted limit, or a minute.
     /// `wait` is the server's `Retry-After`; `None` means until the reset in `Meta::rate`
     /// (or a minute when there is none).
     RateLimited {
@@ -68,6 +74,7 @@ impl ApiError {
         match self {
             ApiError::Unauthorized => "unauthorized",
             ApiError::RateLimited { .. } => "rate_limited",
+            ApiError::Forbidden => "forbidden",
             ApiError::Status(s) if *s >= 500 => "server_error",
             ApiError::Status(_) => "client_error",
             ApiError::Transport => "transport",
@@ -109,6 +116,20 @@ pub struct Api {
 
 fn header_str<'a>(h: &'a HeaderMap, name: &str) -> Option<&'a str> {
     h.get(name).and_then(|v| v.to_str().ok())
+}
+
+/// Does this 403's body (read up to [`MAX_403_BODY`] bytes, nothing kept) name a
+/// secondary / abuse rate limit?
+async fn says_secondary_limit(resp: &mut reqwest::Response) -> bool {
+    let mut head: Vec<u8> = Vec::new();
+    while head.len() < MAX_403_BODY {
+        match resp.chunk().await {
+            Ok(Some(c)) => head.extend_from_slice(&c[..c.len().min(MAX_403_BODY - head.len())]),
+            _ => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&head).to_lowercase();
+    text.contains("secondary rate limit") || text.contains("abuse")
 }
 
 fn read_meta(h: &HeaderMap) -> Meta {
@@ -177,7 +198,7 @@ impl Api {
         h
     }
 
-    async fn finish(&self, resp: reqwest::Response) -> Result<Reply, Failure> {
+    async fn finish(&self, mut resp: reqwest::Response) -> Result<Reply, Failure> {
         let status = resp.status().as_u16();
         let meta = read_meta(resp.headers());
         let retry_after = header_str(resp.headers(), "retry-after").and_then(parse_retry_after);
@@ -189,13 +210,17 @@ impl Api {
             });
         }
         if status == 429 || status == 403 {
-            // A 403 or 429 that is not a primary limit (`remaining` above zero, no
-            // `Retry-After`) is a secondary limit: pause for a bounded minute.
             let error = if let Some(wait) = retry_after {
                 ApiError::RateLimited { wait: Some(wait) }
             } else if remaining_zero {
                 ApiError::RateLimited { wait: None }
+            } else if status == 403 && !says_secondary_limit(&mut resp).await {
+                // A 403 with allowance left and no `Retry-After` is a limit only when
+                // GitHub's body says so; otherwise the token lacks access (SSO,
+                // permission) and waiting a minute will not change that.
+                ApiError::Forbidden
             } else {
+                // A secondary limit: pause for a bounded minute.
                 ApiError::RateLimited {
                     wait: Some(SECONDARY_WAIT),
                 }

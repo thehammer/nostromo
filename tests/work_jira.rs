@@ -186,9 +186,38 @@ fn tuned(
     poll: Duration,
     backoff: Duration,
 ) -> Arc<JiraWorkSource> {
+    tuned_on(src, fixed_clock(), base, poll, backoff)
+}
+
+/// A clock the test moves by hand: starts at `fixed_now()`, never advances by itself.
+#[derive(Clone)]
+struct StepClock(Arc<Mutex<chrono::DateTime<Utc>>>);
+
+impl StepClock {
+    fn new() -> Self {
+        Self(Arc::new(Mutex::new(fixed_now())))
+    }
+
+    fn advance(&self, by: Duration) {
+        *self.0.lock().unwrap() += chrono::Duration::from_std(by).unwrap();
+    }
+
+    fn clock(&self) -> Clock {
+        let inner = self.0.clone();
+        Arc::new(move || *inner.lock().unwrap())
+    }
+}
+
+fn tuned_on(
+    src: JiraWorkSource,
+    clock: Clock,
+    base: String,
+    poll: Duration,
+    backoff: Duration,
+) -> Arc<JiraWorkSource> {
     Arc::new(
         src.with_base_url(base)
-            .with_clock(fixed_clock())
+            .with_clock(clock)
             .file_credentials_only()
             .with_poll_interval(poll)
             .with_env_watch_interval(Duration::from_millis(50))
@@ -2339,24 +2368,40 @@ async fn a_verified_identity_is_not_asked_again_on_every_empty_poll() {
 }
 
 #[tokio::test]
-async fn a_verified_identity_is_asked_again_once_its_time_to_live_has_passed() {
+async fn a_verified_identity_is_asked_again_only_once_its_time_to_live_has_passed_on_the_injected_clock(
+) {
     let server = MockServer::start().await;
     empty_search().mount(&server).await;
     myself(who_am_i()).mount(&server).await;
     let dir = tempfile::tempdir().unwrap();
     let env = write_env(dir.path(), &env_text(GOOD_TOKEN));
-    // Trusted for 100 ms; the poll interval (150 ms) outlasts it.
-    let src = tuned(
-        JiraWorkSource::new(&env).with_identity_ttl(Duration::from_millis(100)),
+    let time = StepClock::new();
+    // Trusted for 10 minutes of *injected* time; real time passing means nothing.
+    let src = tuned_on(
+        JiraWorkSource::new(&env).with_identity_ttl(Duration::from_secs(600)),
+        time.clock(),
         server.uri(),
-        Duration::from_millis(150),
+        Duration::from_millis(50),
         Duration::from_millis(50),
     );
     let mut rx = src.spawn(Arc::new(Notify::new()));
     wait_state(&mut rx, SourceState::Empty).await;
 
-    wait_calls(&server, "GET", MYSELF, 2).await;
+    // Positive waits only: several empty polls happen, all inside the TTL.
+    wait_calls(&server, "POST", SEARCH_JQL, 4).await;
+    assert_eq!(myself_calls(&server).await.len(), 1, "inside the TTL");
 
+    time.advance(Duration::from_secs(599));
+    let seen = search_calls(&server).await;
+    wait_calls(&server, "POST", SEARCH_JQL, seen + 2).await;
+    assert_eq!(
+        myself_calls(&server).await.len(),
+        1,
+        "one second short of the TTL"
+    );
+
+    time.advance(Duration::from_secs(2));
+    wait_calls(&server, "GET", MYSELF, 2).await;
     assert_eq!(rx.borrow().0.state, SourceState::Empty);
 }
 
@@ -2369,19 +2414,52 @@ async fn an_expired_identity_that_myself_now_rejects_becomes_unauthenticated() {
     myself(ResponseTemplate::new(401)).mount(&server).await;
     let dir = tempfile::tempdir().unwrap();
     let env = write_env(dir.path(), &env_text(GOOD_TOKEN));
-    let src = tuned(
-        JiraWorkSource::new(&env).with_identity_ttl(Duration::from_millis(100)),
+    let time = StepClock::new();
+    let src = tuned_on(
+        JiraWorkSource::new(&env).with_identity_ttl(Duration::from_secs(600)),
+        time.clock(),
         server.uri(),
-        Duration::from_millis(150),
+        Duration::from_millis(50),
         Duration::from_millis(50),
     );
     let mut rx = src.spawn(Arc::new(Notify::new()));
     wait_state(&mut rx, SourceState::Empty).await;
 
+    time.advance(Duration::from_secs(601));
     let update = wait_state(&mut rx, SourceState::Unauthenticated).await;
 
     assert!(update.0.reason.unwrap().contains("401"));
     assert!(myself_calls(&server).await.len() >= 2);
+}
+
+#[tokio::test]
+async fn a_myself_200_without_a_usable_account_id_is_unauthenticated_not_empty() {
+    let bodies = [
+        ("no accountId", json!({"emailAddress": EMAIL})),
+        ("empty accountId", json!({"accountId": ""})),
+        ("blank accountId", json!({"accountId": "  "})),
+        ("null accountId", json!({"accountId": null})),
+        ("non-string accountId", json!({"accountId": 7})),
+        ("empty object", json!({})),
+    ];
+    for (what, body) in bodies {
+        let server = MockServer::start().await;
+        empty_search().mount(&server).await;
+        myself(json_resp(body)).mount(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        let env = write_env(dir.path(), &env_text(GOOD_TOKEN));
+        let mut rx = source(&env, &server, LONG).spawn(Arc::new(Notify::new()));
+
+        let update = wait_settled(&mut rx).await;
+
+        assert_eq!(
+            update.0.state,
+            SourceState::Unauthenticated,
+            "{what}: a 200 that names nobody must not vouch for the token: {:?}",
+            update.0
+        );
+        assert!(flat(&update).is_empty(), "{what}");
+    }
 }
 
 #[tokio::test]
