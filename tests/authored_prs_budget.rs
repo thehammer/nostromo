@@ -856,36 +856,39 @@ async fn assert_pauses_about_a_minute_then_resumes(rig: &mut Rig, lift: impl FnO
     assert_ne!(rig.snapshot().unwrap().poll.state, PollState::Error);
 }
 
+/// Plenty left in the primary limit (this is GitHub's abuse protection), and a 403
+/// whose body says `words`: a pause of about a minute, then back to work.
+async fn a_403_saying_pauses_about_a_minute(words: &str) {
+    let fake = Fake::new();
+    twenty(&fake);
+    fake.set_rate(Some(Rate {
+        remaining: 4000,
+        limit: 5000,
+        reset: t0() + Chrono::minutes(50),
+    }));
+    let mut rig = Rig::start(fake.clone(), RigOpts::default()).await;
+    rig.set_demand("visible").await;
+    rig.run(secs(10), secs(1)).await;
+    fake.force_words("search", Some(words));
+    fake.force(
+        "search",
+        Some(Forced {
+            status: 403,
+            retry_after: None,
+        }),
+    );
+    let lifted = fake.clone();
+    assert_pauses_about_a_minute_then_resumes(&mut rig, move || lifted.force("search", None)).await;
+}
+
 #[tokio::test]
 async fn a_403_naming_a_secondary_limit_with_requests_remaining_is_a_pause_of_about_a_minute() {
-    // The wording is matched case-insensitively; "abuse" is the older name.
-    for words in [
-        "You have exceeded a Secondary Rate Limit",
-        "ABUSE detection",
-    ] {
-        let fake = Fake::new();
-        twenty(&fake);
-        // Plenty left in the primary limit: this is GitHub's abuse protection.
-        fake.set_rate(Some(Rate {
-            remaining: 4000,
-            limit: 5000,
-            reset: t0() + Chrono::minutes(50),
-        }));
-        let mut rig = Rig::start(fake.clone(), RigOpts::default()).await;
-        rig.set_demand("visible").await;
-        rig.run(secs(10), secs(1)).await;
-        fake.force_words("search", Some(words));
-        fake.force(
-            "search",
-            Some(Forced {
-                status: 403,
-                retry_after: None,
-            }),
-        );
-        let lifted = fake.clone();
-        assert_pauses_about_a_minute_then_resumes(&mut rig, move || lifted.force("search", None))
-            .await;
-    }
+    a_403_saying_pauses_about_a_minute("You have exceeded a Secondary Rate Limit").await;
+}
+
+#[tokio::test]
+async fn a_403_naming_abuse_detection_in_any_case_is_a_pause_of_about_a_minute() {
+    a_403_saying_pauses_about_a_minute("ABUSE detection mechanism triggered").await;
 }
 
 #[tokio::test]
