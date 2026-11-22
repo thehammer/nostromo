@@ -128,9 +128,9 @@ install-daemon: daemon
 	  if [ -z "$$bridge" ]; then if [ -e "$$bdest" ]; then bridge="$$bdest"; else bridge="$$(dirname "$$real")/nostromo-mcp-bridge"; fi; fi; \
 	  stage_daemon="$$real.new.$$$$"; stage_guard="$$guard.new.$$$$"; stage_bridge="$$bridge.new.$$$$"; \
 	  rm -f "$$stage_daemon" "$$stage_guard" "$$stage_bridge"; \
-	  if cp $(NOSTROMO_TARGET_DIR)/release/nostromd "$$stage_daemon" && codesign --force -s - --identifier nostromd "$$stage_daemon" \
-	      && cp $(NOSTROMO_TARGET_DIR)/release/nostromo-guard "$$stage_guard" && codesign --force -s - --identifier nostromo-guard "$$stage_guard" \
-	      && cp $(NOSTROMO_TARGET_DIR)/release/nostromo-mcp-bridge "$$stage_bridge" && codesign --force -s - --identifier nostromo-mcp-bridge "$$stage_bridge"; then :; \
+	  if cp "$(NOSTROMO_TARGET_DIR)/release/nostromd" "$$stage_daemon" && codesign --force -s - --identifier nostromd "$$stage_daemon" \
+	      && cp "$(NOSTROMO_TARGET_DIR)/release/nostromo-guard" "$$stage_guard" && codesign --force -s - --identifier nostromo-guard "$$stage_guard" \
+	      && cp "$(NOSTROMO_TARGET_DIR)/release/nostromo-mcp-bridge" "$$stage_bridge" && codesign --force -s - --identifier nostromo-mcp-bridge "$$stage_bridge"; then :; \
 	  else \
 	    rm -f "$$stage_daemon" "$$stage_guard" "$$stage_bridge"; \
 	    echo "install-daemon: could not copy and sign nostromd, nostromo-guard and nostromo-mcp-bridge; nothing was replaced" >&2; exit 1; \

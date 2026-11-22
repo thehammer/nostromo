@@ -527,7 +527,9 @@ by every build, review and job. Time Machine's local snapshots are whole-volume,
 blocks of everything deleted or replaced on the system volume, and free space reads low long after the
 files are gone (exclusions only keep a folder out of the backup, not out of a snapshot).
 
-The fix is a separate APFS volume that Time Machine never snapshots:
+The goal is a separate APFS volume that Time Machine does not snapshot. It only is one once the `sudo tmutil
+addexclusion` step below has run; until then a local snapshot includes the volume. Find your container first
+(`diskutil list` or `diskutil apfs list`; `disk3` below is the author's):
 
 ```
 diskutil apfs addVolume disk3 APFS Scratch        # shares the container's free space, no size reserved
@@ -539,10 +541,10 @@ What uses it, with no environment variables to set and nothing for the daemon to
 
 - **`make`** (the `Makefile` top): when `/Volumes/Scratch` is mounted and `CARGO_TARGET_DIR` is not already
   set, it exports `CARGO_TARGET_DIR=/Volumes/Scratch/cargo-target/<checkout directory name>` (one directory
-  per checkout, so worktrees never share a target directory), and `install-daemon` copies the binaries from
+  per checkout name, so worktrees never share a target directory; two checkouts with the same directory name do), and `install-daemon` copies the binaries from
   there. Everywhere else (CI, other machines, a volume that is not mounted) it stays `target/`. An explicit
   `CARGO_TARGET_DIR` always wins. The first `make install-daemon` after the change is a full rebuild; the old
   `target/` can then be deleted.
 - Not covered here: Xcode derived data (`-derivedDataPath build`, inside each worktree), Mother's worktree
-  location, and the `~/.claude` review scratch (`perri-clean.sh` and `perri.md` use `/Volumes/Scratch/perri-shared`
+  location, and the `~/.claude` review scratch (those files live outside this repo; they use `/Volumes/Scratch/perri-shared`
   when the volume is mounted).
