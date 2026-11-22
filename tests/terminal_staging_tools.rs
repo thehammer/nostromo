@@ -279,7 +279,7 @@ async fn the_tool_is_listed_for_an_agent() {
 
 #[test]
 fn the_instructions_carry_the_staging_line_within_their_limits() {
-    let text = nostromo_instructions(Some("topic"));
+    let text = nostromo_instructions(Some("topic"), None);
     assert!(
         text.contains(
             "- nostromo.terminal_staging: for a terminal you follow, stage up to 12 single-line commands the user can click to place at its prompt. Only the user presses Enter. One command per entry, plainly; no secrets; never disguise what a command does. A notice says when an entry was inserted, not that it ran."

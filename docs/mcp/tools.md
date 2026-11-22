@@ -762,6 +762,8 @@ commit about to be merged is the one Perri approved (see "Perri's verdict and th
 `docs/authored-prs.md`). It **only records**: it never merges and never writes to GitHub (an `approved` makes one
 read-only look at the PR's head). Requires `nostromd` with the authored-PR list on.
 
+The session `instructions` mention this tool only to `perri` and `claudia` focuses (exact agent-name match; see "Agent quick guide" in `docs/terminal.md`).
+
 **Input**: `{ "repo": "owner/name", "pr": 123, "head_sha": "<40 lowercase hex>", "verdict": "approved" |
 "changes_requested" | "comment", "note"?: "<at most 200 chars>" }`. No other argument is accepted. `repo` must be
 a valid `owner/name`, `pr` a positive integer, `head_sha` the full head commit (a short or upper-case SHA is
