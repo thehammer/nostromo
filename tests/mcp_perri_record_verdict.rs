@@ -178,6 +178,7 @@ async fn harness(actions_wired: bool) -> Harness {
     let (jobs_tx, jobs_rx) = watch::channel(Vec::new());
     let engine = AuthoredPrsSource::spawn(Deps {
         state_root: None,
+        exclude_orgs: Default::default(),
         api_base: github.uri(),
         github: None,
         token_resolver: None,

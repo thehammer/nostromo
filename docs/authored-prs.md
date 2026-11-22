@@ -8,6 +8,11 @@ Code: `src/data/authored_prs/`.
 Off switch: `authored_prs = false` in `config.toml` (no feature advertised, no
 task, no relay interest).
 
+Exclusion: `authored_prs_exclude_orgs = ["some-org"]` in `config.toml` leaves
+whole GitHub owners out of the list (default `[]`, which changes nothing). It is
+for a machine that must not show another employer's PRs. See
+[Excluding organisations](#excluding-organisations).
+
 ## Sources
 
 - **Carefeed (the relay's org):** live from the github relay. `pr.closed` and
@@ -332,6 +337,54 @@ queue" and the button is available again. One button width for every state, so r
 
 Not verified by tests, because it needs the real thing: a real enqueue on a real admin-portal PR, that the token may
 enqueue, the real queue states and positions (and a queued PR's `mergeStateStatus`), VoiceOver.
+
+## Excluding organisations
+
+`authored_prs_exclude_orgs = ["carefeed"]` is a list of GitHub owner logins,
+compared case-insensitively with the owner part of `owner/name`. An entry is
+trimmed and an empty one dropped; one that contains `/` or a character outside
+`[A-Za-z0-9-]` (or is over 39 characters) is ignored, and a value that is not
+an array is ignored as a whole, each with one startup warning that names the key
+and never a value. The list is fixed for the daemon's life (restart to change).
+
+An excluded owner's PRs are kept out at every way in, so none of them is read,
+held, published or counted:
+
+- **Discovery search:** the query gains one `+-org:<login>` per owner (after
+  `archived:false`), so an excluded org neither costs quota nor fills the
+  100-result page. The path is built once with the client, so the ETag always
+  belongs to the query in force. With an empty list the query is byte for byte
+  the one under Sources. Any result of an excluded owner that still arrives is
+  dropped and left out of `total_open`.
+- **Relay events:** an event whose repo is an excluded owner's is dropped before
+  anything else, so it costs no read and changes nothing.
+- **Detail reads:** a PR whose repo resolves to an excluded owner (a transferred
+  repo) is dropped. Pending-CI polls, ownership and working-copy checks only
+  look at PRs already held, so nothing else adds one.
+- **Saved state:** the engine starts with no PRs, so nothing held can outlive a
+  restart. On start the link/told entries (`authored-pr-links.json`) and Perri
+  verdicts (`perri-verdicts.json`) of excluded owners are forgotten in memory
+  (and the files are rewritten at once, so their names do not stay on disk). If
+  that write fails, the entries are gone from memory but stay on disk until the
+  next successful write or start (one warning, no names). `focus-memory.json`
+  keeps no repo (a focus's tag, agent, folder and name), so it cannot be
+  filtered by owner; it is only ever shown through a PR that is listed.
+- **Verbs:** every verb that takes a repo resolves it through the list, so an
+  excluded repo is refused (`unknown_pr`, `not_found`). `perri.record_verdict`
+  with valid arguments for an excluded repo gets `pr_unknown` with no read, no
+  write and no echo. Unlike an unknown repo, a `changes_requested` or `comment`
+  for it is not recorded (that would write the name to disk), so a local caller
+  can tell the two apart; that is accepted.
+- **The relay's org:** `relay.org` (the organisation the relay sends events for,
+  shown beside its status) is published empty when it is an excluded owner.
+- **SSO-hidden orgs:** an id is still looked up once by `GET /organizations/{id}`
+  (the id has no other way to a name, and the lookup budget is unchanged), but
+  an id whose name is an excluded owner is never published, and while any owner
+  is excluded an id not yet looked up is withheld too. A failed lookup keeps the
+  generic label.
+
+Logs count what was excluded and never name an owner or a repo. There is no
+include list; one could follow.
 
 ## What is logged
 

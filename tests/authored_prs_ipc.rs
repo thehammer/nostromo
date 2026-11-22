@@ -53,6 +53,7 @@ async fn env(feature_on: bool) -> Env {
     if feature_on {
         let handle = AuthoredPrsSource::spawn(Deps {
             state_root: None,
+            exclude_orgs: Default::default(),
             api_base: "http://127.0.0.1:1".into(),
             github: None,
             token_resolver: None,
