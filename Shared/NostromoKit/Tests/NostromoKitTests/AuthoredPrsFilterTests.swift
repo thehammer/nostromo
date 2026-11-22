@@ -594,7 +594,7 @@ final class AuthoredPrsFilterTests: XCTestCase {
         let full = entry?.fullTitle ?? ""
         XCTAssertFalse(hasBidiOrControl(full), "the tooltip name is sanitised too")
         XCTAssertTrue(full.hasPrefix("Evil"))
-        XCTAssertEqual(title.count, F.orgCap, "the menu title is cut at exactly the org cap")
+        XCTAssertEqual(title.count, 60, "the menu title is cut at exactly the 60-character org cap")
         XCTAssertEqual(full.count, MotherOriginDisplay.tooltipCap, "the tooltip is cut at exactly the tooltip cap (120)")
         XCTAssertEqual(MotherOriginDisplay.tooltipCap, 120)
         XCTAssertTrue(full.hasSuffix("…"))
