@@ -641,6 +641,99 @@ impl Rig {
     }
 }
 
+/// The Mac re-checks at undo time that an item is not a command now; the
+/// daemon holds the same line: a status op whose view predates the item
+/// becoming a command (an agent upserted a plain item into one) is refused.
+#[test]
+fn a_stale_status_op_on_an_item_that_became_a_command_is_refused() {
+    let rig = Rig::new();
+    // The person sets the plain item (an agent may not make a done item a
+    // command, so not done) and sees the board at `seen`.
+    rig.pane(vec![pane_status("alpha", "blocked")]).unwrap();
+    let seen = rig.version();
+    // An agent turns it into a command; the person's undo then arrives with
+    // the old view.
+    rig.agent_a(&[Op::Upsert(Upsert {
+        id: Some("alpha".into()),
+        command: Some("rm -rf build".into()),
+        ..Default::default()
+    })])
+    .unwrap();
+    assert_eq!(rig.item("alpha").status, Status::Blocked);
+    let err = rig
+        .pane_at(seen, vec![pane_status("alpha", "todo")])
+        .expect_err("became a command since the view");
+    assert_eq!(err.code, "invalid_args");
+    assert!(err.stale, "{err:?}");
+    assert_eq!(err.index, Some(0));
+    assert_eq!(
+        rig.item("alpha").status,
+        Status::Blocked,
+        "nothing was written"
+    );
+    // After looking again (the current version) the person may tick it.
+    rig.pane(vec![pane_status("alpha", "todo")]).unwrap();
+    assert_eq!(rig.item("alpha").status, Status::Todo);
+}
+
+/// The same line for a command whose text changed after the person's view:
+/// they ticked a different command.
+#[test]
+fn a_stale_status_op_on_a_command_whose_text_changed_is_refused() {
+    let rig = Rig::new();
+    rig.agent_a(&[Op::Upsert(Upsert {
+        id: Some("run-it".into()),
+        section: Some("now".into()),
+        text: Some("Run it".into()),
+        command: Some("echo one".into()),
+        ..Default::default()
+    })])
+    .unwrap();
+    let seen = rig.version();
+    rig.agent_a(&[Op::Upsert(Upsert {
+        id: Some("run-it".into()),
+        command: Some("echo two".into()),
+        ..Default::default()
+    })])
+    .unwrap();
+    let err = rig
+        .pane_at(seen, vec![pane_status("run-it", "done")])
+        .expect_err("command changed");
+    assert!(err.stale, "{err:?}");
+    assert_eq!(rig.item("run-it").status, Status::Todo);
+}
+
+/// The human tick stays: the person saw the command item as it is now, and
+/// unrelated changes to it (or to the board) since do not stop the tick.
+#[test]
+fn a_status_op_on_a_command_the_person_saw_is_accepted_even_after_other_changes() {
+    let rig = Rig::new();
+    rig.agent_a(&[Op::Upsert(Upsert {
+        id: Some("run-it".into()),
+        section: Some("now".into()),
+        text: Some("Run it".into()),
+        command: Some("echo one".into()),
+        ..Default::default()
+    })])
+    .unwrap();
+    let seen = rig.version();
+    rig.agent_a(&[Op::Upsert(Upsert {
+        id: Some("run-it".into()),
+        owner: Some("someone".into()),
+        ..Default::default()
+    })])
+    .unwrap();
+    rig.agent_b(&[Op::Upsert(Upsert {
+        id: Some("beta".into()),
+        owner: Some("else".into()),
+        ..Default::default()
+    })])
+    .unwrap();
+    rig.pane_at(seen, vec![pane_status("run-it", "done")])
+        .unwrap();
+    assert_eq!(rig.item("run-it").status, Status::Done);
+}
+
 #[test]
 fn the_pane_may_tick_a_command_item_done_and_an_agent_may_not() {
     let rig = Rig::new();
