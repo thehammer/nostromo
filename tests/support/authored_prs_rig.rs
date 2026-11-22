@@ -384,6 +384,8 @@ pub struct State {
     pub log: Vec<Req>,
     pub rate: Option<Rate>,
     pub forced: HashMap<&'static str, Forced>,
+    /// Words a forced failure's body carries (ahead of the canary text).
+    pub forced_words: HashMap<&'static str, String>,
     /// `X-GitHub-SSO` value sent on search responses.
     pub sso: Option<String>,
     /// `None`: the lookup answers 404.
@@ -567,8 +569,13 @@ fn respond(state: &Arc<Mutex<State>>, req: &Request) -> ResponseTemplate {
     if let Some(f) = st.forced.get(kind_name(&path)).copied() {
         entry.status = f.status;
         st.log.push(entry);
+        let words = st
+            .forced_words
+            .get(kind_name(&path))
+            .cloned()
+            .unwrap_or_else(|| "forced failure".to_owned());
         let mut t = ResponseTemplate::new(f.status).set_body_json(json!({
-            "message": "forced failure https://github.com/canary-org/canary-repo/pull/9 CANARY-ERROR-BODY"
+            "message": format!("{words} https://github.com/canary-org/canary-repo/pull/9 CANARY-ERROR-BODY")
         }));
         if let Some(ra) = f.retry_after {
             t = t.insert_header("retry-after", ra.to_string().as_str());
@@ -833,6 +840,7 @@ impl Fake {
                 log: Vec::new(),
                 rate: None,
                 forced: HashMap::new(),
+                forced_words: HashMap::new(),
                 sso: None,
                 orgs: HashMap::new(),
                 etags: true,
@@ -901,6 +909,19 @@ impl Fake {
             }
             None => {
                 st.forced.remove(kind);
+            }
+        }
+    }
+
+    /// What a forced failure of `kind` says in its body (`None`: "forced failure").
+    pub fn force_words(&self, kind: &'static str, words: Option<&str>) {
+        let mut st = self.lock();
+        match words {
+            Some(w) => {
+                st.forced_words.insert(kind, w.to_owned());
+            }
+            None => {
+                st.forced_words.remove(kind);
             }
         }
     }

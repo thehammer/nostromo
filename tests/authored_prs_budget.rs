@@ -857,10 +857,85 @@ async fn assert_pauses_about_a_minute_then_resumes(rig: &mut Rig, lift: impl FnO
 }
 
 #[tokio::test]
-async fn a_403_with_no_retry_after_and_requests_remaining_is_a_pause_of_about_a_minute() {
+async fn a_403_naming_a_secondary_limit_with_requests_remaining_is_a_pause_of_about_a_minute() {
+    // The wording is matched case-insensitively; "abuse" is the older name.
+    for words in [
+        "You have exceeded a Secondary Rate Limit",
+        "ABUSE detection",
+    ] {
+        let fake = Fake::new();
+        twenty(&fake);
+        // Plenty left in the primary limit: this is GitHub's abuse protection.
+        fake.set_rate(Some(Rate {
+            remaining: 4000,
+            limit: 5000,
+            reset: t0() + Chrono::minutes(50),
+        }));
+        let mut rig = Rig::start(fake.clone(), RigOpts::default()).await;
+        rig.set_demand("visible").await;
+        rig.run(secs(10), secs(1)).await;
+        fake.force_words("search", Some(words));
+        fake.force(
+            "search",
+            Some(Forced {
+                status: 403,
+                retry_after: None,
+            }),
+        );
+        let lifted = fake.clone();
+        assert_pauses_about_a_minute_then_resumes(&mut rig, move || lifted.force("search", None))
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn a_permission_403_with_requests_remaining_is_an_error_with_backoff_not_a_pause() {
     let fake = Fake::new();
     twenty(&fake);
-    // Plenty left in the primary limit: this is GitHub's abuse protection.
+    fake.set_rate(Some(Rate {
+        remaining: 4000,
+        limit: 5000,
+        reset: t0() + Chrono::minutes(50),
+    }));
+    let mut rig = Rig::start(fake.clone(), RigOpts::default()).await;
+    rig.set_demand("visible").await;
+    rig.run(secs(10), secs(1)).await;
+    fake.force_words(
+        "search",
+        Some("Resource protected by organization SAML enforcement"),
+    );
+    fake.force(
+        "search",
+        Some(Forced {
+            status: 403,
+            retry_after: None,
+        }),
+    );
+    rig.run_until(mins(3), secs(1), |r| {
+        r.fake.log().iter().any(|q| q.status == 403)
+    })
+    .await
+    .expect("the search is refused");
+    rig.run(mins(5), secs(1)).await;
+
+    assert!(
+        !rig.published
+            .iter()
+            .any(|(_, s)| s.poll.state == PollState::Paused),
+        "a permission refusal is never shown as `paused`"
+    );
+    assert!(
+        rig.published
+            .iter()
+            .any(|(_, s)| s.poll.state == PollState::Error),
+        "it is an error (retried with back-off)"
+    );
+}
+
+#[tokio::test]
+async fn a_429_with_no_retry_after_is_a_pause_whatever_its_body_says() {
+    let fake = Fake::new();
+    twenty(&fake);
     fake.set_rate(Some(Rate {
         remaining: 4000,
         limit: 5000,
@@ -872,7 +947,7 @@ async fn a_403_with_no_retry_after_and_requests_remaining_is_a_pause_of_about_a_
     fake.force(
         "search",
         Some(Forced {
-            status: 403,
+            status: 429,
             retry_after: None,
         }),
     );

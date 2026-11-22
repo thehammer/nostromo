@@ -112,11 +112,13 @@ pub async fn refresh_once(
     }
 }
 
-/// The persisted keys, if the file exists and parses.
+/// The persisted keys, if the file exists, parses and names at least one project.
+/// An empty list is no cache: an old build could have saved one, and a `Known`
+/// empty set would hide every ticket until a refresh succeeds.
 pub fn load(path: &Path) -> Option<HashSet<String>> {
     let text = std::fs::read_to_string(path).ok()?;
     let keys: Vec<String> = serde_json::from_str(&text).ok()?;
-    Some(keys.into_iter().collect())
+    (!keys.is_empty()).then(|| keys.into_iter().collect())
 }
 
 fn save(path: &Path, keys: &HashSet<String>) {
@@ -232,6 +234,16 @@ mod tests {
             ProjectFilter::Known(expected.clone())
         );
         assert_eq!(load(&file), Some(expected));
+    }
+
+    #[test]
+    fn an_empty_cache_file_is_no_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(CACHE_FILE);
+        std::fs::write(&file, "[]").unwrap();
+        assert_eq!(load(&file), None);
+        std::fs::write(&file, r#"["CORE"]"#).unwrap();
+        assert_eq!(load(&file), Some(["CORE".to_owned()].into()));
     }
 
     #[tokio::test]

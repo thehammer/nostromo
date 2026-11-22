@@ -902,11 +902,13 @@ async fn a_refused_merge_leaves_one_audit_line_with_the_code_and_who_asked() {
 async fn when_github_cannot_be_read_the_answer_is_a_code_and_no_merge_is_sent() {
     let mut rig = start(vec![ready_pr(N)]).await;
     record(&mut rig, N, &sha('a'), Verdict::Approved).await;
-    let table: [(u16, Option<u64>, &str); 6] = [
+    let table: [(u16, Option<u64>, &str); 7] = [
         (500, None, "unreachable"),
         (502, None, "unreachable"),
         (429, None, "rate_limited"),
         (403, Some(30), "rate_limited"),
+        // No Retry-After, allowance left, a body that names no limit: access, not a wait.
+        (403, None, "token_cannot_merge"),
         (401, None, "token_cannot_merge"),
         (404, None, "unreachable"),
     ];
