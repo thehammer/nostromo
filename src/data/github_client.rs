@@ -2,13 +2,42 @@
 //!
 //! # Token resolution order
 //! 1. `GITHUB_TOKEN` environment variable.
-//! 2. `oauth_token` field under `github.com` in `~/.config/gh/hosts.yml`.
+//! 2. `GH_TOKEN` environment variable (the one the `gh` CLI itself honours).
+//! 3. `oauth_token` field under `github.com` in `~/.config/gh/hosts.yml`.
+//! 4. `gh auth token --hostname github.com`. Modern `gh` keeps the token in
+//!    the macOS keychain, so `hosts.yml` has no `oauth_token` at all and this
+//!    is the only way to reach it.
 //!
-//! If neither is found, construction fails with an actionable error message
+//! If none is found, construction fails with an actionable error message
 //! instructing the user to run `gh auth login`.
+//!
+//! # How `gh` is run
+//! The daemon runs under launchd with almost no `PATH`, and a `PATH` search
+//! would let a planted binary run, so `gh` is found by absolute path, like the
+//! AWS CLI: `$NOSTROMO_GH_CLI`, then `/opt/homebrew/bin/gh`,
+//! `/usr/local/bin/gh`, `/usr/bin/gh`; it must be a regular executable file.
+//! It runs with a fixed argv, no shell, stdin null, stderr discarded, an
+//! environment cleared down to what `gh` needs to find its config and
+//! keychain (`HOME`, `USER`, `GH_CONFIG_DIR`, `XDG_CONFIG_HOME`; never a
+//! token), a 5 second hard timeout and a capped stdout, which must be one
+//! printable-ASCII word of plausible length. Anything else is "no token".
+//! `gh` leads its own process group and the whole group is killed when the run
+//! ends (so a `security` it started cannot linger). The run is wrapped in
+//! `block_in_place` on a multi-thread runtime, as callers are async.
+//!
+//! Trust model: `gh` is trusted like `NOSTROMO_AWS_CLI`; the override env var
+//! is as trusted as the launchd plist; `/opt/homebrew/bin` is admin-group
+//! writable, so anyone who could swap `gh` already runs as the user.
+//!
+//! A token from `gh` is cached in memory for [`GH_TOKEN_TTL`], a failure for
+//! [`GH_FAILURE_TTL`] (a timeout for [`GH_TIMEOUT_TTL`]), so the many `GithubClient::new` callers never run `gh`
+//! per call. The token is never logged or put in an error.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use octocrab::Octocrab;
@@ -189,11 +218,67 @@ pub const GITHUB_API_BASE: &str = "https://api.github.com";
 
 // ── Token resolution ──────────────────────────────────────────────────────────
 
+/// The environment variable that names the `gh` CLI.
+pub const GH_CLI_ENV: &str = "NOSTROMO_GH_CLI";
+/// Where `gh` is looked for when nothing names it. Never a `PATH` search.
+const DEFAULT_GH_CLIS: [&str; 3] = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"];
+/// The only variables of the daemon's environment `gh` runs with: enough to
+/// find its config and the keychain. No `GITHUB_TOKEN`/`GH_TOKEN`.
+const GH_INHERITED_ENV: [&str; 4] = ["HOME", "USER", "GH_CONFIG_DIR", "XDG_CONFIG_HOME"];
+/// How long `gh auth token` may take before it is killed.
+const GH_TIMEOUT: Duration = Duration::from_secs(5);
+/// The most of `gh`'s stdout that is read; more than this is not a token.
+const GH_STDOUT_CAP: usize = 512;
+/// A token from `gh` is reused for this long.
+pub const GH_TOKEN_TTL: Duration = Duration::from_secs(5 * 60);
+/// A quick failed `gh` lookup is not repeated for this long.
+pub const GH_FAILURE_TTL: Duration = Duration::from_secs(30);
+/// After a timeout (a locked keychain, say) `gh` is left alone for longer.
+pub const GH_TIMEOUT_TTL: Duration = Duration::from_secs(5 * 60);
+/// How long to wait for stdout to close after `gh` itself has exited (a
+/// grandchild may hold the pipe open).
+const GH_EXIT_GRACE: Duration = Duration::from_secs(1);
+
+/// What one run of `gh` came to. Carries the token, so no `Debug`.
+enum GhOutcome {
+    Token(String),
+    Failed,
+    TimedOut,
+}
+
+impl GhOutcome {
+    fn ttl(&self) -> Duration {
+        match self {
+            Self::Token(_) => GH_TOKEN_TTL,
+            Self::Failed => GH_FAILURE_TTL,
+            Self::TimedOut => GH_TIMEOUT_TTL,
+        }
+    }
+
+    fn token(&self) -> Option<String> {
+        match self {
+            Self::Token(t) => Some(t.clone()),
+            _ => None,
+        }
+    }
+}
+
+struct GhCacheEntry {
+    candidates: Vec<PathBuf>,
+    at: Instant,
+    outcome: GhOutcome,
+}
+
+// `GhCacheEntry` holds a token and derives nothing (no `Debug`), on purpose.
+static GH_CACHE: Mutex<Option<GhCacheEntry>> = Mutex::new(None);
+
 fn resolve_token(hosts_yml_path: Option<&Path>) -> Result<String> {
-    // 1. Environment variable.
-    if let Ok(t) = std::env::var("GITHUB_TOKEN") {
-        if !t.is_empty() {
-            return Ok(t);
+    // 1. Environment variables.
+    for var in ["GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(t) = std::env::var(var) {
+            if !t.is_empty() {
+                return Ok(t);
+            }
         }
     }
 
@@ -208,12 +293,174 @@ fn resolve_token(hosts_yml_path: Option<&Path>) -> Result<String> {
         }
     }
 
+    // 3. The gh CLI itself (the token is in the keychain).
+    if let Some(token) = gh_cli_token_cached(&gh_candidates(std::env::var_os(GH_CLI_ENV))) {
+        return Ok(token);
+    }
+
     bail!(
         "No GitHub token found.\n\
          Set the GITHUB_TOKEN environment variable or run `gh auth login`.\n\
-         Looked for gh config at: {}",
+         Looked for gh config at: {} (the gh CLI was tried too)",
         path.display()
     )
+}
+
+/// `$NOSTROMO_GH_CLI` (when set), then the usual absolute places.
+fn gh_candidates(env: Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    env.map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .into_iter()
+        .chain(DEFAULT_GH_CLIS.iter().map(PathBuf::from))
+        .collect()
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.is_absolute()
+        && std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Callers reach `resolve_token` from async code, and the `gh` leg can block
+/// for seconds (and holds the cache mutex), so on a multi-thread runtime it
+/// runs under `block_in_place`, which hands the worker's other tasks to a
+/// sibling. `block_in_place` panics on a current-thread runtime, so there
+/// (and outside any runtime) it is a plain call.
+fn gh_cli_token_cached(candidates: &[PathBuf]) -> Option<String> {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    let run = || gh_cli_token_cached_with(candidates, GH_TIMEOUT);
+    match Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(run)
+        }
+        _ => run(),
+    }
+}
+
+fn gh_cli_token_cached_with(candidates: &[PathBuf], timeout: Duration) -> Option<String> {
+    let mut cache = GH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(e) = cache.as_ref() {
+        if e.candidates == candidates && e.at.elapsed() < e.outcome.ttl() {
+            return e.outcome.token();
+        }
+    }
+    // Held across the run on purpose: concurrent callers wait for one `gh`
+    // instead of each starting their own.
+    let outcome = run_gh(candidates, timeout);
+    let token = outcome.token();
+    *cache = Some(GhCacheEntry {
+        candidates: candidates.to_vec(),
+        at: Instant::now(),
+        outcome,
+    });
+    token
+}
+
+#[cfg(test)]
+fn gh_cli_token(candidates: &[PathBuf], timeout: Duration) -> Option<String> {
+    run_gh(candidates, timeout).token()
+}
+
+/// Kill `gh`'s whole process group (so a `security` it started dies too) and
+/// reap `gh`.
+fn kill_group(child: &mut std::process::Child) {
+    // SAFETY: killpg is a plain syscall; `gh` leads its own group (pgid ==
+    // its pid) and is unreaped here, so the pid cannot have been reused.
+    unsafe {
+        libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Run `gh auth token --hostname github.com` from the first executable
+/// candidate. Nothing from `gh` is ever logged, since its output may be a
+/// token.
+fn run_gh(candidates: &[PathBuf], timeout: Duration) -> GhOutcome {
+    use std::os::unix::process::CommandExt;
+    let Some(exe) = candidates.iter().find(|p| is_executable_file(p)) else {
+        return GhOutcome::Failed;
+    };
+    let mut cmd = Command::new(exe);
+    cmd.args(["auth", "token", "--hostname", "github.com"])
+        .env_clear()
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for var in GH_INHERITED_ENV {
+        if let Some(v) = std::env::var_os(var) {
+            cmd.env(var, v);
+        }
+    }
+    let Ok(mut child) = cmd.spawn() else {
+        return GhOutcome::Failed;
+    };
+    let Some(stdout) = child.stdout.take() else {
+        kill_group(&mut child);
+        return GhOutcome::Failed;
+    };
+    // Reads one byte past the cap and stops, so unbounded output is noticed
+    // at once. Never joined: if a grandchild holds the pipe the thread ends
+    // when the group is killed.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.take(GH_STDOUT_CAP as u64 + 1).read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+
+    let deadline = Instant::now() + timeout;
+    let mut out: Option<Vec<u8>> = None;
+    let mut status = None;
+    let mut exited_at = None;
+    let outcome = loop {
+        if out.is_none() {
+            out = rx.try_recv().ok();
+            if out.as_ref().is_some_and(|o| o.len() > GH_STDOUT_CAP) {
+                break GhOutcome::Failed;
+            }
+        }
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(Some(s)) => {
+                    status = Some(s);
+                    exited_at = Some(Instant::now());
+                }
+                Ok(None) => {}
+                Err(_) => break GhOutcome::Failed,
+            }
+        }
+        if let (Some(s), Some(o)) = (&status, &out) {
+            break match s.success() {
+                true => validate_gh_token(o).map_or(GhOutcome::Failed, GhOutcome::Token),
+                false => GhOutcome::Failed,
+            };
+        }
+        if exited_at.is_some_and(|t| t.elapsed() > GH_EXIT_GRACE) {
+            break GhOutcome::Failed;
+        }
+        if Instant::now() >= deadline {
+            break GhOutcome::TimedOut;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    // Always: no straggler (a keychain helper, a backgrounded child) outlives us.
+    kill_group(&mut child);
+    if !matches!(outcome, GhOutcome::Token(_)) {
+        debug!("gh auth token gave no token (failed, over the cap or timed out)");
+    }
+    outcome
+}
+
+/// One printable-ASCII word of plausible length, once trimmed; else `None`.
+fn validate_gh_token(raw: &[u8]) -> Option<String> {
+    if raw.len() > GH_STDOUT_CAP {
+        return None;
+    }
+    let s = std::str::from_utf8(raw).ok()?.trim();
+    let plausible = (20..=255).contains(&s.len());
+    (plausible && s.bytes().all(|b| b.is_ascii_graphic())).then(|| s.to_string())
 }
 
 fn parse_hosts_yml(path: &Path) -> Result<Option<String>> {
@@ -311,6 +558,316 @@ mod tests {
     }
 
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    // ── token resolution (gh keychain fix) ───────────────────────────────────
+
+    const FAKE_TOKEN: &str = "gho_fakeTokenFromGhCli0123456789abcdef";
+    const SECRET_STDERR: &str = "STDERR_SECRET_must_not_leak";
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Holds the env lock and sets the three token-related variables for one
+    /// test; restores them (and clears the gh cache) on drop.
+    struct Env {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl Env {
+        fn new(github: Option<&str>, gh: Option<&str>, cli: Option<&Path>) -> Self {
+            let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let vars = [
+                ("GITHUB_TOKEN", github.map(Into::into)),
+                ("GH_TOKEN", gh.map(Into::into)),
+                (GH_CLI_ENV, cli.map(|p| p.as_os_str().to_owned())),
+            ];
+            let mut saved = Vec::new();
+            for (k, v) in vars {
+                saved.push((k, std::env::var_os(k)));
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+            *GH_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            Self {
+                _guard: guard,
+                saved,
+            }
+        }
+    }
+
+    impl Drop for Env {
+        fn drop(&mut self) {
+            for (k, v) in self.saved.drain(..) {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+            *GH_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+
+    /// A fake `gh` (mode 0755) with the given shell body.
+    fn fake_gh(dir: &Path, body: &str) -> PathBuf {
+        let p = dir.join("gh");
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    fn hosts(dir: &Path, content: &str) -> PathBuf {
+        let p = dir.join("hosts.yml");
+        std::fs::write(&p, content).unwrap();
+        p
+    }
+
+    const KEYRING_HOSTS: &str = "github.com:\n  git_protocol: https\n  user: tester\n";
+
+    #[test]
+    fn gh_token_env_works_and_beats_hosts_and_gh() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(dir.path(), &format!("echo {FAKE_TOKEN}"));
+        let h = hosts(dir.path(), "github.com:\n  oauth_token: from_hosts\n");
+        let _e = Env::new(None, Some("from_gh_env"), Some(&gh));
+        assert_eq!(resolve_token(Some(&h)).unwrap(), "from_gh_env");
+    }
+
+    #[test]
+    fn hosts_oauth_token_wins_over_gh_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(dir.path(), &format!("echo {FAKE_TOKEN}"));
+        let h = hosts(dir.path(), "github.com:\n  oauth_token: from_hosts\n");
+        let _e = Env::new(None, None, Some(&gh));
+        assert_eq!(resolve_token(Some(&h)).unwrap(), "from_hosts");
+    }
+
+    #[test]
+    fn gh_cli_is_used_when_hosts_has_no_oauth_token() {
+        let dir = tempfile::tempdir().unwrap();
+        // Prints the token with a trailing newline and spaces; also checks
+        // the argv and that the daemon's tokens are not passed along.
+        let gh = fake_gh(
+            dir.path(),
+            &format!(
+                "[ \"$*\" = \"auth token --hostname github.com\" ] || exit 3\n\
+                 [ -z \"$GITHUB_TOKEN$GH_TOKEN\" ] || exit 4\n\
+                 for v in $(env | cut -d= -f1); do case $v in \
+                   HOME|USER|GH_CONFIG_DIR|XDG_CONFIG_HOME|PWD|OLDPWD|SHLVL|_) ;; \
+                   *) exit 5 ;; esac; done\n\
+                 echo '  {FAKE_TOKEN}  '"
+            ),
+        );
+        let h = hosts(dir.path(), KEYRING_HOSTS);
+        let _e = Env::new(None, None, Some(&gh));
+        assert_eq!(resolve_token(Some(&h)).unwrap(), FAKE_TOKEN);
+    }
+
+    #[test]
+    fn gh_cli_is_used_when_hosts_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(dir.path(), &format!("echo {FAKE_TOKEN}"));
+        let _e = Env::new(None, None, Some(&gh));
+        let missing = dir.path().join("nope.yml");
+        assert_eq!(resolve_token(Some(&missing)).unwrap(), FAKE_TOKEN);
+    }
+
+    #[test]
+    fn gh_cli_failures_fall_through_to_the_error_without_leaking() {
+        let big = "x".repeat(GH_STDOUT_CAP + 100);
+        let bodies = [
+            format!("echo {FAKE_TOKEN}; echo {SECRET_STDERR} >&2; exit 1"),
+            format!("echo {SECRET_STDERR} >&2"),
+            format!("printf '%s\\n%s\\n' {FAKE_TOKEN} {FAKE_TOKEN}"),
+            format!("echo '{FAKE_TOKEN} {FAKE_TOKEN}'"),
+            "echo '   '".to_string(),
+            format!("echo {big}"),
+            "echo short".to_string(),
+            format!("printf '{FAKE_TOKEN}\\001'"),
+            format!("printf '{FAKE_TOKEN}\\303\\251'"),
+        ];
+        for body in bodies {
+            let dir = tempfile::tempdir().unwrap();
+            let gh = fake_gh(dir.path(), &body);
+            let h = hosts(dir.path(), KEYRING_HOSTS);
+            let _e = Env::new(None, None, Some(&gh));
+            let err = resolve_token(Some(&h)).unwrap_err().to_string();
+            assert!(err.contains("No GitHub token found"), "{body}: {err}");
+            assert!(err.contains("gh CLI"), "{err}");
+            assert!(!err.contains(FAKE_TOKEN), "{body}: token leaked: {err}");
+            assert!(!err.contains(SECRET_STDERR), "stderr leaked: {err}");
+        }
+    }
+
+    #[test]
+    fn a_hanging_gh_is_killed_at_the_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(dir.path(), "exec sleep 30");
+        let started = Instant::now();
+        let got = gh_cli_token(&[gh], Duration::from_millis(300));
+        assert_eq!(got, None);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn gh_is_not_run_per_call_and_a_failure_is_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let counter = dir.path().join("count");
+        let ok = fake_gh(
+            dir.path(),
+            &format!("echo x >> {}\necho {FAKE_TOKEN}", counter.display()),
+        );
+        let _e = Env::new(None, None, Some(&ok));
+        let h = hosts(dir.path(), KEYRING_HOSTS);
+        for _ in 0..5 {
+            assert_eq!(resolve_token(Some(&h)).unwrap(), FAKE_TOKEN);
+        }
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            1
+        );
+
+        // A failing gh is also run once, not once per call.
+        let dir2 = tempfile::tempdir().unwrap();
+        let counter2 = dir2.path().join("count");
+        let bad = fake_gh(
+            dir2.path(),
+            &format!("echo x >> {}\nexit 1", counter2.display()),
+        );
+        std::env::set_var(GH_CLI_ENV, &bad);
+        for _ in 0..5 {
+            assert!(resolve_token(Some(&h)).is_err());
+        }
+        assert_eq!(
+            std::fs::read_to_string(&counter2).unwrap().lines().count(),
+            1
+        );
+    }
+
+    /// No test here touches `PATH`: the resolver never reads it, and every
+    /// candidate is an absolute path, so there is nothing to look up.
+    #[test]
+    fn candidates_are_absolute_paths_never_derived_from_path() {
+        for env in [None, Some("".into()), Some("/x/gh".into())] {
+            let c = gh_candidates(env);
+            assert!(c.iter().all(|p| p.is_absolute()), "{c:?}");
+            assert!(c.len() >= DEFAULT_GH_CLIS.len());
+        }
+        // A bare `gh` (what a PATH search would run) is refused outright.
+        assert_eq!(gh_cli_token(&[PathBuf::from("gh")], GH_TIMEOUT), None);
+    }
+
+    #[test]
+    fn a_missing_gh_gives_no_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let none = [dir.path().join("absent"), dir.path().join("also-absent")];
+        assert_eq!(gh_cli_token(&none, GH_TIMEOUT), None);
+    }
+
+    #[test]
+    fn unbounded_output_is_cut_off_at_the_cap_and_the_child_is_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(dir.path(), "exec yes");
+        let started = Instant::now();
+        assert_eq!(gh_cli_token(&[gh], Duration::from_secs(10)), None);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "waited for the timeout"
+        );
+    }
+
+    fn pid_gone(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks that the pid exists.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        let zombie =
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| s.contains(") Z"));
+        !alive || zombie
+    }
+
+    fn assert_group_gone(pidfile: &Path) {
+        let pid: i32 = std::fs::read_to_string(pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        for _ in 0..100 {
+            if pid_gone(pid) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("the grandchild {pid} outlived gh");
+    }
+
+    #[test]
+    fn a_timeout_kills_the_whole_group_and_does_not_wait_on_the_pipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        // A grandchild holds stdout open, and gh itself hangs.
+        let gh = fake_gh(
+            dir.path(),
+            &format!("sleep 30 &\necho $! > {}\nsleep 30", pidfile.display()),
+        );
+        let started = Instant::now();
+        let out = run_gh(&[gh], Duration::from_millis(400));
+        assert!(matches!(out, GhOutcome::TimedOut));
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_group_gone(&pidfile);
+    }
+
+    #[test]
+    fn a_grandchild_holding_stdout_after_gh_exits_does_not_hang_us() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let gh = fake_gh(
+            dir.path(),
+            &format!("sleep 30 &\necho $! > {}\nexit 0", pidfile.display()),
+        );
+        let started = Instant::now();
+        assert_eq!(gh_cli_token(&[gh], Duration::from_secs(10)), None);
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert_group_gone(&pidfile);
+    }
+
+    #[test]
+    fn a_timeout_is_remembered_longer_than_a_quick_failure() {
+        assert!(GH_TIMEOUT_TTL > GH_FAILURE_TTL);
+        assert_eq!(GhOutcome::TimedOut.ttl(), GH_TIMEOUT_TTL);
+        assert_eq!(GhOutcome::Failed.ttl(), GH_FAILURE_TTL);
+    }
+
+    /// `resolve_token` runs `gh` under `block_in_place` on a multi-thread
+    /// runtime and as a plain call on a current-thread one (where
+    /// `block_in_place` would panic) and outside any runtime.
+    #[tokio::test]
+    async fn the_gh_leg_does_not_panic_on_a_current_thread_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(dir.path(), &format!("echo {FAKE_TOKEN}"));
+        let h = hosts(dir.path(), KEYRING_HOSTS);
+        let _e = Env::new(None, None, Some(&gh));
+        assert_eq!(resolve_token(Some(&h)).unwrap(), FAKE_TOKEN);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_gh_leg_works_on_a_multi_thread_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(dir.path(), &format!("echo {FAKE_TOKEN}"));
+        let h = hosts(dir.path(), KEYRING_HOSTS);
+        let _e = Env::new(None, None, Some(&gh));
+        assert_eq!(resolve_token(Some(&h)).unwrap(), FAKE_TOKEN);
+    }
+
+    #[test]
+    fn a_non_executable_or_relative_override_is_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(dir.path(), &format!("echo {FAKE_TOKEN}"));
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!is_executable_file(&gh));
+        assert!(!is_executable_file(Path::new("gh")));
+        assert!(!is_executable_file(dir.path()));
+    }
 
     /// `reqwest::Client` exposes no public getter for `connect_timeout`/
     /// `timeout` post-`.build()`, and `reqwest::ClientBuilder`'s `Debug` impl
