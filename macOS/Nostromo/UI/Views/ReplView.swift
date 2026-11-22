@@ -377,6 +377,7 @@ class ReplView: NSView {
         documentView.translatesAutoresizingMaskIntoConstraints = true
         documentView.frame = NSRect(x: 0, y: 0, width: 400, height: 1)
         scrollView.documentView = documentView
+        scrollView.menu = TranscriptViewMenu.makePaneMenu()
         // The flight recorder's draw heartbeat. `viewWillDraw`, not `draw(_:)`: overriding `draw(_:)`
         // on this view would make AppKit give a document view as tall as the whole transcript a
         // backing store of its own.
@@ -403,6 +404,7 @@ class ReplView: NSView {
                           harnessMode: foldsExpandedByDefault ? .allActivity : nil)
         inputBar.onSetMode = { [weak self] mode in self?.setTranscriptViewMode(mode) }
         inputBar.bindSlashCommands(tag: session.tag, store: SlashCommandStore.shared)
+        inputBar.bindHistory(tag: session.tag, agentName: session.agentName, store: ComposerHistoryStore.shared)
         addSubview(inputBar)
 
         // "Jump to latest" — covers exactly the transcript area (so it sits above
@@ -1754,7 +1756,10 @@ class ContextMeterView: NSView {
 
 // MARK: - Transcript view mode (FV4)
 
-extension ReplView: TranscriptViewModeTarget, NSMenuItemValidation {
+extension ReplView: TranscriptViewModeTarget, ComposerHistoryClearing, NSMenuItemValidation {
+
+    /// Clear Composer History (the transcript pane's menu): this focus's history, in every window.
+    @objc func clearComposerHistory(_ sender: Any?) { inputBar.clearHistory() }
 
     /// View ▸ Focus (⌥⌘←), the chip, a fold row's context menu.
     @objc func setTranscriptFocusMode(_ sender: Any?) { setTranscriptViewMode(.focus) }

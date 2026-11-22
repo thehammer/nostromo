@@ -1593,6 +1593,24 @@ final class SendToAgentFlowTests: XCTestCase {
         XCTAssertNil(rig.notice)
     }
 
+    func testASentWorkItemMarksItsFocusSensitiveSoComposerHistoryStaysInMemory() {
+        for kind in ["created", "existing"] {
+            let rig = FlowRig()
+            let tag = "work-history-\(kind)-\(UUID().uuidString)"
+            XCTAssertFalse(FocusSensitivity.shared.isSensitive(tag: tag, agentName: nil))
+
+            rig.flow.handle(.sent(outcome(kind, focusTag: tag)), window: rig.window, navigator: rig.navigator)
+
+            XCTAssertTrue(FocusSensitivity.shared.isSensitive(tag: tag, agentName: nil), kind)
+        }
+    }
+
+    func testAMotherJobSendMarksNoFocusSensitive() {
+        let rig = FlowRig()
+        rig.flow.handle(.sent(outcome("mother_job", jobId: "abc123")), window: rig.window, navigator: rig.navigator)
+        XCTAssertFalse(FocusSensitivity.shared.isSensitive(tag: "abc123", agentName: nil))
+    }
+
     func testAnExistingFocusTheMacCannotFindYetIsExplainedNotSilent() {
         let rig = FlowRig()
         rig.navigator.focusFound = false

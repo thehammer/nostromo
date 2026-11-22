@@ -876,6 +876,7 @@ class AppStore: ObservableObject {
         perriDetailByTag.removeValue(forKey: tag)
         ModelStore.shared.forget(tag: tag)
         TranscriptFoldStore.shared.removeFocus(tag: tag)
+        ComposerHistoryStore.shared.removeFocus(tag: tag)
         TranscriptDiagnostics.forgetTag(tag)
         TrackerStore.shared.forget(tag: tag)
         TrackerNeedsYouBadges.live?.refresh()

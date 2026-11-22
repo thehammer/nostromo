@@ -783,6 +783,10 @@ final class SendToAgentFlow {
 
     /// What the sheet's result means for the user, on `window`.
     func handle(_ result: SendToAgentResult, window: NSWindow?, navigator: SendNavigating) {
+        // A work item landed in this focus: its composer history stays in memory from now on.
+        if case .sent(let outcome) = result, let tag = outcome.focusTag {
+            FocusSensitivity.shared.noteWorkSend(tag: tag)
+        }
         switch result {
         case .sent(let outcome) where outcome.kind == "existing":
             if let tag = outcome.focusTag {

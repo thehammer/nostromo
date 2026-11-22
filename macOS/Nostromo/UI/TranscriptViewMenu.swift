@@ -12,6 +12,12 @@ import NostromoKit
     @objc var transcriptShowsAllActivity: Bool { get }
 }
 
+/// Clear History for the pane's focus (the composer's Up / Down history). `ReplView` implements it; the
+/// transcript pane's own menu sends it down the responder chain.
+@objc protocol ComposerHistoryClearing {
+    @objc func clearComposerHistory(_ sender: Any?)
+}
+
 /// The app-level handler of View ▸ Default for New Focuses: it acts on the global default, not on
 /// a pane, so its items name it as their target instead of using the responder chain.
 final class TranscriptDefaultModeHandler: NSObject, NSMenuItemValidation {
@@ -103,6 +109,20 @@ enum TranscriptViewMenu {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: focusTitle, action: focusAction, keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: allActivityTitle, action: allActivityAction, keyEquivalent: ""))
+    }
+
+    static let clearComposerHistoryTitle = "Clear Composer History"
+    static var clearComposerHistoryAction: Selector { #selector(ComposerHistoryClearing.clearComposerHistory(_:)) }
+
+    /// The transcript pane's own context menu (where no row supplies one): the two mode items, then
+    /// Clear Composer History. Fold rows' menus end in the mode items and stay as they are.
+    static func makePaneMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(NSMenuItem(title: focusTitle, action: focusAction, keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: allActivityTitle, action: allActivityAction, keyEquivalent: ""))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: clearComposerHistoryTitle, action: clearComposerHistoryAction, keyEquivalent: ""))
+        return menu
     }
 
     /// The visible transcript panes of `window`.

@@ -197,6 +197,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
     func applicationWillTerminate(_ notification: Notification) {
         appLog.warning("applicationWillTerminate — saving state")
         ConversationHistoryStore.shared.appWillTerminate()
+        ComposerHistoryStore.shared.flush()
         FocusStore.shared.save()
         TeriSentryTab.tracker.flush()
     }
