@@ -51,7 +51,9 @@ echo "=== summary"
 for unit in "${units[@]}"; do
   dir="${unit%%|*}"; pattern="${unit#*|}"
   n="$(printf '%s' "$dir/$pattern" | tr '/*' '__')"
-  read -r rc secs <"$out/$n.rc"
+  # a unit whose wrapper died before writing its .rc file must read as failed, never inherit the last unit's result
+  rc=missing; secs='?'
+  read -r rc secs <"$out/$n.rc" 2>/dev/null || { rc=missing; secs='?'; }
   printf '%4ss  %s  %s (%s)\n' "$secs" "$([ "$rc" = 0 ] && echo ok || echo FAILED)" "$dir" "$pattern"
   [ "$rc" = 0 ] || status=1
 done
