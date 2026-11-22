@@ -22,7 +22,7 @@
 /// Hard ceiling on the text without a kind part, dynamic line included.
 pub const MAX_INSTRUCTIONS_CHARS: usize = 3_200;
 
-/// Hard ceiling on the text when a kind part is present. BASE alone is 2,912
+/// Hard ceiling on the text when a kind part is present. BASE alone is 2,910
 /// characters and must stay byte-identical, so a part cannot fit under
 /// [`MAX_INSTRUCTIONS_CHARS`] together with the dynamic line; this is the
 /// smallest round ceiling that holds the parts.
