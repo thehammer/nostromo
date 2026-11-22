@@ -109,6 +109,10 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     /// through `textView.keyInterceptor`, so the text view keeps first responder throughout.
     let slashPicker = SlashCommandPicker()
     private var slashBinding: AnyCancellable?
+    private var historyStore: ComposerHistoryStore?
+    private var historyTag: String?
+    private var historyAgentName: String?
+    private var historyBinding: AnyCancellable?
     /// Horizontal strip of image thumbnails shown above the text field when images are attached.
     private let imageTray    = NSStackView()
 
@@ -603,6 +607,69 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
             .sink { [weak self] _ in self?.slashPicker.refresh() }
     }
 
+    // MARK: Composer history
+
+    /// This composer's walk through the focus's history (Up / Down). S2 sets its `upInterceptor`.
+    lazy var historyNavigator = ComposerHistoryNavigator(entries: { [weak self] in
+        guard let self, let store = self.historyStore, let tag = self.historyTag else { return [] }
+        return store.entries(tag: tag)
+    })
+
+    /// Tells VoiceOver where the walk stands ("History 2 of 5", never the entry). A seam for tests.
+    lazy var announceHistory: (String) -> Void = { [weak self] text in self?.announce(text) }
+
+    /// Record what this composer sends into `tag`'s history, and let Up / Down recall it. Every bar on
+    /// the same focus binds to the one store, so what one window sends the others can recall, and a
+    /// Clear History in any of them reaches all.
+    func bindHistory(tag: String, agentName: String?, store: ComposerHistoryStore) {
+        historyNavigator.end()
+        historyTag = tag
+        historyAgentName = agentName
+        historyStore = store
+        historyBinding = store.changes.sink { [weak self] change in
+            if case .cleared(let cleared) = change, cleared == tag { self?.historyNavigator.end() }
+        }
+        textView.historyKeyInterceptor = { [weak self] event in self?.handleHistoryKey(event) ?? false }
+        textView.onClearHistory = { [weak self] in self?.clearHistory() }
+    }
+
+    /// Clear History: the focus's history, in memory and on disk, in every window.
+    func clearHistory() {
+        guard let store = historyStore, let tag = historyTag else { return }
+        store.clear(tag: tag)
+    }
+
+    /// Up and Down, after the slash picker had its turn. True means history took the key.
+    private func handleHistoryKey(_ event: NSEvent) -> Bool {
+        guard historyStore != nil, event.keyCode == 125 || event.keyCode == 126, !slashPicker.isOpen else { return false }
+        let range = textView.selectedRange()
+        var isHuman = false
+        if case .human = HumanGesture.permit(event, control: textView) { isHuman = true }
+        let key = ComposerKeyContext(
+            text: textView.string, caret: range.location, selectionLength: range.length,
+            hasMarkedText: textView.hasMarkedText(),
+            hasModifiers: !event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+            isHuman: isHuman, hasDraftImages: !pendingImages.isEmpty)
+        switch event.keyCode == 126 ? historyNavigator.up(key) : historyNavigator.down(key) {
+        case .passThrough: return false
+        case .handled: return true
+        case .show(let text, let announcement):
+            showRecalled(text)
+            announceHistory(announcement)
+            return true
+        }
+    }
+
+    /// Put `text` in the composer with the caret at its end, growing the bar as typing does. The slash
+    /// picker stays shut for it: a recalled `/command` must not take the next Up.
+    private func showRecalled(_ text: String) {
+        slashPicker.dismiss(text: text)
+        textView.string = text
+        textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
+        textDidChange(Notification(name: NSText.didChangeNotification, object: textView))
+        textView.scrollRangeToVisible(textView.selectedRange())
+    }
+
     @objc private func sendButtonAction() { submitAction() }
 
     @objc private func stopButtonAction() { onInterrupt?() }
@@ -648,12 +715,18 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     private func submitAction() {
         var text         = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         let imagesToSend = pendingImages
+        let typedText    = text
         // Allow send when images are present even with no text — synthesise a
         // description from filenames so Claude gets a non-empty message.
         if text.isEmpty && !imagesToSend.isEmpty {
             text = ChatSession.imageOnlyText
         }
         guard !text.isEmpty else { return }
+        // History keeps what was typed, as sent. An image-only send has no text of its own.
+        if let store = historyStore, let tag = historyTag, !typedText.isEmpty {
+            store.record(tag: tag, text: typedText, agentName: historyAgentName)
+        }
+        historyNavigator.end()
         slashPicker.close()
         textView.string  = ""
         pendingImages    = []
@@ -711,7 +784,8 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
         return true
     }
 
-    private func addImage(_ url: URL) {
+    /// Attach one staged image file to the draft (a seam: tests attach without the pasteboard staging).
+    func addImage(_ url: URL) {
         guard !pendingImages.contains(url) else { return }
         pendingImages.append(url)
 
@@ -908,6 +982,11 @@ class ChatTextView: NSTextView {
     /// Asked first about every key: true means it was handled (the slash-command picker's Up, Down,
     /// Tab, Return and Esc), so Return does not send and Tab does not insert.
     var keyInterceptor: ((NSEvent) -> Bool)?
+    /// Asked about Up and Down after `keyInterceptor` (so after the slash picker): true means composer
+    /// history took the key. Otherwise AppKit moves the caret as usual.
+    var historyKeyInterceptor: ((NSEvent) -> Bool)?
+    /// The context menu's "Clear History".
+    var onClearHistory: (() -> Void)?
     /// Attach images from a drop/paste; returns false when the pasteboard had none.
     var onImageDrop: ((NSPasteboard) -> Bool)?
     var onDragHighlight: ((Bool) -> Void)?
@@ -942,6 +1021,7 @@ class ChatTextView: NSTextView {
 
     override func keyDown(with event: NSEvent) {
         if keyInterceptor?(event) == true { return }
+        if historyKeyInterceptor?(event) == true { return }
         // keyCode 36 = Return; Shift+Return inserts a newline normally
         if event.keyCode == 36, !event.modifierFlags.contains(.shift) {
             onSubmit?()
@@ -949,6 +1029,19 @@ class ChatTextView: NSTextView {
         }
         super.keyDown(with: event)
     }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event)
+        guard onClearHistory != nil, let menu,
+              !menu.items.contains(where: { $0.action == #selector(clearHistoryFromMenu(_:)) }) else { return menu }
+        menu.addItem(.separator())
+        let item = NSMenuItem(title: "Clear History", action: #selector(clearHistoryFromMenu(_:)), keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+        return menu
+    }
+
+    @objc private func clearHistoryFromMenu(_ sender: Any?) { onClearHistory?() }
 
     /// Exclude raw image types so NSTextView never reads pixel data from the clipboard.
     /// This prevents the Photos permission prompt that fires even for non-Photos images.

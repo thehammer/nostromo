@@ -379,6 +379,15 @@
 		ZZ0000000000000000TF0202 /* ToolGroupView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0200 /* ToolGroupView.swift */; };
 		ZZ0000000000000000TF0301 /* TranscriptFoldStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0300 /* TranscriptFoldStore.swift */; };
 		ZZ0000000000000000TF0302 /* TranscriptFoldStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0300 /* TranscriptFoldStore.swift */; };
+		ZZ0000000000000000CH4A01 /* ComposerHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4A00 /* ComposerHistoryStore.swift */; };
+		ZZ0000000000000000CH4A02 /* ComposerHistoryStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4A00 /* ComposerHistoryStore.swift */; };
+		ZZ0000000000000000CH4B01 /* FocusSensitivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4B00 /* FocusSensitivity.swift */; };
+		ZZ0000000000000000CH4B02 /* FocusSensitivity.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4B00 /* FocusSensitivity.swift */; };
+		ZZ0000000000000000CH4C01 /* ComposerHistoryNavigator.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4C00 /* ComposerHistoryNavigator.swift */; };
+		ZZ0000000000000000CH4C02 /* ComposerHistoryNavigator.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4C00 /* ComposerHistoryNavigator.swift */; };
+		ZZ0000000000000000CH4D01 /* ComposerHistoryStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4D00 /* ComposerHistoryStoreTests.swift */; };
+		ZZ0000000000000000CH4E01 /* ComposerHistoryNavigatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4E00 /* ComposerHistoryNavigatorTests.swift */; };
+		ZZ0000000000000000CH4F01 /* ReplInputBarHistoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4F00 /* ReplInputBarHistoryTests.swift */; };
 		ZZ0000000000000000FV0301 /* TranscriptModeChip.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000FV0300 /* TranscriptModeChip.swift */; };
 		ZZ0000000000000000FV0302 /* TranscriptModeChip.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000FV0300 /* TranscriptModeChip.swift */; };
 		ZZ0000000000000000FV0201 /* RollInPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000FV0200 /* RollInPolicy.swift */; };
@@ -1136,6 +1145,12 @@
 		ZZ0000000000000000TF0100 /* ToolFoldAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolFoldAdapter.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TF0200 /* ToolGroupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolGroupView.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TF0300 /* TranscriptFoldStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptFoldStore.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000CH4A00 /* ComposerHistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerHistoryStore.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000CH4B00 /* FocusSensitivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusSensitivity.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000CH4C00 /* ComposerHistoryNavigator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerHistoryNavigator.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000CH4D00 /* ComposerHistoryStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerHistoryStoreTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000CH4E00 /* ComposerHistoryNavigatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerHistoryNavigatorTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000CH4F00 /* ReplInputBarHistoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplInputBarHistoryTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TF0400 /* TranscriptViewMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptViewMenu.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TF0500 /* ToolFoldAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolFoldAdapterTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TF0600 /* ToolGroupViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolGroupViewTests.swift; sourceTree = "<group>"; };
@@ -1597,6 +1612,8 @@
 				JJ0000000000000000000001 /* IPCLatencyStats.swift */,
 				JJ0000000000000000000002 /* DaemonDiagnostics.swift */,
 				ZZ0000000000000000TF0300 /* TranscriptFoldStore.swift */,
+				ZZ0000000000000000CH4A00 /* ComposerHistoryStore.swift */,
+				ZZ0000000000000000CH4B00 /* FocusSensitivity.swift */,
 				ZZ0000000000000000FV0200 /* RollInPolicy.swift */,
 				ZZ0000000000000000BA0100 /* BackgroundTaskStore.swift */,
 				FU0000000000000000000104 /* FocusActivityCoordinator.swift */,
@@ -1770,6 +1787,7 @@
 				EE00000000000000000000A0 /* QuickActionStripView.swift */,
 				AA0000020000000000000023 /* ReplView.swift */,
 				ZZ0000000000000000M20160 /* ReplInputBar.swift */,
+				ZZ0000000000000000CH4C00 /* ComposerHistoryNavigator.swift */,
 				FT0000000000000000000002 /* JumpToLatestOverlay.swift */,
 				FT0000000000000000000006 /* FollowTailController.swift */,
 				II000000000000000000020 /* AskQuestionView.swift */,
@@ -1871,6 +1889,9 @@
 				ZZ0000000000000000TF0800 /* ToolFoldScrollTests.swift */,
 				ZZ0000000000000000TF0900 /* ToolGroupLiveTests.swift */,
 				ZZ0000000000000000TF1000 /* TranscriptFoldStoreTests.swift */,
+				ZZ0000000000000000CH4D00 /* ComposerHistoryStoreTests.swift */,
+				ZZ0000000000000000CH4E00 /* ComposerHistoryNavigatorTests.swift */,
+				ZZ0000000000000000CH4F00 /* ReplInputBarHistoryTests.swift */,
 				ZZ0000000000000000FV1800 /* FocusModeSyncTests.swift */,
 				ZZ0000000000000000FV1700 /* TranscriptModeChipAppearanceTests.swift */,
 				ZZ0000000000000000FV1600 /* TranscriptModeChipTests.swift */,
@@ -2391,6 +2412,7 @@
 				ZZ0000000000000000M20141 /* CreateFocusModelPickers.swift in Sources */,
 				ZZ0000000000000000M20151 /* ModelDefaultsView.swift in Sources */,
 				ZZ0000000000000000M20161 /* ReplInputBar.swift in Sources */,
+				ZZ0000000000000000CH4C01 /* ComposerHistoryNavigator.swift in Sources */,
 				WK0000000000000000000002 /* WorkModels.swift in Sources */,
 				WK0000000000000000000005 /* WorkStore.swift in Sources */,
 				WK0000000000000000000096 /* WorkScheduler.swift in Sources */,
@@ -2542,6 +2564,8 @@
 				ZZ0000000000000000TF0101 /* ToolFoldAdapter.swift in Sources */,
 				ZZ0000000000000000TF0201 /* ToolGroupView.swift in Sources */,
 				ZZ0000000000000000TF0301 /* TranscriptFoldStore.swift in Sources */,
+				ZZ0000000000000000CH4A01 /* ComposerHistoryStore.swift in Sources */,
+				ZZ0000000000000000CH4B01 /* FocusSensitivity.swift in Sources */,
 				ZZ0000000000000000FV0301 /* TranscriptModeChip.swift in Sources */,
 				ZZ0000000000000000FV0201 /* RollInPolicy.swift in Sources */,
 				ZZ0000000000000000FV0101 /* ActivityRowView.swift in Sources */,
@@ -2697,6 +2721,7 @@
 				ZZ0000000000000000M20142 /* CreateFocusModelPickers.swift in TestSources */,
 				ZZ0000000000000000M20152 /* ModelDefaultsView.swift in TestSources */,
 				ZZ0000000000000000M20162 /* ReplInputBar.swift in TestSources */,
+				ZZ0000000000000000CH4C02 /* ComposerHistoryNavigator.swift in TestSources */,
 				ZZ0000000000000000M20171 /* ModelPresentationTests.swift in Sources */,
 				ZZ0000000000000000M20181 /* ModelChipAppearanceTests.swift in Sources */,
 				ZZ0000000000000000M20191 /* ModelPopoverTests.swift in Sources */,
@@ -2906,6 +2931,8 @@
 				ZZ0000000000000000TF0102 /* ToolFoldAdapter.swift in TestSources */,
 				ZZ0000000000000000TF0202 /* ToolGroupView.swift in TestSources */,
 				ZZ0000000000000000TF0302 /* TranscriptFoldStore.swift in TestSources */,
+				ZZ0000000000000000CH4A02 /* ComposerHistoryStore.swift in TestSources */,
+				ZZ0000000000000000CH4B02 /* FocusSensitivity.swift in TestSources */,
 				ZZ0000000000000000FV0302 /* TranscriptModeChip.swift in TestSources */,
 				ZZ0000000000000000FV0202 /* RollInPolicy.swift in TestSources */,
 				ZZ0000000000000000FV0102 /* ActivityRowView.swift in TestSources */,
@@ -2919,6 +2946,9 @@
 				ZZ0000000000000000TF0801 /* ToolFoldScrollTests.swift in Sources */,
 				ZZ0000000000000000TF0901 /* ToolGroupLiveTests.swift in Sources */,
 				ZZ0000000000000000TF1001 /* TranscriptFoldStoreTests.swift in Sources */,
+				ZZ0000000000000000CH4D01 /* ComposerHistoryStoreTests.swift in Sources */,
+				ZZ0000000000000000CH4E01 /* ComposerHistoryNavigatorTests.swift in Sources */,
+				ZZ0000000000000000CH4F01 /* ReplInputBarHistoryTests.swift in Sources */,
 				ZZ0000000000000000FV1801 /* FocusModeSyncTests.swift in Sources */,
 				ZZ0000000000000000FV1701 /* TranscriptModeChipAppearanceTests.swift in Sources */,
 				ZZ0000000000000000FV1601 /* TranscriptModeChipTests.swift in Sources */,
