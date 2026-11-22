@@ -2098,11 +2098,22 @@ fn no_allow_is_ever_produced_except_allow_once_from_the_operator_app() {
         app.allow("not-a-real-id", "w").await;
         assert_eq!(agent.next_refused().await.1, AnswerRefusal::NotOperatorApp);
         tcp.next("a refusal", is_secure_connection_refusal).await;
-        assert_eq!(app.next_refused().await.1, AnswerRefusal::NotOperatorApp);
-        let (id, code, _) = app.next_refused().await;
+        // The app's two refusals are for two independent answers, each handled
+        // (and audited) on a task of its own, so they arrive in either order:
+        // match each by its request id.
+        let mut refusals = vec![app.next_refused().await, app.next_refused().await];
+        refusals.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut expected = [
+            (wire.request_id.clone(), AnswerRefusal::NotOperatorApp),
+            ("not-a-real-id".to_string(), AnswerRefusal::UnknownRequest),
+        ];
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
-            (id.as_str(), code),
-            ("not-a-real-id", AnswerRefusal::UnknownRequest)
+            refusals
+                .iter()
+                .map(|(id, code, _)| (id.clone(), *code))
+                .collect::<Vec<_>>(),
+            expected
         );
         settle().await;
         assert!(
