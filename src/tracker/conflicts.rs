@@ -210,14 +210,38 @@ impl Conflicts {
 
     /// Settles the conflict with this id (one losing value) and nothing else:
     /// the others of its field, and any recorded since the user looked, stay.
-    /// When an item has none left, its dropped count is forgotten too.
-    pub fn clear(&mut self, id: &str) {
-        let Some(pos) = self.list.iter().position(|c| c.id == id) else {
-            return;
-        };
-        let gone = self.list.remove(pos);
-        if !self.list.iter().any(|c| c.item_id == gone.item_id) {
-            self.dropped_by_item.remove(&gone.item_id);
+    /// Returns the item it belonged to. The item's dropped marker is not
+    /// touched here: a settling write may record a new conflict on the same
+    /// item right after (the value it displaced), and the marker must outlive
+    /// that. The caller then runs [`Self::forget_drops_of_settled`].
+    pub fn clear(&mut self, id: &str) -> Option<String> {
+        let pos = self.list.iter().position(|c| c.id == id)?;
+        Some(self.list.remove(pos).item_id)
+    }
+
+    /// Forgets the dropped count of each of `item_ids` that has no conflict
+    /// left (the user settled all that was kept of it). The invariant: a
+    /// marker stays while the item holds any conflict; it goes only when the
+    /// user acknowledges it ([`Self::ack_dropped`]) or settles the last
+    /// conflict of the item.
+    pub fn forget_drops_of_settled(&mut self, item_ids: &[String]) {
+        for id in item_ids {
+            if !self.list.iter().any(|c| &c.item_id == id) {
+                self.dropped_by_item.remove(id);
+            }
+        }
+    }
+
+    /// [`Self::forget_drops_of_settled`] for a batch: `recorded` is each
+    /// settled item with the dropped count it had right after the settling
+    /// and before the batch pushed anything. An item with no conflict left
+    /// forgets only that many (the way [`Self::ack_dropped`] does), so a drop
+    /// the batch's own pushes counted survives.
+    pub fn forget_recorded_drops(&mut self, recorded: &[(String, u32)]) {
+        for (id, count) in recorded {
+            if !self.list.iter().any(|c| &c.item_id == id) {
+                self.ack_dropped(id, *count);
+            }
         }
     }
 
@@ -299,7 +323,7 @@ pub fn detect(
         match change.kind {
             ChangeKind::Changed => {
                 for (field, (_, new)) in &change.fields {
-                    let last = latest(prior, id, Some(field));
+                    let last = latest(prior, id, Some(field), d);
                     let mut guess = false;
                     let losing_author = match last {
                         Some(last) => {
@@ -467,17 +491,34 @@ fn gap_overwrite(d: &Detect<'_>) -> bool {
 }
 
 /// The latest change to `field` of item `id` (any field when `None`), made
-/// by an add or an edit. Earlier conflict entries are not changes.
-fn latest<'a>(prior: &'a VecDeque<Change>, id: &str, field: Option<&str>) -> Option<&'a Change> {
+/// by an add or an edit. Earlier conflict entries are not changes. A no-op
+/// the writer itself logged for the field (a losing value it put back where
+/// the field already held it) is skipped: it records a decision, not a write,
+/// so it must never stand in for an unseen write that came before it.
+fn latest<'a>(
+    prior: &'a VecDeque<Change>,
+    id: &str,
+    field: Option<&str>,
+    d: &Detect<'_>,
+) -> Option<&'a Change> {
     prior.iter().rev().find(|c| {
         c.item_id.as_deref() == Some(id)
             && match c.kind {
                 ChangeKind::Changed | ChangeKind::Added => {
-                    field.is_none_or(|f| c.fields.contains_key(f))
+                    field.is_none_or(|f| c.fields.contains_key(f)) && !own_no_op(c, field, d)
                 }
                 _ => false,
             }
     })
+}
+
+/// Is `c` a no-op the writer itself logged for `field`?
+fn own_no_op(c: &Change, field: Option<&str>, d: &Detect<'_>) -> bool {
+    let Some(f) = field else { return false };
+    c.kind == ChangeKind::Changed
+        && &c.by == d.writer
+        && c.client.as_deref() == d.client
+        && c.fields.get(f).is_some_and(|(old, new)| old == new)
 }
 
 /// Did `field` of item `id` hold `value` before one of the logged changes?
@@ -743,6 +784,38 @@ mod tests {
         assert!(run(prior, sec, &file, None, 300).is_empty());
     }
 
+    /// A no-op the pane logged for a field (a losing value put back where the
+    /// field already held it) is the pane's decision, not a write: it must
+    /// never stand in for the file's unseen save before it.
+    #[test]
+    fn a_writers_own_no_op_does_not_hide_an_unseen_write_before_it() {
+        let (file, pane) = (Author::File, Author::Pane);
+        let mut no_op = status_change(&pane, "a", "in-progress", "in-progress", 100, 3);
+        no_op.client = Some("w0".to_string());
+        let prior = vec![
+            status_change(&file, "a", "todo", "in-progress", 50, 2),
+            no_op,
+        ];
+        let write = status_change(&pane, "a", "in-progress", "needs-you", 200, 0);
+        let got = detect(
+            &prior.into_iter().collect(),
+            &[write],
+            &board(),
+            &|_| Some("- [x] Deploy\n".to_string()),
+            &Detect {
+                writer: &pane,
+                seen_through: Some(1),
+                unseen: &[],
+                client: Some("w0"),
+                history_gap: false,
+                resolving: &[],
+                now: at(200),
+            },
+        );
+        assert_eq!(got.len(), 1, "the file's save after the view is kept");
+        assert_eq!(got[0].losing_author, file);
+    }
+
     #[test]
     fn a_source_change_never_conflicts_on_either_side() {
         let (src, pane) = (
@@ -847,5 +920,106 @@ mod tests {
         assert_eq!(conflicts.all().len(), MAX_PER_BOARD);
         assert_eq!(conflicts.all()[0].item_id, "i3");
         assert_eq!(conflicts.dropped(), 3);
+    }
+
+    /// A settling batch whose own pushes make a cap drop the settled item's
+    /// last remaining conflict: the forget subtracts only what was recorded
+    /// before the pushes, so the drop the batch counted survives.
+    #[test]
+    fn a_cap_drop_during_the_settling_batch_survives_the_forget() {
+        let make = |item: &str, field: &str, n: usize| Conflict {
+            id: format!("c{n}"),
+            item_id: item.into(),
+            field: field.into(),
+            losing: json!(n),
+            losing_author: Author::Pane,
+            winning_author: Author::File,
+            at: at(n as i64),
+            title: None,
+            section: None,
+            prev: None,
+            next: None,
+            version: 1,
+            guess: false,
+        };
+        let mut conflicts = Conflicts::default();
+        // alpha's note conflict is the oldest of a full board; its status
+        // conflict is the one the batch settles.
+        conflicts.push(make("alpha", "note", 0));
+        conflicts.push(make("alpha", "status", 1));
+        for n in 2..MAX_PER_BOARD {
+            conflicts.push(make(&format!("i{n}"), "status", n));
+        }
+        assert_eq!(conflicts.all().len(), MAX_PER_BOARD);
+        let item = conflicts.clear("c1").unwrap();
+        let recorded = vec![(item, conflicts.dropped_for("alpha"))];
+        // The batch records two conflicts: the cap drops alpha's note one.
+        conflicts.push(make("x", "status", 100));
+        conflicts.push(make("y", "status", 101));
+        assert!(conflicts.all().iter().all(|c| c.item_id != "alpha"));
+        assert_eq!(conflicts.dropped_for("alpha"), 1);
+        conflicts.forget_recorded_drops(&recorded);
+        assert_eq!(conflicts.dropped_for("alpha"), 1, "a value was lost");
+        // A drop recorded before the settling is what goes.
+        let mut older = Conflicts::default();
+        older.push(make("a", "status", 0));
+        for n in 1..=MAX_PER_FIELD {
+            older.push(make("a", "status", n));
+        }
+        assert_eq!(older.dropped_for("a"), 1);
+        let kept: Vec<String> = older.all().iter().map(|c| c.id.clone()).collect();
+        let mut recorded = Vec::new();
+        for id in &kept {
+            let item = older.clear(id).unwrap();
+            if recorded.is_empty() {
+                recorded.push((item, older.dropped_for("a")));
+            }
+        }
+        older.forget_recorded_drops(&recorded);
+        assert_eq!(older.dropped_for("a"), 0);
+    }
+
+    /// The invariant: a dropped marker stays while any conflict of the item is
+    /// kept; settling the last conflict forgets it, but not when the settling
+    /// write recorded a new conflict on the same item (the displaced value).
+    #[test]
+    fn a_dropped_marker_outlives_a_settling_that_records_a_new_conflict() {
+        let make = |item: &str, n: usize| Conflict {
+            id: format!("c{n}"),
+            item_id: item.into(),
+            field: "status".into(),
+            losing: json!(n),
+            losing_author: Author::Pane,
+            winning_author: Author::File,
+            at: at(n as i64),
+            title: None,
+            section: None,
+            prev: None,
+            next: None,
+            version: 1,
+            guess: false,
+        };
+        let mut conflicts = Conflicts::default();
+        for n in 0..=MAX_PER_FIELD {
+            conflicts.push(make("a", n));
+        }
+        assert_eq!(conflicts.dropped_for("a"), 1);
+        // Settle every kept conflict but one: the marker stays.
+        let kept: Vec<String> = conflicts.all().iter().map(|c| c.id.clone()).collect();
+        for id in &kept[1..] {
+            let item = conflicts.clear(id).unwrap();
+            conflicts.forget_drops_of_settled(&[item]);
+        }
+        assert_eq!(conflicts.dropped_for("a"), 1);
+        // Settling the last while a new conflict is recorded on the item
+        // (what a keep-losing resolve does): the marker stays.
+        let item = conflicts.clear(&kept[0]).unwrap();
+        conflicts.push(make("a", 99));
+        conflicts.forget_drops_of_settled(std::slice::from_ref(&item));
+        assert_eq!(conflicts.dropped_for("a"), 1);
+        // Settling that one with nothing recorded: the item has none left.
+        conflicts.clear("c99");
+        conflicts.forget_drops_of_settled(&[item]);
+        assert_eq!(conflicts.dropped_for("a"), 0);
     }
 }

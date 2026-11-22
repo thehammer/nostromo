@@ -13,7 +13,7 @@ use crate::ipc::protocol::{ConflictKeep, TrackerPaneOp, MAX_TRACKER_EDIT_OPS};
 use crate::tracker::bindings::with_source_line;
 use crate::tracker::changelog::ChangeLog;
 use crate::tracker::conflicts::Conflict;
-use crate::tracker::model::{generate_id, Author, Board, ChangeKind, Item};
+use crate::tracker::model::{generate_id, Author, Board, ChangeKind, Item, Kind};
 use crate::tracker::ops::{
     parse_restorable, LinkInput, Op, PaneStep, Restore, Upsert, MAX_NOTE_CHARS,
 };
@@ -255,13 +255,49 @@ fn apply_effects(entry: &mut BoardEntry, effects: Vec<Effect>) {
     for effect in effects {
         match effect {
             Effect::ClearBadge(item) => entry.approvals.approve(&item),
-            Effect::ClearConflict(id) => entry.conflicts.clear(&id),
+            Effect::ClearConflict(id) => {
+                if let Some(item) = entry.conflicts.clear(&id) {
+                    entry.conflicts.forget_drops_of_settled(&[item]);
+                }
+            }
             Effect::AckDropped { id, count } => entry.conflicts.ack_dropped(&id, count),
             Effect::ClearRemoved { id, block } => {
                 entry.conflicts.clear_removed_matching(&id, &block)
             }
         }
     }
+}
+
+/// A status change (a tick, or an undo/redo of one) on a command: refuses
+/// when the item's kind or command changed after the edit's base version, or
+/// when the history doesn't reach back to say. The person saw a plain item (or
+/// another command), not this one; an agent may have just made it a command,
+/// and a stale undo must not tick it. A command that has not changed since the
+/// person's view is ticked as before.
+fn check_status_not_on_new_command(
+    board: &Board,
+    log: &ChangeLog,
+    id: &str,
+    base_version: u64,
+    index: usize,
+) -> Result<(), TrackerError> {
+    if !board.item(id).is_some_and(|i| i.kind == Kind::Command) {
+        return Ok(());
+    }
+    let changed = log.entries.iter().any(|c| {
+        c.seq > base_version
+            && c.item_id.as_deref() == Some(id)
+            && matches!(c.kind, ChangeKind::Changed | ChangeKind::Added)
+            && (c.fields.contains_key("kind") || c.fields.contains_key("command"))
+    });
+    if changed || log.history_gap(base_version) {
+        return Err(TrackerError::Stale {
+            index: Some(index),
+            reason: "that item became a command (or its command changed) since you saw it; look again before changing its status"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// The user approves what they saw: refuses when anyone changed the item
@@ -385,13 +421,16 @@ fn plan_ops(
             plan.origin.push(index);
         };
         match op {
-            TrackerPaneOp::Status { id, status } => push(
-                &mut plan,
-                PaneStep::Op(Op::Status {
-                    id: id.clone(),
-                    status: status.clone(),
-                }),
-            ),
+            TrackerPaneOp::Status { id, status } => {
+                check_status_not_on_new_command(board, log, id, base_version, index)?;
+                push(
+                    &mut plan,
+                    PaneStep::Op(Op::Status {
+                        id: id.clone(),
+                        status: status.clone(),
+                    }),
+                )
+            }
             TrackerPaneOp::Edit {
                 id,
                 title,
@@ -583,6 +622,11 @@ fn plan_ops(
                     ));
                 }
                 if *keep == ConflictKeep::Losing {
+                    // Putting a losing status back is a pane status op built
+                    // from the person's old view: the same guard applies.
+                    if field == "status" {
+                        check_status_not_on_new_command(board, log, id, base_version, index)?;
+                    }
                     let (steps, new_id) =
                         losing_steps(chosen, board, &mut taken).map_err(|e| invalid(index, &e))?;
                     plan.created.extend(new_id);
