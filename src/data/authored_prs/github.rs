@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 use super::budget::{parse_retry_after, RateObs, Resource};
 use super::classify::{RawMergeQueue, RawPr};
+use super::exclude::ExcludedOrgs;
 use super::snapshot::{safe_segment, valid_repo};
 
 pub const USER_AGENT: &str = "nostromd authored-prs";
@@ -24,6 +25,19 @@ pub const USER_AGENT: &str = "nostromd authored-prs";
 /// token can read. Never review-requested, never assigned.
 pub const SEARCH_PATH: &str =
     "/search/issues?q=is:pr+is:open+author:@me+archived:false&sort=updated&order=desc&per_page=100";
+
+const SEARCH_QUERY_END: &str = "+archived:false";
+
+/// [`SEARCH_PATH`] with a `-org:<login>` qualifier per excluded owner, so an
+/// excluded org can neither cost quota nor fill the 100-result page. Byte for
+/// byte [`SEARCH_PATH`] when nothing is excluded.
+pub fn search_path(excluded: &ExcludedOrgs) -> String {
+    let at = SEARCH_PATH
+        .find(SEARCH_QUERY_END)
+        .map_or(0, |i| i + SEARCH_QUERY_END.len());
+    let (head, tail) = SEARCH_PATH.split_at(at);
+    format!("{head}{}{tail}", excluded.search_qualifiers())
+}
 
 pub const MAX_ALIASES: usize = 20;
 /// GitHub's own advice for a secondary rate limit that names no `Retry-After`:
@@ -95,6 +109,9 @@ pub struct Api {
     http: reqwest::Client,
     token: String,
     base: String,
+    /// Built once: the exclusion list is fixed for the daemon's life, so the
+    /// search ETag never belongs to a different query.
+    search_path: String,
 }
 
 fn header_str<'a>(h: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -153,7 +170,14 @@ impl Api {
             http,
             token,
             base: base.trim_end_matches('/').to_owned(),
+            search_path: SEARCH_PATH.to_owned(),
         }
+    }
+
+    /// The same client, its discovery search leaving `excluded` owners out.
+    pub fn excluding(mut self, excluded: &ExcludedOrgs) -> Self {
+        self.search_path = search_path(excluded);
+        self
     }
 
     fn headers(&self) -> HeaderMap {
@@ -282,7 +306,7 @@ impl Api {
 
     /// The discovery search. `None` items means 304: reuse the last list.
     pub async fn search(&self, etag: Option<&str>) -> Result<SearchResult, Failure> {
-        let reply = self.get(SEARCH_PATH, etag).await?;
+        let reply = self.get(&self.search_path, etag).await?;
         if reply.status == 304 {
             return Ok(SearchResult {
                 meta: reply.meta,
@@ -819,6 +843,25 @@ fn query_with(targets: &[Target], extra_fields: &str) -> String {
     q.push_str("}\n");
     q.push_str(&FRAGMENT.replacen("{EXTRA}", extra_fields, 1));
     q
+}
+
+#[cfg(test)]
+mod search_path_tests {
+    use super::*;
+
+    #[test]
+    fn nothing_excluded_is_the_original_query_byte_for_byte() {
+        assert_eq!(search_path(&ExcludedOrgs::default()), SEARCH_PATH);
+    }
+
+    #[test]
+    fn each_excluded_org_is_a_negative_qualifier_inside_q() {
+        let p = search_path(&ExcludedOrgs::new(["Carefeed", "other-org"]));
+        assert_eq!(
+            p,
+            "/search/issues?q=is:pr+is:open+author:@me+archived:false+-org:carefeed+-org:other-org&sort=updated&order=desc&per_page=100"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -1417,6 +1417,7 @@ fn start_authored_prs(
     state_root: std::path::PathBuf,
 ) {
     use nostromo::data::authored_prs::{AuthoredPrsSource, Deps, FocusInfo};
+    let exclude_orgs = nostromo::data::authored_prs::exclude::ExcludedOrgs::from_config(config);
     let github =
         match nostromo::data::github_client::GithubClient::new(config.github_token_path.as_deref())
         {
@@ -1465,6 +1466,7 @@ fn start_authored_prs(
         projects_root: projects_root.clone(),
         clock: authored_prs_clock(),
         state_root: Some(state_root),
+        exclude_orgs,
     });
     {
         let mut mgr = session_mgr.lock().unwrap();
