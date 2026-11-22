@@ -10,18 +10,18 @@ const NOTICE_LINE: &str = "Mother job notices (<nostromo-mother-job …/>) repor
 /// Every variant of the text a session can get.
 fn every_variant() -> Vec<(String, String)> {
     vec![
-        ("no tracker".to_owned(), nostromo_instructions(None)),
+        ("no tracker".to_owned(), nostromo_instructions(None, None)),
         (
             "a tracker".to_owned(),
-            nostromo_instructions(Some("sentry-triage")),
+            nostromo_instructions(Some("sentry-triage"), None),
         ),
         (
             "a 48-character topic".to_owned(),
-            nostromo_instructions(Some(&format!("a{}", "-b".repeat(23)))),
+            nostromo_instructions(Some(&format!("a{}", "-b".repeat(23))), None),
         ),
         (
             "an over-long topic".to_owned(),
-            nostromo_instructions(Some(&"x".repeat(500))),
+            nostromo_instructions(Some(&"x".repeat(500)), None),
         ),
     ]
 }
@@ -61,7 +61,7 @@ fn every_variant_stays_within_25_lines_and_the_character_budget() {
 
 #[test]
 fn the_tracker_line_still_comes_last_when_a_tracker_is_open() {
-    let text = nostromo_instructions(Some("sentry-triage"));
+    let text = nostromo_instructions(Some("sentry-triage"), None);
     assert!(
         text.ends_with(
             "A tracker is open in this focus: \"sentry-triage\". Call op:\"read\" to load it."

@@ -530,19 +530,17 @@ fn initialize_instructions(state: &McpSharedState, pty_id: Option<&str>) -> Opti
     }
     let tag = pty_id.filter(|t| !t.is_empty() && *t != crate::data::work::picks::PICKS_TAG)?;
     let daemon = state.daemon.as_ref()?;
-    let known = daemon
+    let focus = daemon
         .session_mgr
         .lock()
         .ok()?
         .focus_registry()
-        .iter()
-        .any(|f| f.tag == tag);
-    if !known {
-        return None;
-    }
+        .into_iter()
+        .find(|f| f.tag == tag)?;
     let topic = daemon.tracker.bound_topic(tag);
     Some(crate::mcp::instructions::nostromo_instructions(
         topic.as_deref(),
+        Some(focus.agent_name.as_str()),
     ))
 }
 
