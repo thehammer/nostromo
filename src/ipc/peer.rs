@@ -2267,6 +2267,7 @@ mod tests {
                 repo: "o/r".into(),
                 number: 1,
                 expected_head_sha_short: "abcdef12".into(),
+                expected_via: None,
             },
             ClientMsg::ConversationHistoryGet {
                 request_id: "r".into(),

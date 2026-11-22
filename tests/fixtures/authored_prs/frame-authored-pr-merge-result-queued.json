@@ -1,0 +1,10 @@
+{
+  "type": "authored_pr_merge_result",
+  "request_id": "r8",
+  "result": {
+    "status": "ok",
+    "value": {
+      "code": "queued"
+    }
+  }
+}

@@ -1015,6 +1015,11 @@ class NostromodClient {
         features?.contains(authoredPrsMergeFeature) == true
     }
 
+    /// Does a daemon that advertised `features` take the Merge verb through a merge queue (`authored_prs_merge_queue_v1`)?
+    static func supportsAuthoredPrsMergeQueue(features: [String]?) -> Bool {
+        features?.contains(authoredPrsMergeQueueFeature) == true
+    }
+
     /// The `welcome.features` entry that says the daemon keeps the private conversation history.
     static let conversationHistoryFeature = "conversation_history_v1"
 
@@ -1230,6 +1235,12 @@ class NostromodClient {
     var daemonAdvertisesAuthoredPrsMerge: Bool {
         sendLock.lock(); defer { sendLock.unlock() }
         return NostromodClient.supportsAuthoredPrsMerge(features: advertisedFeatures)
+    }
+
+    /// Whether the connection's last `welcome` advertised `authored_prs_merge_queue_v1`.
+    var daemonAdvertisesAuthoredPrsMergeQueue: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return NostromodClient.supportsAuthoredPrsMergeQueue(features: advertisedFeatures)
     }
 
     /// The Merge verb. Written only to a daemon that advertised `authored_prs_merge_v1`, and only ever after a

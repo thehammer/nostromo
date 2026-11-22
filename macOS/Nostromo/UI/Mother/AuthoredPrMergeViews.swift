@@ -93,7 +93,9 @@ final class AuthoredPrMergeViewController: NSViewController {
         mergeButton.target = self
         mergeButton.action = #selector(mergePressed)
         mergeButton.keyEquivalent = ""
-        mergeButton.setAccessibilityLabel("Squash and merge PR \(session.confirmation.number)")
+        mergeButton.setAccessibilityLabel(session.confirmation.via == .queue
+            ? "Add PR \(session.confirmation.number) to the merge queue"
+            : "Squash and merge PR \(session.confirmation.number)")
         mergeButton.setAccessibilityIdentifier("authored-pr-merge-confirm")
 
         for b in [cancelButton, mergeButton] {

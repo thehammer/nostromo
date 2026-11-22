@@ -1486,6 +1486,8 @@ impl Engine {
                     pill,
                     head_sha_short: p.head_sha.as_deref().and_then(short_sha),
                     perri,
+                    merge_via: c.and_then(|c| c.merge_via),
+                    queue: c.and_then(|c| c.queue),
                     attention_key: key_hash,
                 }
             })

@@ -8,8 +8,9 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use super::snapshot::{
-    safe_segment, valid_login, Checks, ChecksState, Group, Lifecycle, Review, ReviewState,
-    MAX_BASE_REF, MAX_CHECK_NAME, MAX_FAILING_NAMES, MAX_LOGINS, MAX_NEW_COMMENTS,
+    safe_segment, valid_login, Checks, ChecksState, Group, Lifecycle, MergeVia, QueueRow,
+    QueueState, Review, ReviewState, MAX_BASE_REF, MAX_CHECK_NAME, MAX_FAILING_NAMES, MAX_LOGINS,
+    MAX_NEW_COMMENTS, MAX_QUEUE_POSITION,
 };
 use crate::data::perri_queue::CiState;
 use crate::data::perri_queue_native::is_bot;
@@ -133,6 +134,10 @@ pub struct RawRepository {
     pub name_with_owner: String,
     #[serde(default, rename = "defaultBranchRef")]
     pub default_branch_ref: Option<RawDefaultBranch>,
+    /// The merge queue of the repository's DEFAULT branch (`mergeQueue` with no
+    /// `branch` argument). Same three states as [`RawPr::merge_queue`].
+    #[serde(default, rename = "mergeQueue", deserialize_with = "present_or_null")]
+    pub merge_queue: Option<Option<RawMergeQueue>>,
 }
 
 /// One pull request as the `AuthoredPrDetail` query returns it.
@@ -185,6 +190,124 @@ pub struct RawPr {
     /// Only the merge's own read asks for it; empty otherwise.
     #[serde(default, rename = "mergeStateStatus")]
     pub merge_state_status: String,
+    /// The PR's GraphQL node id (what `enqueuePullRequest` takes).
+    #[serde(default)]
+    pub id: String,
+    /// `isInMergeQueue`.
+    #[serde(default, rename = "isInMergeQueue")]
+    pub is_in_merge_queue: bool,
+    /// The PR's OWN `mergeQueue` field. It is not the base branch's queue (on
+    /// admin-portal a PR stacked on `merge/*` answers with `main`'s queue), so
+    /// it is only a cross-check. Three states, on purpose: `None` is the key
+    /// missing from GitHub's answer (not readable: unknown), `Some(None)` is
+    /// `null` and `Some(Some(_))` is a queue.
+    #[serde(default, rename = "mergeQueue", deserialize_with = "present_or_null")]
+    pub merge_queue: Option<Option<RawMergeQueue>>,
+    /// `repository.mergeQueue(branch: <baseRefName>)` for a base that is not the
+    /// default branch, read by the daemon's second request (never part of
+    /// GitHub's JSON for the PR). Three states like `merge_queue`.
+    #[serde(skip)]
+    pub base_branch_queue: Option<Option<RawMergeQueue>>,
+    #[serde(default, rename = "mergeQueueEntry")]
+    pub merge_queue_entry: Option<RawQueueEntry>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RawMergeQueue {
+    #[serde(default)]
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RawQueueEntry {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub position: Option<u64>,
+}
+
+/// Keeps "the key was there and null" apart from "the key was missing".
+fn present_or_null<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
+impl RawPr {
+    fn base_is_default(&self) -> bool {
+        !self.base_ref_name.is_empty()
+            && self
+                .repository
+                .default_branch_ref
+                .as_ref()
+                .is_some_and(|d| d.name == self.base_ref_name)
+    }
+
+    /// The merge queue of the PR's BASE branch: the authority for how the PR
+    /// goes in. For the default branch it is `repository.mergeQueue`; for any
+    /// other base, the second read's `mergeQueue(branch: <base>)`. `None` when
+    /// it could not be read.
+    pub fn base_queue(&self) -> Option<&Option<RawMergeQueue>> {
+        if self.base_is_default() {
+            self.repository.merge_queue.as_ref()
+        } else {
+            self.base_branch_queue.as_ref()
+        }
+    }
+
+    /// Does the base branch's queue need the second request? True for an open
+    /// PR whose base is not the default branch.
+    pub fn needs_base_queue_read(&self) -> bool {
+        !self.base_is_default()
+            && !self.base_ref_name.is_empty()
+            && self.state.eq_ignore_ascii_case("OPEN")
+    }
+
+    /// How GitHub will take this PR in: `None` when it could not be read, or
+    /// when the two reads of the queue disagree about a queue existing.
+    ///
+    /// The BASE branch's queue is the authority. No queue on the base branch is
+    /// a direct merge whatever the PR's own field says (GitHub answers that
+    /// field with the default branch's queue for a PR stacked on a branch that
+    /// has none). A queue on the base branch needs the PR's own field to say so
+    /// too; if it does not, we do not know, and nothing is sent.
+    pub fn merge_via(&self) -> Option<MergeVia> {
+        let pr_says_queue = match self.merge_queue.as_ref()? {
+            None => false,
+            Some(q) if !q.id.is_empty() => true,
+            Some(_) => return None,
+        };
+        match self.base_queue()? {
+            None => Some(MergeVia::Direct),
+            Some(q) if q.id.is_empty() => None,
+            Some(_) if pr_says_queue => Some(MergeVia::Queue),
+            Some(_) => None,
+        }
+    }
+
+    /// Where the PR is in its queue, as the wire shows it.
+    pub fn queue_row(&self) -> Option<QueueRow> {
+        if !self.is_in_merge_queue && self.merge_queue_entry.is_none() {
+            return None;
+        }
+        let e = self.merge_queue_entry.as_ref();
+        Some(QueueRow {
+            state: match e.map(|e| e.state.to_ascii_uppercase()).as_deref() {
+                Some("QUEUED") => QueueState::Queued,
+                Some("AWAITING_CHECKS") => QueueState::AwaitingChecks,
+                Some("MERGEABLE") => QueueState::Mergeable,
+                Some("UNMERGEABLE") => QueueState::Unmergeable,
+                Some("LOCKED") => QueueState::Locked,
+                _ => QueueState::Unknown,
+            },
+            position: e
+                .and_then(|e| e.position)
+                .filter(|p| *p >= 1)
+                .map(|p| p.min(MAX_QUEUE_POSITION) as u32),
+        })
+    }
 }
 
 /// What the classifier concludes about one PR. Everything the wire row needs
@@ -202,6 +325,8 @@ pub struct Classified {
     pub threads_truncated: bool,
     pub base_ref: Option<String>,
     pub lifecycle: Lifecycle,
+    pub merge_via: Option<MergeVia>,
+    pub queue: Option<QueueRow>,
 }
 
 /// A human: a `User`, not a known bot and not a `[bot]` account.
@@ -479,6 +604,8 @@ pub fn classify(pr: &RawPr, told: Option<DateTime<Utc>>) -> Classified {
                 .map(|d| d.name.as_str()),
         ),
         lifecycle: lifecycle_of(pr),
+        merge_via: pr.merge_via(),
+        queue: pr.queue_row(),
     }
 }
 
@@ -1269,5 +1396,121 @@ mod tests {
         );
         v["isCrossRepository"] = json!(true);
         assert!(raw(v).is_cross_repository);
+    }
+
+    // ── how a PR goes in: the BASE branch's queue decides ────────────────────
+
+    /// What one read of a queue field can say.
+    #[derive(Clone, Copy, Debug)]
+    enum Read {
+        /// The field is missing from GitHub's answer: could not be read.
+        Unreadable,
+        /// `null`: no queue.
+        NoQueue,
+        /// A queue.
+        Queue,
+    }
+
+    fn queue_value(r: Read) -> Option<Value> {
+        match r {
+            Read::Unreadable => None,
+            Read::NoQueue => Some(Value::Null),
+            Read::Queue => Some(json!({"id": "MQ_x"})),
+        }
+    }
+
+    /// A PR on `base` (the repo's default branch is `main`); `pr_field` is the
+    /// PR's own `mergeQueue`, `base_read` is the base branch's queue as read the
+    /// way the daemon reads it (`repository.mergeQueue` for the default branch,
+    /// the second request for any other).
+    fn pr_on(base: &str, pr_field: Read, base_read: Read) -> RawPr {
+        let mut v = pr_json();
+        v["baseRefName"] = json!(base);
+        if let Some(q) = queue_value(pr_field) {
+            v["mergeQueue"] = q;
+        }
+        let mut pr = if base == "main" {
+            if let Some(q) = queue_value(base_read) {
+                v["repository"]["mergeQueue"] = q;
+            }
+            raw(v)
+        } else {
+            raw(v)
+        };
+        if base != "main" {
+            pr.base_branch_queue = queue_value(base_read).map(|q| {
+                if q.is_null() {
+                    None
+                } else {
+                    Some(RawMergeQueue { id: "MQ_b".into() })
+                }
+            });
+        }
+        pr
+    }
+
+    #[test]
+    fn how_a_pr_goes_in_follows_its_base_branchs_queue_checked_against_the_prs_own_field() {
+        use MergeVia::{Direct, Queue};
+        use Read::{NoQueue, Queue as Q, Unreadable};
+        // (base branch's queue, the PR's own field) -> how it goes in
+        let table = [
+            (Unreadable, Unreadable, None),
+            (Unreadable, NoQueue, None),
+            (Unreadable, Q, None),
+            // No queue on the base: direct, even when the PR's field says a queue
+            // (that is `main`'s queue, answered for a PR stacked on another branch).
+            (NoQueue, Unreadable, None),
+            (NoQueue, NoQueue, Some(Direct)),
+            (NoQueue, Q, Some(Direct)),
+            // A queue on the base needs the PR's field to agree; if not, we don't know.
+            (Q, Unreadable, None),
+            (Q, NoQueue, None),
+            (Q, Q, Some(Queue)),
+        ];
+        for base in ["main", "merge/stacked"] {
+            for (base_read, pr_field, want) in table {
+                let pr = pr_on(base, pr_field, base_read);
+                assert_eq!(
+                    pr.merge_via(),
+                    want,
+                    "base {base}: base queue {base_read:?}, PR field {pr_field:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_queue_with_no_id_is_not_a_queue_we_can_act_on() {
+        // An odd shape from GitHub on either read is unknown, never a guess.
+        let mut v = pr_json();
+        v["mergeQueue"] = json!({"id": "MQ_x"});
+        v["repository"]["mergeQueue"] = json!({});
+        assert_eq!(raw(v).merge_via(), None, "base queue without an id");
+        let mut v = pr_json();
+        v["mergeQueue"] = json!({});
+        v["repository"]["mergeQueue"] = Value::Null;
+        assert_eq!(raw(v).merge_via(), None, "PR queue without an id");
+    }
+
+    #[test]
+    fn the_default_branchs_queue_is_read_from_the_repository_and_another_base_needs_the_second_read(
+    ) {
+        // On `main` the first answer carries the base queue: nothing else to read.
+        let on_main = pr_on("main", Read::Queue, Read::Queue);
+        assert!(!on_main.needs_base_queue_read());
+        // On another base, a queue on `main` says nothing about it: with no
+        // second read the base queue is unknown, whatever `main` has.
+        let mut v = pr_json();
+        v["baseRefName"] = json!("merge/stacked");
+        v["mergeQueue"] = json!({"id": "MQ_x"});
+        v["repository"]["mergeQueue"] = json!({"id": "MQ_main"});
+        let stacked = raw(v);
+        assert!(stacked.needs_base_queue_read());
+        assert_eq!(stacked.merge_via(), None, "main's queue is not its queue");
+        // Only an open PR needs it.
+        let mut closed = stacked.clone();
+        closed.state = "CLOSED".into();
+        assert!(!closed.needs_base_queue_read());
     }
 }
