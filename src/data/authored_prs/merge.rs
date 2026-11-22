@@ -398,13 +398,15 @@ impl AuthoredPrActions {
     /// waits with it. (`resumes_at` is only ever set while paused; the slower
     /// `rate_limited` poll state is a slow-down, not a stop.)
     pub(super) fn rate_limited_now(&self) -> bool {
+        if self.read_wait_pending() {
+            return true;
+        }
         let snap = self.snapshot.borrow();
         let Some(snap) = snap.as_ref() else {
             return false;
         };
-        let paused = snap.poll.state == PollState::Paused
-            && snap.poll.resumes_at.is_some_and(|t| t > self.clock.now());
-        paused || self.read_wait_pending()
+        snap.poll.state == PollState::Paused
+            && snap.poll.resumes_at.is_some_and(|t| t > self.clock.now())
     }
 
     /// GitHub answered one of the verbs' own live reads with a rate limit:
