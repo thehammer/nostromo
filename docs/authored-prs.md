@@ -64,8 +64,11 @@ refused (and the snapshot says `refresh_blocked`) while one runs or while paused
   `/opt/homebrew/bin/gh`, `/usr/local/bin/gh`, `/usr/bin/gh`. It runs with a fixed
   argv, no stdin, stderr discarded, a cleared environment (`HOME`, `USER`,
   `GH_CONFIG_DIR`, `XDG_CONFIG_HOME` only), a 5 s timeout and a capped stdout; its
-  answer must be one printable-ASCII word. A token from `gh` is cached 5 min and a
-  failure 30 s, so it runs at most about twice a minute. Neither is logged.
+  answer must be one printable-ASCII word. `gh` runs in its own process group, killed
+  when the run ends. A token from `gh` is cached 5 min, a failure 30 s and a timeout
+  5 min. Neither is logged. Trust: `gh` is trusted like `NOSTROMO_AWS_CLI`, the override
+  variable as much as the launchd plist, and `/opt/homebrew/bin` is admin-group
+  writable, so anyone who could swap `gh` already runs as the user.
 - A secondary limit is `paused` too: a 403 or 429 without `Retry-After` and with
   `remaining` above 0 pauses for a minute, as does a GraphQL 200 whose
   `errors[].type` is `RATE_LIMITED`. A pause from a header's reset time is capped at
