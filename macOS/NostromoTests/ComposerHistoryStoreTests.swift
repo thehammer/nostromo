@@ -338,7 +338,7 @@ final class ComposerHistoryStoreTests: XCTestCase {
     // MARK: FocusSensitivity
 
     private func conversation(_ id: String, tag: String?, sensitive: Bool) -> ConversationEntryWire {
-        ConversationHistoryTestSupport.entry(id, status: tag.map { .running(tag: $0, open: true) } ?? .available,
+        HistoryFixtures.entry(id, status: tag.map { .running(tag: $0, open: true) } ?? .available,
                                              sensitive: sensitive)
     }
 

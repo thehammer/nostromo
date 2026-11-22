@@ -186,6 +186,7 @@ final class ReplInputBarHistoryTests: XCTestCase {
         type(rig, draft, caret: 0)
         down(rig)
         XCTAssertEqual(text(rig), draft, "not navigating: Down is just the caret")
+        rig.textView.setSelectedRange(NSRange(location: 0, length: 0))   // Down moved it a line
         up(rig)
         XCTAssertEqual(text(rig), "old")
         rig.textView.setSelectedRange(NSRange(location: 1, length: 0))
