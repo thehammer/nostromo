@@ -99,7 +99,7 @@ mod inject_tests;
 #[cfg(test)]
 mod injected_tests;
 mod login;
-pub(crate) mod merge;
+pub mod merge;
 #[cfg(test)]
 mod merge_delivery_tests;
 mod model_switch;

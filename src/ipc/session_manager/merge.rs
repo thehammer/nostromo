@@ -225,14 +225,14 @@ pub(super) fn segment_starts(text: &str, boundary: &str, count: usize) -> Option
 
 /// A merged frame read back.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Parsed {
+pub struct Parsed {
     pub boundary: String,
     pub parts: Vec<String>,
 }
 
 /// Read `text` as a merged frame, strictly: any deviation is `None`. Accepts
 /// the plain-string form and the array form joined with newlines and trimmed.
-pub(crate) fn parse(text: &str) -> Option<Parsed> {
+pub fn parse(text: &str) -> Option<Parsed> {
     let text = text.trim();
     let rest = text.strip_prefix(HEADER_OPEN)?;
     let rest = rest.strip_prefix("count=\"")?;
