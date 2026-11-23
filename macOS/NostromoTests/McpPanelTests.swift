@@ -671,5 +671,144 @@ final class McpPanelConfirmationTests: MouseQueueTestCase {
         alert.window.cancelOperation(nil)  // what Esc does in a sheet
         mcpSpin()
         XCTAssertTrue(rig.toggles.isEmpty)
+        XCTAssertNil(rig.controller.confirmSheet, "Esc ends the confirmation")
+        XCTAssertTrue(rig.sheet.sheets.isEmpty, "Esc closes the sheet window")
+    }
+
+    func testCancelClosesTheSheetWindowAsWellAsEndingTheConfirmation() throws {
+        let rig = McpWindowRig()
+        defer { rig.close() }
+        let alert = try ask(rig)
+        alert.cancelButton.performClick(nil)
+        mcpSpin()
+        XCTAssertNil(rig.controller.confirmSheet, "Cancel ends the confirmation")
+        XCTAssertTrue(rig.sheet.sheets.isEmpty, "Cancel closes the sheet window")
+    }
+
+    // MARK: One confirmation at a time
+
+    private func twoDisableable() -> [McpServerViewWire] {
+        McpWindowRig.servers + [McpServerViewWire(name: "other", status: .connected, scope: "user", transport: "stdio", toolCount: 1)]
+    }
+
+    func testDisableOnAnotherRowWhileAConfirmationIsUpDoesNotStackASecondSheet() throws {
+        let rig = McpWindowRig(list: twoDisableable())
+        defer { rig.close() }
+        let first = try ask(rig)
+        rig.row("other").toggleButton.performClick(nil)
+        mcpSpin()
+        XCTAssertTrue(rig.controller.confirmSheet === first, "still the first confirmation")
+        XCTAssertEqual(rig.sheet.sheets.count, 1, "no second sheet")
+
+        first.disableButton.performClick(nil)
+        mcpSpin()
+        XCTAssertEqual(rig.toggles.map(\.server), ["callimachus"], "only the confirmed server is toggled")
+        XCTAssertEqual(rig.toggles.map(\.enabled), [false])
+        XCTAssertNil(rig.controller.confirmSheet)
+        XCTAssertTrue(rig.sheet.sheets.isEmpty)
+    }
+
+    func testPressingDisableTwiceOnTheSameRowAsksOnce() throws {
+        let rig = McpWindowRig()
+        defer { rig.close() }
+        let first = try ask(rig)
+        rig.row("callimachus").toggleButton.performClick(nil)
+        mcpSpin()
+        XCTAssertTrue(rig.controller.confirmSheet === first)
+        XCTAssertEqual(rig.sheet.sheets.count, 1)
+    }
+
+    /// Each way out of the confirmation ends it and closes its window, so the panel is not left stuck.
+    func testCancelEscapeAndDisableEachCloseTheSheetAndTheDisableSendsExactlyOnce() throws {
+        enum Exit: String, CaseIterable { case cancel, escape, disable }
+        for exit in Exit.allCases {
+            let rig = McpWindowRig()
+            defer { rig.close() }
+            let alert = try ask(rig)
+            rig.row("callimachus").toggleButton.performClick(nil)  // a second press while it is up
+            XCTAssertEqual(rig.sheet.sheets.count, 1, "\(exit): one sheet")
+            switch exit {
+            case .cancel: alert.cancelButton.performClick(nil)
+            case .escape: alert.window.cancelOperation(nil)
+            case .disable: alert.disableButton.performClick(nil)
+            }
+            mcpSpin()
+            XCTAssertNil(rig.controller.confirmSheet, "\(exit): confirmation ended")
+            XCTAssertTrue(rig.sheet.sheets.isEmpty, "\(exit): sheet window closed")
+            if exit == .disable {
+                XCTAssertEqual(rig.toggles.map(\.enabled), [false], "\(exit): exactly one disable")
+                XCTAssertEqual(rig.toggles.map(\.server), ["callimachus"])
+            } else {
+                XCTAssertTrue(rig.toggles.isEmpty, "\(exit): nothing sent")
+                // The panel is usable again.
+                rig.row("callimachus").toggleButton.performClick(nil)
+                XCTAssertNotNil(rig.controller.confirmSheet, "\(exit): Disable asks again")
+                XCTAssertEqual(rig.sheet.sheets.count, 1, "\(exit): a fresh sheet")
+            }
+        }
+    }
+}
+
+// MARK: - Keyboard focus survives a refresh
+
+/// A refresh re-renders the rows. The focused button must stay focused when its row survives, and when its
+/// row goes, focus lands on a safe control (the next row's same kind of button, else Refresh), never on a
+/// control that would act on some other server by surprise.
+final class McpPanelFocusTests: MouseQueueTestCase {
+    private func server(_ name: String, _ status: McpStatusKind = .connected) -> McpServerViewWire {
+        McpServerViewWire(name: name, status: status, scope: "user", transport: "stdio", toolCount: 1)
+    }
+
+    /// Focus `pick(rig)`, then answer a refresh with `after`; returns the rig.
+    private func refresh(_ rig: McpWindowRig, to after: [McpServerViewWire]) {
+        rig.controller.refresh()
+        rig.harness.advance(0)
+        rig.harness.answer("req-2", action: "status", .ok, servers: after)
+    }
+
+    func testFocusStaysOnTheSameButtonWhenAnEarlierRowLeaves() throws {
+        let rig = McpWindowRig(list: [server("other"), server("callimachus", .failed), server("claude.ai Metabase", .disabled)])
+        defer { rig.close() }
+        let focused = rig.row("callimachus").toggleButton
+        XCTAssertTrue(rig.sheet.makeFirstResponder(focused))
+        refresh(rig, to: [server("callimachus", .failed), server("claude.ai Metabase", .disabled)])
+        XCTAssertTrue(rig.sheet.firstResponder === focused, "same button object, not whatever now sits at its old position")
+        XCTAssertTrue(rig.row("callimachus").toggleButton === focused)
+        XCTAssertFalse(rig.sheet.firstResponder === rig.row("claude.ai Metabase").toggleButton)
+    }
+
+    func testFocusIsKeptWhenNothingChanges() throws {
+        let list = [server("other"), server("callimachus", .failed), server("claude.ai Metabase", .disabled)]
+        let rig = McpWindowRig(list: list)
+        defer { rig.close() }
+        let focused = rig.row("callimachus").reconnectButton
+        XCTAssertTrue(rig.sheet.makeFirstResponder(focused))
+        refresh(rig, to: list)
+        XCTAssertTrue(rig.sheet.firstResponder === focused)
+    }
+
+    func testFocusedRowLeavingMovesFocusToTheNextRowsSameKindOfButton() throws {
+        let rig = McpWindowRig(list: [server("callimachus", .failed), server("other"), server("claude.ai Metabase", .disabled)])
+        defer { rig.close() }
+        XCTAssertTrue(rig.sheet.makeFirstResponder(rig.row("callimachus").toggleButton))
+        refresh(rig, to: [server("other"), server("claude.ai Metabase", .disabled)])
+        XCTAssertTrue(rig.sheet.firstResponder === rig.row("other").toggleButton, "the following row's Disable")
+    }
+
+    func testFocusedReconnectLeavingMovesFocusToTheNextRowsReconnect() throws {
+        let rig = McpWindowRig(list: [server("callimachus", .failed), server("other")])
+        defer { rig.close() }
+        XCTAssertTrue(rig.sheet.makeFirstResponder(rig.row("callimachus").reconnectButton))
+        refresh(rig, to: [server("other")])
+        XCTAssertTrue(rig.sheet.firstResponder === rig.row("other").reconnectButton, "the following row's Reconnect")
+    }
+
+    func testFocusedLastRowLeavingMovesFocusToRefresh() throws {
+        let rig = McpWindowRig(list: [server("other"), server("callimachus", .failed)])
+        defer { rig.close() }
+        XCTAssertTrue(rig.sheet.makeFirstResponder(rig.row("callimachus").toggleButton))
+        refresh(rig, to: [server("other")])
+        XCTAssertTrue(rig.sheet.firstResponder === rig.controller.panelView.refreshButton, "no row follows, so Refresh")
+        XCTAssertFalse(rig.sheet.firstResponder === rig.row("other").toggleButton, "not the previous row's button")
     }
 }

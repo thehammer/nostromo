@@ -421,13 +421,17 @@ final class McpPanelView: NSView {
     /// Show `rows`. The same row views in the same order leave the stack alone; only a different set rebuilds it.
     /// Either way the Tab order is rebuilt, because a button may have appeared, vanished or been enabled.
     func show(rows: [McpRowView], stateText: String?, showFootnote: Bool, refreshEnabled: Bool) {
+        refreshButton.isEnabled = refreshEnabled
         if !rows.elementsEqual(rowViews, by: ===) {
-            // Keyboard focus survives the rebuild: find the same button in the new rows.
+            // Keyboard focus survives the rebuild: on the same button of the same row (the views are reused
+            // by server), and if that row is gone, on the next row's button of the same kind, else Refresh.
+            // Never on another server's action just because it now sits where the old one was.
+            let oldRows = rowViews
             let focused = window?.firstResponder as? McpActionButton
-            let focusedKey = focused.flatMap { button -> (Int, Bool)? in
-                guard let idx = rowViews.firstIndex(where: { $0.reconnectButton === button || $0.toggleButton === button }) else { return nil }
-                return (idx, rowViews[idx].reconnectButton === button)
+            let focusedAt = focused.flatMap { button in
+                oldRows.firstIndex(where: { $0.reconnectButton === button || $0.toggleButton === button })
             }
+            let focusedIsReconnect = focusedAt.map { oldRows[$0].reconnectButton === focused } ?? false
             for v in stack.arrangedSubviews { stack.removeArrangedSubview(v); v.removeFromSuperview() }
             rowViews = rows
             for r in rows {
@@ -436,8 +440,17 @@ final class McpPanelView: NSView {
                 r.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
             }
             stackRebuildCount += 1
-            if let (idx, wasReconnect) = focusedKey, idx < rows.count {
-                let target = wasReconnect ? rows[idx].reconnectButton : rows[idx].toggleButton
+            if let focused, let at = focusedAt {
+                func button(_ row: McpRowView) -> McpActionButton { focusedIsReconnect ? row.reconnectButton : row.toggleButton }
+                let target: McpActionButton
+                if rows.contains(where: { $0 === oldRows[at] }) {
+                    target = focused
+                } else if let next = oldRows[(at + 1)...].first(where: { old in rows.contains { $0 === old } }),
+                          button(next).isEnabled, !button(next).isHidden {
+                    target = button(next)
+                } else {
+                    target = refreshButton
+                }
                 if target.isEnabled { window?.makeFirstResponder(target) }
             }
         }
@@ -445,7 +458,6 @@ final class McpPanelView: NSView {
         stateField.stringValue = stateText ?? ""
         stateField.isHidden = stateText == nil
         footnoteField.isHidden = !showFootnote
-        refreshButton.isEnabled = refreshEnabled
         rebuildKeyLoop()
     }
 
@@ -645,7 +657,9 @@ final class McpPanelController: NSObject {
 
     /// Enable at once; disable after the confirmation.
     func toggle(_ server: String) {
-        guard canStart(server), case .list(let rows) = phase,
+        // One confirmation at a time: a press that arrives while one is up (an Accessibility press can) is
+        // dropped, so the sheet the person sees is the only one there is.
+        guard confirmSheet == nil, canStart(server), case .list(let rows) = phase,
               let row = rows.first(where: { $0.name == server }), row.canToggle else { return }
         if row.isDisabled {
             start(server)
@@ -783,24 +797,27 @@ final class McpPanelController: NSObject {
         confirm.disableButton.action = #selector(confirmDisableClicked(_:))
         confirm.cancelButton.target = self
         confirm.cancelButton.action = #selector(confirmCancelClicked(_:))
-        confirm.window.cancel = { [weak self] in self?.endConfirmation(confirmed: false) }
+        // Each sheet ends itself: its own window, never whichever sheet the controller holds now.
+        confirm.window.cancel = { [weak self, weak window = confirm.window] in
+            self?.endConfirmation(window, confirmed: false)
+        }
         confirmSheet = confirm
         sheet.beginSheet(confirm.window) { [weak self] response in
-            self?.confirmSheet = nil
+            if self?.confirmSheet === confirm { self?.confirmSheet = nil }
             completion(response == .OK)
         }
     }
 
     @objc private func confirmDisableClicked(_ sender: NSButton) {
         guard isHuman(sender) else { return }
-        endConfirmation(confirmed: true)
+        endConfirmation(sender.window, confirmed: true)
     }
 
-    @objc private func confirmCancelClicked(_ sender: NSButton) { endConfirmation(confirmed: false) }
+    @objc private func confirmCancelClicked(_ sender: NSButton) { endConfirmation(sender.window, confirmed: false) }
 
-    private func endConfirmation(confirmed: Bool) {
-        guard let confirm = confirmSheet else { return }
-        sheet?.endSheet(confirm.window, returnCode: confirmed ? .OK : .cancel)
+    private func endConfirmation(_ window: NSWindow?, confirmed: Bool) {
+        guard let window, let sheet, sheet.sheets.contains(window) else { return }
+        sheet.endSheet(window, returnCode: confirmed ? .OK : .cancel)
     }
 
     private func finishClose() {

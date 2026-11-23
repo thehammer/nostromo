@@ -606,6 +606,22 @@ mod tests {
     }
 
     #[test]
+    fn a_session_whose_first_fetch_is_running_is_not_pruned() {
+        let panel = McpPanelState::default().with_limiter_ttl(Duration::ZERO);
+        // The fetch lock is out with a caller: no list, no action, nothing "recent", but it is running.
+        let fetching = panel.fetch_lock("fetching");
+        panel.fetch_lock("other");
+        assert_eq!(panel.tracked_sessions(), 2, "the fetching session stays");
+        assert!(
+            Arc::ptr_eq(&fetching, &panel.fetch_lock("fetching")),
+            "a second caller gets the same lock, so the fetch is shared, not run twice"
+        );
+        drop(fetching);
+        panel.fetch_lock("other");
+        assert_eq!(panel.tracked_sessions(), 1, "once the fetch is over it goes");
+    }
+
+    #[test]
     fn an_entry_without_a_name_is_skipped() {
         assert!(McpServerView::from_cli(&json!({"status": "connected"})).is_none());
     }
