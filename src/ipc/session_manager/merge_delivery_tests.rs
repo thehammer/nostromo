@@ -464,6 +464,60 @@ async fn a_held_batch_is_one_entry_whose_take_back_returns_all_texts_and_images(
     assert_eq!(contents_len(&out), 1, "nothing is resent");
 }
 
+fn ledger_records(shared: &Shared) -> Vec<crate::model::batches::BatchRecord> {
+    crate::model::batches::load(&shared.ctx.hub.paths.batches_dir, &shared.ctx.session_id)
+}
+
+fn fail_sign_in(shared: &Shared) {
+    login::on_turn_started(shared);
+    login::on_turn_end(
+        shared,
+        "t",
+        Some(TurnAuthOutcome {
+            signal: AuthSignal::ErrorField,
+            resendable: true,
+        }),
+    );
+}
+
+#[tokio::test]
+async fn every_write_of_a_merged_frame_gets_exactly_one_ledger_record_resends_included() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut reap, shared, out) = idle_session(&dir);
+    queue(&shared, vec![typed("one"), typed("two")]);
+    advance(&shared);
+    eventually("the batch frame", || {
+        (!frames_read(&out).is_empty()).then_some(())
+    })
+    .await;
+    assert_eq!(
+        ledger_records(&shared).len(),
+        1,
+        "the first write: one record"
+    );
+
+    for resend in 1..=2usize {
+        fail_sign_in(&shared);
+        // The failed turn ends with the session idle again, as it does live.
+        *lock_recover(&shared.state) = SessionState::Idle;
+        let held = shared.login.held_entry().expect("held");
+        let outcome = reap
+            .0
+            .resend_held("t", &held.hold_id, login::ResendTrigger::Manual);
+        assert_eq!(outcome, login::ResendOutcome::Resent);
+        assert_eq!(
+            wait_for_contents(&out, 1 + resend).await.len(),
+            1 + resend,
+            "written again"
+        );
+        let records = ledger_records(&shared);
+        assert_eq!(records.len(), 1 + resend, "one record per physical write");
+        assert!(records
+            .iter()
+            .all(|r| r.boundary == records[0].boundary && r.count == 2));
+    }
+}
+
 /// A session whose merged frame of `one` and `two` failed to authenticate and
 /// is held, with `three` and `four` queued behind it.
 async fn held_batch_with_two_waiting(

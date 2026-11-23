@@ -3903,13 +3903,6 @@ fn step(shared: &Shared, finished_apply: bool) {
             if !matches!(msg.kind, EntryKind::Injected) {
                 shared.publish_queue(Some((QueueChangeReason::Delivered, msg.ids())));
             }
-            // A merged frame is recorded (boundary and count only, never text)
-            // before it is written, with nothing locked, so a transcript rebuilt
-            // later can tell it from a lone message that imitates one. Delivery
-            // never waits on this: a failure only costs the split on rebuild.
-            if let Some(batch) = &msg.batch {
-                merge::record_batch(shared, batch);
-            }
             let in_flight = WriteInFlight {
                 shared,
                 msg: Some(msg),

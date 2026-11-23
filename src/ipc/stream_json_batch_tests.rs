@@ -185,3 +185,70 @@ fn a_pasted_copy_of_a_real_envelope_shows_verbatim_because_its_record_is_used_up
     assert_eq!(turns[1].user_input, envelope());
     assert_eq!(t.retained_bytes, recount(&t));
 }
+
+fn api_401_line() -> String {
+    json!({"type":"assistant","message":{"id":"msg_x","type":"message","role":"assistant",
+        "model":"<synthetic>","content":[{"type":"text","text":
+        "API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\"}}"}],
+        "stop_reason":"stop_sequence","usage":{"input_tokens":0,"output_tokens":0}}})
+    .to_string()
+}
+
+fn failed_result_line() -> &'static str {
+    r#"{"type":"result","subtype":"error_during_execution","is_error":true,"duration_ms":5,"total_cost_usd":0.0,"result":"API Error: 401"}"#
+}
+
+/// The CLI's file for a merged frame written `writes` times: every write but the
+/// last fails to sign in (user line, API 401, error result); the last succeeds.
+fn resent_envelope_file(writes: usize) -> String {
+    let mut lines = Vec::new();
+    for i in 0..writes {
+        lines.push(user_line(&envelope()));
+        if i + 1 < writes {
+            lines.push(api_401_line());
+            lines.push(failed_result_line().to_owned());
+        } else {
+            lines.push(result_line().to_owned());
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
+#[test]
+fn a_merged_batch_resent_after_a_failed_sign_in_splits_both_turns_with_a_record_per_write() {
+    let mut t = transcript_from_jsonl(&resent_envelope_file(2), 50);
+
+    t.apply_batch_ledger(&[record(2), record(2)]);
+
+    let turns = t.snapshot();
+    assert_eq!(turns.len(), 2);
+    for turn in &turns {
+        assert_eq!(turn.user_parts, ["oh and backfill", "use the new column"]);
+    }
+    assert_eq!(t.retained_bytes, recount(&t));
+}
+
+#[test]
+fn a_merged_batch_written_three_times_splits_all_three_turns() {
+    let mut t = transcript_from_jsonl(&resent_envelope_file(3), 50);
+
+    t.apply_batch_ledger(&[record(2), record(2), record(2)]);
+
+    let turns = t.snapshot();
+    assert_eq!(turns.len(), 3);
+    for turn in &turns {
+        assert_eq!(turn.user_parts, ["oh and backfill", "use the new column"]);
+    }
+}
+
+#[test]
+fn a_resent_batch_with_one_record_shows_the_resend_verbatim() {
+    // What the ledger looked like before resends were recorded.
+    let mut t = transcript_from_jsonl(&resent_envelope_file(2), 50);
+
+    t.apply_batch_ledger(&[record(2)]);
+
+    let turns = t.snapshot();
+    assert_eq!(turns[0].user_parts.len(), 2);
+    assert!(turns[1].user_parts.is_empty());
+}
