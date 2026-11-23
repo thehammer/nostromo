@@ -20,6 +20,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use super::merge;
 use super::queue::EntryKind;
 use super::{
     advance, lock_recover, resolve_claude, write_batch_frame, write_user_frame, PendingMessage,
@@ -393,7 +394,16 @@ pub(super) fn write_recorded(
 ) -> Result<()> {
     shared.login.remember_written(msg, note);
     let result = match &msg.batch {
-        Some(batch) => write_batch_frame(&shared.stdin, &msg.text, batch),
+        Some(batch) => {
+            // Every physical write of a merged frame, a held resend included,
+            // gets its own ledger record (boundary and count only, never text):
+            // the CLI's session file gets one user line per write, and a
+            // transcript rebuild uses one record per line to tell the frame from
+            // a lone message imitating one. Delivery never waits on this: a
+            // failure only costs the split on rebuild.
+            merge::record_batch(shared, batch);
+            write_batch_frame(&shared.stdin, &msg.text, batch)
+        }
         None => write_user_frame(&shared.stdin, &msg.text, &msg.images),
     };
     if result.is_err() {

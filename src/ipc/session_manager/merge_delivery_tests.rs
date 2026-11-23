@@ -464,6 +464,139 @@ async fn a_held_batch_is_one_entry_whose_take_back_returns_all_texts_and_images(
     assert_eq!(contents_len(&out), 1, "nothing is resent");
 }
 
+fn ledger_records(shared: &Shared) -> Vec<crate::model::batches::BatchRecord> {
+    crate::model::batches::load(&shared.ctx.hub.paths.batches_dir, &shared.ctx.session_id)
+}
+
+fn fail_sign_in(shared: &Shared) {
+    login::on_turn_started(shared);
+    login::on_turn_end(
+        shared,
+        "t",
+        Some(TurnAuthOutcome {
+            signal: AuthSignal::ErrorField,
+            resendable: true,
+        }),
+    );
+}
+
+#[tokio::test]
+async fn every_write_of_a_merged_frame_gets_exactly_one_ledger_record_resends_included() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut reap, shared, out) = idle_session(&dir);
+    queue(&shared, vec![typed("one"), typed("two")]);
+    advance(&shared);
+    eventually("the batch frame", || {
+        (!frames_read(&out).is_empty()).then_some(())
+    })
+    .await;
+    assert_eq!(
+        ledger_records(&shared).len(),
+        1,
+        "the first write: one record"
+    );
+
+    for resend in 1..=2usize {
+        fail_sign_in(&shared);
+        // The failed turn ends with the session idle again, as it does live.
+        *lock_recover(&shared.state) = SessionState::Idle;
+        let held = shared.login.held_entry().expect("held");
+        let outcome = reap
+            .0
+            .resend_held("t", &held.hold_id, login::ResendTrigger::Manual);
+        assert_eq!(outcome, login::ResendOutcome::Resent);
+        assert_eq!(
+            wait_for_contents(&out, 1 + resend).await.len(),
+            1 + resend,
+            "written again"
+        );
+        let records = ledger_records(&shared);
+        assert_eq!(records.len(), 1 + resend, "one record per physical write");
+        assert!(records
+            .iter()
+            .all(|r| r.boundary == records[0].boundary && r.count == 2));
+    }
+}
+
+/// A session whose merged frame of `one` and `two` failed to authenticate and
+/// is held, with `three` and `four` queued behind it.
+async fn held_batch_with_two_waiting(
+    dir: &tempfile::TempDir,
+) -> (turn_note_tests::Reap, Shared, PathBuf, Vec<String>) {
+    let (reap, shared, out) = idle_session(dir);
+    let mut ids = queue(&shared, vec![typed("one"), typed("two")]);
+    advance(&shared);
+    eventually("the batch frame", || {
+        (!frames_read(&out).is_empty()).then_some(())
+    })
+    .await;
+    login::on_turn_started(&shared);
+    login::on_turn_end(
+        &shared,
+        "t",
+        Some(TurnAuthOutcome {
+            signal: AuthSignal::ErrorField,
+            resendable: true,
+        }),
+    );
+    assert!(shared.login.held_entry().is_some(), "held");
+    ids.extend(queue(&shared, vec![typed("three"), typed("four")]));
+    (reap, shared, out, ids)
+}
+
+#[tokio::test]
+async fn removing_a_held_batch_discards_every_part_and_resends_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (reap, shared, out, _ids) = held_batch_with_two_waiting(&dir).await;
+    lock_recover(&shared.pending).clear();
+    let held = shared.login.held_entry().expect("held");
+
+    let answer = reap.0.queue_verb("t", &held.id, QueueVerb::Remove);
+
+    assert_eq!(answer.code, QueueResultCode::Removed);
+    assert!(shared.login.held_entry().is_none());
+    advance(&shared);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(contents_len(&out), 1, "no part is resent");
+    assert!(
+        lock_recover(&shared.pending).is_empty(),
+        "no part re-queued"
+    );
+}
+
+#[tokio::test]
+async fn stop_with_a_held_batch_returns_its_parts_then_the_queued_messages_separately() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut reap, _shared, _out, ids) = held_batch_with_two_waiting(&dir).await;
+
+    let (_, dropped) = reap.0.interrupt_returning("t");
+
+    let got: Vec<(&str, &str)> = dropped
+        .typed
+        .iter()
+        .map(|e| (e.id.as_str(), e.text.as_str()))
+        .collect();
+    let want: Vec<(&str, &str)> = ids
+        .iter()
+        .map(String::as_str)
+        .zip(["one", "two", "three", "four"])
+        .collect();
+    assert_eq!(got, want, "each message separately, original ids, in order");
+    assert_eq!(dropped.ids, ids);
+}
+
+#[tokio::test]
+async fn stopping_the_whole_session_returns_the_held_parts_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let (reap, shared, _out, ids) = held_batch_with_two_waiting(&dir).await;
+
+    let lost = reap.0.discard_queue_for_session_stop("t");
+
+    assert_eq!(lost, ids, "held one and two, then three and four");
+    assert!(shared.login.held_entry().is_none());
+    assert!(lock_recover(&shared.pending).is_empty());
+}
+
 fn contents_len(out: &Path) -> usize {
     frames_read(out).len()
 }

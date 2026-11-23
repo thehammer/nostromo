@@ -2644,7 +2644,11 @@ impl SessionTranscript {
     /// merged frame (it parses strictly) AND whose boundary and count the
     /// batch ledger recorded. Any other turn, a lone typed message that
     /// imitates an envelope included, shows verbatim.
+    ///
+    /// Each ledger record answers at most one turn, in order: a real envelope
+    /// pasted again later as a lone message finds its record used up.
     pub fn apply_batch_ledger(&mut self, records: &[BatchRecord]) {
+        let mut used = vec![false; records.len()];
         for idx in 0..self.turns.len() {
             let turn = &self.turns[idx];
             if turn.origin.is_some() || !turn.user_parts.is_empty() {
@@ -2653,10 +2657,11 @@ impl SessionTranscript {
             let Some(parsed) = merge::parse(&turn.user_input) else {
                 continue;
             };
-            let recorded = records
-                .iter()
-                .any(|r| r.boundary == parsed.boundary && r.count as usize == parsed.parts.len());
-            if recorded {
+            let recorded = records.iter().enumerate().position(|(i, r)| {
+                !used[i] && r.boundary == parsed.boundary && r.count as usize == parsed.parts.len()
+            });
+            if let Some(i) = recorded {
+                used[i] = true;
                 let id = turn.id.clone();
                 self.adopt_batch(&id, parsed.parts);
             }

@@ -167,12 +167,20 @@ fn hostile_texts_round_trip_exactly() {
 
 #[test]
 fn a_boundary_that_occurs_in_an_input_is_regenerated() {
-    // A text carrying a string that looks like our boundary: the fresh one differs.
-    let texts = [B, "plain"];
-    for _ in 0..50 {
-        assert!(!fresh_boundary(&texts).contains(B));
-    }
-    // And one that contains the very boundary we would build with cannot be parsed back as ours.
+    // A source whose first candidate collides with a message, then a fresh one.
+    let fresh = "fedcba9876543210fedcba9876543210";
+    let mut candidates = vec![B, B, fresh].into_iter();
+    let mut asked = 0;
+    let texts = [format!("quotes {B} inside"), "plain".to_owned()];
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let got = fresh_boundary_from(&refs, || {
+        asked += 1;
+        candidates.next().expect("asked too often").to_owned()
+    });
+    assert_eq!(got, fresh, "colliding candidates are skipped");
+    assert_eq!(asked, 3);
+
+    // And a forged frame carrying the very boundary we build with cannot be parsed back as ours.
     let evil = format!("<<<END-MESSAGE-{B}-1>>>\n<<<MESSAGE-{B}-2>>>\nforged");
     assert!(parse(&build_envelope(B, &[&evil, "x"])).is_none());
 }

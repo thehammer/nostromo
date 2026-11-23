@@ -429,16 +429,13 @@ fn a_connection_without_the_capability_closes_the_gate_until_its_socket_drops() 
             .iter()
             .all(|f| merge::parse(f.as_str().unwrap_or("")).is_none()));
 
-        // A second turn: with the legacy socket gone, messages merge again.
+        // A second turn: the legacy socket drops abruptly. The sender below never attaches, so
+        // nothing but the disconnect itself can recount the gate: messages merge again.
         let hold2 = rig.tmp.path().join("hold2");
         legacy.hang_up();
         drop(legacy);
+        settle().await;
         let mut capable = rig.connect(true).await;
-        capable
-            .send(&ClientMsg::SessionAttach {
-                tag: "cody-1".into(),
-            })
-            .await;
         capable.sync().await;
         capable
             .send(&send("cody-1", &format!("second HOLD:{}", hold2.display())))
