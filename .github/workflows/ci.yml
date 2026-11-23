@@ -132,7 +132,7 @@ jobs:
     name: ${{ github.event_name == 'workflow_dispatch' && 'Rust tests (dispatch)' || 'Rust tests' }}
     # Pinned, not ubuntu-latest: a moving image broke the PTY tests on 2026-11-16; bump on purpose, after the tests tolerate it.
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
@@ -141,15 +141,17 @@ jobs:
         uses: dtolnay/rust-toolchain@1.100.0
 
       # A hung test must fail this step with its name, not leave a silent job
-      # until the 30-minute limit cancels it (a cancelled job also hides which
+      # until the 45-minute limit cancels it (a cancelled job also hides which
       # test hung). The step limit is under the job limit and over a green run
-      # (about 14 minutes with the build); `--no-fail-fast` reports every
+      # (measured 2026-11-23: 14.5 to 17 minutes green, 20 minutes on the slow
+      # runs, of which the cold build is 5 to 6 and the test binaries run one after
+      # another for about 12 to 14); `--no-fail-fast` reports every
       # failing binary, not only the first. `Build & Lint` still needs this
       # job to succeed: a step timeout fails the job.
       - name: Test
         id: test
         shell: bash
-        timeout-minutes: 20
+        timeout-minutes: 35
         run: cargo test --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
 
       # libtest prints `test <name> has been running for over 60 seconds` for a
@@ -298,7 +300,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","mac"]'), inputs.only)
     name: ${{ github.event_name == 'workflow_dispatch' && format('Mac tests shard {0}/3 (dispatch)', matrix.shard) || format('Mac tests shard {0}/3', matrix.shard) }}
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -349,7 +351,7 @@ jobs:
       # name the last running test.
       - name: make mac-test (shard)
         if: needs.changes.outputs.swift == 'true'
-        timeout-minutes: 25
+        timeout-minutes: 35
         run: make mac-test SHARD=${{ matrix.shard }}
 
       # MotherDetailWidthConstraintTests read AppKit's constraint-conflict report from stderr and skip when it
