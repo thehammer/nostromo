@@ -157,7 +157,7 @@ can answer an approval, a decision or a Mother hold (B10).
 It also carries **device administration upward** for Ada's pairing PRD
 (`docs/prds/daemon-pairing-flow.md`, cited as PRD-ACn). The operator pairs,
 lists, revokes and re-scopes phones and iPads from the Mac app on Sendai or
-Kobe (PRD-AC11–13, AC18, AC23–25, AC35), and both are satellites. W9 put the
+Kobe (PRD-AC11–13, AC18, AC23–25, AC50), and both are satellites. W9 put the
 device registry and every pairing on the primary, and made the admin verbs
 work for local Unix clients there. This wedge lets a satellite forward those
 verbs from **its own local clients** up its existing outbound uplink, and

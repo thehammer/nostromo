@@ -552,7 +552,7 @@ Devices redeem codes over the WebSocket listener without a token.
 Behavioural criteria from the PRD that this wedge delivers on the daemon
 side: PRD-AC9, AC14, AC16, AC17, AC21, AC23 (terminal), AC25/26 (daemon
 behaviour and terminal output), AC28, AC29, AC31 (server side), AC32 (server
-side), AC35 (daemon and terminal), AC36, AC37 (terminal and logs), and the
+side), AC36, AC56–58 (AC35 is deferred by Q2), AC37 (terminal and logs), and the
 daemon side of sign-offs D3, D4, D5, D6, Q1 and Q2 (cited by decision id,
 because Ada is rewriting the PRD's numbering in parallel).
 

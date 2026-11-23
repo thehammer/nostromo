@@ -66,34 +66,46 @@ older body text, this section wins. Nothing here waits on anyone any more.
   is cancelled between the check and **Pair**, tapping **Pair** shows the
   matching failure sentence and keeps the operator's edited name. Criterion
   W11-18.
-- **D6, re-pairing an already-paired phone.** Decided by `server_id`, not by
-  address (the same server may be reached at its LAN or its VPN address):
-  - **Same server** (`PairOffer.server_id == credential.serverId`): the
-    confirmation adds **"This replaces this iPhone's current pairing. The old
-    one will be revoked."** On **Pair**, stop the current `WebSocketClient`,
-    send `Pair { …, replaces_token: <current token> }`, and on `Paired`
-    replace the Keychain item. The old entry moves to Revoked server-side
-    (W9) and the name is kept.
-  - **Different server**: the confirmation leads with a warning line in the
+- **D6, re-pairing an already-paired phone** (PRD AC57, AC58). "Same server"
+  is decided only by the server proving it knows this device, never by
+  address or `server_id` (both are unauthenticated). With a credential, after
+  the first `PairCheck` returns `challenge`, the phone sends a second
+  `PairCheck` with `proof = HMAC-SHA256(SHA-256(token), challenge ‖ code)`
+  (W9). It never sends the token or its hash to a pairing socket.
+  - **Same server** (`knows_device: true`): the confirmation adds **"This
+    replaces this iPhone's current pairing. The old one will be revoked."**
+    On **Pair**, stop the current `WebSocketClient` and send `Pair { …,
+    replace: true }`; on `Paired`, replace the Keychain item (the old entry
+    moves to Revoked server-side and the name is kept). If `Pair` fails, keep
+    the old credential, **restart the old client** and show the normal failure
+    state.
+  - **Lost credential** (no Keychain item, e.g. after a reinstall): there is
+    nothing to prove, so it is a fresh pairing; the device is named "iPhone 2"
+    and the old entry stays active until the operator revokes it from the
+    Devices list. The success screen does not hide this (the name shows it).
+  - **Different server** (`knows_device: false`, or no answer): the confirmation leads with a warning line in the
     alert style: **"This iPhone is paired with Nostromo at 10.0.0.5. Pairing
     with 10.0.0.9 disconnects it from 10.0.0.5 and removes its Nostromo
     content."** On **Pair**: wipe local content (`DaemonStore.wipeAll()`, as on
-    revoke) and stop the old client, then send `Pair` **without**
-    `replaces_token` (one server's token is never sent to another). On
+    revoke) and stop the old client, then send `Pair { replace: false }`. On
     `Paired`: if the old server is reachable, open a short authenticated
     socket with the old credential and send `DeviceUnpairSelf` (5 s budget;
     unreachable means the old entry goes stale, as with un-pair while
     unreachable); then save the new credential. If `Pair` fails, the old
-    credential is kept and the normal failure state shows.
+    credential is kept, the old client is restarted (content refills from the
+    old server), and the normal failure state shows.
   Criterion W11-19.
 - **D7 / operator Q7: the phone shows nothing from the message queue in v1.**
   Already the plan (W11-16). No count either.
 - **Q8 / Q3, one merged list.** Sort "needs you" first, then by recency,
-  across hosts. Show the host badge only when more than one Mac is present:
-  `Hosts` lists more than one connected host, or the list holds rows from more
-  than one host; with one Mac, no badges. A work-host (Kobe) row shows host,
-  8-character ref and a reason phrase from the **same fixed vocabulary as
-  push** ("Job 3f9a1c2e · asked a question"). Tapping it opens a card with
+  across hosts. Every row shows its Mac's name when the list holds rows
+  (live or last-known) from more than one Mac; when every row comes from one
+  Mac, no row does (PRD AC52; `Hosts` is not consulted). A work-host (Kobe)
+  row shows only its host, its kind's reference and fixed phrases from the
+  **same vocabulary as push** (PRD AC53): a Mother job as `Job 3f9a1c2e ·
+  asked a question`; a PR as `PR #4821 · small change · 3 waiting` (no size
+  phrase when unknown); a session or decision as the agent from the fixed set
+  (or *A session*) and its state. Tapping it opens a card with
   that metadata and the line **"Details stay on kobe."**, never a blank screen
   or an endless spinner. The phrase table lives in Kit
   (`Shared/NostromoKit/Sources/NostromoKit/NeedsYou/ReasonPhrases.swift`,
@@ -104,14 +116,19 @@ older body text, this section wins. Nothing here waits on anyone any more.
   `adherence_blocked` → *blocked after review*, `operator_hold` → *held after
   a failure*, `cost_cap` → *paused at its spend cap*, `activity`
   `pipeline_blocked` → *pipeline blocked*, anything else → *needs you*. Criterion W11-20.
-- **Operator Q2: mail and todos stay home in v1.** When `PairOffer.
-  mail_and_todos_shared` is false (the v1 default), the confirmation and
-  success screens carry no scope line promising mail or todos (the success
-  line is "Paired as <final name>."), Settings shows "Mail and todos aren't
-  shared from your Macs", and the Fred and Teri tabs, on `Withheld { reason:
-  "not_shared" }`, say **"Mail and todos stay on your Mac in this version."**
-  The `device_scope` copy stays built for when sharing is turned on.
-  Criterion W11-21.
+- **Operator Q2: mail, calendar and todos stay home in v1, with no way to
+  turn sharing on** (PRD AC56). This wedge builds **no** per-device scope:
+  no `sensitive` in the credential, cache or store, no `device_scope`
+  handling, and the cache never holds Fred or Teri data. Final v1 copy (the
+  PRD's "Final v1 copy" table): the Fred tab, the Teri tab and device
+  Settings say **"Mail, calendar and todos stay on your Mac in this
+  version."** (the tabs on `Withheld { reason: "not_shared" }`). Nothing else
+  mentions mail, calendar or todos: not the confirmation, not the success
+  screen ("Paired as" plus the final name). Criterion W11-21.
+- **Transcripts.** Personal-host, non-sensitive, non-PHI transcripts stay
+  read-only as today (`TranscriptView`, through the routed `SessionAttach`);
+  Kobe, sensitive and PHI transcripts never: the row's card says "Details
+  stay on kobe." and no attach is sent.
 - **Operator Q4.** The phone answers nothing: decisions stay read-only with
   "Answer it on your Mac" (already W11-2).
 
@@ -160,13 +177,13 @@ on an always-on host reached over WireGuard
 (`docs/plans/backplane-sequencing.md`, B2/B7/B8). W9 gave the daemon:
 - an authenticated WebSocket listener (default port 47101, `Authorization:
   Bearer <token>`);
-- a pairing-only socket (`PairCheck { code }` → `PairOffer { name_hint,
-  sensitive, server_id }` or `PairRefused { expired | invalid }`; `Pair {
-  code, name, kind }` → `Paired { device_id, token, name, sensitive,
-  server_id }`);
+- a pairing-only socket (`PairCheck { code, proof? }` → `PairOffer {
+  name_hint, server_id, challenge, knows_device? }` or `PairRefused { expired
+  | invalid }`; `Pair { code, name, kind, replace }` → `Paired { device_id,
+  token, name, server_id, replaced }`);
 - `Unauthorized { reason }` + close 4001 for a revoked or unknown token;
-- live scope changes (`Withheld { reason: "device_scope" }`, or a replay of
-  retained Fred/Teri frames);
+- `Withheld { reason: "not_shared" }` for the Fred, Teri and work topics
+  (Q2; no per-device scope);
 - `DeviceUnpairSelf`;
 - the QR payload `nostromo://pair?v=1&host=&port=&code=`.
 
@@ -181,7 +198,7 @@ adds the **Pair with Nostromo** first-launch flow (scan, system-Camera deep
 link, typed code, confirmation, success, four failure states), a persisted
 **last-known content cache** (needed so "can't reach" still shows content
 across relaunches), the **no-longer-paired** screen with a content wipe,
-Settings with **Un-pair**, and live mail-and-todos scope. Bonjour stays only
+Settings with **Un-pair**. Bonjour stays only
 as a legacy option in Settings. The macOS app is untouched (W15 does the Mac
 side).
 
@@ -211,12 +228,14 @@ side).
 - `.../Transport/DeviceCredential.swift` (new) — Keychain wrapper
   (`kSecClassGenericPassword`, service `com.hammer.nostromo.device`, one
   fixed account; `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`).
-  Stores `{token, deviceId, serverId, name, sensitive}`: `load()`,
+  Stores `{token, deviceId, serverId, name}`: `load()`,
   `save(_:)`, `clear()`. It is protocol-typed so tests inject an in-memory
   store. It is **not** keyed by address, so changing the address keeps the
   pairing (PRD-AC33).
 - `.../Transport/PairingClient.swift` (new) — opens a token-less WS and
-  runs `check(code) -> PairOffer` and `pair(code, name, kind) -> Paired`
+  runs `check(code, proof?) -> PairOffer` and `pair(code, name, kind,
+  replace) -> Paired`, plus `proof(token, challenge, code)` (pure, tested
+  against a fixed vector),
   with typed errors `expired`, `invalid`, `unreachable` and
   `localNetworkDenied`. `kind` comes from `UIDevice.userInterfaceIdiom`.
 - `.../Transport/PairLink.swift` (new) — parse and validate
@@ -224,22 +243,18 @@ side).
   host non-empty). Pure; unit-tested.
 - `.../Store/ContentCache.swift` (new) — persists the last-known snapshot
   the tabs render (`motherJobs`, `perriQueue`, `perriCurrentPr`, `focuses`,
-  `sessions`, `fredMailbox`, `fredCalendar`, `teriTodos`, plus a
-  `savedAt`) as one JSON file in Application Support, written atomically
+  `sessions`, plus a `savedAt`; never Fred or Teri data, Q2) as one JSON file in Application Support, written atomically
   with `FileProtectionType.complete` and excluded from backup. Debounced
   writes (at most every 5 s). `wipe()` deletes the file synchronously.
-  Fred/Teri fields are written only while the device's scope is
-  `sensitive: true`, and are purged at once when it goes false.
 - `.../Store/DaemonStore.swift:156-170, 293-400` — accept a transport
   protocol that both clients satisfy. Add `@Published pairingState` (from
-  the client's `ConnectionState`), `isStale`, and `deviceScope`. Hydrate
-  from `ContentCache` at init when a credential exists. On `.withheld(topics,
-  reason: "device_scope")`, clear `fredMailbox`, `fredCalendar`,
-  `teriTodos` and the work data, and purge them from the cache
-  (PRD-AC35). Today's `:391` keeps stale content. Add `wipeAll()`, which
+  the client's `ConnectionState`) and `isStale`. Hydrate from
+  `ContentCache` at init when a credential exists. On `.withheld(topics,
+  reason: "not_shared")`, record the topics so the Fred and Teri tabs show
+  the Q2 line (PRD-AC34). Add `wipeAll()`, which
   clears every published collection and calls `ContentCache.wipe()`. Keep
   jobs keyed by `(host, id)` so two hosts' queues merge without collision
-  (default presentation per Q3: one list, host badge). Rows whose host's
+  (one merged list; badges per PRD AC52, above). Rows whose host's
   `Hosts.egress == work` render state, ref and reason only and have no
   drill-in that would request content. Add `needsYouCount` per host from
   `ApprovalPending` counts plus Mother `awaiting` jobs; it is display-only.
@@ -294,11 +309,11 @@ side).
 - `.../Pairing/ConfirmPairingView.swift` (new) — shown only after a
   successful `PairCheck`. It shows "Pair this <iPhone|iPad> with Nostromo at
   <address>?", an editable **Name** pre-filled with `name_hint` or the
-  device kind, the scope line from `PairOffer.sensitive`, and **Pair**
+  device kind, the D6 replace or different-server line when it applies (no
+  mail wording), and **Pair**
   (`.keyboardShortcut(.defaultAction)`) (PRD-AC7).
-- `.../Pairing/PairingSuccessView.swift` (new) — "Paired as <final name>.
-  Includes mail and todos" / "Mail and todos are off for this <kind>",
-  showing `Paired.name` (the deduplicated name, PRD-AC9, AC10). It hands
+- `.../Pairing/PairingSuccessView.swift` (new) — "Paired as" and the final
+  name, nothing about mail, showing `Paired.name` (the deduplicated name, PRD-AC9, AC10). It hands
   over to the tabs once the first `MotherJobs` arrives, or after 1.5 s,
   whichever is later.
 - `.../Pairing/PairingErrorBanner.swift` (new) — the four PRD failure
@@ -318,17 +333,16 @@ side).
   `TeriView.swift` and the Mother/Perri/Sessions views stop replacing their
   content with `disconnectedView` when cached content exists.
 - `iOS/Nostromo/Views/FredView.swift:18-19`, `TeriView.swift:40` — when
-  withheld with reason `device_scope`: "Mail and todos are turned off for
-  this <iPad>. Change this from Devices on your Mac." No spinner and no
-  empty list (PRD-AC34).
+  withheld with reason `not_shared`: "Mail, calendar and todos stay on your
+  Mac in this version." No spinner and no empty list (PRD-AC34).
 - `iOS/Nostromo/Views/DeviceSettingsView.swift` (new; replaces the
   `ConnectionSettingsView` entry point, which stays reachable under
   "Advanced → Local network (legacy)"):
   - **Server address**, editable. On save, reconnect with the same
     credential. If the new address answers 4001, the normal
     no-longer-paired path applies (PRD-AC33).
-  - This device's **name** and **mail-and-todos** scope, read-only (no
-    control can change scope, PRD-AC36).
+  - This device's **name**, read-only, and the line "Mail, calendar and todos
+    stay on your Mac in this version." (no control, PRD-AC36, AC56).
   - **Un-pair This iPhone/iPad**, with a confirmation. Reachable: send
     `DeviceUnpairSelf`, await `DeviceUnpaired` (5 s timeout), wipe, and
     return to the pairing screen. Unreachable or timeout: wipe, and show
@@ -353,9 +367,9 @@ side).
     `Paired` saved through the injected credential store.
   - `DeviceCredentialTests.swift`, `PairLinkTests.swift`.
   - `ContentCacheTests.swift` — round trip; `wipe()` leaves no file;
-    Fred/Teri never written while scope is off.
-  - Extend `DaemonStoreTests.swift` (`device_scope` withheld clears Fred/
-    Teri and the cache; `wipeAll()` empties every collection; hydrate from
+    Fred/Teri never written.
+  - Extend `DaemonStoreTests.swift` (`not_shared` withheld yields the Q2
+    state for the Fred and Teri tabs; `wipeAll()` empties every collection; hydrate from
     the cache marks `isStale`) and `MotherWireTests.swift` (fixtures with
     `host` present and absent).
 
@@ -372,12 +386,12 @@ side).
    classification (`notPaired` vs `unreachable`) in one function with a
    table-driven test. It guards PRD-AC22, the criterion most likely to
    regress quietly.
-4. `DaemonStore`: transport protocol, cache hydration, `device_scope`
+4. `DaemonStore`: transport protocol, cache hydration, `not_shared`
    handling, `wipeAll()`.
 5. Views: the pairing flow, then the root state machine and `.onOpenURL`,
    then the no-longer-paired screen, the unreachable banner, and Settings.
-6. Store keying by `(host, id)` and the host badge on Mother rows (hidden
-   when every job has `host == nil`).
+6. Store keying by `(host, id)` and the host badge on every row (shown only
+   when the rows come from more than one Mac, PRD AC52).
 7. Build the iOS target and run the `NostromoKit` tests on GitHub Actions
    (`make ci-remote ONLY=kit` and `ONLY=ios`); do not run `swift` or
    `xcodebuild` locally (toolchain guard).
@@ -385,7 +399,7 @@ side).
 ## Acceptance criteria
 
 Behavioural criteria from the PRD delivered on the device: PRD-AC1–10,
-AC19–22, AC25–27 (device side), AC30–34, AC35 (device side), AC36, AC37
+AC19–22, AC25–27 (device side), AC30–34, AC36, AC52–58 (device side; AC35 is deferred by Q2), AC37
 (device side). Those that need a real device and a live primary are listed
 as manual checks.
 
@@ -414,9 +428,10 @@ Technical criteria:
   then the screen renders. After a relaunch, `ContentCache` has no file and
   `DaemonStore` is empty.
 - [ ] **W11-8** The cache is written with `FileProtectionType.complete`, excluded from
-  backup, and never contains Fred/Teri data while scope is off.
-- [ ] **W11-9** `device_scope` withheld clears on-screen Fred/Teri content at once; the
-  daemon delivers it in under 1 s (W9).
+  backup, and never contains Fred/Teri data.
+- [ ] **W11-9** `Withheld { not_shared }` puts the Fred and Teri tabs in the Q2 state
+  with no spinner or empty list; no Fred or Teri frame is ever decoded into
+  the store (Kit test).
 - [ ] **W11-10** After **Pair** on a reachable server, the first `MotherJobs` frame is
   rendered within 3 s (PRD-AC8).
 - [ ] **W11-11** A `nostromo://pair` link with a malformed code or host shows an error and
@@ -454,21 +469,26 @@ Technical criteria:
   `PairCheck`; a `PairRefused { expired | invalid }` on **Pair** after a good
   check shows the matching failure and keeps the edited name (Kit test on the
   pairing flow model).
-- [ ] **W11-19** D6: with an injected credential, a `PairOffer` with the same
-  `server_id` produces the replace line and a `Pair` carrying
-  `replaces_token`; a different `server_id` produces the warning line, wipes
-  content before `Pair`, sends no `replaces_token`, and sends
-  `DeviceUnpairSelf` to the old address with the old token after `Paired`;
-  a failed `Pair` keeps the old credential.
-- [ ] **W11-20** Q8: with two hosts' rows the list is sorted needs-you first then
-  recency and shows host badges; with one host there are none; a work-host
-  row's text comes from `ReasonPhrases` (generated from
-  `tests/fixtures/push-vocab/reason_phrases.json`) and its card says
-  "Details stay on <host>." with no content request.
-- [ ] **W11-21** Q2: with `mail_and_todos_shared: false` no pairing, success or
-  settings screen promises mail or todos, and `Withheld { not_shared }` makes
-  the Fred and Teri tabs show "Mail and todos stay on your Mac in this
-  version." (an `ios_policy` string scan plus a `DaemonStore` test).
+- [ ] **W11-19** D6 (PRD AC57, AC58): with an injected credential the phone sends a
+  `proof` matching a fixed test vector and never its token or token hash on a
+  pairing socket; `knows_device: true` produces the replace line and `Pair {
+  replace: true }`; `false` or no answer (same `server_id` or not) produces
+  the warning line, wipes content before `Pair`, and sends
+  `DeviceUnpairSelf` to the old address with the old token after `Paired`; a
+  failed `Pair` keeps the old credential and restarts the old client; with no
+  credential no proof is sent.
+- [ ] **W11-20** Q8 (PRD AC52, AC53): rows (live or last-known) from two Macs are
+  sorted needs-you first then recency and all carry a host name, including
+  with Kobe disconnected and only last-known Kobe rows; rows from one Mac
+  carry none; Kobe Mother, PR, session and decision rows use only the fixed
+  forms (Mother phrases from `ReasonPhrases`, generated from
+  `tests/fixtures/push-vocab/reason_phrases.json`), with marker strings in
+  title, question, branch, repository and session name appearing nowhere;
+  the card says "Details stay on kobe." with no content request.
+- [ ] **W11-21** Q2 (PRD AC56 and the "Final v1 copy" table): the Fred tab, Teri tab
+  and Settings show exactly "Mail, calendar and todos stay on your Mac in this
+  version."; no other iOS string mentions mail, calendar or todos (an
+  `ios_policy` string scan); no control or setting can turn sharing on.
 
 ## Mother crew: gates, lenses, checklist and calibration
 
@@ -491,7 +511,7 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   automatically in parallel with adherence on the gated commit (Mother #75,
   merged since this was first written); the repo default is all four lenses
   (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
-- **Review depth:** Manual Perri pass: the normal `perri` entry below; the lenses add a second read on the wire/credential paths. Device credential storage and the cache wipe on scope loss.
+- **Review depth:** Manual Perri pass: the normal `perri` entry below; the lenses add a second read on the wire/credential paths. Device credential storage, the D6 proof and the cache wipe on revoke.
 - **Checklist:** the acceptance items above carry ids (`W11-1` to `W11-21`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The
   worker ticks each with `mother check <job> --done --evidence <short ref>` only
@@ -513,7 +533,7 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
 - A queue count on session rows (D7 option (c)); a later additive field.
 - Universal links (`https://` with an apple-app-site-association file);
   there is no public domain. The custom scheme is the deep link.
-- Any control on the device that changes its own mail-and-todos scope.
+- Any control or setting that shares mail, calendar or todos (Q2).
 
 ```yaml
 suggested_config:
