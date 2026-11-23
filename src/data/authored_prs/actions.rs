@@ -53,6 +53,8 @@ pub struct AuthoredPrActions {
     /// The full heads the engine holds. Without it (a test that feeds the
     /// snapshot itself) only the row's first 8 digits are compared.
     heads: Option<HeadBook>,
+    /// Owners whose repos no verb takes: they are not in the list.
+    exclude: super::exclude::ExcludedOrgs,
     /// Merges in flight and answered.
     pub(super) merges: MergeBook,
     /// Until when the verbs' own live reads stay quiet: GitHub answered one
@@ -92,6 +94,13 @@ impl AuthoredPrActions {
         )
         .with_merge(Arc::clone(&handle.verdicts), Arc::clone(&handle.api))
         .with_heads(Arc::clone(&handle.heads))
+        .with_exclusions(handle.exclude.clone())
+    }
+
+    /// Refuse the verbs for these owners' repos.
+    pub fn with_exclusions(mut self, exclude: super::exclude::ExcludedOrgs) -> Self {
+        self.exclude = exclude;
+        self
     }
 
     /// Compare a verdict's head with the engine's full head, not just the 8
@@ -130,6 +139,7 @@ impl AuthoredPrActions {
             verdicts: Arc::new(VerdictStore::in_memory()),
             api: Arc::new(Mutex::new(None)),
             heads: None,
+            exclude: super::exclude::ExcludedOrgs::default(),
             merges: MergeBook::default(),
             read_wait: Mutex::new(None),
             starts: Mutex::new(VecDeque::new()),
@@ -178,7 +188,9 @@ impl AuthoredPrActions {
     /// `invalid` (`repo`, `number` or `head_sha` is not valid), `pr_unknown`
     /// (GitHub has no such PR), `head_not_current`, or `unreachable` /
     /// `rate_limited` (an approval that could not be checked; nothing is
-    /// recorded).
+    /// recorded). A repo of an excluded owner (`authored_prs_exclude_orgs`) that
+    /// passes the argument checks gets `pr_unknown` with no read, no write and
+    /// no echo.
     pub async fn record_verdict(
         &self,
         repo: &str,
@@ -190,6 +202,13 @@ impl AuthoredPrActions {
     ) -> Result<bool, &'static str> {
         let rec = VerdictRecord::new(repo, number, head_sha, verdict, self.clock.now(), by, note)
             .ok_or("invalid")?;
+        // An excluded owner's PR is refused with `pr_unknown`: no read, no write,
+        // no echo. Unlike an unknown repo, a `changes_requested` or `comment` for
+        // it is not recorded (that would write the name to disk), so a local
+        // caller can tell the two apart; that is accepted.
+        if self.exclude.covers_repo(repo) {
+            return Err("pr_unknown");
+        }
         let current = if verdict == Verdict::Approved {
             self.live_head_is(repo, number, head_sha).await?;
             true

@@ -143,6 +143,9 @@ pub struct FakePr {
     pub base_queue: Option<bool>,
     /// GitHub could not resolve the base branch's queue (`null` beside an error).
     pub base_queue_error: bool,
+    /// The repository GraphQL names for the PR, when it is not the one it was
+    /// found under (a repo transferred to another owner).
+    pub detail_repo: Option<String>,
 }
 
 impl FakePr {
@@ -184,6 +187,7 @@ impl FakePr {
             queue_field_error: false,
             base_queue: None,
             base_queue_error: false,
+            detail_repo: None,
         }
     }
 
@@ -384,6 +388,8 @@ pub struct State {
     pub log: Vec<Req>,
     pub rate: Option<Rate>,
     pub forced: HashMap<&'static str, Forced>,
+    /// Words a forced failure's body carries (ahead of the canary text).
+    pub forced_words: HashMap<&'static str, String>,
     /// `X-GitHub-SSO` value sent on search responses.
     pub sso: Option<String>,
     /// `None`: the lookup answers 404.
@@ -475,7 +481,7 @@ fn pr_graphql(pr: &FakePr, query: &str) -> Value {
         "baseRefName": pr.base_ref,
         "headRefName": pr.head_ref,
         "headRefOid": pr.head_sha,
-        "repository": {"nameWithOwner": pr.repo, "defaultBranchRef": {"name": pr.default_branch}},
+        "repository": {"nameWithOwner": pr.detail_repo.as_deref().unwrap_or(&pr.repo), "defaultBranchRef": {"name": pr.default_branch}},
         "commits": {"nodes": [{"commit": {"committedDate": iso(pr.committed), "statusCheckRollup": rollup}}]},
         "latestOpinionatedReviews": {"nodes": pr.reviews.iter().map(|(s, l, t)| json!({
             "state": s, "author": actor(l, t), "body": CANARY_BODY
@@ -567,8 +573,13 @@ fn respond(state: &Arc<Mutex<State>>, req: &Request) -> ResponseTemplate {
     if let Some(f) = st.forced.get(kind_name(&path)).copied() {
         entry.status = f.status;
         st.log.push(entry);
+        let words = st
+            .forced_words
+            .get(kind_name(&path))
+            .cloned()
+            .unwrap_or_else(|| "forced failure".to_owned());
         let mut t = ResponseTemplate::new(f.status).set_body_json(json!({
-            "message": "forced failure https://github.com/canary-org/canary-repo/pull/9 CANARY-ERROR-BODY"
+            "message": format!("{words} https://github.com/canary-org/canary-repo/pull/9 CANARY-ERROR-BODY")
         }));
         if let Some(ra) = f.retry_after {
             t = t.insert_header("retry-after", ra.to_string().as_str());
@@ -833,6 +844,7 @@ impl Fake {
                 log: Vec::new(),
                 rate: None,
                 forced: HashMap::new(),
+                forced_words: HashMap::new(),
                 sso: None,
                 orgs: HashMap::new(),
                 etags: true,
@@ -901,6 +913,19 @@ impl Fake {
             }
             None => {
                 st.forced.remove(kind);
+            }
+        }
+    }
+
+    /// What a forced failure of `kind` says in its body (`None`: "forced failure").
+    pub fn force_words(&self, kind: &'static str, words: Option<&str>) {
+        let mut st = self.lock();
+        match words {
+            Some(w) => {
+                st.forced_words.insert(kind, w.to_owned());
+            }
+            None => {
+                st.forced_words.remove(kind);
             }
         }
     }
@@ -996,6 +1021,8 @@ pub struct RigOpts {
     pub wall_jump: Option<WallJump>,
     /// How the engine looks for a token again when it started without one.
     pub token_resolver: Option<TokenResolver>,
+    /// `authored_prs_exclude_orgs`.
+    pub exclude_orgs: Vec<String>,
 }
 
 impl Default for RigOpts {
@@ -1005,6 +1032,7 @@ impl Default for RigOpts {
             token: true,
             wall_jump: None,
             token_resolver: None,
+            exclude_orgs: Vec::new(),
         }
     }
 }
@@ -1206,6 +1234,9 @@ impl Rig {
         };
         let handle = AuthoredPrsSource::spawn(Deps {
             state_root: Some(state_root.clone()),
+            exclude_orgs: nostromo::data::authored_prs::exclude::ExcludedOrgs::new(
+                &opts.exclude_orgs,
+            ),
             api_base: server.uri(),
             github,
             token_resolver: opts.token_resolver.clone(),
@@ -1228,7 +1259,8 @@ impl Rig {
                 Arc::clone(&clock),
             )
             .with_merge(Arc::clone(&handle.verdicts), Arc::clone(&handle.api))
-            .with_heads(Arc::clone(&handle.heads)),
+            .with_heads(Arc::clone(&handle.heads))
+            .with_exclusions(handle.exclude.clone()),
         );
         let mut rig = Rig {
             fake,

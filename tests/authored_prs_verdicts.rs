@@ -516,7 +516,17 @@ async fn an_approval_for_a_pr_the_snapshot_never_listed_is_checked_live() {
 }
 
 async fn unverifiable(status: u16, retry_after: Option<u64>, code: &'static str) {
+    unverifiable_saying(status, retry_after, None, code).await;
+}
+
+async fn unverifiable_saying(
+    status: u16,
+    retry_after: Option<u64>,
+    words: Option<&str>,
+    code: &'static str,
+) {
     let mut rig = start_with(pr_at(&sha('a'))).await;
+    rig.fake.force_words("graphql", words);
     rig.fake.force(
         "graphql",
         Some(Forced {
@@ -535,8 +545,22 @@ async fn an_approval_is_refused_unreachable_when_github_says_401() {
 }
 
 #[tokio::test]
-async fn an_approval_is_refused_rate_limited_on_a_403() {
-    unverifiable(403, None, "rate_limited").await;
+async fn an_approval_is_refused_unreachable_on_a_permission_403_not_rate_limited() {
+    // No Retry-After, allowance left, and a body that does not name a limit: the
+    // token cannot read this PR. Still refused (nothing is kept), but never a
+    // remembered wait.
+    unverifiable(403, None, "unreachable").await;
+}
+
+#[tokio::test]
+async fn an_approval_is_refused_rate_limited_on_a_403_that_names_a_secondary_limit() {
+    unverifiable_saying(
+        403,
+        None,
+        Some("You have exceeded a secondary rate limit"),
+        "rate_limited",
+    )
+    .await;
 }
 
 #[tokio::test]

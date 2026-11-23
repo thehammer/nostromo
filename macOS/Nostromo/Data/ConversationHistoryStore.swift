@@ -37,6 +37,8 @@ final class ConversationHistoryStore {
     private(set) var history: ConversationHistoryWire?
     /// Something changed: a listing arrived, or the daemon said the history changed.
     let changes = PassthroughSubject<Void, Never>()
+    /// Fires when `sensitivityKnown` becomes true.
+    let knownChanges = PassthroughSubject<Void, Never>()
     /// A resume's outcome (row id, result).
     let resumeResults = PassthroughSubject<(String, ResumeResult), Never>()
 
@@ -86,6 +88,28 @@ final class ConversationHistoryStore {
     }
 
     var isSupported: Bool { sender?.daemonAdvertisesConversationHistory == true }
+
+    /// Whether what the daemon knows about which focuses are sensitive has been heard: a listing has been
+    /// answered, or a connection came up whose daemon has no listing. False until then, and for good if
+    /// the daemon never answers. (Not derived from `history`, which `appWillTerminate` may drop.)
+    private(set) var sensitivityKnown = false
+
+    /// The daemon connection came up or went away. On a (re)connect ask for the listing at once, so the
+    /// composer history knows which focuses are sensitive before the user can type into one.
+    func connectionChanged(_ connected: Bool) {
+        guard connected else { return }
+        if isSupported {
+            refresh()
+        } else {
+            markSensitivityKnown()
+        }
+    }
+
+    private func markSensitivityKnown() {
+        guard !sensitivityKnown else { return }
+        sensitivityKnown = true
+        knownChanges.send()
+    }
 
     // MARK: Requests
 
@@ -175,6 +199,7 @@ final class ConversationHistoryStore {
         case .conversationHistory(let wire):
             history = wire
             changes.send()
+            markSensitivityKnown()
             sweepNoCodebaseFolders(wire)
         case .conversationHistoryChanged:
             refresh()

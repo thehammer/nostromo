@@ -5645,7 +5645,8 @@ fn every_conversation_verb_from_a_local_process_that_is_not_the_app_is_refused_a
 /// A local process that is not the app cannot cancel a resume still inside its
 /// reservation window; the app's own release still can.
 #[test]
-fn a_pending_resume_reservation_survives_a_release_from_a_local_process_that_is_not_the_app() {
+fn a_pending_conversation_resume_reservation_survives_a_release_from_a_local_process_that_is_not_the_app(
+) {
     run(GUARDED, |rig| async move {
         let history = seed_conversations(&rig);
         let reply = rig

@@ -1416,7 +1416,8 @@ fn start_authored_prs(
     mut republish: tokio::sync::watch::Receiver<u64>,
     state_root: std::path::PathBuf,
 ) {
-    use nostromo::data::authored_prs::{AuthoredPrsSource, Deps, FocusInfo, SystemClock};
+    use nostromo::data::authored_prs::{AuthoredPrsSource, Deps, FocusInfo};
+    let exclude_orgs = nostromo::data::authored_prs::exclude::ExcludedOrgs::from_config(config);
     let github =
         match nostromo::data::github_client::GithubClient::new(config.github_token_path.as_deref())
         {
@@ -1463,8 +1464,9 @@ fn start_authored_prs(
         jobs_rx,
         focuses,
         projects_root: projects_root.clone(),
-        clock: Arc::new(SystemClock),
+        clock: authored_prs_clock(),
         state_root: Some(state_root),
+        exclude_orgs,
     });
     {
         let mut mgr = session_mgr.lock().unwrap();
@@ -1477,7 +1479,7 @@ fn start_authored_prs(
                     .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
                     .join(".claude")
                     .join("agents"),
-                Arc::new(SystemClock),
+                authored_prs_clock(),
             ),
         ));
     }
@@ -1502,11 +1504,32 @@ fn start_authored_prs(
     });
 }
 
+/// The wall clock the authored-PR daemon runs on: the real one, which keeps up
+/// when the Mac sleeps. (`TokioClock` is for tests: it stops while asleep.)
+fn authored_prs_clock() -> Arc<dyn nostromo::data::authored_prs::Clock> {
+    Arc::new(nostromo::data::authored_prs::SystemClock)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::sync::watch;
+
+    #[tokio::test(start_paused = true)]
+    async fn the_authored_pr_clock_is_the_real_wall_clock_not_tokios_paused_one() {
+        let clock = authored_prs_clock();
+        let before = clock.now();
+        // A tokio-driven clock would jump an hour; the wall clock does not move.
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        let moved = clock.now() - before;
+        assert!(
+            moved < chrono::Duration::seconds(60),
+            "the clock followed tokio's time: moved {moved}"
+        );
+        let off = (clock.now() - chrono::Utc::now()).num_seconds().abs();
+        assert!(off < 60, "not the wall clock: {off}s off");
+    }
 
     async fn next_frame(rx: &mut broadcast::Receiver<ServerMsg>) -> ServerMsg {
         tokio::time::timeout(Duration::from_secs(2), rx.recv())

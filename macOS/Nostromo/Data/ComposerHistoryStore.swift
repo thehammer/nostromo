@@ -30,6 +30,11 @@ enum ComposerHistoryChange: Equatable {
 /// A focus that is, or becomes, sensitive (`FocusSensitivityProviding`) has its file deleted at once and
 /// keeps history in memory only for the rest of the app's life.
 ///
+/// Nothing is written until sensitivity is *known* (`isKnown`: the daemon's first conversation list has
+/// been answered, or the daemon is known not to have one, and the persisted marks were read). Until then
+/// history is memory only and is written once the focus is known not to be sensitive. If the daemon never
+/// answers, history stays in memory for the whole run: it fails closed, never open.
+///
 /// ## Privacy
 ///
 /// History is never sent anywhere and entries are never logged: a failure logs the error's class only.
@@ -45,8 +50,10 @@ final class ComposerHistoryStore {
     static let maxEntryLength = 20_000
     static let debounce: TimeInterval = 1
 
+    static let sharedDirectory = NostromoHome.current.appendingPathComponent(".nostromo/composer-history.v1", isDirectory: true)
+
     static let shared = ComposerHistoryStore(
-        directory: NostromoHome.current.appendingPathComponent(".nostromo/composer-history.v1", isDirectory: true),
+        directory: sharedDirectory,
         persists: persistsAcrossRelaunch,
         sensitivity: FocusSensitivity.shared)
 
@@ -65,6 +72,10 @@ final class ComposerHistoryStore {
         self.scheduler = scheduler
         sensitivitySubscription = sensitivity.becameSensitive.sink { [weak self] tag in
             self?.becameSensitive(tag: tag)
+        }
+        knownSubscription = sensitivity.becameKnown.sink { [weak self] in
+            guard let self, !self.dirty.isEmpty else { return }
+            self.scheduleFlushOfDirty()
         }
         if persists { sweepOrphanedTempFiles() }
     }
@@ -150,6 +161,7 @@ final class ComposerHistoryStore {
     private let scheduler: WorkScheduler
     private let writeQueue = DispatchQueue(label: "nostromo.composer-history.write", qos: .utility)
     private var sensitivitySubscription: AnyCancellable?
+    private var knownSubscription: AnyCancellable?
 
     private var entriesByTag: [String: [String]] = [:]
     private var loaded: Set<String> = []
@@ -158,8 +170,7 @@ final class ComposerHistoryStore {
     private var pendingCancel: (() -> Void)?
 
     private func fileURL(_ tag: String) -> URL {
-        let hex = SHA256.hash(data: Data(tag.utf8)).map { String(format: "%02x", $0) }.joined()
-        return directory.appendingPathComponent("\(hex).json")
+        directory.appendingPathComponent("\(FocusSensitivity.tagHash(tag)).json")
     }
 
     private var writesToDisk: Bool { persists }
@@ -198,7 +209,8 @@ final class ComposerHistoryStore {
         let directory = directory
         writeQueue.async {
             let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
-            for name in names where name.hasPrefix(".") && name.hasSuffix(".tmp") {
+            for name in names where name.hasPrefix(".") && name.hasSuffix(".tmp")
+                && !name.hasPrefix(FocusSensitivity.marksTempPrefix) {
                 try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
             }
         }
@@ -231,6 +243,10 @@ final class ComposerHistoryStore {
     private func scheduleWrite(_ tag: String) {
         guard writesToDisk, !memoryOnly.contains(tag) else { return }
         dirty.insert(tag)
+        scheduleFlushOfDirty()
+    }
+
+    private func scheduleFlushOfDirty() {
         guard pendingCancel == nil else { return }
         pendingCancel = scheduler.schedule(Self.debounce) { [weak self] in
             self?.pendingCancel = nil
@@ -239,6 +255,8 @@ final class ComposerHistoryStore {
     }
 
     private func writePending() {
+        // Sensitivity not known yet: keep what is pending in memory; `becameKnown` schedules it again.
+        guard sensitivity.isKnown else { return }
         let tags = dirty.subtracting(memoryOnly)
         dirty = []
         guard !tags.isEmpty else { return }
@@ -263,12 +281,12 @@ final class ComposerHistoryStore {
 
     /// The directory is 0700 and the file 0600, and the file has its mode from its first byte: it is
     /// created 0600 under a temporary name and renamed over the old one, so no reader ever sees it wider.
-    private static func writePrivately(_ data: Data, to url: URL, directory: URL) throws {
+    static func writePrivately(_ data: Data, to url: URL, directory: URL, tempPrefix: String = ".") throws {
         let fm = FileManager.default
         try fm.createDirectory(at: directory, withIntermediateDirectories: true,
                                attributes: [.posixPermissions: 0o700])
         try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
-        let temp = directory.appendingPathComponent(".\(UUID().uuidString).tmp")
+        let temp = directory.appendingPathComponent("\(tempPrefix)\(UUID().uuidString).tmp")
         let fd = open(temp.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
         guard fd >= 0 else { throw CocoaError(.fileWriteUnknown) }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)

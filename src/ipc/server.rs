@@ -4728,6 +4728,60 @@ mod tests {
         }
     }
 
+    /// A `session_spawn` frame off the wire, handled as the operator app sends it.
+    fn spawn_frame_answers(frame: serde_json::Value) -> Vec<ServerMsg> {
+        let msg: ClientMsg = serde_json::from_value(frame).expect("a session_spawn frame decodes");
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+            dir.path().join("s.json"),
+        )));
+        let (ttx, mut trx) = mpsc::unbounded_channel();
+        let (btx, _brx) = broadcast::channel(8);
+        handle_client_msg(
+            msg,
+            PeerTrust::OperatorApp,
+            None,
+            None,
+            &SensitiveTags::in_memory(),
+            "conn",
+            "client",
+            &mgr,
+            &ttx,
+            &btx,
+            dir.path(),
+            &Arc::new(Mutex::new(DecisionRegistry::new())),
+            &Arc::new(Mutex::new(HashSet::new())),
+            None,
+            &TerminalManager::in_memory(),
+        );
+        let mut out = Vec::new();
+        while let Ok(m) = trx.try_recv() {
+            out.push(m);
+        }
+        out
+    }
+
+    #[test]
+    fn a_session_spawn_frame_claiming_no_codebase_without_a_folder_is_refused_by_the_daemon() {
+        // The focus registry knows nothing of this tag: only the frame's own flag
+        // can make the daemon refuse (the app's registry push is debounced).
+        let out = spawn_frame_answers(serde_json::json!({
+            "type": "session_spawn",
+            "tag": "spaces-1",
+            "agent_name": "claude",
+            "view_name": "Spaces",
+            "remote_control": false,
+            "no_codebase": true
+        }));
+        assert!(
+            matches!(
+                out.as_slice(),
+                [ServerMsg::Error { message }] if message.contains("no-codebase focus needs its own folder")
+            ),
+            "{out:?}"
+        );
+    }
+
     fn commands_get_as(trust: PeerTrust, tag: &str) -> Vec<ServerMsg> {
         let dir = tempfile::tempdir().unwrap();
         let mgr = Arc::new(Mutex::new(SessionManager::with_store_path(

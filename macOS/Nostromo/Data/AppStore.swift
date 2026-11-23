@@ -782,6 +782,8 @@ class AppStore: ObservableObject {
                 // Tells every chip whether the daemon is reachable, and on a new connection
                 // asks for the model catalogue and the per-agent defaults.
                 ModelStore.shared.connectionChanged(connected)
+                // Asks for the conversation list so composer history knows which focuses are sensitive.
+                ConversationHistoryStore.shared.connectionChanged(connected)
                 BackgroundTaskStore.shared.tasksSupported = connected && self?.client.daemonAdvertisesTasks == true
                 // Terminal views attach again after a reconnect, and are told when the daemon is gone.
                 TerminalSessionStore.shared.connectionChanged(connected)

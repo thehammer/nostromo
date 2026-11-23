@@ -42,9 +42,11 @@
 //! The identity check runs only when a search returns nothing, and a success is
 //! trusted for 10 minutes per set of credentials. (A search that returns issues does
 //! not vouch for later ones: a list that drops to zero is exactly what a revoked
-//! token looks like, so the next empty search is still checked.) A rejection is held like any 401 and ends on a changed
-//! `.env` or an explicit refresh. The `X-AACCOUNTID: unidentified` response header is
-//! not used: it cannot be confirmed here without a real Jira, and `/myself` is authoritative.
+//! token looks like, so the next empty search is still checked.) The 200 must name
+//! an account (a non-empty `accountId`), else it counts as a rejection. A rejection
+//! is held like any 401 and ends on a changed `.env` or an explicit refresh. The
+//! `X-AACCOUNTID: unidentified` response header is not used: it cannot be confirmed
+//! here without a real Jira, and `/myself` is authoritative.
 //!
 //! Credentials are re-resolved on every fetch, and a change of the `.env`
 //! file's mtime triggers a fetch, so fixing a token recovers without a daemon
@@ -273,7 +275,7 @@ pub struct JiraWorkSource {
     hold: Mutex<Option<Hold>>,
     /// The credentials (fingerprint) last shown to be accepted, and when. Only a
     /// positive result is kept; see [`JiraWorkSource::confirm_identity`].
-    verified: Mutex<Option<(u64, Instant)>>,
+    verified: Mutex<Option<(u64, DateTime<Utc>)>>,
     /// What "now" is for `updated_at`, `retry_at` and a `Retry-After` date.
     clock: Clock,
 }
@@ -717,7 +719,7 @@ impl JiraWorkSource {
             .verified
             .lock()
             .unwrap()
-            .is_some_and(|(f, at)| f == fingerprint && at.elapsed() < self.identity_ttl);
+            .is_some_and(|(f, at)| f == fingerprint && self.within_identity_ttl(at));
         if fresh {
             return Ok(());
         }
@@ -726,10 +728,13 @@ impl JiraWorkSource {
             .get(format!("{}/rest/api/3/myself", self.base(creds)))
             .basic_auth(&creds.email, Some(&creds.token));
         match self.send_json(req, false).await {
-            Ok(_) => {
+            // A 200 only vouches for the token when it names an account: an
+            // unauthenticated Jira can answer 200 with nothing useful.
+            Ok(body) if has_account_id(&body) => {
                 self.vouch_for(fingerprint);
                 Ok(())
             }
+            Ok(_) => Err(FetchError::Rejected(401)),
             Err(FetchError::Failed(why)) => Err(FetchError::Failed(format!(
                 "{why} while checking the API token"
             ))),
@@ -738,7 +743,16 @@ impl JiraWorkSource {
     }
 
     fn vouch_for(&self, credentials: u64) {
-        *self.verified.lock().unwrap() = Some((credentials, Instant::now()));
+        *self.verified.lock().unwrap() = Some((credentials, self.now()));
+    }
+
+    /// Whether a vouch made at `at` still holds, by the injected clock. A clock that
+    /// went backwards is not fresh (fail closed).
+    fn within_identity_ttl(&self, at: DateTime<Utc>) -> bool {
+        self.now()
+            .signed_duration_since(at)
+            .to_std()
+            .is_ok_and(|age| age < self.identity_ttl)
     }
 
     fn forget_identity(&self) {
@@ -1024,6 +1038,13 @@ impl JiraWorkSource {
             .await
             .map_err(|_| FetchError::Failed("unreadable response".into()))
     }
+}
+
+/// `GET /myself` names the account: a non-empty string `accountId`.
+fn has_account_id(body: &Value) -> bool {
+    body.get("accountId")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty())
 }
 
 /// Internal marker: the `search/jql` endpoint answered 404/410.

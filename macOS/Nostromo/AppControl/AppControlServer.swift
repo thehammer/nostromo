@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import os
 import NostromoKit
 
@@ -76,8 +77,13 @@ final class AppControlServer {
         // SwiftUI only builds its accessibility tree when an assistive client is
         // present; this is what an AX client sets, and it lets `find`/`tree` see
         // text SwiftUI draws itself (e.g. the Mother job list).
-        NSApp.accessibilitySetValue(true as NSNumber, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
-        NSApp.accessibilitySetValue(true as NSNumber, forAttribute: NSAccessibility.Attribute(rawValue: "AXManualAccessibility"))
+        // Goes through the app's own AXUIElement (no Accessibility trust needed for our own
+        // process; `NSApplication.accessibilitySetValue` is deprecated). The result codes are
+        // not checked: AppKit reports "not implemented"/"unsupported" yet applies the value,
+        // which `enhancedUI` in `ax` reads back.
+        for attribute in ["AXEnhancedUserInterface", "AXManualAccessibility"] {
+            AXUIElementSetAttributeValue(AXUIElementCreateApplication(getpid()), attribute as CFString, kCFBooleanTrue)
+        }
         ctlLog.notice("app control listening at \(path, privacy: .public)")
         queue.async { [weak self] in self?.acceptLoop() }
     }
@@ -367,7 +373,9 @@ final class AppControlServer {
         var o = AppControlAX.dump(t, 0)
         if AppControlAX.isWithheld(t) { return o }
         o["isAccessibilityElement"] = t.isAccessibilityElement()
-        o["enhancedUI"] = NSApp.accessibilityAttributeValue(NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface")) as Any
+        var enhanced: CFTypeRef?
+        AXUIElementCopyAttributeValue(AXUIElementCreateApplication(getpid()), "AXEnhancedUserInterface" as CFString, &enhanced)
+        o["enhancedUI"] = enhanced as Any
         o["cellRows"] = (t.accessibilityRows() ?? []).count
         return o
     }

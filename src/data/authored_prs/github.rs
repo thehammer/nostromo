@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 use super::budget::{parse_retry_after, RateObs, Resource};
 use super::classify::{RawMergeQueue, RawPr};
+use super::exclude::ExcludedOrgs;
 use super::snapshot::{safe_segment, valid_repo};
 
 pub const USER_AGENT: &str = "nostromd authored-prs";
@@ -25,18 +26,37 @@ pub const USER_AGENT: &str = "nostromd authored-prs";
 pub const SEARCH_PATH: &str =
     "/search/issues?q=is:pr+is:open+author:@me+archived:false&sort=updated&order=desc&per_page=100";
 
+const SEARCH_QUERY_END: &str = "+archived:false";
+
+/// [`SEARCH_PATH`] with a `-org:<login>` qualifier per excluded owner, so an
+/// excluded org can neither cost quota nor fill the 100-result page. Byte for
+/// byte [`SEARCH_PATH`] when nothing is excluded.
+pub fn search_path(excluded: &ExcludedOrgs) -> String {
+    let at = SEARCH_PATH
+        .find(SEARCH_QUERY_END)
+        .map_or(0, |i| i + SEARCH_QUERY_END.len());
+    let (head, tail) = SEARCH_PATH.split_at(at);
+    format!("{head}{}{tail}", excluded.search_qualifiers())
+}
+
 pub const MAX_ALIASES: usize = 20;
 /// GitHub's own advice for a secondary rate limit that names no `Retry-After`:
 /// wait at least a minute.
 pub const SECONDARY_WAIT: Duration = Duration::from_secs(60);
 const MAX_BODY: usize = 16 * 1024 * 1024;
+/// How much of a 403's body is read to tell a secondary limit from a permission
+/// refusal. The body is only matched against fixed phrases; it is never kept or logged.
+const MAX_403_BODY: usize = 4 * 1024;
 
 /// Why a request failed. No variant carries a URL or any response text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiError {
     /// 401.
     Unauthorized,
-    /// 429 or 403: stop until `Retry-After`, the reset of an exhausted limit, or a minute.
+    /// 403 that is not a limit: the token or its SSO/permissions cannot do this. Not
+    /// a pause; retrying every minute would never help.
+    Forbidden,
+    /// 429, or a 403 that is a limit: stop until `Retry-After`, the reset of an exhausted limit, or a minute.
     /// `wait` is the server's `Retry-After`; `None` means until the reset in `Meta::rate`
     /// (or a minute when there is none).
     RateLimited {
@@ -54,6 +74,7 @@ impl ApiError {
         match self {
             ApiError::Unauthorized => "unauthorized",
             ApiError::RateLimited { .. } => "rate_limited",
+            ApiError::Forbidden => "forbidden",
             ApiError::Status(s) if *s >= 500 => "server_error",
             ApiError::Status(_) => "client_error",
             ApiError::Transport => "transport",
@@ -88,10 +109,27 @@ pub struct Api {
     http: reqwest::Client,
     token: String,
     base: String,
+    /// Built once: the exclusion list is fixed for the daemon's life, so the
+    /// search ETag never belongs to a different query.
+    search_path: String,
 }
 
 fn header_str<'a>(h: &'a HeaderMap, name: &str) -> Option<&'a str> {
     h.get(name).and_then(|v| v.to_str().ok())
+}
+
+/// Does this 403's body (read up to [`MAX_403_BODY`] bytes, nothing kept) name a
+/// secondary / abuse rate limit?
+async fn says_secondary_limit(resp: &mut reqwest::Response) -> bool {
+    let mut head: Vec<u8> = Vec::new();
+    while head.len() < MAX_403_BODY {
+        match resp.chunk().await {
+            Ok(Some(c)) => head.extend_from_slice(&c[..c.len().min(MAX_403_BODY - head.len())]),
+            _ => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&head).to_lowercase();
+    text.contains("secondary rate limit") || text.contains("abuse")
 }
 
 fn read_meta(h: &HeaderMap) -> Meta {
@@ -132,7 +170,14 @@ impl Api {
             http,
             token,
             base: base.trim_end_matches('/').to_owned(),
+            search_path: SEARCH_PATH.to_owned(),
         }
+    }
+
+    /// The same client, its discovery search leaving `excluded` owners out.
+    pub fn excluding(mut self, excluded: &ExcludedOrgs) -> Self {
+        self.search_path = search_path(excluded);
+        self
     }
 
     fn headers(&self) -> HeaderMap {
@@ -153,7 +198,7 @@ impl Api {
         h
     }
 
-    async fn finish(&self, resp: reqwest::Response) -> Result<Reply, Failure> {
+    async fn finish(&self, mut resp: reqwest::Response) -> Result<Reply, Failure> {
         let status = resp.status().as_u16();
         let meta = read_meta(resp.headers());
         let retry_after = header_str(resp.headers(), "retry-after").and_then(parse_retry_after);
@@ -165,13 +210,17 @@ impl Api {
             });
         }
         if status == 429 || status == 403 {
-            // A 403 or 429 that is not a primary limit (`remaining` above zero, no
-            // `Retry-After`) is a secondary limit: pause for a bounded minute.
             let error = if let Some(wait) = retry_after {
                 ApiError::RateLimited { wait: Some(wait) }
             } else if remaining_zero {
                 ApiError::RateLimited { wait: None }
+            } else if status == 403 && !says_secondary_limit(&mut resp).await {
+                // A 403 with allowance left and no `Retry-After` is a limit only when
+                // GitHub's body says so; otherwise the token lacks access (SSO,
+                // permission) and waiting a minute will not change that.
+                ApiError::Forbidden
             } else {
+                // A secondary limit: pause for a bounded minute.
                 ApiError::RateLimited {
                     wait: Some(SECONDARY_WAIT),
                 }
@@ -257,7 +306,7 @@ impl Api {
 
     /// The discovery search. `None` items means 304: reuse the last list.
     pub async fn search(&self, etag: Option<&str>) -> Result<SearchResult, Failure> {
-        let reply = self.get(SEARCH_PATH, etag).await?;
+        let reply = self.get(&self.search_path, etag).await?;
         if reply.status == 304 {
             return Ok(SearchResult {
                 meta: reply.meta,
@@ -794,6 +843,25 @@ fn query_with(targets: &[Target], extra_fields: &str) -> String {
     q.push_str("}\n");
     q.push_str(&FRAGMENT.replacen("{EXTRA}", extra_fields, 1));
     q
+}
+
+#[cfg(test)]
+mod search_path_tests {
+    use super::*;
+
+    #[test]
+    fn nothing_excluded_is_the_original_query_byte_for_byte() {
+        assert_eq!(search_path(&ExcludedOrgs::default()), SEARCH_PATH);
+    }
+
+    #[test]
+    fn each_excluded_org_is_a_negative_qualifier_inside_q() {
+        let p = search_path(&ExcludedOrgs::new(["Carefeed", "other-org"]));
+        assert_eq!(
+            p,
+            "/search/issues?q=is:pr+is:open+author:@me+archived:false+-org:carefeed+-org:other-org&sort=updated&order=desc&per_page=100"
+        );
+    }
 }
 
 #[cfg(test)]
