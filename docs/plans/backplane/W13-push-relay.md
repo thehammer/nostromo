@@ -557,8 +557,8 @@ iOS app (contract-text notifications, no extension; W16 adds the extension):
     [.alert, .badge, .sound, .timeSensitive]`).
   - On a token, sends `RegisterPush` over the W11 `WebSocketClient` whenever
     connected.
-  - (No background-push removal handler: S1 forbids combining removal with
-    replacement. Stale notifications are replaced through the collapse id,
+  - (No background-push removal handler: the push PRD's v1 withdrawal is
+    replace in place plus removal when the app runs. Stale notifications are replaced through the collapse id,
     and removed by the app itself on launch and foreground connect.)
   - In the `UNUserNotificationCenterDelegate` tap handler, routes to the item.
 - `iOS/Nostromo/Views/PushItemView.swift` (new): the tap target. It resolves
