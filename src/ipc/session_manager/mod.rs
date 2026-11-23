@@ -100,6 +100,8 @@ mod inject_tests;
 mod injected_tests;
 mod login;
 pub(crate) mod merge;
+#[cfg(test)]
+mod merge_delivery_tests;
 mod model_switch;
 #[cfg(test)]
 mod notice_inject_tests;

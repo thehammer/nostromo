@@ -61,12 +61,12 @@ impl Batch {
 
 /// May `m` be part of a batch? Typed by a person, not a slash command.
 fn mergeable(m: &PendingMessage) -> bool {
-    let typed = matches!(m.kind, EntryKind::Typed { .. });
-    debug_assert!(
-        !typed || m.on_delivered.is_none(),
-        "a typed entry never carries a delivered hook"
-    );
-    typed && m.batch.is_none() && local_command::split_typed_command(&m.text).is_none()
+    // An entry with a delivered hook never merges (the hook must run for its
+    // own delivery): only app entries carry them in production.
+    matches!(m.kind, EntryKind::Typed { .. })
+        && m.on_delivered.is_none()
+        && m.batch.is_none()
+        && local_command::split_typed_command(&m.text).is_none()
 }
 
 /// Group the queue into the runs `step` will write: a partition of

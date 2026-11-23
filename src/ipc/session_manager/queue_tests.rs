@@ -49,7 +49,17 @@ fn spawn_stub(mgr: &mut SessionManager, tag: &str, script: &str) {
 
 /// A session whose turn is running (no message of ours started it), so every
 /// send queues. The child records what it reads on stdin into `out`.
+///
+/// A connection that did not declare `merged_turns_v1` is attached, so nothing
+/// merges and each queued message is its own frame (what these tests cover).
 fn busy(tag: &str, out: &Path) -> SessionManager {
+    let mgr = busy_merging(tag, out);
+    mgr.sessions[tag].shared.queue.set_legacy_clients(1);
+    mgr
+}
+
+/// [`busy`] with no client attached: queued typed messages merge.
+fn busy_merging(tag: &str, out: &Path) -> SessionManager {
     let mut mgr = SessionManager::with_store_path(tmp_store());
     spawn_stub(&mut mgr, tag, &format!("cat >> '{}'", out.display()));
     *lock_recover(&mgr.sessions[tag].shared.state) = SessionState::MidTurn;
@@ -627,12 +637,17 @@ struct Answers {
 }
 
 /// One interleaving. Returns what it found wrong (empty when all is well).
-fn run_interleaving(seed: u64, skip_wait: bool) -> Vec<String> {
-    const MESSAGES: usize = 4;
+fn run_interleaving(seed: u64, skip_wait: bool, merge: bool) -> Vec<String> {
+    // With merging, queues of 2 to 5 typed messages; else 4 messages, one frame each.
+    let messages: usize = if merge { 2 + (seed % 4) as usize } else { 4 };
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("in");
-    let mut mgr = busy("t", &out);
-    let texts: Vec<String> = (0..MESSAGES).map(|i| format!("m{seed}-{i}")).collect();
+    let mut mgr = if merge {
+        busy_merging("t", &out)
+    } else {
+        busy("t", &out)
+    };
+    let texts: Vec<String> = (0..messages).map(|i| format!("m{seed}-{i}")).collect();
     let ids: Vec<String> = texts
         .iter()
         .map(|t| mgr.send_typed_message("t", t, &[], None).unwrap())
@@ -652,7 +667,7 @@ fn run_interleaving(seed: u64, skip_wait: bool) -> Vec<String> {
     let fails = rng.below(2) == 0;
     let stop_at = rng.micros(900);
     let stops = rng.below(2) == 0;
-    let takers: Vec<(Duration, QueueVerb, Option<Duration>)> = (0..MESSAGES)
+    let takers: Vec<(Duration, QueueVerb, Option<Duration>)> = (0..messages)
         .map(|_| {
             let verb = if rng.below(2) == 0 {
                 QueueVerb::TakeBack
@@ -720,12 +735,19 @@ fn run_interleaving(seed: u64, skip_wait: bool) -> Vec<String> {
         std::thread::sleep(Duration::from_millis(1));
     }
     let claimed = shared.queue.delivered_ids();
+    // A merged frame stands for each of its parts.
+    let parts_written = || -> Vec<String> {
+        written(&out)
+            .into_iter()
+            .flat_map(|f| merge::parse(&f).map_or_else(|| vec![f], |p| p.parts))
+            .collect()
+    };
     wait_for("the child to read what was delivered", || {
-        written(&out).len() >= claimed.len()
+        parts_written().len() >= claimed.len()
     });
     std::thread::sleep(Duration::from_millis(3));
 
-    let frames = written(&out);
+    let frames = parts_written();
     let dropped = lock_recover(&stop_dropped).clone();
     let answers = lock_recover(&answers);
     let mut problems = Vec::new();
@@ -776,12 +798,38 @@ async fn every_typed_message_is_delivered_taken_back_removed_or_dropped_exactly_
     println!("queue race: seeds 1..={RACE_SEEDS}");
     let problems = tokio::task::spawn_blocking(|| {
         (1..=RACE_SEEDS)
-            .flat_map(|seed| run_interleaving(seed, false))
+            .flat_map(|seed| run_interleaving(seed, false, false))
             .collect::<Vec<_>>()
     })
     .await
     .unwrap();
     assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn merged_batches_are_delivered_taken_back_removed_or_dropped_exactly_once() {
+    println!("merged queue race: seeds 1..={RACE_SEEDS}, queues of 2 to 5");
+    let problems = tokio::task::spawn_blocking(|| {
+        (1..=RACE_SEEDS)
+            .flat_map(|seed| run_interleaving(seed, false, true))
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap();
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_merged_race_test_catches_a_decision_made_without_waiting_for_the_in_flight_write() {
+    let caught = tokio::task::spawn_blocking(|| {
+        (1..=RACE_SEEDS)
+            .filter(|seed| !run_interleaving(*seed, true, true).is_empty())
+            .count()
+    })
+    .await
+    .unwrap();
+    println!("merged race mutation: caught in {caught} of {RACE_SEEDS} seeds");
+    assert!(caught > 0);
 }
 
 /// The mutation that proves the race test: deciding without waiting for the
@@ -790,7 +838,7 @@ async fn every_typed_message_is_delivered_taken_back_removed_or_dropped_exactly_
 async fn the_race_test_catches_a_decision_made_without_waiting_for_the_in_flight_write() {
     let caught = tokio::task::spawn_blocking(|| {
         (1..=RACE_SEEDS)
-            .filter(|seed| !run_interleaving(*seed, true).is_empty())
+            .filter(|seed| !run_interleaving(*seed, true, false).is_empty())
             .count()
     })
     .await
