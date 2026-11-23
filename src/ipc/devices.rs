@@ -516,7 +516,14 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
 /// `name`, or `name 2`, `name 3`, … the first free among active devices.
 fn unique_name(devices: &[DeviceRecord], name: &str) -> String {
-    let name = name.trim();
+    // Device-supplied: drop control characters (ESC, bidi overrides) and cap
+    // the length so the name is safe to print in a terminal.
+    let cleaned: String = name
+        .chars()
+        .filter(|c| !c.is_control() && !matches!(*c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        .take(64)
+        .collect();
+    let name = cleaned.trim();
     let name = if name.is_empty() { "Device" } else { name };
     let taken = |candidate: &str| {
         devices
