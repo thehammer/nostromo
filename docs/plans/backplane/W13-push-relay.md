@@ -17,7 +17,7 @@ Versus the 2026-10-18 version (read the memo's "What changed since
   the Perri queue still searches only `org:Carefeed`
   (`perri_queue_native.rs:1037-1038`), so S5 stands; `ask_decision`'s
   `no_operator` is `src/mcp/tools/ask_decision.rs:90`; the Mother poller is
-  `run_mother_pollers` (`src/bin/nostromd.rs:864`, 2 s at `:402`); retained
+  `run_mother_pollers` (`src/bin/nostromd.rs:864`, 2 s at `:931`); retained
   frames `src/ipc/server.rs:4483`.
 - **New push sources stay out.** Authored-PR events (CI state, Perri verdicts,
   merge results) are `LocalOnly` and never reach the primary; tracker
@@ -25,7 +25,8 @@ Versus the 2026-10-18 version (read the memo's "What changed since
   push kind is added without Ada.
 - **Relay gate.** After merge, add the `relay-test` gate (memo, crew delta 5).
 - **Gates.** Rust, Python and Swift all run, one after another (Mother's
-  code); durations unmeasured, estimated ~60–65 min plus clippy.
+  code): measured ≈ 5 + 20 + 24 ≈ 49 min per pass (memo, "Estimate"), plus
+  `relay-test` once crew delta 5 lands.
 
 ## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 

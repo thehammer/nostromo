@@ -31,7 +31,7 @@ the per-topic publish table first; they win over older text here. Versus the
   `DecisionRequest` `:3286`, `DecisionResolved` `:3306`, `ApprovalPending`
   `:3367`; `ActivityEvent` `src/agent_bus.rs:19`; the activity tailer
   `src/bin/nostromd.rs:720-751`, the Mother poller `run_mother_pollers`
-  `:864` (2 s, `:402`); the TCP listener and mDNS `:353-398`; `Config`
+  `:864` (2 s, `:931`); the TCP listener and mDNS `:353-398`; `Config`
   `src/config.rs:51`. The old numbers in the body are superseded by these.
 - **Gates.** As W9 (memo, crew deltas); Kit runs only as the worker-run
   `make ci-remote ONLY=kit` check because `swift-ci`'s `when` excludes this
@@ -401,7 +401,8 @@ open question 2) on the operator's own host.
   prints the token.
 - [ ] **W10-15** No clippy warnings. PR body references the sequencing memo (W10).
 - [ ] **W10-17** B11: a routed `SessionAttach` on a `personal` satellite registers its
-  synthetic key as a network client; with the verified app attached and a
+  synthetic key as a network client; with a local client that declared
+  `merged_turns_v1` attached (no verified app exists in a Linux test) and a
   routed attach present, queued typed messages on that session still merge
   (two-server harness).
 - [ ] **W10-18** `redact_for_uplink_metadata` has an explicit arm for every one of the

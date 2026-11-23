@@ -584,9 +584,12 @@ details. One new item needs you:
 session's queue?** On the Mac, a message typed while the agent is busy now
 waits as a chip under the composer; the operator can take it back to edit it,
 or remove it, and pressing Stop hands the waiting messages back to the
-composer. None of that reaches a phone: the daemon refuses the queue view and
-take-back to anything but the verified Mac app (`src/ipc/peer.rs:798-800`,
-`:1103-1105`; `docs/message-queue.md`). Options: (a) the phone shows the
+composer. None of that reaches a phone: the daemon refuses the queue view,
+take-back and remove to every network peer (`src/ipc/peer.rs:1103-1105`), and
+the queue frames never go to one (`:798-800`). On the Mac side, any local
+client may watch the queue (`src/ipc/server.rs:1725-1733`); only take-back and
+remove are limited to the verified Mac app (`docs/message-queue.md`, "Who may
+call what"). Options: (a) the phone shows the
 waiting messages and can take one back; (b) the phone shows nothing about
 them (today); (c) the phone shows a count only ("2 waiting") on the
 session's row. *Proposal: (b) in this version, (c) later if wanted.* A phone

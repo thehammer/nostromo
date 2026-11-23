@@ -19,8 +19,8 @@ Versus the 2026-10-18 version (read the memo's "What changed since
   `Turn.user_parts` (#514); replay must carry it byte-for-byte (a Kit decode
   test with a merged turn in the replayed window).
 - **Gates.** Rust and Swift both change, so all of `rust-*`, `python-test` and
-  `swift-ci` run, one after another (Mother's code); durations are unmeasured,
-  estimated at ~60–65 min plus clippy (memo, crew delta 6).
+  `swift-ci` run, one after another (Mother's code): measured ≈ 5 + 20 + 24 ≈
+  49 min per pass, inside #519's `budget_minutes: 75` (memo, "Estimate").
 
 ## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 

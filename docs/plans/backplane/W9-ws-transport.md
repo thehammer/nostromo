@@ -193,7 +193,7 @@ Devices redeem codes over the WebSocket listener without a token.
   server" (PRD-AC22, AC26, AC32), and an app-level frame plus close code is
   unambiguous where an HTTP 401 from an intermediary is not. Text frames
   carry one JSON message. Binary frames close with 1003. A text frame over
-  `MAX_FRAME_LEN` (`src/ipc/protocol.rs:45`) closes with 1009.
+  `MAX_FRAME_LEN` (`src/ipc/protocol.rs:52`) closes with 1009.
   Unauthenticated upgrades are rate-limited per source IP: 20 per minute,
   then refused at upgrade with HTTP 429.
 - `src/ipc/server.rs:617-1429` — `handle_client` is already generic over the
@@ -241,7 +241,7 @@ Devices redeem codes over the WebSocket listener without a token.
     connect/disconnect, broadcast `Devices { devices }` (class `Admin`,
     topic `devices`).
 - `src/ipc/protocol.rs` — **no `PROTOCOL_VERSION` change** (stays 4 at
-  `:26`; capability is the `Welcome.features` strings below). Add
+  `:34`; capability is the `Welcome.features` strings below). Add
   `Topic::Devices` (`Topic` enum `:73-89`; `Unknown` stays last with
   `#[serde(other)]`). Messages:
   - Client → daemon, device side: `PairCheck { code }`;
@@ -425,8 +425,11 @@ Devices redeem codes over the WebSocket listener without a token.
    (n) device-admin verbs on a WS device socket → refused;
    (o) a device token never appears in captured log output;
    (p) a WS device whose `Hello` declares `capabilities: ["merged_turns_v1"]`
-   and one that declares nothing both attach to a busy session with the
-   verified app attached: queued typed messages still merge (B11), and the
+   and one that declares nothing both attach to a busy session with a local
+   (Unix) client that declared `merged_turns_v1` also attached (the gate looks
+   only at the declared capability; the operator-app verifier is macOS-only,
+   `src/ipc/peer_verify.rs:350`, `:375`, `:386`, `:677`, `:740`, so no Linux
+   test can be the verified app): queued typed messages still merge (B11), and the
    connection's declared capability is recorded.
 9. **CLI.** Implement `nostromo device …` in `src/bin/nostromo_cli.rs`
    over `DaemonClient`. Test the
@@ -505,9 +508,9 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   (`where: any`, on the host; it triggers because `tests/**` matches the new
   Rust test files and `Makefile`), `shellcheck` only if a script changes.
   `swift-ci` is skipped (no Swift paths). Mother's code runs the checks
-  serially (memo, crew delta 6); durations are unmeasured, but Rust plus
-  `python-test` may approach 45 min, so prefer adding this job after #519's
-  `budget_minutes: 75` and the path filter.
+  serially (memo, crew delta 6). Measured per pass: Rust ≈ 5 min,
+  `python-test` ≈ 20 (memo, "Estimate"), so ≈ 25 min, inside both 45 and
+  #519's 75; with crew delta 7 `python-test` stops firing here.
   `max_attempts` is 2.
   Mother runs them on the pushed head after the worker exits: sandbox gates
   through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
@@ -523,7 +526,7 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   automatically in parallel with adherence on the gated commit (Mother #75,
   merged).
 - **Review depth:** **Manual Perri pass is still required** (the `perri` entry below at xhigh, then the operator's review). Lens findings are input to it, not a substitute: a lens sees only the diff (patch input is capped at 120 KB, so a large wedge will report `coverage_gap` findings), and Mother's `phi-security` checklist is written for care data, so it does not know this repo's trust tiers (B9, B10). First authenticated listener and token issuer.
-- **Checklist:** the acceptance items above carry ids (`W9-1` to `W9-18`) so
+- **Checklist:** the acceptance items above carry ids (`W9-1` to `W9-20`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The
   worker ticks each with `mother check <job> --done --evidence <short ref>` only
   when its test or check has passed.

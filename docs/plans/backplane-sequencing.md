@@ -35,7 +35,7 @@ the **queue view for phones** (Ada D7, recommendation: local-only in v1).
 | Wedge | Ready? | Why |
 |---|---|---|
 | W14 linux-primary | **Yes** | Independent packaging. Gated in observe mode (crew.yml is on main). |
-| W9 ws-transport | **Yes**, after this docs PR merges | AP2a (#278/#287), AP3 (#310), MC4 (#299) and CL1/CL2 (#311/#314) are all merged, so the 2026-10-18 exclusion is moot. Only rule left: no other job editing `src/ipc/{protocol,server,peer}.rs` at the same time. Nothing like that is queued today. W9 now also carries B11 (a few lines in `src/ipc/session_manager/mod.rs`). |
+| W9 ws-transport | **Yes**, after this docs PR merges | AP2a (#278/#287), AP3 (#310), MC4 (#299) and CL1/CL2 (#311/#314) are all merged, so the 2026-10-18 exclusion is moot. Only rule left: no other job editing `src/ipc/{protocol,server,peer}.rs` or `src/ipc/session_manager/` at the same time. Run `mother list` before adding W9: the tracker still shows job 0848d0c0 (tracker title+fold, daemon + Mac; its PR #473 merged) and chore job b7caf0f1 as queued or in progress, and those rows look stale. W9 now also carries B11 (a few lines in `src/ipc/session_manager/mod.rs`). |
 | W10 satellite-uplink | After W9 merges | Same wire files as W9. |
 | W11 ios-ws-client | Blocked | W9 + W10 merged, **Ada D1–D7**, and (recommended) the iOS test target prerequisite below. |
 | W15 mac-device-admin | Blocked | W10 merged, **Ada D1–D7**; not beside another job that edits `macOS/Nostromo.xcodeproj` (PR #518 does today). |
@@ -48,53 +48,51 @@ calibration in "Estimate"; none of them is a Mother job you must run before
 W14):
 
 1. **Merge this docs PR.** No cost. Every wedge cites it.
-2. **Crew config follow-up** (`.mother/crew.yml`, config only). PR #519 (open)
-   raises the `python-test` (900 → 1800 s) and `swift-ci` (1800 → 2400 s)
-   timeouts and, on its branch, `gates.budget_minutes` from 45 to **75**
-   (approved by Perri). Keep 75. Why a larger budget is needed at all: Mother's own code runs the checks one after another inside one watchdog for the whole run (Mother's git, `origin/main` `0a38549`: `plugins/mother/lib/gates.sh:246-249`, the `while read check` loop in `mother_gates_run`; `plugins/mother/bin/mother-run-job:945-956`, `budget_minutes` × 60 s as the total; overrun is recorded `incomplete`). Nostromo's repo docs do not say this, and no gate run was observed.
-   Gate durations here are **unknown**; no gate run was measured. A serial sum
-   from other measurements would be about 60–65 min plus clippy for a wedge
-   that triggers Rust, Python and Swift: Rust tests 14.5–20 min on GitHub CI
-   (`.github/workflows/ci.yml:143-150`, not the RWX sandbox), `python-test`
-   ~20 min and `swift-ci` ~24 min (#502's measurements as quoted in #519's
-   body), clippy and fmt unmeasured. 75 covers that with little headroom;
-   revisit only if the first mixed wedge (W12) comes back `incomplete`. Also
-   narrow `python-test`'s `when` so a
-   Rust-only wedge's `tests/*.rs` does not trigger the ~20 min Python run
-   (`tests/**` matches them today, `.mother/crew.yml:30`). Without this the
-   gate rows of every Rust wedge come back `incomplete` (observe mode: data
-   lost, nothing held). Cost: an operator edit, or a $5 cap job (≈ $2).
-   **Do before W9 is added**; W14 does not need it.
+2. **Crew config follow-up** (`.mother/crew.yml`, config only). PR #519 (open;
+   approved in review, merge pending) raises the `python-test` (900 → 1800 s)
+   and `swift-ci` (1800 → 2400 s) timeouts and `gates.budget_minutes` from 45
+   to **75**. Keep 75: Mother runs the checks serially, and the measured serial
+   sum for a Rust + Python + Swift wedge is ≈ 5 + 20 + 24 ≈ 49 min (sources in
+   "Estimate"), so 75 is ≈ 1.5×; at 45 such a wedge's gates end `incomplete`
+   (observe mode: data lost, nothing held). Also narrow `python-test`'s `when`
+   (crew delta 7): `tests/**` (`.mother/crew.yml:30`) matches every Rust test
+   file, so Rust-only wedges pay the ~20 min Python run for nothing. Cost: an
+   operator edit, or a $5 cap job (≈ $2). **Do before W9 is added**; W14 does
+   not need it.
 3. **Ada sign-offs** D1–D7 (pairing) and S1–S8 (push): one Ada session over
    both PRDs' design-loop notes. Blocks W11/W15 and W13/W16 respectively;
    needed by the time W10 merges to keep the Swift wedges from idling. Cost: an
    interactive Ada session (≈ $3–8), plus your reading time. Exact asks in
    "Open questions for the operator", item 1.
-4. **Apple notification-filtering entitlement** (`com.apple.developer.
-   usernotifications.filtering`) for the extension's bundle id. Operator, on
+4. **Apple notification-filtering entitlement**
+   (`com.apple.developer.usernotifications.filtering`) for the iOS app. Operator, on
    the Apple Developer site, now: lead time is Apple's. Blocks only the
    filtering half of W16 (S1); W16 ships without it.
-5. **cargo-nextest in CI and the RWX sandbox** (recommended, not blocking).
-   The Rust tests job measures 14.5–17 min green, 20 min slow, with the test
-   binaries running one after another for 12–14 min (`.github/workflows/
-   ci.yml:143-155`; step limit 35, job 45 since #517). There are 169 test
-   binaries in `tests/` and W9–W13 add about eight more. nextest runs binaries
-   in parallel; expect the test step to drop to roughly 5–8 min. Caveats the
-   job must handle: nextest does not run doctests (keep a `cargo test --doc`
-   step), and each test runs in its own process (no test here uses
-   `serial_test`, but any test relying on in-process global state must be
-   found). Cap $15, expected ≈ $6, ≈ 55 min. Run it beside W14; it saves about
-   10 min per hop on every Rust wedge (6 hops) and shortens the `rust-test`
-   gate the same way.
-6. **iOS test target and simulator test job** (recommended before W11). See
-   "CI prerequisites" below. Cap $20, expected ≈ $8, ≈ 65 min; can run beside
+5. **cargo-nextest in GitHub CI** (optional; not before W9). The GitHub Rust
+   tests job measures 14.5–17 min green, 20 min slow, with the test binaries
+   running one after another for 12–14 min (`.github/workflows/ci.yml:143-150`;
+   step limit 35, job 45 since #517). nextest would run binaries in parallel
+   (roughly 5–8 min). **Its benefit is GitHub-CI-only and small for this
+   plan:** the `rust-test` gate in the RWX sandbox already takes ≈ 3.3 min, and
+   every `src/` change also runs the Mac shards (`docs/ci.md`, "Path gate"),
+   whose slowest shard (20–25 min, `docs/ci.md:434`) sets a backplane PR's CI
+   wall time, not the Rust job. So it does not shorten a backplane hop until
+   the Mac shards get faster than the Rust job. Caveats if done: nextest skips
+   doctests (keep `cargo test --doc`), and each test runs in its own process.
+   Cap $15, expected ≈ $6, ≈ 56 min plus gates.
+6. **iOS test target and simulator test job** (recommended before W11; it
+   reverses the committed policy in `docs/ios-verification.md:131`,
+   `:688-717`). See "CI prerequisites" below. Cap $20, expected ≈ $8, ≈ 106 min
+   with gates; can run beside
    W9/W10 (it edits `iOS/Nostromo.xcodeproj` and `.github/workflows/ci.yml`,
    which neither touches).
 
 **Decisions only the operator can make** (details and recommendations in
 "Open questions for the operator"): the queue view for phones (D7, recommend
 local-only in v1); the gate budget (recommend #519's 75 and the `python-test` path filter); whether to
-add nextest and the iOS test target first (recommend both, neither blocks W9);
+add the iOS test target first (recommend yes, but it reverses a committed
+policy in `docs/ios-verification.md`; see "CI prerequisites"); nextest
+(optional, little effect on this plan);
 whether to split W13 (recommend no unless the iOS project is contended).
 
 ## What changed since 2026-10-18 (refresh of 2026-11-23)
@@ -172,8 +170,10 @@ Read against `origin/main` `8f0328b9`. Line numbers below are from that commit.
    `LocalOnly` or `Sensitive` on main and therefore **never leaves its host on
    any uplink**, except `TrackerSummary` (counts), `SessionBridge` (a boolean)
    and `SessionTurnOrigin` (transcript family).
-7. **CI.** The Rust tests job takes 14.5–20 min (above); W9–W13 add tests, so
-   nextest (prerequisite 5) is worth doing first but does not block. Linux
+7. **CI.** The GitHub Rust tests job takes 14.5–20 min, but the slowest Mac
+   shard (20–25 min, `docs/ci.md:434`) runs on every `src/` change and sets
+   the wall time; the sandbox `rust-test` gate is ≈ 3.3 min. So nextest
+   (prerequisite 5) is optional for this plan. Linux
    runners are pinned to `ubuntu-24.04` (#474) and the Rust jobs are split
    into `rust-fmt`, `rust-clippy`, `rust-test` behind the aggregate
    `Build & Lint` check (`ci.yml:94-192`). Mac tests run in three shards
@@ -196,7 +196,8 @@ Read against `origin/main` `8f0328b9`. Line numbers below are from that commit.
     `:4483`; the TCP listener and mDNS are bound in `src/bin/nostromd.rs:353-398`;
     `PROTOCOL_VERSION` is still 4 (`protocol.rs:34`); `Topic` gained `Terminal`
     and `AuthoredPrs` (`protocol.rs:73-89`); the Mother poller is
-    `run_mother_pollers` (`nostromd.rs:864`, 2 s interval `:402`);
+    `run_mother_pollers` (`nostromd.rs:864`, 2 s interval `:931`; `:402` is
+    the crash-recovery supervisor's);
     `src/mother/mod.rs` `list_jobs` `:431`, `run_mother` `:606`; the
     macOS-only verifier arms are `src/ipc/peer_verify.rs:344-386`, `:657-677`,
     `:730-740`; `sha2` is already a direct dependency (`Cargo.toml:92`, the ECS
@@ -205,7 +206,7 @@ Read against `origin/main` `8f0328b9`. Line numbers below are from that commit.
 ## Mother features adopted (2026-10-18, Mother `origin/main` `e597389`)
 
 *2026-11-23 updates (Mother `origin/main` `0a38549`):* the lens wave (#75) is
-merged; Mother's code runs the gates of one job serially (`plugins/mother/lib/gates.sh:246-249`, Mother's git; not stated in Nostromo's docs, not observed in a run); the checklist parser accepts `- **ID-n** text`
+merged; Mother's code runs the gates of one job serially (`plugins/mother/lib/gates.sh:246-249`, Mother's git; not stated in Nostromo's docs); the checklist parser accepts `- **ID-n** text`
 with or without `[ ]` (`plugins/mother/lib/criteria.sh`); `.mother/crew.yml`
 exists on Nostromo's main. Statements below that say otherwise are history.
 
@@ -312,8 +313,8 @@ current content, by the 2026-10-18 delta numbers:
 | 3 | `gates.budget_minutes: 45` | **Applied** (`:6`), but now too small: see 6 below. |
 | 4 | Lens scopes for push, relay, transport, extension, `dist/**` | **Applied** (`:63-65`): `phi-security` lists `src/ipc/**`, `src/push/**`, `infra/**`, `template.yaml`, Kit `Wire/**`, `Transport/**`, `Push/**` and `iOS/NostromoNotificationService/**`; `ops-infra` lists `dist/**`, `infra/**`, `template.yaml` and both Xcode projects. The lens default is all four lenses (`:61`), so a wedge's `lenses.add` is now a no-op and only `remove` changes anything. |
 | 5 | `relay-test` gate after W13 | **Open.** Add after W13 merges: `cargo test --manifest-path infra/push-relay/Cargo.toml`, `where: sandbox`, `when: { paths: ["infra/push-relay/**"] }`, `timeout_s: 900`. The standalone crate is not covered by the root `cargo test`. |
-| 6 | Timeouts and the total gate budget | **In PR #519** (open, Perri-approved): `python-test` 1800 s, `swift-ci` 2400 s, `budget_minutes` 75. Checks run serially per Mother's code (`gates.sh:246-249` in Mother's git). Actual gate durations are unknown; the serial sum from CI and #502 numbers is ~60–65 min plus clippy for a Rust + Python + Swift wedge, so 75 fits with little headroom. |
-| 7 | `python-test` path filter | **Open.** `when` includes `tests/**` (`:30`), which matches every Rust test file, so a Rust-only wedge pays the Python run (~20 min per #502, as quoted in #519). Replace `tests/**` with the Python suite directories (the `PY_FAST_SUITES`/slow lists in `Makefile:71-90` name them) plus `tests/**/*.py`. |
+| 6 | Timeouts and the total gate budget | **In PR #519** (open; approved in review, merge pending): `python-test` 1800 s, `swift-ci` 2400 s, `budget_minutes` 75. Checks run serially per Mother's code (`gates.sh:246-249` in Mother's git). Measured per pass: Rust ≈ 5, `python-test` ≈ 20, `swift-ci` ≈ 24 min (#519's `docs/mother-crew.md`; #502), so a mixed wedge is ≈ 49 min and 75 is ≈ 1.5×. |
+| 7 | `python-test` path filter | **Open.** `when` includes `tests/**` (`:30`), which matches every Rust test file, so a Rust-only wedge pays the Python run (~20 min per #502, as quoted in #519). Replace `tests/**` with the Python suite directories (the `PY_FAST_SUITES`/`PY_SLOW_SUITES` lists, `Makefile:71-72`, name them) plus `tests/**/*.py`. |
 | 8 | `phi-security` scope for the new CLI | **Open, small.** Add `src/bin/nostromo_cli.rs` (W10's `nostromo uplink pair` writes the satellite token). |
 
 Also new on main and used by the wedges: `rust-fmt` (non-blocking),
@@ -441,7 +442,7 @@ ones that change the backplane, and what each wedge does about it.
    dispatched with `make ci-remote [ONLY=rust|python|swift|mac|kit|ios]`.
    Every wedge's acceptance criteria now say so, and every test is hermetic: no
    real network beyond loopback, no real WireGuard, no real APNs or AWS.
-8. **Wire versioning.** `PROTOCOL_VERSION` is still 4 (`protocol.rs:26`), the
+8. **Wire versioning.** `PROTOCOL_VERSION` is still 4 (`protocol.rs:26` then; `:34` on `8f0328b9`), the
    Mac and iOS clients hard-code 4, and other in-flight plans (CL1) also edit
    `protocol.rs`. The refresh drops every `PROTOCOL_VERSION` bump from the
    wedges. Capability is negotiated through `Welcome.features` only (rule in
@@ -590,7 +591,9 @@ means: a W10 routed attach (the primary forwarding a phone's `SessionAttach`
 to a satellite) joins the satellite's session as an undeclared network
 connection, so merging silently stops on Sendai for as long as any phone
 watches; and a W9 `Paired` device on a single-host setup does the same if its
-build predates #514.
+build predates #514. (Precisely: every attached connection that did **not**
+declare the capability counts; current iOS builds declare it, so they do not
+close the gate today.)
 
 **Rule.**
 1. A connection counts against the merge gate only if it is attached to the
@@ -757,7 +760,7 @@ practice: hold S6 and M4–M7 until W10 merges, or slot them between wedges.
 | 0 | this docs PR | merge first | docs |
 | 0′ | crew follow-up (prerequisite 2) | before W9 is added | `.mother/crew.yml` |
 | 1 | **W14** | now; runs beside anything (disjoint files except `src/bin/nostromd.rs` startup and `src/mother/mod.rs`, which no queued job edits) | Makefile, `dist/systemd/`, `src/mother/mod.rs`, `nostromd.rs` startup, `ci.yml` |
-| 1′ | nextest (prerequisite 5, recommended) | now, beside W14; merge before W9 if it is ready, otherwise W9 does not wait | `.github/workflows/ci.yml`, `.rwx/sandbox.yml`, `docs/ci.md`, `.mother/crew.yml` `rust-test.run` |
+| 1′ | nextest (prerequisite 5, optional) | any time; never blocks a wedge | `.github/workflows/ci.yml`, `docs/ci.md` |
 | 2 | **W9** | after steps 0 and 0′; no other session-wire job running. Beside W14 is fine, but W14 and W9 both edit `nostromd.rs` startup and the Makefile: merge W14 first or expect a small conflict | session wire, `session_manager/mod.rs` (B11), Makefile, new CLI |
 | 2′ | iOS test target (prerequisite 6, recommended) | any time before W11; beside W9/W10 | `iOS/Nostromo.xcodeproj`, `ci.yml`, `Makefile`, `docs/ios-verification.md` |
 | 3 | **W10** | W9 merged; same exclusion | session wire |
@@ -795,20 +798,29 @@ the comparable Mac UI slice, message queue S2, spent $39.)
 
 ## CI prerequisites (new, 2026-11-23)
 
-**Rust: nextest first, recommended, not blocking.** Numbers and caveats are in
-"Readiness", prerequisite 5. W9 adds `tests/ipc_ws_transport.rs` and
+**Rust: nextest is optional.** Numbers and caveats are in "Readiness",
+prerequisite 5. W9 adds `tests/ipc_ws_transport.rs` and
 `tests/device_pairing.rs`, W10 `tests/uplink_roundtrip.rs` and
 `tests/uplink_egress.rs`, W12 and W13 more; each is one more binary in the
-serial run. If nextest is not in first, the wedges still work; the hop and the
-`rust-test` gate are just ~10 min longer each.
+GitHub job's serial run. That does not lengthen a backplane hop while the Mac
+shards (20–25 min) are the slower half of CI, and the sandbox gate (≈ 3.3 min)
+is unaffected.
 
-**iOS: add a test target, recommended before W11.** Today iOS is verified in
-three layers (`docs/ios-verification.md`): L1 logic in NostromoKit
-(`swift-tests-kit`, runs on macOS), L2 Python source scans (`tests/ios_policy`),
-L3 a compile (`ios-simulator-build`, generic simulator, no tests). The
-ios-curated-view-parity W2 plan decided **not** to add a target, because that
-PRD forbade a simulator and the target means hand-editing four `pbxproj`
-sections and committing a shared scheme. The backplane changes the balance:
+**iOS: add a test target, recommended before W11, which reverses a committed
+policy.** Today iOS is verified in layers (`docs/ios-verification.md`): L1
+logic in NostromoKit (`swift-tests-kit`, runs on macOS), L2 Python source
+scans (`tests/ios_policy`), L3 a compile (now also CI's `ios-simulator-build`,
+generic simulator, no tests), and an L4 that is macOS-only ("L4 — does the
+thing actually run (macOS)", `:135`). The committed doc says the repo "does
+not run iOS unit tests against a simulator, anywhere, ever" (`:131`) and
+argues it in "Why no simulator, anywhere" (`:688-717`). Its load-bearing
+reason is discipline: once a simulator-bound target exists, "is this actually
+going to work" questions get routed through it whether or not they need a
+simulator, and L1/L2 stop being the default. Its incidental reason is cost:
+four hand-edited `project.pbxproj` sections and a committed shared scheme
+(the untracked ios-curated-view-parity W2 plan says the same). **iOS-T
+reverses that policy, so it must rewrite that section, not add beside it.**
+The backplane changes the balance:
 W11 adds a Keychain credential store, a `nostromo://pair` URL handler, an
 encrypted content cache and the pairing screens; W13 adds APNs registration;
 W16 adds a Notification Service Extension. The wedges already push the logic
@@ -825,14 +837,20 @@ exists (tracker: "iOS untestable until backplane"). Proposed wedge
   Nostromo -destination 'platform=iOS Simulator,name=<a device the macos-26
   image ships>' CODE_SIGNING_ALLOWED=NO`;
 - in `ci.yml`, turn `ios-simulator-build` (`:510-545`) into build-and-test on
-  the same runner and paths, and add `ONLY=ios` coverage to `make ci-remote`;
-- one smoke test (the app delegate launches and `NetworkClient` constructs),
-  plus a `docs/ios-verification.md` "L4 — simulator" section that says what
-  belongs in it (only what Kit cannot run) and keeps L1 as the default.
+  the same runner and paths (`ONLY=ios` already exists in `make ci-remote`,
+  `scripts/ci_remote.py:31`, so it then runs the tests too);
+- one smoke test (the app delegate launches and `NetworkClient` constructs);
+- rewrite `docs/ios-verification.md`: replace "Why no simulator, anywhere"
+  (`:688-717`) and the "anywhere, ever" sentence (`:131`) with the new rule,
+  and add a layer named **"L5 — iOS simulator (backplane runtime only)"** (the
+  name L4 is taken by the macOS layer, `:135`). Keep the discipline argument
+  as the rule: only what needs an iOS process (Keychain access groups, URL
+  handling, file protection, extension wiring) goes in L5; everything else
+  stays L1/L2, and a review checks that.
 Cost: cap $20, expected ≈ $8, ≈ 65 min, plus ~5–10 min of macOS runner time on
 each Swift PR (off the critical path; the Mac shards are longer). If the
-operator declines, W11 and W16 keep their Kit-only tests and the plan says
-so; nothing else changes.
+operator declines, the committed policy stands, W11 and W16 keep their
+Kit-only tests and say so; nothing else changes.
 
 ## Estimate (refreshed 2026-11-23; calibration 2026-10-14 checked against recent jobs; ±33 min per job)
 
@@ -842,44 +860,66 @@ Nostromo jobs agree on the middle and show a wide spread: message queue S1
 spent $5.9 of a $40 cap (15%), S2 (Mac UI) $39 of $45 (87%), S3 $9.6 of $60
 (16%); most recent jobs carried $20–45 caps. So caps stay sized for the bad
 case (Swift UI work runs near its cap), and expected spend stays 40%. **Per
-hop ≈ 45 min** (was 40): GitHub CI is now ~20 min for Rust tests and up to
-~35 min per Mac shard, and every `src/` change also runs the Swift jobs
-(`docs/ci.md`, "Path gate"), then Perri and the merge, plus the one-in-three
-chance of a fix-up. **Gate time is now real but unmeasured**: Mother runs the
-gates after the worker exits and before the PR is presented, one check after
-another (Mother's code, `gates.sh:246-249`), capped by `budget_minutes`. No
-gate duration has been measured for this repo. The job times below **assume**
-one gate pass of ~25 min for a single-toolchain wedge and ~50 min for a mixed
-one, guessed from GitHub CI's Rust test time (`ci.yml:143-150`) and #502's
-`python-test`/`swift-ci` times quoted in #519; replace them with Mother's
-recorded gate times after W14 and W9.
+hop ≈ 50 min** (was 40): GitHub CI now takes about 25 min wall for a full
+run (slowest Mac shard 20–25 min, Rust tests 15–20 min, `docs/ci.md:434`;
+it was 10–15 min when the calibration was fitted), and every `src/` change
+also runs the Swift jobs (`docs/ci.md`, "Path gate"), then Perri and the merge, plus the one-in-three
+chance of a fix-up.
 
-| Wedge | Cap | Expected spend | Job time (incl. one gate pass) | Starts after |
-|---|---|---|---|---|
-| W14 linux-primary | $20 | ≈ $8 | ≈ 62 + 25 ≈ 85 min | now |
-| W9 ws-transport | $60 | ≈ $24 | ≈ 110 + 25 ≈ 135 min | this PR, crew follow-up |
-| W10 satellite-uplink | $55 | ≈ $22 | ≈ 104 + 25 ≈ 130 min | W9 |
-| W11 ios-ws-client | $60 | ≈ $24 | ≈ 110 + 25 ≈ 135 min | W9, W10, Ada D1–D7, iOS-T |
-| W15 mac-device-admin | $45 | ≈ $18 | ≈ 92 + 25 ≈ 115 min | W10, W11, Ada D1–D7 |
-| W12 seq-resume | $50 | ≈ $20 | ≈ 98 + 50 ≈ 150 min | W10, W11 |
-| W13 push-relay | $75 | ≈ $30 | ≈ 128 + 50 ≈ 180 min | W12, Ada S1–S8 |
-| W16 ios-push-enrichment | $50 | ≈ $20 | ≈ 98 + 50 ≈ 150 min | W13 |
-| *Prereq: crew follow-up* | $5 | ≈ $2 | ≈ 45 min (or an operator edit) | now |
-| *Prereq: nextest* | $15 | ≈ $6 | ≈ 55 + 25 ≈ 80 min | now |
-| *Prereq: iOS-T* | $20 | ≈ $8 | ≈ 62 + 25 ≈ 85 min | now |
+**Gate time, one pass, measured** (serial: Mother's own code runs the checks
+one after another under one watchdog, Mother's git `origin/main` `0a38549`,
+`plugins/mother/lib/gates.sh:246-249` and `plugins/mother/bin/mother-run-job:945-956`;
+Nostromo's docs do not state it): Rust ≈ 5 min (clippy ≈ 0.5, `cargo test`
+≈ 3.3 from a fresh sandbox, sandbox start ≈ 1.25; recorded in this memo on
+2026-10-18 and again in #519's `docs/mother-crew.md` table, "measured
+2026-11-23"); `python-test` ≈ 20 min serial on a loaded host (#502: the gate
+was seen timing out at ~1266 s); `swift-ci` ≈ 24 min (#519; #502 saw a
+1421 s gate). The 2026-10-18 figures of `python-test` under 1 min and
+`swift-ci` ≈ 7.5 min are superseded by those. Gate results have been
+recorded for months (the tracker counts 52 python-test failures in 106
+gate failures), so these are real runs, not guesses. A wedge touching Rust,
+Python and Swift paths therefore costs ≈ 5 + 20 + 24 ≈ **49 min** of gates
+before any retry (#519's own sum), and `budget_minutes: 75` is ≈ 1.5× that.
+Which checks fire follows each check's `when` paths (`.mother/crew.yml`):
+`python-test` fires for `tests/**`, `Makefile`, `.github/**`, `macOS/**`,
+`iOS/**`, `Shared/**` and `src/mother/**`, so today every backplane wedge
+pays it; with crew delta 7 the Rust-only wedges drop to ≈ 5 min.
 
-Critical path: W9 → W10 → W11 → W12 → W13 → W16 ≈ 135 + 130 + 135 + 150 +
-180 + 150 = 880 min of jobs plus 6 hops × 45 min ≈ **19 h end to end** (range
-15–23 h), counted from W9's start and assuming the Ada sign-offs land before
-W10 merges. nextest would take about 6 × 10 min off (≈ 18 h). W14, W15 and the
-prerequisites run off the critical path. Fastest finish with concurrency 3 is
-the same ≈ 19 h: the chain is serial.
+The job times below add one gate pass, with today's `when` paths.
+
+| Wedge | Cap | Expected spend | Job time (base + gates) | Gates that fire (today's `when`) | Starts after |
+|---|---|---|---|---|---|
+| W14 linux-primary | $20 | ≈ $8 | ≈ 62 + 25 ≈ 87 min | Rust 5, python 20 | now |
+| W9 ws-transport | $60 | ≈ $24 | ≈ 110 + 25 ≈ 135 min | Rust 5, python 20 | this PR, crew follow-up |
+| W10 satellite-uplink | $55 | ≈ $22 | ≈ 104 + 25 ≈ 129 min | Rust 5, python 20 | W9 |
+| W11 ios-ws-client | $60 | ≈ $24 | ≈ 110 + 44 ≈ 154 min | python 20, swift 24 | W9, W10, Ada D1–D7, iOS-T |
+| W15 mac-device-admin | $45 | ≈ $18 | ≈ 92 + 44 ≈ 136 min | python 20, swift 24 | W10, W11, Ada D1–D7 |
+| W12 seq-resume | $50 | ≈ $20 | ≈ 98 + 49 ≈ 147 min | Rust 5, python 20, swift 24 | W10, W11 |
+| W13 push-relay | $75 | ≈ $30 | ≈ 128 + 49 ≈ 177 min | Rust 5, python 20, swift 24 | W12, Ada S1–S8 |
+| W16 ios-push-enrichment | $50 | ≈ $20 | ≈ 98 + 49 ≈ 147 min | Rust 5, python 20, swift 24 | W13 |
+| *Prereq: crew follow-up* | $5 | ≈ $2 | ≈ 44 min | none (`.mother/**` matches no check) | now |
+| *Prereq: iOS-T* | $20 | ≈ $8 | ≈ 62 + 44 ≈ 106 min | python 20, swift 24 | now |
+| *Optional: nextest* | $15 | ≈ $6 | ≈ 56 + 25 ≈ 81 min | Rust 5 (`.rwx/**`), python 20 (`.github/**`) | any time |
+
+Critical path: W9 → W10 → W11 → W12 → W13 → W16 ≈ 135 + 129 + 154 + 147 +
+177 + 147 = 889 min of jobs plus 6 hops × 50 min ≈ **20 h end to end** (range
+16–24 h), counted from W9's start and assuming the Ada sign-offs land before
+W10 merges. With crew delta 7 (Rust-only wedges skip `python-test`), W9 and
+W10 save ≈ 20 min each (≈ 19 h). W14, W15 and the prerequisites run off the
+critical path. Fastest finish with concurrency 3 is the same ≈ 20 h: the
+chain is serial.
 **Total cap $415; expected spend ≈ $166** (range $120–$250, the high end if
-the Swift wedges behave like S2). With the three prerequisites: cap $455,
-expected ≈ $182.
-Quota: unknown. W14, the prerequisites and W9 (≈ $48 expected) can land in one
+the Swift wedges behave like S2). With the crew follow-up and iOS-T: cap $440,
+expected ≈ $176 (nextest, if done, adds $15 / ≈ $6).
+Quota: unknown. W14, the prerequisites and W9 (≈ $42 expected) can land in one
 week; the rest spans at least one weekly reset. Ada's sign-offs, not compute,
 remain the likely long pole for W11/W15/W13/W16.
+
+**Where the 2026-10-18 gate paragraph went.** Its measured Rust pass (≈ 5 min)
+is kept above. Its `swift-ci` ≈ 7.5 and `python-test` under 1 min figures were
+replaced by the 2026-11-23 measurements (≈ 24 and ≈ 20), its "up to 3"
+attempts is now `max_attempts: 2`, and its "+63 min, ≈ 15 h" total is replaced
+by the table above.
 
 **Use Mother's own figure as the live estimate.** Every running job shows an
 approximate `≈NN%` and an ETA band (`mother list`, `mother status`, the Mother
@@ -979,10 +1019,10 @@ flagged, not made (open question 8).
   satellite route silently stops merging on that session; with B11 wrong, a
   local legacy client could see a merged turn drawn twice. W9's tests pin
   both directions.
-- **Gate data lost (new).** At `budget_minutes: 45`, a mixed Rust/Swift wedge
-  probably overruns (serial sum ~60–65 min plus clippy, estimated, not
-  measured) and records `incomplete`; observe mode loses the data without
-  holding the job. #519's 75 and crew delta 7 address it.
+- **Gate data lost (new).** At `budget_minutes: 45`, a Rust + Python + Swift
+  wedge (measured ≈ 49 min of serial gates) overruns and records `incomplete`;
+  observe mode loses the data without holding the job. #519's 75 and crew
+  delta 7 address it.
 
 ## Open technical item — RESOLVED 2026-10-18
 
@@ -1036,8 +1076,8 @@ Driving Mother, sessions or Perri from a phone needs a new bet and PRD.
    the notification-filtering entitlement) for the iOS app,
    `com.hammer.nostromo.ios` (`iOS/Nostromo.xcodeproj/project.pbxproj:404`),
    whose Notification Service Extension W16 adds (its bundle id is not created
-   yet; W16 picks it, conventionally `com.hammer.nostromo.ios.
-   NotificationService`), stating that the extension removes notifications
+   yet; W16 picks it, conventionally
+   `com.hammer.nostromo.ios.NotificationService`), stating that the extension removes notifications
    that are no longer relevant. If the form needs the extension's id, request
    it when W16 creates the target. When: now; lead time is Apple's.
    What it blocks: only W16's silent-withdrawal path (S1). W16 ships without
@@ -1047,8 +1087,9 @@ Driving Mother, sessions or Perri from a phone needs a new bet and PRD.
    Mac app, answers nothing (B10) and hosts no sessions; Sendai stays a
    satellite, with `mode = primary` as the fallback if W14 finds a blocker.
 8. **Split W13** into W13a (daemon + relay, Rust) and W13b (iOS)?
-   *Recommend:* yes if the approvals chain is still holding the iOS project
-   when W12 merges; otherwise keep one job.
+   *Recommend (2026-11-23):* no, keep one job, unless another job is editing
+   `iOS/Nostromo.xcodeproj` when W12 merges (the approvals chain this used to
+   wait on has merged).
 9. **PRD open questions (operator):** mail-and-todos default for a new
    device, *recommend* on (it only covers Sendai's under B9); Kobe's device
    admin level, *recommend* `full` (the lost-phone moment can happen at
@@ -1070,8 +1111,11 @@ Driving Mother, sessions or Perri from a phone needs a new bet and PRD.
     plus the `python-test` path filter (crew delta 7) before W9 is added.
     Gate durations are unknown; raise the budget only if a real run comes
     back `incomplete`.
-12. **nextest and the iOS test target first?** *Recommend* both, beside W14
-    and W9; neither blocks W9 ("CI prerequisites").
+12. **iOS test target first, and nextest?** *Recommend* iOS-T before W11,
+    knowing it reverses the committed "no simulator, anywhere" policy in
+    `docs/ios-verification.md` and must rewrite it. nextest is optional (no
+    effect on a backplane hop while the Mac shards are slower). Neither blocks
+    W9 ("CI prerequisites").
 
 ## Questions for Ada
 

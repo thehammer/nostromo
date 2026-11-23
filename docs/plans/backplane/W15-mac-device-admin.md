@@ -18,8 +18,9 @@ Versus the 2026-10-18 version:
   `setupMenu` on the base (or none).
 - **Cap $45** (was $35): the comparable Mac UI slice, message queue S2, spent
   $39.
-- **Gates.** `swift-ci` (~24 min per #502 as quoted in #519, not a gate run; PR #519 raises its timeout to 2400 s) and
-  `python-test` (its `when` includes `macOS/**`).
+- **Gates.** `swift-ci` (≈ 24 min, measured 2026-11-23 per #519; #519 raises its
+  timeout to 2400 s) and `python-test` (≈ 20 min; its `when` includes
+  `macOS/**`): ≈ 44 min per pass.
 
 ## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 

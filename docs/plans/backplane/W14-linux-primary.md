@@ -34,7 +34,7 @@ since 2026-10-18" has the context):
   Bishop).
 - **Line references re-derived:** `list_jobs`/`list_jobs_counted`
   `src/mother/mod.rs:431-437`, `run_mother` `:606`; `run_mother_pollers`
-  `src/bin/nostromd.rs:864` (2 s interval `:402`); the activity tailer
+  `src/bin/nostromd.rs:864` (2 s interval `:931`); the activity tailer
   `:720-751` (`hook_status::default_settings_path`
   `src/activity/hook_status.rs:12`); TCP listener and mDNS `:353-398`; the
   macOS-only verifier arms `src/ipc/peer_verify.rs:344-386`, `:657-677`,
@@ -129,7 +129,7 @@ no change to the other wedges.
   `src/bin/nostromd.rs:720-751` — the activity tailer path and the hook
   check assume `~/.claude/` exists; on a host with no Claude Code install
   the tailer must wait for the file to appear (it uses `notify`,
-  `Cargo.toml:78`) rather than exit.
+  `Cargo.toml:83`) rather than exit.
 - `tests/linux_startup.rs` (new, `#[cfg(target_os = "linux")]`) — start the
   daemon binary via `assert_cmd`/`std::process::Command` with `HOME` set to a
   tempdir and an empty `PATH` save for the binary's own dir; assert it is
@@ -169,12 +169,12 @@ no change to the other wedges.
 - [ ] **W14-7** `make install-daemon-linux` installs `nostromd`, `nostromo-guard` and
   `nostromo-mcp-bridge` (restart guard first, same order as macOS); a Linux
   daemon logs the "operator app verification unavailable" line.
+- [ ] **W14-8** PR body references the sequencing memo (W14) and states B7's host as
+  resolved.
 - [ ] **W14-9** With the documented primary `config.toml` (agents off,
   `authored_prs_enabled = false`), `tests/linux_startup.rs` sees one clean
   startup: no WARN about `gh`, `aws`, Bishop or Huey, and at most one about
   `mother`.
-- [ ] **W14-8** PR body references the sequencing memo (W14) and states B7's host as
-  resolved.
 
 ## Mother crew: gates, lenses, checklist and calibration
 
