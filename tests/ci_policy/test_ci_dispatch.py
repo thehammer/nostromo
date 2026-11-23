@@ -64,6 +64,9 @@ WRAPPER_PREFIX = {
     "always": "always()",
     "not-cancelled": "!cancelled()",
 }
+# macOS only when Swift steps will run; Linux when the classifier skipped them
+# (tests/ci_policy/test_swift_runner_choice.py owns the rule).
+SWIFT_RUNS_ON = "${{ needs.changes.outputs.swift == 'true' && 'macos-26' || 'ubuntu-24.04' }}"
 SWIFT_GATE = "needs.changes.outputs.swift == 'true'"
 CHANGES_JOB = ("changes", "Detect changed paths")
 # The only job whose display name may be the required check's name.
@@ -432,8 +435,8 @@ def check_mac_shard_job(text):
         violations.append("job `%s` matrix is not exactly `shard: [1, 2, 3]`" % SHARD_JOB)
     if not re.search(r"(?m)^      fail-fast:\s*false\s*$", block):
         violations.append("job `%s` must set `fail-fast: false` so one run shows every failing shard" % SHARD_JOB)
-    if _job_level(block, "runs-on") != "macos-26":
-        violations.append("job `%s` must run on macos-26" % SHARD_JOB)
+    if _job_level(block, "runs-on") != SWIFT_RUNS_ON:
+        violations.append("job `%s` runs-on must be %s" % (SHARD_JOB, SWIFT_RUNS_ON))
     group = re.search(r"(?m)^      group:[ \t]*(.*)$", block)
     if group is None or "matrix.shard" not in group.group(1):
         violations.append("job `%s` concurrency group must include `matrix.shard` (one group per shard)" % SHARD_JOB)
@@ -603,7 +606,7 @@ def good_workflow(
             out.append("    needs: [%s]" % ", ".join(RUST_PARTS))
         if cond is not None:
             out.append("    if: %s" % cond)
-        out.append("    runs-on: %s" % ("macos-26" if key == SHARD_JOB else "ubuntu-24.04"))
+        out.append("    runs-on: %s" % (SWIFT_RUNS_ON if key == SHARD_JOB else "ubuntu-24.04"))
         if key == SHARD_JOB:
             out += ["    strategy:", "      fail-fast: false", "      matrix:", "        shard: [1, 2, 3]"]
         out.append("    concurrency:")
