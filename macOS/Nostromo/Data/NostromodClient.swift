@@ -15,11 +15,16 @@ private struct ClientHello: Encodable {
     /// process's app bundle; only both together let this connection answer
     /// an agent's decision. Older daemons ignore the key.
     let clientKind       = "mac_app"
+    /// What this app renders beyond the base protocol. `merged_turns_v1`: a turn may answer several
+    /// queued messages the daemon merged into one frame (`DaemonTurn.userParts`). Older daemons
+    /// ignore the key.
+    let capabilities     = [mergedTurnsFeature]
     enum CodingKeys: String, CodingKey {
         case type_           = "type"
         case clientId        = "client_id"
         case protocolVersion = "protocol_version"
         case clientKind      = "client_kind"
+        case capabilities
     }
 }
 
@@ -596,8 +601,13 @@ struct DaemonTurn: Decodable {
     /// What opened the turn when the user did not type it (terminal output, a follow notice).
     /// Absent from an older daemon's wire; an origin kind this app does not know decodes to nil.
     var origin: TurnOriginWire? = nil
+    /// Two or more entries: the turn answers several messages the daemon merged into one frame
+    /// (`merged_turns_v1`), as typed, in order; `userInput` is them joined by a blank line.
+    /// Empty for an ordinary turn and for an older daemon.
+    var userParts: [String] = []
     enum CodingKeys: String, CodingKey {
         case id, userInput = "user_input", timestamp, blocks, isComplete = "is_complete", origin
+        case userParts = "user_parts"
     }
 }
 
@@ -610,7 +620,8 @@ extension DaemonTurn {
                   timestamp: try c.decodeIfPresent(String.self, forKey: .timestamp),
                   blocks: try c.decode([DaemonTurnBlock].self, forKey: .blocks),
                   isComplete: try c.decode(Bool.self, forKey: .isComplete),
-                  origin: (try? c.decodeIfPresent(TurnOriginWire.self, forKey: .origin)) ?? nil)
+                  origin: (try? c.decodeIfPresent(TurnOriginWire.self, forKey: .origin)) ?? nil,
+                  userParts: (try? c.decodeIfPresent([String].self, forKey: .userParts)) ?? [])
     }
 }
 
@@ -1606,6 +1617,12 @@ class NostromodClient {
     var daemonAdvertisesClaudeLogin: Bool {
         sendLock.lock(); defer { sendLock.unlock() }
         return advertisedFeatures.contains(claudeLoginFeature)
+    }
+
+    /// Whether the connection's last `welcome` advertised `merged_turns_v1`.
+    var daemonAdvertisesMergedTurns: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return advertisedFeatures.contains(mergedTurnsFeature)
     }
 
     /// Whether the connection's last `welcome` advertised `session_queue_v1`.

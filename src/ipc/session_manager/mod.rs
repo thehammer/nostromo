@@ -73,6 +73,7 @@ use super::stream_json::{
     SessionTranscript, TurnDelta, TurnOrigin, NOSTROMO_NOTE_CLOSE, NOSTROMO_NOTE_OPEN,
     SCROLLBACK_TURNS,
 };
+use crate::model::batches;
 use crate::model::hub::ModelHub;
 use crate::model::notes::{self, NoteKind};
 use crate::model::store as model_store;
@@ -99,6 +100,9 @@ mod inject_tests;
 mod injected_tests;
 mod login;
 pub mod mcp_panel;
+pub mod merge;
+#[cfg(test)]
+mod merge_delivery_tests;
 mod model_switch;
 #[cfg(test)]
 mod notice_inject_tests;
@@ -224,6 +228,9 @@ struct PendingMessage {
     /// Run once the message has been written to the session's stdin; never run
     /// for a message an interrupt dropped from the queue.
     on_delivered: Option<DeliveredHook>,
+    /// Set on a merged frame (see `merge`): `text` is then the envelope and the
+    /// original messages are here, to go back to the queue if the write fails.
+    batch: Option<Box<merge::Batch>>,
 }
 
 /// What to do when a queued message is actually delivered (see
@@ -282,8 +289,9 @@ struct Shared {
     /// finished. Set under `state`, cleared by the writer once the message is
     /// either written or back on `pending`.
     writing: Arc<AtomicBool>,
-    /// The id of the message `writing` is about (set with it, cleared with it).
-    writing_id: Arc<Mutex<Option<String>>>,
+    /// The ids of the message(s) `writing` is about (a merged frame has one per
+    /// part; set with it, cleared with it).
+    writing_ids: Arc<Mutex<Vec<String>>>,
     /// Orders a switch request's store/ledger writes against `apply_switch`'s
     /// (see the lock-order note above). Holds no data.
     model_io: Arc<Mutex<()>>,
@@ -713,6 +721,9 @@ pub struct SessionManager {
     /// other, but they do not count as a reason to poll task previews: the
     /// previews never reach them.
     network_clients: HashSet<String>,
+    /// Connections whose Hello declared `merged_turns_v1`. A connection not in
+    /// here is legacy: while one is attached to a session, nothing merges there.
+    merge_capable: HashSet<String>,
     /// Per focus tag: the nonce of the focus `create_focus_core` last created
     /// under it. In memory only (a restart forgets it).
     focus_nonces: HashMap<String, String>,
@@ -822,6 +833,7 @@ impl SessionManager {
             focus_registry: Vec::new(),
             bridges: None,
             network_clients: HashSet::new(),
+            merge_capable: HashSet::new(),
             daemon_created_tags: HashSet::new(),
             pending_departures: HashSet::new(),
             non_empty_pushes_seen: 0,
@@ -1441,6 +1453,7 @@ impl SessionManager {
         let mut transcript = if resume {
             let mut t = load_scrollback(&session_id, SCROLLBACK_TURNS);
             t.merge_ledger_notes(&notes::load(&paths.notes_dir, &session_id));
+            t.apply_batch_ledger(&batches::load(&paths.batches_dir, &session_id));
             t
         } else {
             SessionTranscript::new()
@@ -1552,7 +1565,7 @@ impl SessionManager {
             model: Arc::new(Mutex::new(runtime)),
             waiters: Arc::new(Mutex::new(HashMap::new())),
             writing: Arc::new(AtomicBool::new(false)),
-            writing_id: Arc::new(Mutex::new(None)),
+            writing_ids: Arc::new(Mutex::new(Vec::new())),
             model_io: Arc::new(Mutex::new(())),
             ctx: Arc::new(SessionCtx {
                 tag: tag.clone(),
@@ -1897,7 +1910,7 @@ impl SessionManager {
             );
             let discarded = session.shared.login.discard_for_stop();
             let dropped = if running || discarded.is_some() {
-                queue::drain_for_stop(&session.shared, discarded.clone().flatten())
+                queue::drain_for_stop(&session.shared, discarded.clone().unwrap_or_default())
             } else {
                 DroppedQueue::default()
             };
@@ -1954,6 +1967,7 @@ impl SessionManager {
                 &session.attached_clients,
                 &self.network_clients,
             ));
+            refresh_merge_gate(session, &self.merge_capable);
             ensure_poller(&session.shared);
             // Cap what a freshly-attaching client receives to the last
             // SCROLLBACK_TURNS turns — mirrors the cap already applied when
@@ -2059,6 +2073,17 @@ impl SessionManager {
                 h.abort();
             }
             session.shared.queue.forget_client(client_id);
+            refresh_merge_gate(session, &self.merge_capable);
+        }
+    }
+
+    /// Record whether connection `client_id` declared `merged_turns_v1` (its
+    /// Hello). Done before it can attach to anything.
+    pub fn set_client_merge_capable(&mut self, client_id: &str, capable: bool) {
+        if capable {
+            self.merge_capable.insert(client_id.to_string());
+        } else {
+            self.merge_capable.remove(client_id);
         }
     }
 
@@ -3190,6 +3215,7 @@ impl SessionManager {
 
     /// Detach all of a disconnecting client's sessions (children keep running).
     pub fn on_client_disconnect(&mut self, client_id: &str) {
+        self.merge_capable.remove(client_id);
         for session in self.sessions.values_mut() {
             session.attached_clients.remove(client_id);
             session.shared.tasks.set_clients(local_client_count(
@@ -3200,6 +3226,7 @@ impl SessionManager {
                 h.abort();
             }
             session.shared.queue.forget_client(client_id);
+            refresh_merge_gate(session, &self.merge_capable);
         }
         self.network_clients.remove(client_id);
         self.client_senders.lock().unwrap().remove(client_id);
@@ -3504,6 +3531,17 @@ fn run_reader(
                             continue;
                         }
                     }
+                    // A merged frame's turn shows the messages as typed: the split
+                    // comes from what the daemon wrote, never from the prompt's text.
+                    if replayed && !is_wake {
+                        if let Some(parts) = login::bound_batch_parts(&shared) {
+                            let adopted =
+                                lock_recover(&shared.transcript).adopt_batch(&turn.id, parts);
+                            if let Some(adopted) = adopted {
+                                *turn = adopted;
+                            }
+                        }
+                    }
                     // A prompt-type command's turn is the text the daemon wrote.
                     if command_echo && replayed {
                         if let Some(text) = login::bound_command_text(&shared) {
@@ -3802,6 +3840,20 @@ fn deny_unless_exited(
         .map_err(std::io::Error::other)
 }
 
+/// Recount the connections attached to `session` that did not declare
+/// `merged_turns_v1`, and tell the watchers when that opens or closes merging
+/// (the queue view's `merge_group` follows the gate).
+fn refresh_merge_gate(session: &ManagedSession, capable: &HashSet<String>) {
+    let legacy = session
+        .attached_clients
+        .iter()
+        .filter(|c| !capable.contains(*c))
+        .count();
+    if session.shared.queue.set_legacy_clients(legacy) {
+        session.shared.publish_queue(None);
+    }
+}
+
 /// After a turn ends or a switch has been applied: apply a switch waiting for
 /// the turn first, else send the next queued message (staying mid-turn), else
 /// go idle. While a switch is being applied nothing is sent: the switch task
@@ -3853,11 +3905,14 @@ fn step(shared: &Shared, finished_apply: bool) {
             let msg = if exited || shared.login.paused() {
                 None
             } else {
-                lock_recover(&shared.pending).pop_front()
+                merge::take_front(
+                    &mut lock_recover(&shared.pending),
+                    shared.queue.merge_allowed(),
+                )
             };
             match msg {
                 Some(msg) => {
-                    *lock_recover(&shared.writing_id) = Some(msg.id.clone());
+                    *lock_recover(&shared.writing_ids) = msg.ids();
                     shared.writing.store(true, Ordering::SeqCst);
                     *state = SessionState::MidTurn;
                     Next::Write(msg)
@@ -3878,7 +3933,14 @@ fn step(shared: &Shared, finished_apply: bool) {
             // The message left the queue: the view drops it now (state is
             // released). A failed write puts it back (see `settle`).
             if !matches!(msg.kind, EntryKind::Injected) {
-                shared.publish_queue(Some((QueueChangeReason::Delivered, vec![msg.id.clone()])));
+                shared.publish_queue(Some((QueueChangeReason::Delivered, msg.ids())));
+            }
+            // A merged frame is recorded (boundary and count only, never text)
+            // before it is written, with nothing locked, so a transcript rebuilt
+            // later can tell it from a lone message that imitates one. Delivery
+            // never waits on this: a failure only costs the split on rebuild.
+            if let Some(batch) = &msg.batch {
+                merge::record_batch(shared, batch);
             }
             let in_flight = WriteInFlight {
                 shared,
@@ -3925,19 +3987,31 @@ impl WriteInFlight<'_> {
 
     fn settle(&mut self, wrote: bool) {
         let Some(msg) = self.msg.take() else { return };
-        let back = (!wrote && !matches!(msg.kind, EntryKind::Injected)).then(|| msg.id.clone());
+        let back = (!wrote && !matches!(msg.kind, EntryKind::Injected)).then(|| msg.ids());
         {
             let mut state = lock_recover(&self.shared.state);
             if !wrote {
-                lock_recover(&self.shared.pending).push_front(msg);
+                let mut pending = lock_recover(&self.shared.pending);
+                match msg.batch {
+                    // A merged frame that was not written goes back as the
+                    // messages it was made of, in order (a fresh boundary is
+                    // drawn when they merge again).
+                    Some(batch) => {
+                        for part in batch.parts.into_iter().rev() {
+                            pending.push_front(part);
+                        }
+                    }
+                    None => pending.push_front(msg),
+                }
+                drop(pending);
                 *state = SessionState::Idle;
             }
-            *lock_recover(&self.shared.writing_id) = None;
+            lock_recover(&self.shared.writing_ids).clear();
             self.shared.writing.store(false, Ordering::SeqCst);
         }
-        if let Some(id) = back {
+        if let Some(ids) = back {
             self.shared
-                .publish_queue(Some((QueueChangeReason::Queued, vec![id])));
+                .publish_queue(Some((QueueChangeReason::Queued, ids)));
         }
         self.shared.broadcast(SessionEvent::State(if wrote {
             SessionState::MidTurn
@@ -4202,18 +4276,72 @@ fn write_user_frame(
         serde_json::json!(text)
     } else {
         let mut blocks = vec![serde_json::json!({ "type": "text", "text": text })];
-        for img in &encoded {
-            blocks.push(serde_json::json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": img.media_type,
-                    "data": img.base64_data,
-                }
-            }));
-        }
+        blocks.extend(encoded.iter().map(image_block));
         serde_json::json!(blocks)
     };
+    write_user_content(stdin, content)
+}
+
+/// Write a merged frame (see `merge`): `text` is the envelope (a note block may
+/// be in front of it). No images: one plain string. With images: one text
+/// block per message's section, each followed by that message's images. A
+/// message's unreadable-image note goes right after its own section.
+fn write_batch_frame(
+    stdin: &Arc<Mutex<Option<ChildStdin>>>,
+    text: &str,
+    batch: &merge::Batch,
+) -> Result<()> {
+    let count = batch.parts.len();
+    let starts = merge::segment_starts(text, &batch.boundary, count)
+        .ok_or_else(|| anyhow!("merged frame lost its markers"))?;
+    let mut sections = Vec::with_capacity(count);
+    let mut any_image = false;
+    for (k, part) in batch.parts.iter().enumerate() {
+        let end = starts.get(k + 1).copied().unwrap_or(text.len());
+        let mut section = text[starts[k]..end].to_owned();
+        if k > 0 {
+            section = section.trim_start_matches("\n\n").to_owned();
+        }
+        let (encoded, failed) = encode_images(&part.images);
+        if !failed.is_empty() {
+            section.push_str(&unreadable_images_note(&failed));
+        }
+        any_image |= !encoded.is_empty();
+        sections.push((section, encoded));
+    }
+    let content = if any_image {
+        let mut blocks = Vec::new();
+        for (section, encoded) in &sections {
+            blocks.push(serde_json::json!({ "type": "text", "text": section }));
+            blocks.extend(encoded.iter().map(image_block));
+        }
+        serde_json::json!(blocks)
+    } else {
+        let joined = sections
+            .iter()
+            .map(|(s, _)| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        serde_json::json!(joined)
+    };
+    write_user_content(stdin, content)
+}
+
+fn image_block(img: &EncodedImage) -> serde_json::Value {
+    serde_json::json!({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": img.media_type,
+            "data": img.base64_data,
+        }
+    })
+}
+
+fn write_user_content(
+    stdin: &Arc<Mutex<Option<ChildStdin>>>,
+    content: serde_json::Value,
+) -> Result<()> {
     let frame = serde_json::json!({
         "type": "user",
         "message": { "role": "user", "content": content }

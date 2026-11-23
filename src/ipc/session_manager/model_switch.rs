@@ -630,7 +630,7 @@ impl SessionManager {
         report
     }
 
-    /// Delete the notes ledgers older than `cutoff` that no live focus resumes
+    /// Delete the notes and batch ledgers older than `cutoff` that no live focus resumes
     /// (a ledger is kept while any live focus resumes its session). Returns
     /// how many were deleted.
     fn sweep_ledgers(
@@ -645,25 +645,27 @@ impl SessionManager {
             .map(|(_, sid)| sid)
             .collect();
         live_sessions.extend(self.sessions.values().filter_map(|s| s.session_id.clone()));
-        let Ok(entries) = std::fs::read_dir(&hub.paths.notes_dir) else {
-            return 0;
-        };
         let mut removed = 0;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Some(sid) = path.file_stem().and_then(|s| s.to_str()) else {
+        for dir in [&hub.paths.notes_dir, &hub.paths.batches_dir] {
+            let Ok(entries) = std::fs::read_dir(dir) else {
                 continue;
             };
-            let old = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .map(|at| chrono::DateTime::<chrono::Utc>::from(at) < cutoff)
-                .unwrap_or(false);
-            if old && !live_sessions.contains(sid) && std::fs::remove_file(&path).is_ok() {
-                removed += 1;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let Some(sid) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let old = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .map(|at| chrono::DateTime::<chrono::Utc>::from(at) < cutoff)
+                    .unwrap_or(false);
+                if old && !live_sessions.contains(sid) && std::fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                }
             }
         }
         removed

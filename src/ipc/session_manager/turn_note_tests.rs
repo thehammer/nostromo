@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 /// A stub session running `script` (its stdout is read as stream-json); its
 /// session id is `stub-sid`.
-fn spawn_stub(mgr: &mut SessionManager, tag: &str, script: &str) {
+pub(super) fn spawn_stub(mgr: &mut SessionManager, tag: &str, script: &str) {
     let program = PathBuf::from("/bin/sh");
     let args = vec!["-c".to_string(), script.to_string()];
     let managed = mgr
@@ -51,12 +51,12 @@ fn spawn_stub(mgr: &mut SessionManager, tag: &str, script: &str) {
 
 /// A stub child that appends everything it reads on stdin to `out` and never
 /// ends a turn.
-fn recording_stub(out: &Path) -> String {
+pub(super) fn recording_stub(out: &Path) -> String {
     format!("cat >> '{}'", out.display())
 }
 
 /// Kills the stub children on drop, even when an assertion fails first.
-struct Reap(SessionManager);
+pub(super) struct Reap(pub(super) SessionManager);
 
 impl Drop for Reap {
     fn drop(&mut self) {
@@ -65,7 +65,7 @@ impl Drop for Reap {
 }
 
 /// Poll `probe` until it gives a value (generous deadline, no fixed sleep).
-async fn eventually<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
+pub(super) async fn eventually<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(v) = probe() {
@@ -77,7 +77,7 @@ async fn eventually<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
 }
 
 /// The frames a recording stub has read from stdin so far, as JSON.
-fn frames_read(out: &Path) -> Vec<serde_json::Value> {
+pub(super) fn frames_read(out: &Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(out)
         .unwrap_or_default()
         .lines()
@@ -86,7 +86,7 @@ fn frames_read(out: &Path) -> Vec<serde_json::Value> {
 }
 
 /// The text content of every frame read so far.
-fn contents(out: &Path) -> Vec<String> {
+pub(super) fn contents(out: &Path) -> Vec<String> {
     frames_read(out)
         .iter()
         .map(|f| {
@@ -99,7 +99,7 @@ fn contents(out: &Path) -> Vec<String> {
 }
 
 /// Wait for `n` frames and give their contents.
-async fn wait_for_contents(out: &Path, n: usize) -> Vec<String> {
+pub(super) async fn wait_for_contents(out: &Path, n: usize) -> Vec<String> {
     eventually(&format!("{n} frames on the child's stdin"), || {
         let all = contents(out);
         (all.len() >= n).then_some(all)
@@ -109,7 +109,7 @@ async fn wait_for_contents(out: &Path, n: usize) -> Vec<String> {
 
 /// What the fake provider was asked and told.
 #[derive(Default)]
-struct Offer {
+pub(super) struct Offer {
     /// The note it still owes: cleared by a commit, kept by a drop.
     pending: Mutex<Option<String>>,
     asked: Mutex<Vec<(String, String)>>,
@@ -117,13 +117,13 @@ struct Offer {
 }
 
 impl Offer {
-    fn owing(text: &str) -> Arc<Offer> {
+    pub(super) fn owing(text: &str) -> Arc<Offer> {
         let offer = Arc::new(Offer::default());
         *offer.pending.lock().unwrap() = Some(text.to_string());
         offer
     }
 
-    fn committed(&self) -> usize {
+    pub(super) fn committed(&self) -> usize {
         self.committed.load(Ordering::SeqCst)
     }
 
@@ -131,7 +131,7 @@ impl Offer {
         self.asked.lock().unwrap().clone()
     }
 
-    fn still_owes(&self) -> Option<String> {
+    pub(super) fn still_owes(&self) -> Option<String> {
         self.pending.lock().unwrap().clone()
     }
 }
@@ -171,7 +171,11 @@ impl TurnNoteProvider for FakeProvider {
 
 /// A stub session `tag` (stdin recorded in `stdin.log` of `dir`) whose
 /// manager has `offer` as its note provider.
-fn session(dir: &tempfile::TempDir, tag: &str, offer: &Arc<Offer>) -> (Reap, Shared, PathBuf) {
+pub(super) fn session(
+    dir: &tempfile::TempDir,
+    tag: &str,
+    offer: &Arc<Offer>,
+) -> (Reap, Shared, PathBuf) {
     let out = dir.path().join("stdin.log");
     let mut mgr = SessionManager::with_store_path(dir.path().join("sessions.json"));
     mgr.set_turn_note_provider(Arc::new(FakeProvider(Arc::clone(offer))));
@@ -182,7 +186,7 @@ fn session(dir: &tempfile::TempDir, tag: &str, offer: &Arc<Offer>) -> (Reap, Sha
 
 /// The CLI read the last written frame and its turn ran to the end: the
 /// reader binds the message to the turn, then the turn completes.
-fn turn_runs(shared: &Shared) {
+pub(super) fn turn_runs(shared: &Shared) {
     turn_runs_with(shared, || {});
 }
 
@@ -194,7 +198,7 @@ fn turn_runs_with(shared: &Shared, during: impl FnOnce()) {
     login::on_turn_end(shared, "t", None);
 }
 
-fn note_block(note: &str, user_text: &str) -> String {
+pub(super) fn note_block(note: &str, user_text: &str) -> String {
     format!("{NOSTROMO_NOTE_OPEN}{note}{NOSTROMO_NOTE_CLOSE}{user_text}")
 }
 

@@ -70,6 +70,7 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
     send(
         stream,
         &ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "pane-source-liveness-it".into(),
             protocol_version: 3,
             client_kind: None,

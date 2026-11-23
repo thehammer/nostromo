@@ -21,6 +21,9 @@ struct ChatTurn: Identifiable {
     /// The user's message. Mutable because `TurnPayloadStore` swaps the full
     /// text for a bounded prefix when the turn goes cold.
     var userInput:   String
+    /// The messages of a merged turn, as typed, in order (two or more); empty for a normal turn.
+    /// `userInput` is them joined by a blank line, which is what identity uses.
+    var userParts:   [String]    = []
     /// Image files the user attached to this message. Only the optimistic local
     /// echo carries them (the daemon's replayed record holds no paths), so they
     /// show for as long as this pane has been open.
@@ -74,6 +77,8 @@ struct ChatTurn: Identifiable {
         let userInput: Int
         /// Parallel to `ChatTurn.blocks`.
         let blocks: [Int]
+        /// Parallel to `ChatTurn.userParts` (empty for a normal turn).
+        var userParts: [Int] = []
     }
 
     /// A synthetic, operator-visible statement about missing history.
@@ -105,7 +110,9 @@ struct ChatTurn: Identifiable {
          epoch: Int = 0,
          marker: Marker? = nil,
          subagentTextParents: [Int: String] = [:],
-         origin: TurnOriginWire? = nil) {
+         origin: TurnOriginWire? = nil,
+         userParts: [String] = []) {
+        self.userParts    = userParts
         self.subagentTextParents = subagentTextParents
         self.origin       = origin
         self.id           = id
@@ -190,6 +197,12 @@ extension ChatTurn {
     /// Character count of the user's message before any truncation.
     var userInputLength: Int {
         truncatedLengths?.userInput ?? userInput.count
+    }
+
+    /// Character count of each message of a merged turn before any truncation (empty for a normal turn).
+    var userPartLengths: [Int] {
+        truncatedLengths.map { $0.userParts.isEmpty ? userParts.map(\.count) : $0.userParts }
+            ?? userParts.map(\.count)
     }
 
     /// Character count of the block at `index` before any truncation.

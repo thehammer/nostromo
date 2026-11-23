@@ -67,6 +67,7 @@ async fn spawn_server() -> (Server, u16, TempDir) {
 async fn do_handshake(mut stream: &mut TcpStream) {
     // → Hello
     let hello = ClientMsg::Hello {
+        capabilities: Vec::new(),
         client_id: "test-ios-client".to_string(),
         protocol_version: PROTOCOL_VERSION,
         client_kind: None,
@@ -165,6 +166,7 @@ async fn tcp_and_unix_share_broadcast() {
 
     // Subscribe to Activity topic so the broadcast passes the topic filter.
     let hello = ClientMsg::Hello {
+        capabilities: Vec::new(),
         client_id: "broadcast-test".to_string(),
         protocol_version: PROTOCOL_VERSION,
         client_kind: None,
@@ -228,6 +230,7 @@ async fn tcp_rejects_old_protocol_version() {
 
     // Send Hello with an ancient protocol version (0).
     let hello = ClientMsg::Hello {
+        capabilities: Vec::new(),
         client_id: "old-client".to_string(),
         protocol_version: 0,
         client_kind: None,

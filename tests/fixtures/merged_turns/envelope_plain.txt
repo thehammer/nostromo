@@ -1,0 +1,9 @@
+<nostromo-batch count="2" boundary="0123456789abcdef0123456789abcdef">The user sent these 2 messages while you were working: separate messages, in the order sent, each verbatim between its own markers.</nostromo-batch>
+
+<<<MESSAGE-0123456789abcdef0123456789abcdef-1>>>
+oh and backfill the rows
+<<<END-MESSAGE-0123456789abcdef0123456789abcdef-1>>>
+
+<<<MESSAGE-0123456789abcdef0123456789abcdef-2>>>
+use the new column name
+<<<END-MESSAGE-0123456789abcdef0123456789abcdef-2>>>

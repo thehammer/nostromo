@@ -189,6 +189,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, topics: Va
     send(
         stream,
         &ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "mother-notices-it".into(),
             protocol_version: PROTOCOL_VERSION,
             // Claimed on every transport: the claim alone never lifts a peer.
@@ -585,6 +586,7 @@ fn notice_turn(id: &str) -> Turn {
         blocks: vec![],
         is_complete: false,
         origin,
+        user_parts: Vec::new(),
     }
 }
 

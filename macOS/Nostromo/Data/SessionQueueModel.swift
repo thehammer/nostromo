@@ -11,6 +11,9 @@ import Combine
 /// `welcome.features` entry for the queue wire.
 let sessionQueueFeature = "session_queue_v1"
 
+/// `welcome.features` entry, and this app's `hello.capabilities` entry, for merged turns.
+let mergedTurnsFeature = "merged_turns_v1"
+
 // MARK: - Wire
 
 /// One queued message of a `session_queue` snapshot.
@@ -27,6 +30,8 @@ struct SessionQueueEntryWire: Decodable, Equatable {
     /// The sender's own tag for the message, on typed entries.
     let clientRef: String?
     let canTakeBack: Bool
+    /// Entries with the same value will be written together as one frame (merged turns).
+    let mergeGroup: Int?
 
     enum CodingKeys: String, CodingKey {
         case id, kind, text, command
@@ -34,6 +39,7 @@ struct SessionQueueEntryWire: Decodable, Equatable {
         case appLabel = "app_label"
         case clientRef = "client_ref"
         case canTakeBack = "can_take_back"
+        case mergeGroup = "merge_group"
     }
 }
 
@@ -114,6 +120,8 @@ struct QueuedMessage: Equatable, Identifiable {
     let appLabel: String?
     let clientRef: String?
     let canTakeBack: Bool
+    /// Present when this message will be written together with its neighbours (one turn).
+    let mergeGroup: Int?
 
     init(_ wire: SessionQueueEntryWire) {
         id = wire.id
@@ -124,6 +132,7 @@ struct QueuedMessage: Equatable, Identifiable {
         appLabel = wire.appLabel
         clientRef = wire.clientRef
         canTakeBack = wire.canTakeBack
+        mergeGroup = wire.mergeGroup
     }
 }
 

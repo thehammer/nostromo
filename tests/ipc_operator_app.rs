@@ -167,6 +167,7 @@ async fn sync<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> Vec<ServerMs
 
 fn hello(client_kind: Option<&str>) -> ClientMsg {
     ClientMsg::Hello {
+        capabilities: Vec::new(),
         client_id: "operator-app-it".into(),
         protocol_version: PROTOCOL_VERSION,
         client_kind: client_kind.map(str::to_string),

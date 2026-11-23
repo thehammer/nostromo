@@ -363,6 +363,14 @@ impl World {
             )
             .expect("the session starts")
             .expect("a session id");
+        // These tests are about one message per sign-in outcome, in order. A
+        // connection that did not declare `merged_turns_v1` is attached, so
+        // queued messages are not merged into one frame (see `merge`).
+        self.mgr
+            .lock()
+            .unwrap()
+            .attach(tag, "legacy-client-without-merged-turns")
+            .expect("attach");
         Fake { dir }
     }
 

@@ -312,6 +312,7 @@ impl Ipc {
             nonce: None,
         };
         ipc.send(&ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "mcp-terminal-guards".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: claim.map(str::to_string),

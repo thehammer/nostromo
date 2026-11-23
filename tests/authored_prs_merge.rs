@@ -1163,6 +1163,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     send(
         s,
         &ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "merge-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: kind.map(str::to_owned),

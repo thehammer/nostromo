@@ -59,6 +59,7 @@ async fn codec_rejects_oversized_frame_read() {
 #[tokio::test]
 async fn codec_client_msg_hello_round_trip() {
     let msg = ClientMsg::Hello {
+        capabilities: Vec::new(),
         client_id: "test-client".to_string(),
         protocol_version: PROTOCOL_VERSION,
         client_kind: None,

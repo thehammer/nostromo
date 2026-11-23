@@ -790,3 +790,53 @@ final class QueuedMessagesViewTests: MouseQueueTestCase {
         view.subviews + view.subviews.flatMap { allSubviews(of: $0) }
     }
 }
+
+// MARK: M3-15 "sent together" (merged turns)
+
+extension QueuedMessagesViewTests {
+
+    private func mergedEntry(_ id: String, group: Int?) -> QueuedMessage {
+        var json: [String: Any] = ["id": id, "kind": "typed", "text": "text \(id)", "image_count": 0,
+                                   "command": false, "can_take_back": true]
+        if let group { json["merge_group"] = group }
+        let data = try! JSONSerialization.data(withJSONObject: json)
+        return QueuedMessage(try! JSONDecoder().decode(SessionQueueEntryWire.self, from: data))
+    }
+
+    private func headerOf(_ entries: [QueuedMessage], signIn: Bool = false) -> (text: String, label: String?) {
+        let window = GestureFixtures.offscreenWindow(size: NSSize(width: 420, height: 600))
+        addTeardownBlock { window.close() }
+        let view = QueuedMessagesView(frame: NSRect(x: 0, y: 0, width: 420, height: 10))
+        window.contentView!.addSubview(view)
+        view.setContent(entries: entries, displayName: "Cody", waitingForSignIn: signIn)
+        return (view.headerText, view.headerLabel.accessibilityLabel())
+    }
+
+    func testTheHeaderSaysSentTogetherExactlyWhenAnEntryHasAMergeGroup() {
+        let merging = headerOf([mergedEntry("a", group: 1), mergedEntry("b", group: 1)])
+        XCTAssertEqual(merging.text, "Waiting for Cody to finish · 2 queued · sent together")
+        XCTAssertEqual(merging.label, merging.text, "VoiceOver reads the suffix too")
+    }
+
+    func testASingleMessageAndAGateClosedQueueHaveNoSuffix() {
+        XCTAssertEqual(headerOf([mergedEntry("a", group: nil)]).text, "Waiting for Cody to finish · 1 queued")
+        XCTAssertEqual(headerOf([mergedEntry("a", group: nil), mergedEntry("b", group: nil)]).text,
+                       "Waiting for Cody to finish · 2 queued")
+    }
+
+    func testDuringASignInHoldTheSuffixComesOnlyFromEntriesBehindIt() {
+        XCTAssertEqual(headerOf([mergedEntry("a", group: nil), mergedEntry("b", group: nil)], signIn: true).text,
+                       "Waiting for sign-in · 2 queued")
+        XCTAssertEqual(headerOf([mergedEntry("a", group: 1), mergedEntry("b", group: 1)], signIn: true).text,
+                       "Waiting for sign-in · 2 queued · sent together")
+    }
+
+    func testTheMergeGroupDecodesAndAnOldFrameWithoutItDoesToo() throws {
+        let with = try JSONDecoder().decode(SessionQueueEntryWire.self, from: Data(
+            #"{"id":"q1","kind":"typed","text":"x","image_count":0,"command":false,"can_take_back":true,"merge_group":2}"#.utf8))
+        XCTAssertEqual(with.mergeGroup, 2)
+        let without = try JSONDecoder().decode(SessionQueueEntryWire.self, from: Data(
+            #"{"id":"q1","kind":"typed","text":"x","image_count":0,"command":false,"can_take_back":true}"#.utf8))
+        XCTAssertNil(without.mergeGroup)
+    }
+}

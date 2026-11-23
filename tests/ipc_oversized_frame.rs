@@ -100,6 +100,7 @@ async fn connect(d: &Daemon, topics: Vec<Topic>) -> (UnixStream, Vec<ServerMsg>)
     send(
         &mut s,
         &ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "oversized-frame-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: None,

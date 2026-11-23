@@ -125,6 +125,7 @@ async fn sync<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S) -> Vec<ServerMsg> {
 
 fn hello(kind: Option<&str>) -> ClientMsg {
     ClientMsg::Hello {
+        capabilities: Vec::new(),
         client_id: "authored-prs-it".into(),
         protocol_version: PROTOCOL_VERSION,
         client_kind: kind.map(str::to_owned),

@@ -37,6 +37,7 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
     send(
         stream,
         &ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "perri-action-it".into(),
             protocol_version: 4,
             client_kind: None,
