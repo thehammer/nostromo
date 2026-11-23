@@ -909,6 +909,13 @@ flagged, not made (open question 8).
   and orphans a running job (`runner_died`, then tier escalation). Check
   `mother list` on that host first. `make mac-install` does not restart the
   daemon (pin is read per connection); relaunch the app.
+- *2026-11-23:* `make install-daemon` (`Makefile:136-193`) now stages and
+  signs **three** binaries (`nostromd`, `nostromo-guard`,
+  `nostromo-mcp-bridge`) from `$(NOSTROMO_TARGET_DIR)/release`, and refuses to
+  restart while a remote (ECS) shell is open (`bin/nostromo-restart-guard`,
+  `FORCE=1` overrides). Run it from a plain terminal, not a Nostromo shell.
+  After W9 it also installs the `nostromo` CLI (W9 "Files to change"). Running
+  sessions keep their old MCP bridge until restarted.
 - **Order:** primary (Tokyo) first, then Sendai, then Kobe, then the iOS
   build. A newer primary with older satellites is always safe; a newer
   satellite with an older primary degrades to "not uplinked".
@@ -973,9 +980,28 @@ Driving Mother, sessions or Perri from a phone needs a new bet and PRD.
 
 ## Open questions for the operator (with recommendations)
 
-1. **Ada sign-offs D1–D6 (pairing) and S1–S8 (push).** Gate W11/W15 and
-   W13/W16. *Recommend:* run Ada once on both PRDs' design-loop notes
-   (turn 1 and turn 2) before W9 merges, so the Swift wedges are not idle.
+1. **Ada sign-offs D1–D7 (pairing) and S1–S8 (push).** *Refreshed
+   2026-11-23.* Nothing has been signed since 2026-10-18. What to do: start one
+   Ada session (`ada` agent) pointed at `docs/prds/daemon-pairing-flow.md`
+   "Design-loop notes for Ada" (turns 1–3) and `docs/prds/push-relay.md`
+   "Design-loop notes for Ada" (turns 1–3), and ask her to sign off or
+   rewrite each item in place. When: before W10 merges (about a day after W9
+   starts), so W11/W15 are not idle. What each blocks:
+   - **D1** (Local Network permission on home Wi-Fi; new failure state and its
+     copy), **D2** (camera alert not counted), **D3** (pairing dies with its
+     window; "lost the connection" copy), **D4** (server check before the
+     confirmation step), **D5** (lockout across two open codes), **D6**
+     (re-pairing an already-paired phone; copy), **D7** (new: queue view on
+     the phone): block **W11** (D1, D2, D4, D6, D7) and **W15** (D3, D5); W9
+     and W10 already build the daemon side as proposed.
+   - **S1** (withdrawal depends on Apple's entitlement), **S2** (decisions
+     never coalesced), **S3** (unknown PR size omitted), **S4** (now moot
+     after S7, sign as withdrawn), **S5** (repo names gated on owner),
+     **S6** ("under 1 min"), **S7** (no lock-screen decision buttons; a phone
+     is not an operator), **S8** (no enrichment for work hosts, PHI repos or
+     decisions): block **W13** (S1–S3, S5–S7) and **W16** (S1, S7, S8).
+   - The operator's own answers needed in the same pass: open question 9
+     below (mail-and-todos default; Kobe's device-admin level).
 2. **Routed actions from devices.** *Recommend:* none that mutate in this
    sequence (resolved item above). Revisit only with a device-trust PRD.
 3. **Approvals on the phone.** *Recommend:* counts only (B10); a count-only
@@ -987,8 +1013,19 @@ Driving Mother, sessions or Perri from a phone needs a new bet and PRD.
    (metadata only), Teri/Fred never leave Kobe; Sendai `personal` with
    `publish_sensitive = false` until you choose otherwise.
 6. **Apple's notification-filtering entitlement.** *Recommend:* request it
-   now for the extension's bundle id (lead time is outside our control); W16
-   ships without it.
+   now (still not requested as of 2026-11-23, per the tracker). What to do: in
+   the Apple Developer account, request
+   `com.apple.developer.usernotifications.filtering` (Apple's request form for
+   the notification-filtering entitlement) for the iOS app,
+   `com.hammer.nostromo.ios` (`iOS/Nostromo.xcodeproj/project.pbxproj:404`),
+   whose Notification Service Extension W16 adds (its bundle id is not created
+   yet; W16 picks it, conventionally `com.hammer.nostromo.ios.
+   NotificationService`), stating that the extension removes notifications
+   that are no longer relevant. If the form needs the extension's id, request
+   it when W16 creates the target. When: now; lead time is Apple's.
+   What it blocks: only W16's silent-withdrawal path (S1). W16 ships without
+   it; until it is granted, withdrawal is badge-reliable and
+   notification-removal best effort.
 7. **Tokyo vs Sendai as primary.** *Recommend:* Tokyo. The primary needs no
    Mac app, answers nothing (B10) and hosts no sessions; Sendai stays a
    satellite, with `mode = primary` as the fallback if W14 finds a blocker.
@@ -999,6 +1036,23 @@ Driving Mother, sessions or Perri from a phone needs a new bet and PRD.
    device, *recommend* on (it only covers Sendai's under B9); Kobe's device
    admin level, *recommend* `full` (the lost-phone moment can happen at
    work; pairing and widening need a real click in the Mac app).
+10. **Queue view on the phone (new, 2026-11-23; Ada D7).** Message queue S1
+    made the queue view, take-back and remove local-only (`peer.rs:798-800`,
+    `:1103-1105`), and Stop returns dropped texts only to the Mac that pressed
+    it. Options: (a) parity: publish `SessionQueue` to paired devices for
+    non-sensitive personal focuses and let a phone take back; (b) local-only
+    (today); (c) local-only plus a count. *Recommend (b) for v1, (c) as a
+    follow-up.* A phone cannot send (`SessionSend` is refused for every
+    network trust), so it has nothing of its own to take back; take-back is a
+    session-driving verb behind the operator nonce and stays B10-adjacent; and
+    queued text is unsent user input that need not reach Tokyo's disk. A
+    count ("2 waiting") would be a new metadata field on `SessionInfo`, safe
+    for `work` hosts too, and is cheap to add later. Parity needs the
+    device-trust bet.
+11. **Gate budget.** *Recommend* `budget_minutes: 90` and the `python-test`
+    path filter (crew deltas 6 and 7) before W9 is added.
+12. **nextest and the iOS test target first?** *Recommend* both, beside W14
+    and W9; neither blocks W9 ("CI prerequisites").
 
 ## Questions for Ada
 
@@ -1015,3 +1069,8 @@ Driving Mother, sessions or Perri from a phone needs a new bet and PRD.
 - **Q3 — Multi-host presentation.** Unchanged: W11 defaults to one merged
   list with a host badge. New wrinkle: Kobe's rows are metadata-only
   (state, ref, reason), so they look different from Sendai's.
+- **2026-11-23 (turn 3 in both PRDs).** Pairing PRD: new **D7** (queue view on
+  the phone, recommend local-only), and an information note that merged turns
+  (several queued messages answered in one turn) show on the phone as the
+  Mac shows them. Push PRD: no new sign-off; S4 becomes moot under S7 and the
+  entitlement request is still outstanding.
