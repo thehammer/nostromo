@@ -37,11 +37,14 @@ The phone keeps work moving while the operator is between contexts.
 
 The operator, away from the primary Mac:
 
-- **Commuter train, ~60 min each way.** Predictable daily window. Wants
-  to triage email-style decisions: review Mother adherence-blocked
-  notes, approve/deny pending PR work, glance at calendar, ask Claudia
-  a brief question to stash for later, queue a small job for the Mac
-  daemon to pick up.
+- **Commuter train, ~60 min each way.** Predictable daily window.
+  **(v1)** Read-only triage: see what needs the operator across Macs, read
+  the detail of personal-host items (a Mother job's question, a waiting
+  PR's number and size), judge what is urgent, and plan the desk hour.
+  Nothing is answered, approved or queued from the phone. *(Original, kept
+  for the record; later, when opened up: approve/deny pending PR work,
+  glance at calendar, ask Claudia a brief question to stash for later,
+  queue a small job for the Mac daemon to pick up.)*
 - **Walking between meetings (2–3 min windows).** Glance at Mother queue,
   see whether the long-running job is done, read the result.
 - **Notification triggers (5–15 seconds).** "Mother job awaiting input"
@@ -52,7 +55,8 @@ The operator, away from the primary Mac:
   to see what's running on the Mac without opening the laptop.
 - **Hotel / off-site / no-Mac scenarios.** Backup posture for "I left
   my laptop and need to triage" — limited functionality, not the
-  primary use case.
+  primary use case. In v1 that means seeing what is waiting, not acting
+  on it.
 
 The phone is **never** the place for sustained typing-driven work,
 reviewing large diffs, or running multi-step interactive sessions with
@@ -88,21 +92,30 @@ sequence delivers it, or **(later, when opened up)** where it is deferred.
 - **Mother enqueue (later, when opened up; limited).** Send a Mother request as a structured
   short-form: ticket key, repo, one-line intent. The daemon picks it up
   on the Mac, Archie + Cody run there. The phone never spawns workers.
-- **Calendar quick-view.** Today/tomorrow agenda. Tap for details, join
-  link, mark as done. Read-only.
-- **Budget posture awareness.** Tiny pace bars in a glance widget.
-  Surfaces if posture flips to conservative / critical.
-- **Home-screen widget.** Mother queue counts, calendar next event,
-  posture chip. Visible without opening the app.
-- **Lock-screen Live Activity.** When a Mother job is running, show a
-  Dynamic Island / Live Activity with state and ETA. Tap to open detail.
+- **Calendar quick-view (later, when opened up).** Today/tomorrow agenda.
+  Tap for details, join link, mark as done. Read-only. Deferred because
+  the calendar comes from the same Microsoft 365 source as Fred's mail,
+  which stays on the Macs in v1. Whether calendar stays home is an open
+  operator question in `docs/prds/daemon-pairing-flow.md`; the v1 default
+  is yes.
+- **Budget posture awareness (later, when opened up).** Tiny pace bars in a
+  glance widget. Surfaces if posture flips to conservative / critical. (In
+  v1, a spend pace running ahead of budget only counts toward the badge and
+  the summaries; see `docs/prds/push-relay.md`.)
+- **Home-screen widget (later, when opened up).** Mother queue counts,
+  calendar next event, posture chip. Visible without opening the app.
+  Widgets are out of scope for the push PRD.
+- **Lock-screen Live Activity (later, when opened up).** When a Mother job
+  is running, show a Dynamic Island / Live Activity with state and ETA. Tap
+  to open detail. Live Activities are out of scope for the push PRD.
 
 ## Constraints
 
 - **(Added 2026-11-23) The phone answers nothing in the backplane
   sequence.** No decision, approval, Mother question, PR action, enqueue or
-  message is sent from the phone. Mail and todos stay on the Macs in v1, and
-  work-host (Kobe) items are metadata only.
+  message is sent from the phone. Mail, todos and (by default, pending the
+  operator) calendar stay on the Macs in v1, and work-host (Kobe) items are
+  metadata only.
 
 - **No diff editing, no code authoring, no terminal.** The phone
   doesn't expose a PTY, doesn't render claude code's TUI, doesn't
@@ -113,18 +126,20 @@ sequence delivers it, or **(later, when opened up)** where it is deferred.
   (or the cloud backplane, depending on the architecture decision).
 - **No multi-account, no team features.** Single-operator client over
   their own daemon. Sharing/team support is out of scope.
-- **Limited file management.** Can attach photos / screenshots to a
-  Claudia message. Cannot browse the operator's filesystem, edit
-  documents, or upload arbitrary files.
+- **Limited file management.** Cannot browse the operator's filesystem,
+  edit documents, or upload arbitrary files. *(later, when opened up, with
+  Claudia thin chat: attach photos / screenshots to a Claudia message.)*
 - **Read-mostly for transcript views.** Operator can read agent output
   but should not be expected to comment on every paragraph. If they want
   to give detailed feedback, they wait for the Mac.
 - **Latency-tolerant.** Network round-trip to the daemon (or cloud
   backplane) is acceptable as long as the user-visible response feels
   reactive (<500ms for thin UI; agent latency is whatever it is).
-- **Offline-aware.** Most actions queue locally and flush when
-  connectivity returns. Reading recent state should work offline from
-  the last sync.
+- **Offline-aware.** Reading recent state works offline from the last
+  sync, marked stale, and the phone never mistakes "can't reach the
+  server" for "not paired". (There are no phone actions to hold for later
+  in v1. *Later, when opened up:* actions taken offline are held on the
+  phone and sent when connectivity returns.)
 
 ## Resolved decisions (2026-05-16)
 
@@ -137,25 +152,26 @@ sequence delivers it, or **(later, when opened up)** where it is deferred.
   constraints also force the cleanest minimal UI, which iPad inherits.
 - **v1 scope: Mother triage + push notifications + Perri PR triage
   + calendar quick-view.** *(Narrowed 2026-11-23: "triage" here means
-  seeing and judging urgency, not acting; see the amended premise.)* Claudia thin-chat **deferred** out of v1 — it
+  seeing and judging urgency, not acting; calendar quick-view is deferred
+  by default with mail; see the amended premise.)* Claudia thin-chat
+  **deferred** out of v1 — it
   needs cross-device session state, daemon-side conversation routing,
   and message ordering done right. Ship v1, watch how the commute use
   case actually plays, then design Claudia thin-chat with real signal.
 
-## Still open
+## Resolved since (2026-10 to 2026-11)
 
-- **Daemon transport** (the bet-the-product decision): phone → daemon
-  via Tailscale/WireGuard (private, requires Mac on) or → cloud backplane
-  (always on, requires hosted infrastructure). Personal-leverage phase
-  defaults to Tailscale-to-Mac; design the wire protocol to be
-  transport-agnostic so the pivot stays open. Locked in for v1 (Tailscale);
-  cloud backplane revisited if product pivot triggers.
-- **Auth model**: phone-to-daemon pairing flow (QR shown on Mac, scanned
-  on phone) + long-lived device token. Detailed design in its own PRD
-  before mobile work starts (Archie W5 `daemon-pairing-flow`).
-- **Push notifications**: APNs requires a server-side relay even in
-  Tailscale-to-Mac mode. Probably a thin push relay component owned by
-  the operator. Detailed in its own PRD (Archie W5 `push-relay`).
+- **Daemon transport.** Resolved in `docs/plans/backplane-sequencing.md`
+  (B2): VPN to home over WireGuard, not Tailscale and not a cloud
+  backplane. The phone talks to an always-on home server, not to a Mac.
+- **Auth model.** Signed off 2026-11-23 in
+  `docs/prds/daemon-pairing-flow.md`: pair once by QR or typed code; the
+  operator never sees a credential.
+- **Push notifications.** Signed off 2026-11-23 in
+  `docs/prds/push-relay.md`: a closed-vocabulary relay in a dedicated
+  personal AWS account.
+
+## Still open
 - **Claudia state** (deferred to post-v1): where the phone-side Claudia
   conversation lives. Probably on the Mac daemon with phone as thin
   renderer. Will be addressed when Claudia thin-chat is brought back
@@ -175,5 +191,6 @@ sequence delivers it, or **(later, when opened up)** where it is deferred.
   coordinates with.
 - See `docs/visions/ipad.md` for the middle posture between phone
   and Mac.
-- Future PRDs anticipated: daemon-pairing flow, phone push relay,
-  mobile-shaped PR diff reader, Mother triage screen, Claudia thin chat.
+- Future PRDs anticipated: mobile-shaped PR diff reader, Mother triage
+  screen, Claudia thin chat, and a device-trust PRD before the phone may
+  answer anything.

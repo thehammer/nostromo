@@ -25,12 +25,22 @@ conversations — without pretending to be a full Mac.
 > and `docs/prds/push-relay.md`, decision logs). In this sequence the iPad
 > **answers nothing**: no approve/deny on Mother jobs or decisions, no PR
 > approve/request-changes/comment, no Claudia messages, no Mother queuing.
+>
 > **Mail and todos stay on the Macs**, so the Fred mailbox capability below
 > is deferred and the Fred and Teri views say "Mail and todos stay on your
-> Mac in this version." Kobe (work) items are metadata only. The
-> capabilities below that act or show mail are **later, when opened up**:
-> answering through a device-trust PRD, mail once the operator chooses to
-> let it onto devices. Reading, browsing and urgency at a glance are v1.
+> Mac in this version." **Calendar stays home too by default** (it comes
+> from the same Microsoft 365 source as the mail; an open operator question
+> in the pairing PRD). Kobe (work) items are metadata only.
+>
+> **What is v1 on the iPad** is exactly what the pairing PRD delivers to any
+> paired device: the merged "needs you" list across Macs, Mother job state
+> and personal-host detail read-only, PR review requests as number, size and
+> waiting count, decisions read-only with "Answer it on your Mac", and
+> notifications. Everything else below (plan viewer, PR diff viewer, Claudia
+> transcripts and chat, mail, calendar, drag-and-drop, Pencil annotation,
+> answering of any kind) is **later, when opened up**: answering through a
+> device-trust PRD, mail and calendar once the operator chooses to let them
+> onto devices, richer reading through PRDs of their own.
 
 ## Audience and context of use
 
@@ -43,11 +53,12 @@ The operator, away from the Mac, with the iPad accessible:
   doing meaningful work for an hour or two. Reviewing diffs, having a
   multi-turn Claudia session, queuing Mother jobs.
 - **Side display next to the Mac (via Sidecar or as a focused panel).**
-  Pace bars, Mother queue, calendar — ambient awareness that takes pressure
-  off the Mac windows.
-- **Meeting / classroom / shared environment.** Surfacing Claudia in
-  conversation, taking notes that flow back into Fred's calendar or
-  Claudia's context. Apple Pencil for annotation, voice for capture.
+  Mother queue (v1); pace bars and calendar (later, when opened up) —
+  ambient awareness that takes pressure off the Mac windows.
+- **Meeting / classroom / shared environment (later, when opened up).**
+  Surfacing Claudia in conversation, taking notes that flow back into
+  Fred's calendar or Claudia's context. Apple Pencil for annotation, voice
+  for capture.
 
 The iPad is **not** the place for terminal-density TUI work (no PTY
 exposure, no vt100). It is the place where rich graphics, longer-form
@@ -70,7 +81,7 @@ reading, and pencil/touch annotation pay off.
   alongside a chat input. Markdown rendering with tables, code blocks,
   foldable tool calls. Voice input via Pencil-tapped dictation or
   hardware keyboard.
-- **Fred mailbox + calendar split view.** Side-by-side, similar to
+- **Fred mailbox + calendar split view (later, when opened up).** Side-by-side, similar to
   Mail.app's iPad layout. Tap an email to expand; calendar updates
   in the second pane.
 - **Drag-and-drop between agents.** Drag a calendar event onto a
@@ -87,8 +98,8 @@ reading, and pencil/touch annotation pay off.
   multitasking — operator can run Nostromo alongside Notes or Safari
   without leaving the app.
 - **Same daemon as iPhone.** No new transport; iPad connects the same
-  way (Tailscale to Mac daemon or cloud backplane, per the unified
-  decision).
+  way (VPN to the home server over WireGuard, per
+  `docs/plans/backplane-sequencing.md` B2).
 
 ## Constraints
 

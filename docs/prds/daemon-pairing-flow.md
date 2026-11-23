@@ -1,7 +1,7 @@
 # PRD: Pair a phone or iPad with Nostromo, and take it back
 
 **Author:** Ada
-**Status:** Signed off by Ada 2026-11-23. Design loop closed (D1–D7 signed; operator answered both open questions and the sequencing memo's Q3). See "Sign-off and decision log" at the end.
+**Status:** Signed off by Ada 2026-11-23. Design loop closed for Archie (D1–D7 signed; the operator answered Q1, Q2, Q4, Q7 and Q8 of Ada's memo). Three operator questions stay open, each with a conservative v1 default (open questions 3–5). See "Sign-off and decision log" at the end.
 **Answers:** Q1 in `docs/plans/backplane-sequencing.md`
 **Unblocks:** W11 `ios-ws-client`, W15 `mac-device-admin`, and the device verbs in W9/W10.
 **Consistent with:** `docs/visions/iphone.md`, `docs/visions/ipad.md` (both amended 2026-11-23 to match this sequence)
@@ -24,8 +24,8 @@ That introduction is the only setup step the mobile surface has. It happens
 rarely: twice at the start, then after a lost phone, a revoke, or a server
 move. Each time, the operator will have forgotten how it worked last time.
 If it is fiddly, the mobile surface never gets used. If it feels
-untrustworthy, the operator won't let mail and todos onto the phone, and the
-phone loses half its value.
+untrustworthy, the operator won't trust the phone with anything that matters
+(including, later, mail and todos), and it never becomes the place he checks.
 
 Today the iOS app's first launch opens a local-network discovery sheet. Its
 fallback is a manual form asking for a Mac's LAN IP and port. Neither works
@@ -63,8 +63,7 @@ One operator (Hammer), with these devices:
   typing;
 - a live countdown ("Expires in 4:52"). Codes last five minutes and work
   once;
-- **(v1)** one line, with no checkbox: **"Mail and todos aren't shared from
-  your Macs in this version."** The window never promises content that will
+- **(v1)** one line, with no checkbox: **"Mail, calendar and todos aren't shared from your Macs in this version."** The window never promises content that will
   not arrive (see "Mail and todos" below);
 - a Cancel button, which invalidates the code at once.
 
@@ -212,11 +211,19 @@ Mac it applies to):
 | read-only | yes | no | no | no |
 | off | no | no | no | no |
 
-Kobe is **revoke-only**. A Mac whose level the operator has not set is
-treated as revoke-only, the same "unset means the cautious class" rule the
-push PRD uses for host classification. On a revoke-only Mac the **Revoke**
-button works exactly as on Sendai; **Pair a Device…** shows the "turned off
-on this Mac" line above and no code. Nothing on Kobe can raise its own level.
+Kobe is **revoke-only** (operator decision). On a revoke-only Mac the
+**Revoke** button works exactly as on Sendai; **Pair a Device…** shows the
+"turned off on this Mac" line above and no code. Nothing on Kobe can raise
+its own level.
+
+*Ada's choice at sign-off, not an operator decision:* a Mac whose level the
+operator has not set is treated as revoke-only, the same "unset means the
+cautious class" rule the push PRD uses for host classification. **Sendai
+becomes full only when the operator sets it on the server**: at the moment
+he enrols Sendai with the server (that step already happens on the server),
+or later from the server's terminal. If he does neither, Sendai is
+revoke-only too, and his first pairing uses the terminal path
+(`nostromo device pair` over SSH) until he raises Sendai's level.
 
 **Revoking: the lost-phone path.** In the Devices list the operator selects
 the row, clicks **Revoke**, and confirms a dialog that names the device
@@ -274,14 +281,23 @@ recency, across Macs. On the train the question is "what needs me", not
 "which machine is it on".
 
 - **Host badge only when it means something.** Each row carries its Mac's
-  name (`kobe`, `sendai`) only when more than one Mac is connected. A
-  one-Mac setup shows no badges.
+  name (`kobe`, `sendai`) whenever the list holds rows from more than one
+  Mac, live or last-known. So a closed Kobe whose last-known jobs are still
+  listed keeps its badges, and so do Sendai's rows beside them. When every
+  row comes from one Mac, no row shows a badge.
 - **Kobe rows say what they can, in words.** Kobe is a work host: the
   server holds only states, counts and short references from it, never
-  titles, questions or transcripts. A Kobe row shows the host, the
-  8-character reference and a reason phrase from **the same fixed vocabulary
-  as push notifications** ("Job 3f9a1c2e · asked a question"), so the
-  phone and the lock screen say the same thing.
+  titles, questions or transcripts. A Kobe row shows the host badge, a
+  reference that depends on the kind, and a phrase from **the same fixed
+  vocabulary as push notifications**, so the phone and the lock screen say
+  the same thing:
+  - a Mother job: `Job <8-character job ref> · <reason phrase>`
+    ("Job 3f9a1c2e · asked a question");
+  - a PR review: `PR #<number> · <size phrase> · <n> waiting`, or without
+    the size phrase when it is unknown;
+  - a session or decision: the agent from the fixed set (*Mother*, *Perri*,
+    *Fred*, *Teri*, *Claudia*, otherwise *A session*) and its state ("Claudia
+    is waiting on you"). Never the session's own name.
 - **Tapping a Kobe row** opens a card with that metadata and the line
   **"Details stay on kobe."** It never shows a blank screen or a spinner that
   does not end.
@@ -307,7 +323,11 @@ confirmation) would be its own PRD and security review.
 
 **(v1) Decision: mail and todos stay on the Macs, for every host.** Nothing
 from Fred (mail) or Teri (todos, tickets) reaches any device in this
-version, from Sendai or from Kobe.
+version, from Sendai or from Kobe. **Calendar stays home too, by default**:
+Fred's calendar comes from the same Microsoft 365 source as the mail. The
+operator has not decided calendar explicitly (open question 5); until he
+does, no calendar content reaches a device, and the copy below names it so
+nothing is promised.
 
 Why, in one line: Fred's mailbox is the operator's Microsoft 365 mail, which
 is probably the Carefeed tenant, and Teri is the Carefeed work assistant. So
@@ -317,12 +337,10 @@ reads, or chooses to open it up.
 
 What the operator sees in v1:
 
-- The pairing window and the terminal say **"Mail and todos aren't shared
-  from your Macs in this version."**, with no checkbox and no flag.
+- The pairing window and the terminal say **"Mail, calendar and todos aren't shared from your Macs in this version."**, with no checkbox and no flag.
 - The device's success screen and confirmation say nothing about mail and
   todos, because there is no choice to report.
-- On every device, the Fred and Teri tabs say **"Mail and todos stay on your
-  Mac in this version."** They never show a spinner, an empty list that
+- On every device, the Fred and Teri tabs say **"Mail, calendar and todos stay on your Mac in this version."** They never show a spinner, an empty list that
   looks like "no mail", or a "turned off for this iPad" line that implies a
   switch someone could flip.
 - Device Settings shows the same sentence where the scope would be.
@@ -424,8 +442,7 @@ start at 38.
 
 11. **(amended 2026-11-23)** **Pair a Device…** in the Mac app on Sendai
     shows a QR, the server address, the code grouped as `NNN NNN`, a visibly
-    counting-down expiry, the line "Mail and todos aren't shared from your
-    Macs in this version." with no checkbox, and Cancel. The address shown
+    counting-down expiry, the line "Mail, calendar and todos aren't shared from your Macs in this version." with no checkbox, and Cancel. The address shown
     is the server's, not the Mac's.
 12. **(amended 2026-11-23; bet narrowed from "pair from Kobe" to "manage
     from Kobe")** From Kobe, the managed Mac that only dials out, the Devices
@@ -436,12 +453,12 @@ start at 38.
     he decides to revoke. A headless server should never force an SSH
     session for the bad-day task.
 13. **(amended 2026-11-23)** When a device redeems the code, the Mac window
-    changes on its own within 2 seconds to "Paired: <final name>". —
+    changes on its own within 2 seconds to "Paired: `<final name>`". —
     **ambitious bet** (applies to 13 and 14): the operator should see the
     result where he started, not have to check the phone and wonder.
 14. **(amended 2026-11-23)** `nostromo device pair` stays running and prints
     the address, code, a text QR, remaining time and the mail-and-todos line.
-    On redemption it prints "Paired: <final name>" and exits successfully.
+    On redemption it prints "Paired: `<final name>`" and exits successfully.
     On expiry it prints that the code expired and exits unsuccessfully.
     Ctrl-C invalidates the code, so entering it afterwards on a device gives
     the "wrong" message.
@@ -468,7 +485,7 @@ start at 38.
     the same code inside its five minutes succeeds.
 22. With an existing pairing and the server unreachable, the device: stays
     paired; never shows the pairing screen; shows last-known content and the
-    "Can't reach Nostromo at <address>" banner; and reconnects without user
+    "Can't reach Nostromo at `<address>`" banner; and reconnects without user
     action once the server is reachable again. The same holds across an app
     relaunch while still unreachable.
 
@@ -512,13 +529,12 @@ start at 38.
 **Mail and todos**
 
 34. **(amended 2026-11-23)** On every paired device, from every host, the
-    Fred and Teri tabs show "Mail and todos stay on your Mac in this
-    version." and never show mail, todo or ticket content, a spinner, or an
+    Fred and Teri tabs show "Mail, calendar and todos stay on your Mac in this version." and never show mail, todo or ticket content, a spinner, or an
     empty list. No surface (Mac window, terminal, device confirmation,
     success screen, device Settings, Devices list) offers a mail-and-todos
     checkbox, flag or toggle. *(later, when opened up: a device paired with
     mail and todos on shows Fred and Teri content; one paired with it off
-    shows the "turned off for this <device>" explanation.)*
+    shows the "turned off for this `<device>`" explanation.)*
 35. **(later, when opened up)** Changing a connected device's mail-and-todos
     setting from the Mac Devices list (or the terminal) changes what the
     device shows within 5 seconds, without a re-pair or relaunch. Turning it
@@ -544,7 +560,7 @@ start at 38.
     with the same code.
 39. On an already-paired device in the same situation, the stale-content
     banner reads exactly "Nostromo can't use your local network to reach
-    <address>. Turn it on in Settings or use your VPN." The device stays
+    `<address>`. Turn it on in Settings or use your VPN." The device stays
     paired and never shows the pairing screen.
 40. iOS's Local Network alert never appears on the first-launch screen; it
     can appear only after a scan or a typed submit.
@@ -581,14 +597,14 @@ start at 38.
 *Pairing link on an already-paired device (D6)*
 
 48. On a device paired with server A, opening a pairing code for server A
-    shows "This replaces this <device>'s current pairing. The old one will
+    shows "This replaces this `<device>`'s current pairing. The old one will
     be revoked." After **Pair**, the Devices list shows one active entry for
     the device under its existing name (no "2" suffix), and the old entry
     in the Revoked group with "Replaced by re-pairing". The old credential
     no longer works.
 49. On a device paired with server A, opening a pairing code for server B
-    shows first, in the alert style, "This <device> is paired with Nostromo
-    at <A>. Pairing with <B> disconnects it from <A> and removes its
+    shows first, in the alert style, "This `<device>` is paired with Nostromo
+    at `<A>`. Pairing with `<B>` disconnects it from `<A>` and removes its
     Nostromo content." After **Pair**, relaunching shows no content from A.
     If A was reachable, A's list shows the old entry as revoked.
 
@@ -602,13 +618,20 @@ start at 38.
 
 *What a device shows from several Macs (Q8, D7)*
 
-52. With two Macs connected, the device shows one list with every "needs
-    you" item above every other item, and each row carries its Mac's name.
-    With one Mac connected, no row carries a Mac name.
-53. A Kobe row shows the host, the 8-character reference and a reason phrase
-    from the push PRD's fixed vocabulary, and nothing else from the item.
-    Tapping it shows a card with that metadata and "Details stay on kobe.",
-    never an empty screen or an endless spinner.
+52. The device shows one list with every "needs you" item above every other
+    item, across Macs. When the list holds rows (live or last-known) from
+    more than one Mac, every row carries its Mac's name; when every row
+    comes from one Mac, no row carries a Mac name. (Test: Kobe disconnected
+    with last-known jobs still listed, plus Sendai rows: badges shown. Only
+    Sendai rows: no badges.)
+53. Each Kobe row shows only its host, its kind's reference and fixed
+    phrases: a Mother job as `Job <8-hex ref> · <reason phrase>`; a PR as
+    `PR #<number> · <size phrase> · <n> waiting` (no size phrase when
+    unknown); a session or decision as the agent from the fixed set (or *A
+    session*) and its state. With marker strings in the item's title,
+    question, branch, repository and session name, none appears anywhere on
+    the device. Tapping the row shows a card with the same metadata and
+    "Details stay on kobe.", never an empty screen or an endless spinner.
 54. Messages waiting in a busy session's queue on any Mac never appear on a
     device: no text, no count, no take-back control.
 
@@ -688,7 +711,7 @@ start at 38.
 - **A leaked code pairs a stranger.** A photo of the Mac screen, or a code
   read aloud, is enough within five minutes. Mitigations as experienced:
   single use, five minutes, a code that dies with its window or connection,
-  a live "Paired: <name>" report where the code was issued, wrong-attempt
+  a live "Paired: `<name>`" report where the code was issued, wrong-attempt
   lockout, and a list where an unexpected device is obvious and one revoke
   away. In v1 a stranger's device would see job states and Sendai's
   non-mail content, never mail or todos. If this still feels too open, the
@@ -726,7 +749,10 @@ start at 38.
 
 ## Open questions
 
-Both answered by the operator on 2026-11-23. See the decision log.
+The draft's two questions were answered on 2026-11-23 (1 and 2). Three
+questions remain open for the operator. For each, v1 takes the conservative
+default shown, so nothing waits on the answer; an answer can only open things
+up.
 
 1. ~~**Should mail and todos be on by default for a newly paired device?**~~
    **Answered: mail and todos stay on the Macs in v1, for every host** (so
@@ -735,6 +761,21 @@ Both answered by the operator on 2026-11-23. See the decision log.
    see the list?**~~ **Answered: Kobe is revoke-only.** It can list, revoke
    and (once there is anything to turn off) turn mail and todos off. It
    cannot pair or turn anything on.
+3. **Open: which Microsoft 365 account does Fred read on Sendai?** Fred's
+   mailbox reads Microsoft Graph with the `m365` CLI's sign-in. If that is
+   the Carefeed tenant, Sendai's mail is employer content. *v1 default:*
+   treat it as work-sensitive (mail and todos stay home). If it is personal
+   mail only, mail could be opened up to devices.
+4. **Open: does the employer's policy allow Kobe's job states, short
+   references and host name to leave Kobe** for the operator's personal
+   server, the push relay and Apple, and to show on a personal phone?
+   *v1 default:* the plans assume yes, and send only fixed-vocabulary
+   metadata (no Carefeed text) from Kobe. If the answer is no, Kobe stops
+   sending to the server and the phone shows no Kobe rows or pushes.
+5. **Open: does calendar stay home too?** Fred's calendar comes from the
+   same Microsoft 365 source as the mail. *v1 default:* yes, calendar stays
+   on the Macs with mail and todos, and the copy says "Mail, calendar and
+   todos…". If he says no, only the copy and the calendar views change.
 
 ---
 
@@ -928,15 +969,27 @@ later". All of it is written into the sections above.
 
 ### Operator decisions (2026-11-23)
 
+Numbers are the operator-question numbers in Ada's sign-off memo (Q1–Q8).
+The push PRD's log uses the same numbering.
+
 | # | Decision (v1) | What it reverses or narrows | Later, when opened up |
 |---|---|---|---|
-| Q1 | **Kobe is `revoke-only`**, a new device-admin level: list, revoke, turn mail and todos off. It cannot pair or turn anything on. A Mac with no level set is revoke-only. Sendai is full. | Narrows AC12's bet from "pair from Kobe" to "manage from Kobe". Reverses the draft's "Kobe does everything" (draft open question 2). | Raise Kobe's level on the server if employer policy and the remote-management question are ever settled. |
-| Q2 | **Mail and todos stay on the Macs for every host.** No checkbox, flag or toggle on any surface. The pairing window says "Mail and todos aren't shared from your Macs in this version."; the Fred and Teri tabs say "Mail and todos stay on your Mac in this version." Fred's mail is probably Carefeed's Microsoft 365 tenant, so even Sendai's mail and todos count as work-sensitive. | Reverses the draft's "on by default" grant (draft open question 1). AC34 rewritten; AC35 deferred; AC10, AC11, AC13, AC14, AC23 drop the scope wording. | The per-device permission, its default and the live toggle (AC35's bet), once the operator confirms whose mail Fred reads. |
-| Q3 (memo Q8) | **One merged list**, "needs you" first, host badge only when more than one Mac is connected. Kobe rows use push's fixed vocabulary; the tap card says "Details stay on kobe." | Nothing (new). | Sections or a host switcher, if the merged list proves confusing. |
+| Q1 | **Kobe is `revoke-only`**, a new device-admin level: list, revoke, turn mail and todos off. It cannot pair or turn anything on. (That an unset Mac is revoke-only, and that Sendai becomes full only when set on the server, is Ada's choice, recorded below.) | Narrows AC12's bet from "pair from Kobe" to "manage from Kobe". Reverses the draft's "Kobe does everything" (draft open question 2). | Raise Kobe's level on the server if employer policy and the remote-management question are ever settled. |
+| Q2 | **Mail and todos stay on the Macs for every host.** No checkbox, flag or toggle on any surface. The pairing window says "Mail and todos aren't shared from your Macs in this version."; the Fred and Teri tabs say "Mail and todos stay on your Mac in this version." Fred's mail is probably Carefeed's Microsoft 365 tenant (unconfirmed; open question 3), so even Sendai's mail and todos count as work-sensitive. Calendar stays home by default (open question 5, not yet decided). | Reverses the draft's "on by default" grant (draft open question 1). AC34 rewritten; AC35 deferred; AC10, AC11, AC13, AC14, AC23 drop the scope wording. | The per-device permission, its default and the live toggle (AC35's bet), once the operator confirms whose mail Fred reads. |
+| Q8 (multi-Mac list) | **One merged list**, "needs you" first, host badge whenever the list holds rows from more than one Mac. Kobe rows use push's fixed vocabulary; the tap card says "Details stay on kobe." | Nothing (new). | Sections or a host switcher, if the merged list proves confusing. |
 | Q4 | **The device answers nothing in this sequence**: no decisions, approvals, Mother questions, PR actions, enqueue or sending. | Narrows `docs/visions/iphone.md` and `docs/visions/ipad.md` (amended in the same change). | A device-trust PRD (Face ID-bound keys, per-action confirmation) and its own security review. |
-| Q7 (D7) | **Nothing from the message queue on a device**: no text, count or take-back. | Nothing; this is today's behaviour. | A count, "2 messages waiting", on the session row. |
+| Q7 (= D7) | **Nothing from the message queue on a device**: no text, count or take-back. | Nothing; this is today's behaviour. | A count, "2 messages waiting", on the session row. |
 
 ### Ada's sign-offs
+
+- **Ada's choices at sign-off (not operator decisions; conservative
+  defaults the operator may open up):** a Mac with no device-admin level set
+  is revoke-only, and Sendai becomes full only when the operator sets it on
+  the server; calendar stays home until the operator answers open question
+  5; Kobe rows use per-kind references (criterion 53).
+- **Still open for the operator:** open questions 3 (whose Microsoft 365
+  mail), 4 (employer policy on Kobe metadata leaving Kobe) and 5
+  (calendar). The loop is closed for Archie: each has a v1 default.
 
 - **D1, Local Network on home Wi-Fi: accepted, with changes.** AC2 rewritten;
   first-screen wording changed; a fifth failure state in Ada's words, with
