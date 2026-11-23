@@ -1,7 +1,7 @@
 # PRD: Pair a phone or iPad with Nostromo, and take it back
 
 **Author:** Ada
-**Status:** Signed off by Ada 2026-11-23. Design loop closed for Archie (D1–D7 signed; the operator answered Q1, Q2, Q4, Q7 and Q8 of Ada's memo). Three operator questions stay open, each with a conservative v1 default (open questions 3–5). See "Sign-off and decision log" at the end.
+**Status:** Signed off by Ada 2026-11-23. Design loop closed for Archie (D1–D7 signed; the operator answered Q1, Q2, Q4, Q7 and Q8 of Ada's memo). Three operator questions stay open, each with a v1 default (open questions 3–5). Two defaults are conservative; open question 4's is permissive and must be confirmed before W10 ships. See "Sign-off and decision log" at the end.
 **Answers:** Q1 in `docs/plans/backplane-sequencing.md`
 **Unblocks:** W11 `ios-ws-client`, W15 `mac-device-admin`, and the device verbs in W9/W10.
 **Consistent with:** `docs/visions/iphone.md`, `docs/visions/ipad.md` (both amended 2026-11-23 to match this sequence)
@@ -653,7 +653,8 @@ start at 38.
   iPhone and iPad, one flow.
 - Scanning from the system Camera app into the confirmation step.
 - Device Settings: server address (editable), this device's name
-  (read-only), the "Mail and todos stay on your Mac in this version" line,
+  (read-only), the "Mail, calendar and todos stay on your Mac in this
+  version." line,
   **Un-pair This iPhone/iPad**.
 - The "no longer paired" screen, and wiping content on revoke, un-pair, or
   re-pairing to a different server.
@@ -752,9 +753,11 @@ start at 38.
 ## Open questions
 
 The draft's two questions were answered on 2026-11-23 (1 and 2). Three
-questions remain open for the operator. For each, v1 takes the conservative
-default shown, so nothing waits on the answer; an answer can only open things
-up.
+questions remain open for the operator. For each, v1 takes the default
+shown, so nothing waits on the answer. Questions 3 and 5 have conservative
+defaults: an answer can only open things up. **Question 4 is the one open
+question whose default is permissive**: v1 assumes yes, and a "no" closes
+things.
 
 1. ~~**Should mail and todos be on by default for a newly paired device?**~~
    **Answered: mail and todos stay on the Macs in v1, for every host** (so
@@ -763,17 +766,25 @@ up.
    see the list?**~~ **Answered: Kobe is revoke-only.** It can list, revoke
    and (once there is anything to turn off) turn mail and todos off. It
    cannot pair or turn anything on.
-3. **Open: which Microsoft 365 account does Fred read on Sendai?** Fred's
-   mailbox reads Microsoft Graph with the `m365` CLI's sign-in. If that is
-   the Carefeed tenant, Sendai's mail is employer content. *v1 default:*
+3. **Open: which accounts (Microsoft 365 and/or Google) does Fred read on
+   Sendai?** Fred can merge several accounts into one mailbox and calendar,
+   from Microsoft 365 (through the `m365` CLI's sign-in) and from Google. If
+   any of them is the Carefeed tenant, Sendai's mail and calendar include
+   employer content. *v1 default:*
    treat it as work-sensitive (mail and todos stay home). If it is personal
    mail only, mail could be opened up to devices.
 4. **Open: does the employer's policy allow Kobe's job states, short
    references and host name to leave Kobe** for the operator's personal
    server, the push relay and Apple, and to show on a personal phone?
-   *v1 default:* the plans assume yes, and send only fixed-vocabulary
-   metadata (no Carefeed text) from Kobe. If the answer is no, Kobe stops
-   sending to the server and the phone shows no Kobe rows or pushes.
+   *v1 default (permissive):* yes. Kobe sends only fixed-vocabulary
+   metadata, never Carefeed text. The default is permissive because without
+   Kobe's metadata the backplane has little purpose: most jobs run there.
+   **It must be confirmed against the employer's policy before W10 (the
+   satellite uplink) ships.** If the answer is no, Kobe sends nothing to
+   the server: the phone shows no Kobe rows, sends no Kobe pushes, and
+   Kobe's revoke-only device administration also goes, since it travels
+   over the same uplink. Revoking then happens from Sendai or the server's
+   terminal.
 5. **Open: does calendar stay home too?** Fred's calendar comes from the
    same Microsoft 365 source as the mail. *v1 default:* yes, calendar stays
    on the Macs with mail and todos, and the copy says "Mail, calendar and
@@ -977,7 +988,7 @@ The push PRD's log uses the same numbering.
 | # | Decision (v1) | What it reverses or narrows | Later, when opened up |
 |---|---|---|---|
 | Q1 | **Kobe is `revoke-only`**, a new device-admin level: list, revoke, turn mail and todos off. It cannot pair or turn anything on. (That an unset Mac is revoke-only, and that Sendai becomes full only when set on the server, is Ada's choice, recorded below.) | Narrows AC12's bet from "pair from Kobe" to "manage from Kobe". Reverses the draft's "Kobe does everything" (draft open question 2). | Raise Kobe's level on the server if employer policy and the remote-management question are ever settled. |
-| Q2 | **Mail and todos stay on the Macs for every host.** No checkbox, flag or toggle on any surface. The pairing window says "Mail and todos aren't shared from your Macs in this version."; the Fred and Teri tabs say "Mail and todos stay on your Mac in this version." Fred's mail is probably Carefeed's Microsoft 365 tenant (unconfirmed; open question 3), so even Sendai's mail and todos count as work-sensitive. Calendar stays home by default (open question 5, not yet decided). | Reverses the draft's "on by default" grant (draft open question 1). AC34 rewritten; AC35 deferred; AC10, AC11, AC13, AC14, AC23 drop the scope wording. | The per-device permission, its default and the live toggle (AC35's bet), once the operator confirms whose mail Fred reads. |
+| Q2 | **Mail and todos stay on the Macs for every host.** No checkbox, flag or toggle on any surface. The pairing window says "Mail, calendar and todos aren't shared from your Macs in this version."; the Fred and Teri tabs say "Mail, calendar and todos stay on your Mac in this version." (exact text per AC11 and AC34; "calendar" is Ada's default pending open question 5). Fred's mail is probably Carefeed's Microsoft 365 tenant (unconfirmed; open question 3 asks which Microsoft 365 and/or Google accounts Fred reads), so even Sendai's mail and todos count as work-sensitive. Calendar stays home by default (open question 5, not yet decided). | Reverses the draft's "on by default" grant (draft open question 1). AC34 rewritten; AC35 deferred; AC10, AC11, AC13, AC14, AC23 drop the scope wording. | The per-device permission, its default and the live toggle (AC35's bet), once the operator confirms whose mail Fred reads. |
 | Q8 (multi-Mac list) | **One merged list**, "needs you" first, host badge whenever the list holds rows from more than one Mac. Kobe rows use push's fixed vocabulary; the tap card says "Details stay on kobe." | Nothing (new). | Sections or a host switcher, if the merged list proves confusing. |
 | Q4 | **The device answers nothing in this sequence**: no decisions, approvals, Mother questions, PR actions, enqueue or sending. | Narrows `docs/visions/iphone.md` and `docs/visions/ipad.md` (amended in the same change). | A device-trust PRD (Face ID-bound keys, per-action confirmation) and its own security review. |
 | Q7 (= D7) | **Nothing from the message queue on a device**: no text, count or take-back. | Nothing; this is today's behaviour. | A count, "2 messages waiting", on the session row. |
@@ -992,6 +1003,8 @@ The push PRD's log uses the same numbering.
 - **Still open for the operator:** open questions 3 (whose Microsoft 365
   mail), 4 (employer policy on Kobe metadata leaving Kobe) and 5
   (calendar). The loop is closed for Archie: each has a v1 default.
+  Question 4's default is permissive and must be confirmed against the
+  employer's policy before W10 ships.
 
 - **D1, Local Network on home Wi-Fi: accepted, with changes.** AC2 rewritten;
   first-screen wording changed; a fifth failure state in Ada's words, with

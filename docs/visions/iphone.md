@@ -17,8 +17,10 @@ The operator gets a thin, fast lens into the same agent ecosystem the Mac
 sees. They cannot author new MCP tools or write code from the phone.
 
 **Amended 2026-11-23 (backplane sequence).** In this sequence the phone is a
-**"what needs me, and is it urgent"** surface. It can read agent output
-(personal hosts), see what is waiting and how urgent it is, and react to a
+**"what needs me, and is it urgent"** surface. It can read the detail of
+personal-host items read-only (a Mother job's question, a decision's
+prompt), but not agent transcripts, which are later, as on the iPad. It can
+see what is waiting and how urgent it is, and react to a
 notification by deciding whether to go to the Mac. It **answers nothing**:
 no approving or denying decisions or permission requests, no answering or
 resuming Mother jobs, no PR approve / request-changes, no Mother enqueue, no
@@ -122,8 +124,8 @@ sequence delivers it, or **(later, when opened up)** where it is deferred.
   let the operator write or modify source code. If a workflow needs
   those, the answer is "do it on the Mac when you're back."
 - **No agent spawning.** The phone does not run claude or any other
-  worker locally. All inference + tool calls happen on the Mac daemon
-  (or the cloud backplane, depending on the architecture decision).
+  worker locally. All inference and tool calls happen on the operator's
+  Macs.
 - **No multi-account, no team features.** Single-operator client over
   their own daemon. Sharing/team support is out of scope.
 - **Limited file management.** Cannot browse the operator's filesystem,

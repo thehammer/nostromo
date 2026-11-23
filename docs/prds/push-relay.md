@@ -1,7 +1,7 @@
 # PRD: Tell the operator what needs them, without telling anyone else
 
 **Author:** Ada
-**Status:** Signed off by Ada 2026-11-23. Design loop closed for Archie (S1–S8 signed, S4 withdrawn, new S7a specified; the operator answered Q3–Q7 of Ada's memo). Operator questions still open, each with a conservative v1 default, are listed in `docs/prds/daemon-pairing-flow.md`, open questions 3–5. See "Sign-off and decision log" at the end.
+**Status:** Signed off by Ada 2026-11-23. Design loop closed for Archie (S1–S8 signed, S4 withdrawn, new S7a specified; the operator answered Q3–Q7 of Ada's memo). Operator questions still open, each with a v1 default, are listed in `docs/prds/daemon-pairing-flow.md`, open questions 3–5; open question 4 (employer policy on Kobe metadata) has a permissive default and must be confirmed before W10 ships. See "Sign-off and decision log" at the end.
 **Answers:** Q2 in `docs/plans/backplane-sequencing.md`
 **Unblocks wedge:** W13 `push-relay` (`docs/plans/backplane/W13-push-relay.md`) and W16 `ios-push-enrichment`
 **Surface:** iPhone (and iPad, same app) notifications; the operator's own machines; the hosted relay as seen from outside.
@@ -70,7 +70,9 @@ if the host is personal **and** the repository's owner is not a work
 organisation (default: Carefeed). It never appears for items from a work
 host, and never for an employer-owned repository on any host. The list of
 work owners can only be changed on the operator's machines; the phone shows
-it read-only, like host class. Today every review in the queue is a Carefeed
+it read-only, like host class. **(v1)** When a repository's owner cannot be
+told (for example, only a bare repository name is known), it counts as a
+work owner, so no name is shown. Today every review in the queue is a Carefeed
 PR, so in practice no review shows a repository name. *(Gating Mother job
 repository names on owner as well as host is Ada's conservative default at
 sign-off, 2026-11-23; the operator may open it up.)*
@@ -147,7 +149,7 @@ answer buttons (see "Lock-screen actions on decisions", withdrawn).
 | PR number (`#4821`) | Organisation or owner name |
 | Size, from a fixed set: *small change* (under 50 changed lines) / *medium change* / *large change* (over 400) | CI log text, file paths |
 | Number of PRs currently waiting on the operator from that host | Repository name from a work host |
-| Repository name — **personal hosts only** | |
+| Repository name — **personal hosts only, and only when its owner is not a work organisation** | Repository name of an employer-owned repository on any host |
 
 - Work host — **Title:** `Review · kobe` **Body:** `PR #4821 · small change · 3 waiting`
 - Personal host, personal owner (illustrative only; cannot occur while the
@@ -186,6 +188,13 @@ without paying for it in relay or Apple exposure.
 
 - **(v1)** Enrichment is **on** by default for personal hosts, with a
   per-host off switch on each device.
+- **(v1) Enrichment is also gated on the repository's owner.** An item from
+  a repository owned by a work organisation (default Carefeed), or whose
+  owner cannot be told, shows only the contract text, even from a personal
+  host. Today Sendai's review queue holds only Carefeed PRs, so without this
+  gate enrichment would put Carefeed PR titles on the lock screen. *(Ada's
+  conservative default at sign-off, 2026-11-23; the operator may open it
+  up.)*
 - **(v1) Work hosts are never enriched**, and neither are items from the PHI
   repositories on any host. The server never holds a Kobe question or PR
   title, so there is nothing the phone could fetch. A work host's row in the
@@ -199,7 +208,9 @@ without paying for it in relay or Apple exposure.
   sign-off choice, made within the operator's 2026-11-23 acceptance of
   Ada's recommendations; not one of his explicit decisions). The
   notification shows the first line of the decision's prompt, ending
-  `· answer on your Mac`, and offers no choice buttons. Seeing the question
+  `· answer on your Mac`, and offers no choice buttons. The owner gate
+  above applies: a decision from a session in an employer-owned repository
+  shows only the contract text. Seeing the question
   is what lets the operator decide whether to walk back to the Mac; the app
   already shows the same prompt read-only on tap. Decisions from a work host
   or a PHI repository show only the contract text.
@@ -343,7 +354,9 @@ The app has a **Sent notifications** screen listing every notification
 attempted for this device in the last 7 days: time, kind, host, the exact
 title and body as sent, and the outcome — *delivered to Apple*, *rejected by
 Apple*, *relay unreachable*, *held for quiet hours*, *coalesced into a
-summary*, *withdrawn*, *skipped: resolved during grace delay*. This record is
+summary*, *withdrawn* (the "no longer needs you" replacement was sent),
+*silently removed* (a best-effort silent removal was sent), *skipped:
+resolved during grace delay*. This record is
 kept on the operator's own machines, not in the relay, and is deleted after 7
 days.
 
@@ -451,7 +464,8 @@ Lock screen and lifecycle:
   passive entry with no sound, and the item never has two entries. A silent
   removal for an item leaves the operator's machines only after Apple has
   accepted that item's replacement (checkable in Sent notifications: a
-  *withdrawn* line never comes before the item's replacement line). (Test
+  *silently removed* line never comes before that item's *withdrawn*
+  line). (Test
   with the app force-quit as well as suspended.)
 - **(amended 2026-11-23)** Opening the app, or bringing it to the
   foreground, removes every notification whose item is no longer waiting,
@@ -472,19 +486,23 @@ Lock screen and lifecycle:
 
 Enrichment:
 
-- With the VPN up and a personal-host Mother or review item, the displayed
+- **(amended 2026-11-23)** With the VPN up and a personal-host Mother or review item from a
+  repository whose owner is not a work organisation, the displayed
   notification shows the real question / PR title within 5 seconds of
   arrival, while the notification that left the operator's machines still
   contains none of it — **ambitious bet**: this is what makes the
   notification worth reading without making it worth stealing.
 - **(new 2026-11-23)** With the VPN up, a decision from a personal, non-PHI
-  host displays the first line of its prompt, ending `· answer on your
+  host, in a repository whose owner is not a work organisation, displays the first line of its prompt, ending `· answer on your
   Mac`, within 5 seconds, and the displayed notification offers no choice
   actions.
 - **(amended 2026-11-23)** With the VPN up, an item from a work host, or from
   a PHI repository on any host, always displays the contract text exactly.
   The notification settings show the work host as "Details stay on `<host>`"
   with no toggle.
+- **(new 2026-11-23)** With the VPN up, an item or decision from a personal
+  host whose repository is owned by a work organisation (default Carefeed),
+  or whose owner cannot be told, displays the contract text exactly.
 - **(new 2026-11-23)** Turning enrichment off for a personal host on a device
   makes that host's notifications on that device display the contract text.
 - With the VPN down, every notification displays the contract text exactly;
@@ -606,12 +624,15 @@ Visibility and retention:
   to time out unless they return to the Mac. The decision timing (at once
   when the Mac is idle) and the personal-host prompt line are there so the
   operator can judge quickly whether to go.
-- **Misclassified host.** A personal host that ends up with a Carefeed
-  checkout outside the work-owners list (say, a fork under a personal
-  account) would leak that repository's name, and its prompts and questions would be enriched on the phone (never sent
-  through the relay). Defaulting unclassified hosts to work limits this to an
-  explicit operator mistake. Keep Carefeed checkouts off Sendai, or classify
-  Sendai as work.
+- **Misclassified host.** A Carefeed host marked personal by mistake gets
+  personal treatment for anything not caught by the owner gate. Defaulting
+  unclassified hosts to work limits this to an explicit operator mistake.
+- **Carefeed code under a personal owner.** A Carefeed checkout on a
+  personal host whose owner is not on the work-owners list (for example, a
+  fork under a personal account) would show that repository's name in
+  notifications, and its questions and prompts would be enriched on the
+  phone (never sent through the relay). Keep Carefeed checkouts off Sendai,
+  or classify Sendai as work.
 - **Lock-screen exposure via enrichment.** Enriched personal-host text is on
   the phone's own screen. The setup screen recommends "When Unlocked"
   previews once; the operator owns the choice.
@@ -923,7 +944,8 @@ into the sections above.
 | 2026-11-23 | Q6 | **The relay runs in a new, dedicated personal AWS account, or a member account in the operator's personal AWS Organization.** Never a Carefeed account. | Narrows "the operator's own cloud account" to a dedicated one. | — |
 | 2026-11-23 | Q7 | **Nothing from the message queue**, in notifications or in the app. | Nothing (today's behaviour). | A count in the app, "2 messages waiting". |
 | 2026-11-23 | S8 amendment (Ada) | **Personal-host decisions show the first line of the prompt, read-only**, ending "· answer on your Mac". This is **Ada's sign-off choice**, made within the operator's 2026-11-23 acceptance of Ada's recommendations; it is not one of his explicit decisions. His explicit reversal is Q3 (Kobe, work and PHI detail). | Reverses Archie's turn-2 proposal (no decision enrichment). | — |
-| 2026-11-23 | Ada default | **Repository names gated on owner for every kind**, not only reviews: Ada's conservative default, which the operator may open up. | Tightens the draft's Mother row (host class only). | Open up if Mother runs on personally owned repositories and the operator wants their names. |
+| 2026-11-23 | Ada default | **Repository names gated on owner for every kind**, not only reviews, and **an unknown owner counts as a work owner**: Ada's conservative default, which the operator may open up. | Tightens the draft's Mother row (host class only). | Open up if Mother runs on personally owned repositories and the operator wants their names. |
+| 2026-11-23 | Ada default | **Enrichment gated on owner too**: items (including decisions) from employer-owned or unknown-owner repositories show only contract text, even from a personal host. Ada's conservative default, which the operator may open up. | Narrows personal-host enrichment (the draft gated on host class only). | Open up per owner if the operator wants it. |
 
 ### Apple's notification-filtering entitlement: investigated 2026-11-23, not requested
 

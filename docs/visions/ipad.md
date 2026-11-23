@@ -27,8 +27,8 @@ conversations — without pretending to be a full Mac.
 > approve/request-changes/comment, no Claudia messages, no Mother queuing.
 >
 > **Mail and todos stay on the Macs**, so the Fred mailbox capability below
-> is deferred and the Fred and Teri views say "Mail and todos stay on your
-> Mac in this version." **Calendar stays home too by default** (it comes
+> is deferred and the Fred and Teri views say "Mail, calendar and todos stay
+> on your Mac in this version." **Calendar stays home too by default** (it comes
 > from the same Microsoft 365 source as the mail; an open operator question
 > in the pairing PRD). Kobe (work) items are metadata only.
 >
