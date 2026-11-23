@@ -455,12 +455,21 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
             wakeMarker = marker
             bubbleWidthConstraint = attachIsland(marker, width: slotWidth())
         // Several messages the daemon merged into one turn: one bubble each, then "sent together".
-        // (No origin, so it is never a terminal delivery or a marker; the confirm sentinel never
-        // reaches here because a confirm reply is one message.)
-        } else if turn.userParts.count >= 2, !turn.userInput.contains(Self.confirmReplySentinel) {
-            let merged = MergedUserBubblesView(parts: turn.userParts)
-            mergedBubbles = merged
-            bubbleWidthConstraint = attachIsland(merged, width: slotWidth())
+        // (No origin, so it is never a terminal delivery or a marker.) An AskQuestion answer queued
+        // behind a running turn can merge with a typed message: only the part(s) that are confirm
+        // replies are hidden (the card's chosen-state already shows them), the others are drawn,
+        // with the caption only when two or more are.
+        } else if turn.userParts.count >= 2 {
+            let shown = turn.userParts.filter { !$0.contains(Self.confirmReplySentinel) }
+            if shown.count >= 2 {
+                let merged = MergedUserBubblesView(parts: shown)
+                mergedBubbles = merged
+                bubbleWidthConstraint = attachIsland(merged, width: slotWidth())
+            } else if let only = shown.first {
+                let bubble = UserBubbleView(text: only, imageURLs: turn.imageURLs)
+                self.bubble = bubble
+                bubbleWidthConstraint = attachIsland(bubble, width: Self.bubbleWidth(paneWidth: islandWidth, imageOnly: false))
+            }
         // The sentinel only ever marks a confirm-card reply, which has no terminal origin: on a
         // terminal-origin turn it is just text, and hiding it would hide what the agent received.
         } else if let bubbleText, turn.hasTerminalOrigin || !turn.userInput.contains(Self.confirmReplySentinel) {

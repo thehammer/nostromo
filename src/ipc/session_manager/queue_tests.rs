@@ -787,6 +787,15 @@ fn run_interleaving(seed: u64, skip_wait: bool, merge: bool) -> Vec<String> {
         }
     }
     drop(answers);
+    // Whatever reached the child arrived in the order it was queued, also after
+    // a failed write put a batch's parts back.
+    let order: Vec<usize> = frames
+        .iter()
+        .filter_map(|f| texts.iter().position(|t| t == f))
+        .collect();
+    if order.windows(2).any(|w| w[0] >= w[1]) {
+        problems.push(format!("seed {seed}: written out of order: {order:?}"));
+    }
     lock_recover(&mgr).stop_session("t");
     problems
 }

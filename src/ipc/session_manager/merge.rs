@@ -179,13 +179,23 @@ pub(super) fn record_batch(shared: &Shared, batch: &Batch) {
 
 /// A fresh boundary that occurs in none of `texts`.
 pub(super) fn fresh_boundary(texts: &[&str]) -> String {
-    loop {
-        let b = uuid::Uuid::new_v4().simple().to_string();
+    fresh_boundary_from(texts, || uuid::Uuid::new_v4().simple().to_string())
+}
+
+/// [`fresh_boundary`] with the candidate source injected (random by default).
+pub(super) fn fresh_boundary_from(texts: &[&str], mut source: impl FnMut() -> String) -> String {
+    // A random UUID collides with typed text essentially never; the bound only
+    // keeps a broken source from hanging a caller.
+    for _ in 0..FRESH_BOUNDARY_MAX_TRIES {
+        let b = source();
         if !texts.iter().any(|t| t.contains(&b)) {
             return b;
         }
     }
+    panic!("boundary source produced {FRESH_BOUNDARY_MAX_TRIES} candidates that all occur in the messages");
 }
+
+const FRESH_BOUNDARY_MAX_TRIES: usize = 1000;
 
 fn header(boundary: &str, n: usize) -> String {
     format!(
