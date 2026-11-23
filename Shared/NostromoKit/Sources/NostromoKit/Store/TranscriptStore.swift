@@ -153,12 +153,28 @@ public final class TranscriptStore: ObservableObject {
         }
     }
 
+    /// The turn that now answers what the user sent replaces its optimistic echo: one echo per
+    /// message (a merged turn answers each of its `userParts`), newest first. Nothing else ever
+    /// removes an echo but a full snapshot.
+    private func dropEchoes(answeredBy turn: DaemonTurn) {
+        var wanted = (turn.userParts.count >= 2 ? turn.userParts : [turn.userInput])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        for i in turns.indices.reversed() where turns[i].id.hasPrefix("local-") {
+            let text = turns[i].userInput.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let j = wanted.firstIndex(of: text) {
+                wanted.remove(at: j)
+                turns.remove(at: i)
+            }
+        }
+    }
+
     private func apply(_ delta: DaemonTurnDelta) {
         switch delta {
         case .turnStarted(let turn):
             // De-dup guard: if we attached to an already-running session the
             // snapshot may have already included this turn.
             if !turns.contains(where: { $0.id == turn.id }) {
+                dropEchoes(answeredBy: turn)
                 turns.append(turn)
             }
         case .blockAppended(let turnId, let block):

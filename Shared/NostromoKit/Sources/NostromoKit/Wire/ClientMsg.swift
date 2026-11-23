@@ -13,11 +13,21 @@ struct ClientHello: Encodable {
     let type_           = "hello"
     let clientId:        String
     let protocolVersion: Int
+    /// What this client can render beyond the base protocol. `merged_turns_v1`: a turn may answer
+    /// several queued messages merged into one frame (`DaemonTurn.userParts`).
+    let capabilities:    [String]
+
+    init(clientId: String, protocolVersion: Int, capabilities: [String] = ["merged_turns_v1"]) {
+        self.clientId = clientId
+        self.protocolVersion = protocolVersion
+        self.capabilities = capabilities
+    }
 
     enum CodingKeys: String, CodingKey {
         case type_           = "type"
         case clientId        = "client_id"
         case protocolVersion = "protocol_version"
+        case capabilities
     }
 }
 

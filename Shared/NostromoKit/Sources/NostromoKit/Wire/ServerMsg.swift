@@ -401,15 +401,21 @@ public struct DaemonTurn: Decodable {
     /// terminal, a follow notice). Nil for an ordinary turn, for an older daemon, and for an
     /// origin kind this client does not know: an unknown kind never costs the whole turn.
     public let origin:      TurnOriginWire?
+    /// Two or more entries: the turn answers several messages the daemon merged into one frame
+    /// (`merged_turns_v1`), and these are the messages as typed, in order. `userInput` is them
+    /// joined by a blank line, so a client that ignores this shows one readable bubble. Empty for
+    /// an ordinary turn and for an older daemon.
+    public let userParts:   [String]
 
     public init(id: String, userInput: String, timestamp: String?, blocks: [DaemonTurnBlock],
-                isComplete: Bool, origin: TurnOriginWire? = nil) {
+                isComplete: Bool, origin: TurnOriginWire? = nil, userParts: [String] = []) {
         self.id = id
         self.userInput = userInput
         self.timestamp = timestamp
         self.blocks = blocks
         self.isComplete = isComplete
         self.origin = origin
+        self.userParts = userParts
     }
 
     enum CodingKeys: String, CodingKey {
@@ -419,6 +425,7 @@ public struct DaemonTurn: Decodable {
         case blocks
         case isComplete = "is_complete"
         case origin
+        case userParts  = "user_parts"
     }
 
     public init(from decoder: Decoder) throws {
@@ -428,7 +435,8 @@ public struct DaemonTurn: Decodable {
                   timestamp: try c.decodeIfPresent(String.self, forKey: .timestamp),
                   blocks: try c.decode([DaemonTurnBlock].self, forKey: .blocks),
                   isComplete: try c.decode(Bool.self, forKey: .isComplete),
-                  origin: (try? c.decodeIfPresent(TurnOriginWire.self, forKey: .origin)) ?? nil)
+                  origin: (try? c.decodeIfPresent(TurnOriginWire.self, forKey: .origin)) ?? nil,
+                  userParts: (try? c.decodeIfPresent([String].self, forKey: .userParts)) ?? [])
     }
 }
 
@@ -436,13 +444,14 @@ extension DaemonTurn {
     /// Return a copy with `block` appended to `blocks`.
     func appending(_ block: DaemonTurnBlock) -> DaemonTurn {
         DaemonTurn(id: id, userInput: userInput, timestamp: timestamp,
-                   blocks: blocks + [block], isComplete: isComplete, origin: origin)
+                   blocks: blocks + [block], isComplete: isComplete, origin: origin,
+                   userParts: userParts)
     }
 
     /// Return a copy with `isComplete` set to `true`.
     func completed() -> DaemonTurn {
         DaemonTurn(id: id, userInput: userInput, timestamp: timestamp,
-                   blocks: blocks, isComplete: true, origin: origin)
+                   blocks: blocks, isComplete: true, origin: origin, userParts: userParts)
     }
 }
 
