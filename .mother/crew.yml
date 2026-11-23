@@ -3,7 +3,7 @@ phi_sensitive: false
 gates:
   mode: observe
   max_attempts: 2
-  budget_minutes: 45
+  budget_minutes: 75
   checks:
     - name: rust-fmt
       run: "cargo fmt --check"

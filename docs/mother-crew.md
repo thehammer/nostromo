@@ -8,13 +8,13 @@ Mother reads `.mother/crew.yml` from a job's **base ref** when the job is added,
 |---|---|---|---|---|
 | `rust-clippy` | sandbox | `src/**`, Rust tests, `Cargo.*`, toolchain, `.rwx/**` | ~30 s (+ ~75 s sandbox start) | yes |
 | `rust-test` | sandbox | same as clippy | ~3 min 18 s from a fresh sandbox | yes |
-| `python-test` | any (host Mac) | `tests/**`, `scripts/**`, `bin/**`, `Makefile`, `*.py` | ~45 s | yes |
-| `swift-ci` | host (`make ci-remote ONLY=swift`) | `macOS/**`, `iOS/**`, `Shared/**` | ~7.5 min | yes |
+| `python-test` | any (host Mac) | `tests/**`, `scripts/**`, `bin/**`, `Makefile`, `*.py` | ~20 min serial on a loaded host (measured 2026-11-23, #502) | yes |
+| `swift-ci` | host (`make ci-remote ONLY=swift`) | `macOS/**`, `iOS/**`, `Shared/**` | ~24 min (measured 2026-11-23) | yes |
 | `shellcheck` | host | `*.sh`, `bin/**`, `scripts/**` | seconds | yes |
 | `actionlint` | host | `.github/workflows/**` | seconds | advisory |
 | `mother-contract` | host | contract fixtures and Mother client code | seconds | advisory |
 
-A Swift + Rust job costs about 14 minutes of gates before any retry, hence `gates.budget_minutes: 45`.
+A Swift + Rust job costs about 49 minutes of gates before any retry if the checks run one after another (measured 2026-11-23: clippy + tests ~5, `python-test` ~20, `swift-ci` ~24), hence `gates.budget_minutes: 75`. Whether Mother runs checks serially or in parallel is not stated in this repo; if they run in parallel the budget could drop back.
 
 Lenses (`correctness`, `tests`, `ops-infra`, `phi-security`) run on every job; `ops-infra` and `phi-security` are scoped to the paths in the file. Lens names are a closed set in Mother: an unknown name makes `mother add` fail for every nostromo job. Lens spend is capped by `lenses.budget_usd` ($3 per job).
 
@@ -56,7 +56,7 @@ lenses: {add: [tests], remove: [ops-infra]}
 
 ## Costs and limits to know
 
-- `swift-ci` dispatches the whole macOS GitHub workflow for each gate attempt (up to two attempts), so it duplicates the PR's own CI run and uses Actions minutes. Its `timeout_s` is 1800, below the 45-minute `budget_minutes`, so a hung dispatch fails on its own instead of marking every gate `unavailable` through the total watchdog.
+- `swift-ci` dispatches the whole macOS GitHub workflow for each gate attempt (up to two attempts), so it duplicates the PR's own CI run and uses Actions minutes. Its `timeout_s` is 2400, below the 75-minute `budget_minutes`, so a hung dispatch fails on its own instead of marking every gate `unavailable` through the total watchdog.
 - `python-test` runs on the HOST Mac (`where: any`), not in the Linux sandbox: `tests/operator_pin` needs `codesign`/`lipo` and refuses to skip without them, so a sandbox gate fails every time (seen in the first live gate run on 2026-10-21, exit 2 after 81 s). Its `when` paths cover the trees the Python policy suites scan (`macOS/`, `iOS/`, `Shared/`, `.github/`, `src/mother/`). CI's Python job runs on macOS for the same reason.
 - `shellcheck-changed.sh` cannot check a changed file whose name git prints quoted (non-ASCII, quotes, tabs): it says so on stderr and fails rather than passing silently.
 
