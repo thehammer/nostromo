@@ -356,7 +356,7 @@ open question 2) on the operator's own host.
 
 ## Acceptance criteria
 
-- [ ] **W10-1** CI is green: Rust in the RWX sandbox and the `ubuntu-latest` job,
+- [ ] **W10-1** CI is green: Rust in the RWX sandbox and the `ubuntu-24.04` Rust jobs,
   `swift-tests-kit` on GitHub Actions (`make ci-remote ONLY=kit` to
   re-run). **No local `cargo` or `swift`** (toolchain guard). No existing
   test is modified except to add fixtures with `host` present;

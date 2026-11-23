@@ -502,7 +502,7 @@ on the home network; the UDM Pro's WireGuard is the only off-site path.
 ### B7 — Primary host: Tokyo (Linux)
 Unchanged by main, and strengthened: the primary needs no Mac app, no Mother,
 no Bishop and (B10) no `OperatorApp`. The Rust workspace builds and tests on
-`ubuntu-latest` (`ci.yml:33-63`). W14 is packaging only. If W14 hits a blocker,
+`ubuntu-24.04` (`ci.yml:94-192`; was `ubuntu-latest`, `:33-63`, on 2026-10-18). W14 is packaging only. If W14 hits a blocker,
 Sendai takes the role with `mode = primary`; no other wedge changes.
 
 ### B8 — Wire protocol: WebSocket carrying the existing JSON

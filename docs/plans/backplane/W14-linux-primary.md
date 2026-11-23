@@ -1,6 +1,56 @@
 # W14 — Package nostromd as a Linux primary (systemd user unit)
 
-## Refreshed 2026-10-18 against `origin/main` `d61c62d`
+## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
+
+Ready to dispatch now. Versus the 2026-10-18 version (the memo's "What changed
+since 2026-10-18" has the context):
+- **The macOS install recipe changed.** `make daemon` (`Makefile:129-130`)
+  builds `nostromd`, `nostromo-guard` **and `nostromo-mcp-bridge`**;
+  `install-daemon` (`:136-193`) copies them from
+  `$(NOSTROMO_TARGET_DIR)/release` (`:14`, which honours `CARGO_TARGET_DIR`,
+  #500), stages and ad-hoc signs all three to new inodes, moves bridge, then
+  guard, then daemon, symlinks `~/.local/bin/nostromo-mcp-bridge` if absent,
+  and runs the restart guard `bin/nostromo-restart-guard` first (`:123-126`;
+  a portable bash script that asks the installed `nostromd remote-shells`
+  and refuses while a remote shell is open; `FORCE=1` overrides). The Linux
+  target mirrors that exactly, minus `codesign` and `launchctl`: same three
+  binaries (the guard and bridge are what sessions need; installing them keeps
+  the layout identical even though a primary hosts no sessions), same order,
+  same `$(NOSTROMO_TARGET_DIR)`, same restart guard. If W9 has merged first,
+  include the `nostromo` CLI the way W9 adds it. W14 and W9 both edit the
+  Makefile and `nostromd.rs` startup: merge W14 first or expect a small
+  conflict.
+- **More "Mac developer box" assumptions on a bare primary.** Since
+  2026-10-18 the daemon gained per-agent enable switches (#302;
+  `config.resolve_agents`, `src/config.rs:257`; Huey starts its pipeline when
+  enabled, `src/bin/nostromd.rs:96`, `:634`), the authored-PR engine
+  (`authored_prs_enabled`, default `true`, `src/config.rs:128`, `:224`;
+  started at `nostromd.rs:784-794`; it finds a GitHub token through `gh`,
+  #507), Bishop posture reads, and ECS remote shells. The primary needs none of
+  them. Add a documented primary `config.toml` (README "Install (Linux)"):
+  agents Fred, Teri, Huey and Perri off, `authored_prs_enabled = false`; and
+  extend `tests/linux_startup.rs` to start with that config and assert one
+  clean startup (no repeated WARN from a missing `gh`, `aws`, `mother` or
+  Bishop).
+- **Line references re-derived:** `list_jobs`/`list_jobs_counted`
+  `src/mother/mod.rs:431-437`, `run_mother` `:606`; `run_mother_pollers`
+  `src/bin/nostromd.rs:864` (2 s interval `:402`); the activity tailer
+  `:720-751` (`hook_status::default_settings_path`
+  `src/activity/hook_status.rs:12`); TCP listener and mDNS `:353-398`; the
+  macOS-only verifier arms `src/ipc/peer_verify.rs:344-386`, `:657-677`,
+  `:730-740`; `notify` `Cargo.toml:83`.
+- **CI.** Linux runners are pinned to `ubuntu-24.04` (#474) and the Rust
+  toolchain to 1.100.0 (#452). The Rust work is split into `rust-fmt`,
+  `rust-clippy` and `rust-test` behind the aggregate `Build & Lint`
+  (`.github/workflows/ci.yml:94-192`, `needs: [rust-fmt, rust-clippy,
+  rust-test]` at `:179`). Put the `systemd-analyze verify` step in the
+  `rust-clippy` job (cheap, already on `ubuntu-24.04`) rather than a new job,
+  so the required check needs no change. `docs/ci.md` is the place to say so.
+- **MC4 is merged**, so the 2026-10-18 collision note is void.
+- **Gates.** `rust-*` (sandbox), `python-test` (`Makefile` and `tests/**`
+  match), `shellcheck` if a script changes, `actionlint` for `ci.yml`.
+
+## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
 Versus the 2026-10-10 draft: `make install-daemon` now installs **two**
 signed binaries, `nostromd` and the production-shell guard `nostromo-guard`
@@ -20,7 +70,7 @@ and MC4 (`mother-crew-client-mc4-needs-you-and-notifications.md`) both edit
 `docs/plans/backplane-sequencing.md` (bet B7) chooses **Tokyo**, a personal
 always-on Linux workstation, as the primary `nostromd` host. The Rust
 workspace already builds and tests on Linux in CI
-(`.github/workflows/ci.yml:33-63`, `ubuntu-latest`: build, clippy, test;
+(`.github/workflows/ci.yml:94-192`, `ubuntu-24.04`: fmt, clippy, test;
 and the RWX sandbox, `.rwx/sandbox.yml`), so this is packaging, not
 porting. What is macOS-only today is the install path: `Makefile:69-110`
 (`install-daemon` stages and `codesign`s `nostromd` and `nostromo-guard`,
@@ -50,31 +100,33 @@ no change to the other wedges.
   `Environment=RUST_LOG=info`, `StandardOutput=append:%h/.cache/nostromd/log/stdout.log`,
   `StandardError=append:%h/.cache/nostromd/log/stderr.log`,
   `WantedBy=default.target`.
-- `Makefile:69-110` — add `install-daemon-linux` / `uninstall-daemon-linux`
-  (`cargo build --release --bin nostromd --bin nostromo-guard`; install both
-  to `~/.local/bin` with the same stage-then-rename order as the macOS
-  target, minus `codesign`; `mkdir -p ~/.config/systemd/user
+- `Makefile:129-201` — add `install-daemon-linux` / `uninstall-daemon-linux`
+  (build through `make daemon`; install `nostromd`, `nostromo-guard` and
+  `nostromo-mcp-bridge` from `$(NOSTROMO_TARGET_DIR)/release` to
+  `~/.local/bin` with the same restart guard first and the same
+  stage-then-rename order as the macOS target (bridge, guard, daemon), minus
+  `codesign`; `mkdir -p ~/.config/systemd/user
   ~/.cache/nostromd/log`; render the template with `sed` like the plist path
   does; `systemctl --user
   daemon-reload && systemctl --user enable --now nostromd`; print
   `loginctl enable-linger $USER` as a required one-time step if
   `loginctl show-user $USER -p Linger` is `no`). Make `install-daemon`
   dispatch on `uname -s` so the existing macOS target is unchanged.
-- `src/mother/mod.rs:321-340, 486` — when `mother` is not on `PATH`
+- `src/mother/mod.rs:431-437, 606` — when `mother` is not on `PATH`
   (`std::io::ErrorKind::NotFound`), return a typed `MotherUnavailable`
-  error; `run_mother_pollers` (`src/bin/nostromd.rs:568-640`) logs it once
+  error; `run_mother_pollers` (`src/bin/nostromd.rs:864`) logs it once
   at WARN and backs off to a 60 s interval instead of 2 s. Do not touch
   `src/mother/decode.rs` or the crew types.
 - `src/bin/nostromd.rs` startup — on a non-macOS host, log one INFO line:
   "operator app verification unavailable on this platform: decisions and
   approvals cannot be answered here".
-- `src/bin/nostromd.rs:196-260` — mDNS advertising already degrades
+- `src/bin/nostromd.rs:384-398` — mDNS advertising already degrades
   non-fatally; confirm `mdns-sd` starts on a host with no multicast route
   or make the failure a single WARN. (Satellite mode in W10 removes it
   entirely; the primary keeps it only for a LAN client that still uses
   the raw TCP path.)
 - `src/activity/hook_status.rs:12` (`default_settings_path`) and
-  `src/bin/nostromd.rs:460-470` — the activity tailer path and the hook
+  `src/bin/nostromd.rs:720-751` — the activity tailer path and the hook
   check assume `~/.claude/` exists; on a host with no Claude Code install
   the tailer must wait for the file to appear (it uses `notify`,
   `Cargo.toml:78`) rather than exit.
@@ -111,11 +163,16 @@ no change to the other wedges.
 - [ ] **W14-4** `systemd-analyze verify dist/systemd/nostromd.service` passes in CI.
 - [ ] **W14-5** macOS `make install-daemon` behaviour is unchanged.
 - [ ] **W14-6** CI is green: the RWX sandbox Rust run (Linux, includes
-  `tests/linux_startup.rs`), the `ubuntu-latest` build/lint job with the new
-  `systemd-analyze verify` step, and the macOS jobs. No local `cargo`. The
+  `tests/linux_startup.rs`), the `ubuntu-24.04` Rust jobs (`rust-clippy` carries the new step),
+  and the macOS jobs. No local `cargo`. The
   startup test is hermetic (tempdir `HOME`, empty `PATH`, no network).
-- [ ] **W14-7** `make install-daemon-linux` installs both `nostromd` and `nostromo-guard`;
-  a Linux daemon logs the "operator app verification unavailable" line.
+- [ ] **W14-7** `make install-daemon-linux` installs `nostromd`, `nostromo-guard` and
+  `nostromo-mcp-bridge` (restart guard first, same order as macOS); a Linux
+  daemon logs the "operator app verification unavailable" line.
+- [ ] **W14-9** With the documented primary `config.toml` (agents off,
+  `authored_prs_enabled = false`), `tests/linux_startup.rs` sees one clean
+  startup: no WARN about `gh`, `aws`, Bishop or Huey, and at most one about
+  `mother`.
 - [ ] **W14-8** PR body references the sequencing memo (W14) and states B7's host as
   resolved.
 
@@ -141,7 +198,7 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   merged since this was first written); the repo default is all four lenses
   (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
 - **Review depth:** Lenses plus Mother's adherence review are enough here; no extra manual Perri pass beyond the `perri` entry below. Packaging only (systemd unit, Makefile, a Linux startup path).
-- **Checklist:** the acceptance items above carry ids (`W14-1` to `W14-8`) so
+- **Checklist:** the acceptance items above carry ids (`W14-1` to `W14-9`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The
   worker ticks each with `mother check <job> --done --evidence <short ref>` only
   when its test or check has passed.

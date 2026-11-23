@@ -223,7 +223,7 @@ Tests:
 
 Tests (Cody gates):
 
-- [ ] **W16-1** CI is green: Rust in the RWX sandbox and the `ubuntu-latest` job; Kit
+- [ ] **W16-1** CI is green: Rust in the RWX sandbox and the `ubuntu-24.04` Rust jobs; Kit
   tests and the iOS build (extension embedded) on GitHub Actions. No
   existing test is modified except W13's engine test, which is extended.
 - [ ] **W16-2** `PushDetail` never returns text for a decision, a `work`-host item, a

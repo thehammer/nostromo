@@ -443,7 +443,7 @@ side), AC35 (daemon and terminal), AC36, AC37 (terminal and logs).
 
 Technical criteria:
 - [ ] **W9-1** CI is green on the PR: the Rust build, clippy and tests (RWX sandbox,
-  `rwx sandbox exec -- cargo test …`, and the `ubuntu-latest` job in
+  `rwx sandbox exec -- cargo test …`, and the `ubuntu-24.04` Rust jobs in
   `.github/workflows/ci.yml`), and the Python tooling job. **Do not run
   `cargo` locally** (the toolchain guard blocks it); use the sandbox or
   `make ci-remote ONLY=rust`. Every new test is hermetic: loopback sockets on
