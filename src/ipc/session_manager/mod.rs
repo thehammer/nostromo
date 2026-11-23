@@ -98,6 +98,7 @@ mod inject_tests;
 #[cfg(test)]
 mod injected_tests;
 mod login;
+mod merge;
 mod model_switch;
 #[cfg(test)]
 mod notice_inject_tests;
@@ -223,6 +224,9 @@ struct PendingMessage {
     /// Run once the message has been written to the session's stdin; never run
     /// for a message an interrupt dropped from the queue.
     on_delivered: Option<DeliveredHook>,
+    /// Set on a merged frame (see `merge`): `text` is then the envelope and the
+    /// original messages are here, to go back to the queue if the write fails.
+    batch: Option<Box<merge::Batch>>,
 }
 
 /// What to do when a queued message is actually delivered (see
