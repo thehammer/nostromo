@@ -35,6 +35,86 @@ question 10 (Ada **D7**) first. Versus the 2026-10-18 version:
   `NetworkClient` at `:17` (the old `:15-46` range still brackets the
   `@main` scene). Re-derive other iOS line numbers on the base.
 
+## Sign-offs folded in (2026-11-23: Ada's memo and the operator's decisions)
+
+Ada signed off D1–D7 and the operator answered Q1–Q8 (memo, "Decision log
+2026-11-23"). Ada is rewriting `docs/prds/daemon-pairing-flow.md` in parallel,
+so this file cites decisions by id. Where a sentence below conflicts with the
+older body text, this section wins. Nothing here waits on anyone any more.
+
+- **D1, Local Network denied (fifth failure state).** Copy, verbatim, with the
+  real address: **"Nostromo can't use your local network, so it can't reach
+  10.0.0.5 on this Wi-Fi. Turn on Local Network for Nostromo in Settings, or
+  use your VPN."** Buttons **Open Settings** (`UIApplication.
+  openSettingsURLString`) and **Try Again**. It keeps the entered address and
+  code, and does **not** use up the code (a denied attempt never reaches the
+  daemon). After pairing, a denied connection shows the banner variant
+  **"Nostromo can't use your local network to reach 10.0.0.5. Turn it on in
+  Settings or use your VPN."** instead of the VPN banner, and never moves to
+  the pairing or no-longer-paired screen. No pre-prompt screen before iOS's
+  alert. The amended AC2: the app pairs and runs with camera permission denied
+  (typed path), and with Local Network denied whenever the server is reached
+  over the VPN, over cellular, or on another subnet. The Local Network alert
+  can appear only after **Scan** or a typed submit, never on the first screen.
+  Criteria W11-12, W11-17.
+- **D2.** The three-action count (PRD AC3) counts operator actions inside the
+  app; iOS's one-time camera and Local Network alerts are not counted. No
+  code; the PR body says so when reporting W11-13.
+- **D4, check before confirmation.** `PairCheck` runs right after a scan or
+  typed submit; "expired", "wrong" and "can't reach" show **before** the
+  confirmation step. The check never uses up the code. If the code expires or
+  is cancelled between the check and **Pair**, tapping **Pair** shows the
+  matching failure sentence and keeps the operator's edited name. Criterion
+  W11-18.
+- **D6, re-pairing an already-paired phone.** Decided by `server_id`, not by
+  address (the same server may be reached at its LAN or its VPN address):
+  - **Same server** (`PairOffer.server_id == credential.serverId`): the
+    confirmation adds **"This replaces this iPhone's current pairing. The old
+    one will be revoked."** On **Pair**, stop the current `WebSocketClient`,
+    send `Pair { …, replaces_token: <current token> }`, and on `Paired`
+    replace the Keychain item. The old entry moves to Revoked server-side
+    (W9) and the name is kept.
+  - **Different server**: the confirmation leads with a warning line in the
+    alert style: **"This iPhone is paired with Nostromo at 10.0.0.5. Pairing
+    with 10.0.0.9 disconnects it from 10.0.0.5 and removes its Nostromo
+    content."** On **Pair**: wipe local content (`DaemonStore.wipeAll()`, as on
+    revoke) and stop the old client, then send `Pair` **without**
+    `replaces_token` (one server's token is never sent to another). On
+    `Paired`: if the old server is reachable, open a short authenticated
+    socket with the old credential and send `DeviceUnpairSelf` (5 s budget;
+    unreachable means the old entry goes stale, as with un-pair while
+    unreachable); then save the new credential. If `Pair` fails, the old
+    credential is kept and the normal failure state shows.
+  Criterion W11-19.
+- **D7 / operator Q7: the phone shows nothing from the message queue in v1.**
+  Already the plan (W11-16). No count either.
+- **Q8 / Q3, one merged list.** Sort "needs you" first, then by recency,
+  across hosts. Show the host badge only when more than one Mac is present:
+  `Hosts` lists more than one connected host, or the list holds rows from more
+  than one host; with one Mac, no badges. A work-host (Kobe) row shows host,
+  8-character ref and a reason phrase from the **same fixed vocabulary as
+  push** ("Job 3f9a1c2e · asked a question"). Tapping it opens a card with
+  that metadata and the line **"Details stay on kobe."**, never a blank screen
+  or an endless spinner. The phrase table lives in Kit
+  (`Shared/NostromoKit/Sources/NostromoKit/NeedsYou/ReasonPhrases.swift`,
+  new), generated from one fixture `tests/fixtures/push-vocab/
+  reason_phrases.json` (new) that W13's `vocab.rs` will assert against, so the
+  app and the lock screen cannot drift. Its entries are the push PRD's
+  phrases as W13 lists them: `paused_reason` `user` → *asked a question*,
+  `adherence_blocked` → *blocked after review*, `operator_hold` → *held after
+  a failure*, `cost_cap` → *paused at its spend cap*, `activity`
+  `pipeline_blocked` → *pipeline blocked*, anything else → *needs you*. Criterion W11-20.
+- **Operator Q2: mail and todos stay home in v1.** When `PairOffer.
+  mail_and_todos_shared` is false (the v1 default), the confirmation and
+  success screens carry no scope line promising mail or todos (the success
+  line is "Paired as <final name>."), Settings shows "Mail and todos aren't
+  shared from your Macs", and the Fred and Teri tabs, on `Withheld { reason:
+  "not_shared" }`, say **"Mail and todos stay on your Mac in this version."**
+  The `device_scope` copy stays built for when sharing is turned on.
+  Criterion W11-21.
+- **Operator Q4.** The phone answers nothing: decisions stay read-only with
+  "Answer it on your Mac" (already W11-2).
+
 ## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
 Read `docs/plans/backplane-sequencing.md` first ("What changed since
@@ -109,7 +189,8 @@ side).
 - **Repo:** nostromo
 - **Branch:** `feat/backplane-ios-ws-client`
 - **Base:** `origin/main` (W9 merged; W10 merged for the `host` field)
-- **Max cost:** $60 (expected ≈ $24; see the memo's Estimate)
+- **Max cost:** $65 (expected ≈ $26; see the memo's Estimate; raised from $60
+  on 2026-11-23 for D1's fifth state, D6's two re-pair paths and Q8's rows)
 
 ## Files to change
 
@@ -222,9 +303,9 @@ side).
   whichever is later.
 - `.../Pairing/PairingErrorBanner.swift` (new) — the four PRD failure
   sentences verbatim, with the real address and device kind (PRD-AC19). A
-  fifth state, `localNetworkDenied`, uses copy pending Ada (design-loop
-  notes, D1). The entered address and code stay in place, and **Try Again**
-  is one tap (PRD-AC20).
+  fifth state, `localNetworkDenied`, uses D1's signed-off copy with **Open
+  Settings** and **Try Again** (see "Sign-offs folded in"). The entered
+  address and code stay in place, and **Try Again** is one tap (PRD-AC20).
 - `iOS/Nostromo/Views/NoLongerPairedView.swift` (new) — full screen: "This
   <iPhone|iPad> is no longer paired with Nostromo. Pair it again to
   reconnect." and **Pair Again** → `PairWithNostromoView` with the address
@@ -364,7 +445,30 @@ Technical criteria:
   transport (Kit decode test plus the existing iOS view path).
 - [ ] **W11-16** No iOS or Kit code path used by the iOS target sends
   `session_queue_watch`, `session_queue_take_back` or `session_queue_remove`
-  (an `ios_policy` source-scan case), per Ada D7.
+  (an `ios_policy` source-scan case), per Ada D7 and operator Q7.
+- [ ] **W11-17** D1: a Kit test maps a Local-Network-denied path probe to
+  `localNetworkDenied` (never `unreachable`, never `notPaired`); the pairing
+  error and the post-pairing banner use D1's two sentences verbatim with the
+  real address; the code is not sent, so not used up.
+- [ ] **W11-18** D4: the confirmation step renders only after a successful
+  `PairCheck`; a `PairRefused { expired | invalid }` on **Pair** after a good
+  check shows the matching failure and keeps the edited name (Kit test on the
+  pairing flow model).
+- [ ] **W11-19** D6: with an injected credential, a `PairOffer` with the same
+  `server_id` produces the replace line and a `Pair` carrying
+  `replaces_token`; a different `server_id` produces the warning line, wipes
+  content before `Pair`, sends no `replaces_token`, and sends
+  `DeviceUnpairSelf` to the old address with the old token after `Paired`;
+  a failed `Pair` keeps the old credential.
+- [ ] **W11-20** Q8: with two hosts' rows the list is sorted needs-you first then
+  recency and shows host badges; with one host there are none; a work-host
+  row's text comes from `ReasonPhrases` (generated from
+  `tests/fixtures/push-vocab/reason_phrases.json`) and its card says
+  "Details stay on <host>." with no content request.
+- [ ] **W11-21** Q2: with `mail_and_todos_shared: false` no pairing, success or
+  settings screen promises mail or todos, and `Withheld { not_shared }` makes
+  the Fred and Teri tabs show "Mail and todos stay on your Mac in this
+  version." (an `ios_policy` string scan plus a `DaemonStore` test).
 
 ## Mother crew: gates, lenses, checklist and calibration
 
@@ -388,7 +492,7 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   merged since this was first written); the repo default is all four lenses
   (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
 - **Review depth:** Manual Perri pass: the normal `perri` entry below; the lenses add a second read on the wire/credential paths. Device credential storage and the cache wipe on scope loss.
-- **Checklist:** the acceptance items above carry ids (`W11-1` to `W11-16`) so
+- **Checklist:** the acceptance items above carry ids (`W11-1` to `W11-21`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The
   worker ticks each with `mother check <job> --done --evidence <short ref>` only
   when its test or check has passed.
@@ -403,8 +507,10 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
 - Push notifications / APNs registration (W13).
 - `seq`/resume (W12); this client reconnects and relies on retained frames.
 - Removing `NetworkClient`/Bonjour (deprecated, selectable under legacy).
-- Renaming the device after pairing; pairing with more than one server;
-  detecting whether the VPN is on (PRD out of scope).
+- Renaming the device after pairing; pairing with more than one server at
+  once (D6 replaces, it never adds); detecting whether the VPN is on (PRD out
+  of scope).
+- A queue count on session rows (D7 option (c)); a later additive field.
 - Universal links (`https://` with an apple-app-site-association file);
   there is no public domain. The custom scheme is the deep link.
 - Any control on the device that changes its own mail-and-todos scope.

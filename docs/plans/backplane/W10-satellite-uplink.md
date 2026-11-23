@@ -33,9 +33,56 @@ the per-topic publish table first; they win over older text here. Versus the
   `src/bin/nostromd.rs:720-751`, the Mother poller `run_mother_pollers`
   `:864` (2 s, `:931`); the TCP listener and mDNS `:353-398`; `Config`
   `src/config.rs:51`. The old numbers in the body are superseded by these.
-- **Gates.** As W9 (memo, crew deltas); Kit runs only as the worker-run
+- **Gates.** Rust ≈ 5 min plus `python-test` ≈ 20 today (its `tests/**`
+  matches the new Rust test files). This is the one wedge that crew delta 7
+  helps: W10 edits no `Makefile` and no Swift path, so once `tests/**` is
+  narrowed only the Rust gates fire (≈ 5 min). Kit runs only as the worker-run
   `make ci-remote ONLY=kit` check because `swift-ci`'s `when` excludes this
   wedge's paths.
+
+## Sign-offs folded in (2026-11-23: Ada's memo and the operator's decisions)
+
+Memo, "Decision log 2026-11-23". What changes here:
+- **Q1, the `revoke_only` admin level, is enforced here.** W15 defines it
+  ("Revoke-only device-admin level (Q1)"); this wedge implements the primary's
+  policy and the level signal:
+  - `PeerTrust::Satellite { admin }` and the local narrowing `device_admin`
+    both take `full | revoke_only | read_only | off`, ordered in that sequence;
+    the effective level is the lower of the two.
+  - Per verb on the primary, for a satellite whose effective level is
+    `revoke_only`: `DeviceList`, `DeviceRevoke`, `DevicePairCancel` and
+    `DeviceSetScope { sensitive: false }` run; `DevicePairStart`,
+    `DevicePairUpdate` and `DeviceSetScope { sensitive: true }` get
+    `DeviceAdminError { not_permitted_on_this_mac }` with no side effect.
+    Admin frames (`Devices`) are delivered as for `read_only`.
+  - The default level follows the enrolment egress: `work` → `revoke_only`
+    (Kobe), `personal` → `full` (Sendai). An explicit `--admin` wins.
+  - New `ServerMsg::DeviceAdminLevel { level, pair_from: Vec<String> }`
+    (class `Admin`, targeted, never broadcast; no ordinal, which only
+    `ClientMsg` has; an arm in `classify_server_msg` and in
+    `redact_for_uplink_metadata`). The primary sends it on a satellite's uplink
+    admission and whenever that record's level changes; `pair_from` lists the
+    hosts whose level is `full`. The satellite lowers `level` by its local
+    narrowing, retains it, and sends it to each local client that subscribes to
+    `devices`. A primary sends `{ level: full, pair_from: [] }` to its own
+    local subscribers. W15 uses it to disable controls up front and to name
+    the Mac to pair from.
+- **Q2: mail and todos stay home in v1, on every host.** `publish_sensitive`
+  stays default `false`, and the README says to leave it off on Sendai too:
+  Fred's mailbox is Microsoft 365 Graph (`src/data/fred_mailbox_native.rs`,
+  `src/data/graph_client.rs`), very likely the employer tenant, so v1 treats
+  even Sendai's mail as work-sensitive. The machinery (the flag, W10-8's
+  `true` case) stays built and tested. W9's primary switch `[devices]
+  share_mail_and_todos = false` is the second lock: even if a satellite
+  published, no `Paired` peer would receive the frames.
+- **Q3, Q5 (work-host text)**: unchanged; the metadata function already sends
+  only kind-level enums, the host, the 8-hex ref and counts. **Q7**: the queue
+  frames are `LocalOnly` and dropped at step 1 of the forward filter; a test
+  row asserts `SessionQueue*` never reaches the primary on either profile.
+- **S7a** adds one field later: W13 puts `operator_presence` on
+  `DecisionRequest`, and adds it to this wedge's metadata arm for that frame.
+  Nothing to build here.
+- New criterion W10-19 (revoke-only and the level signal).
 
 ## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
@@ -125,8 +172,9 @@ open question 2) on the operator's own host.
   Vec<String> (default `["admin-portal", "referral-monitor"]`; config may
   add, the two defaults cannot be removed), publish_topics:
   Option<Vec<Topic>> (default: all the profile allows), device_admin:
-  DeviceAdmin (`full` default, `read_only` or `off`; a local *narrowing* of
-  what the primary grants) }`. Env overrides `NOSTROMD_MODE`,
+  DeviceAdmin (`full` default, `revoke_only`, `read_only` or `off`; a local
+  *narrowing* of what the primary grants) }`. Keep `publish_sensitive`
+  `false` in v1 on every host (Q2). Env overrides `NOSTROMD_MODE`,
   `NOSTROMD_UPLINK_URL`. Validation: `Satellite` requires `uplink`; a
   `work` satellite requires an explicit `host_name` matching
   `^[a-z][a-z0-9-]{0,15}$` (an MDM may set the OS hostname to a person's
@@ -263,7 +311,9 @@ open question 2) on the operator's own host.
   the satellite sent. **Satellite admin
   authorisation (primary side):** a W9 admin verb arriving on a satellite's
   uplink connection is executed only if that satellite's registry record
-  has `admin: full`. With `read_only`, only `DeviceList` is executed and the
+  has `admin: full`. With `revoke_only`, the verb table under "Sign-offs
+  folded in" applies (list, revoke, cancel, turn mail-and-todos off). With
+  `read_only`, only `DeviceList` is executed and the
   rest get `DeviceAdminError { not_permitted_on_this_mac }`. With `off`,
   everything gets that error. `DevicePairStart { satellite: Some(_) }`
   (satellite enrolment) is always refused over an uplink. Pairings started
@@ -278,7 +328,9 @@ open question 2) on the operator's own host.
   allowed for its declared egress (a `work` satellite may only publish the
   metadata shapes; anything else is dropped and counted), and
   `Hello.role.egress` must match the egress recorded at enrolment (`nostromo
-  device pair --satellite <host> --egress work|personal`, default `work`). A
+  device pair --satellite <host> --egress work|personal`, default `work`;
+  the `--admin` default follows it: `work` → `revoke_only`, `personal` →
+  `full`). A
   satellite's token never appears in the phone/iPad device list.
 - `src/bin/nostromd.rs:196-260` — in `Satellite` mode: force
   `tcp_listen_addr`/`ws_listen_addr` to loopback (log if the config asked
@@ -345,7 +397,14 @@ open question 2) on the operator's own host.
    `DevicePairStart` gets `server_unreachable` at once; closing the
    satellite's Unix client cancels its pairing on the primary (a later
    redeem gets `invalid`); and `Devices` updates reach the satellite's Unix
-   client.
+   client. With the record at `revoke_only` (Q1): `DeviceList`, `DeviceRevoke`,
+   `DevicePairCancel` and `DeviceSetScope { sensitive: false }` take effect;
+   `DevicePairStart`, `DevicePairUpdate` and `DeviceSetScope { sensitive:
+   true }` get `not_permitted_on_this_mac` and change nothing; the satellite's
+   Unix client receives `DeviceAdminLevel { level: revoke_only, pair_from:
+   [<full hosts>] }` on subscribe, and again after `nostromo device admin` on
+   the primary changes the level; a local `device_admin = "read_only"`
+   narrowing lowers what the client is told and enforced.
 7. **Egress gates.** `personal` with `publish_sensitive = false`: a
    `TeriState` broadcast never reaches the primary; with `true` it does and
    the primary still withholds it from `Paired { sensitive: false }` and
@@ -417,6 +476,12 @@ open question 2) on the operator's own host.
   `CrewProgress` cannot decode that shape (its `signals.cost` is a scalar today),
   the test records which keys degrade instead of failing the wedge, and the PR
   body says so for MC6.
+- [ ] **W10-19** Q1: the primary enforces `revoke_only` per the verb table (allowed:
+  list, revoke, cancel, scope off; refused with no side effect: pair start,
+  pair update, scope on); the default level is `revoke_only` for a `work`
+  enrolment and `full` for `personal`; `DeviceAdminLevel` reaches a
+  satellite's local `devices` subscriber with the effective (narrowed) level
+  and `pair_from`, and is never broadcast or sent to a `Paired` or `Tcp` peer.
 
 ## Mother crew: gates, lenses, checklist and calibration
 
@@ -425,7 +490,7 @@ Adopts the Mother features summarised in the memo's "Mother features adopted"
 2026-11-23). The repo's `.mother/crew.yml` is on main since MC5 (#290): it is
 read from the job's base ref, so a worker can neither add nor loosen a gate.
 
-- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `python-test` (`where: any`, on the host, when its `when` paths match; `tests/**` and `Makefile` are among them). `swift-ci` is skipped (this wedge touches no Swift paths); the Kit run named in the criteria stays a worker-run check (`make ci-remote ONLY=kit`).
+- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `python-test` (`where: any`, on the host, when its `when` paths match; today `tests/**` matches the new Rust tests; after crew delta 7 it no longer fires here, since this wedge edits no `Makefile` and no Swift path). `swift-ci` is skipped (this wedge touches no Swift paths); the Kit run named in the criteria stays a worker-run check (`make ci-remote ONLY=kit`).
   Mother runs them on the pushed head after the worker exits: sandbox gates
   through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
   from the job worktree. Gate commands never go through the worker's Bash tool,
@@ -440,7 +505,7 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   merged since this was first written); the repo default is all four lenses
   (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
 - **Review depth:** **Manual Perri pass is still required** (the `perri` entry below at xhigh, then the operator's review). Lens findings are input to it, not a substitute: a lens sees only the diff (patch input is capped at 120 KB, so a large wedge will report `coverage_gap` findings), and Mother's `phi-security` checklist is written for care data, so it does not know this repo's trust tiers (B9, B10). Egress filter on a managed laptop; routed frames into a satellite.
-- **Checklist:** the acceptance items above carry ids (`W10-1` to `W10-18`) so
+- **Checklist:** the acceptance items above carry ids (`W10-1` to `W10-19`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The
   worker ticks each with `mother check <job> --done --evidence <short ref>` only
   when its test or check has passed.
