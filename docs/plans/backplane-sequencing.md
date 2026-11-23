@@ -295,30 +295,32 @@ a Mother follow-up that is not built; MC4 uses it on the Mac only when it
 exists, and W13 registers no phone with Mother. The phone push and Mother's Mac
 notification are different devices and can both fire.
 
-### Crew config deltas (for MC5 if not yet dispatched, else a one-line follow-up PR)
+### Crew config deltas (refreshed 2026-11-23: applied vs open)
 
-1. Merge `.mother/crew.yml` before any backplane wedge is added; a job added
-   earlier carries no `crew` and is ungated (W14 may start ungated).
-2. `python-test` should be `where: sandbox`, not `any`: Python goes through the
-   RWX sandbox like Rust. (MC5 chose `any`; its own verification step already
-   runs `rwx sandbox exec -- make python-test`.)
-3. `gates.budget_minutes: 45`, not 20. A wedge that matches `rust-clippy`,
-   `rust-test` (about 5 min with sandbox start) and `swift-ci` (about 7.5 min)
-   plus `python-test` is about 14 min before any retry, so 20 is `incomplete`
-   waiting to happen.
-4. `lenses.scopes.phi-security` gains `src/push/**`, `infra/**`, `template.yaml`,
-   `Shared/NostromoKit/Sources/NostromoKit/Transport/**`,
-   `Shared/NostromoKit/Sources/NostromoKit/Push/**`,
-   `iOS/NostromoNotificationService/**`; `ops-infra` gains `dist/**`, `infra/**`,
-   `template.yaml`.
-5. After W13 merges: a `relay-test` gate (`cargo test --manifest-path
-   infra/push-relay/Cargo.toml`, `where: sandbox`, `when` `infra/push-relay/**`).
-   The standalone crate is not covered by `cargo test` at the root.
+`.mother/crew.yml` is on main (MC5 #290, `where: any` for Python in #292). Its
+current content, by the 2026-10-18 delta numbers:
+
+| # | Delta | State on `8f0328b9` |
+|---|---|---|
+| 1 | Merge crew.yml before any backplane wedge is added | **Applied.** Every wedge added from now on is gated (observe mode). |
+| 2 | `python-test` `where: sandbox` | **Withdrawn; `where: any` is correct** (`.mother/crew.yml:27-32`). The suites need macOS tools (`codesign`/`lipo` in `tests/operator_pin`, the QA harness), which the Linux sandbox lacks. |
+| 3 | `gates.budget_minutes: 45` | **Applied** (`:6`), but now too small: see 6 below. |
+| 4 | Lens scopes for push, relay, transport, extension, `dist/**` | **Applied** (`:63-65`): `phi-security` lists `src/ipc/**`, `src/push/**`, `infra/**`, `template.yaml`, Kit `Wire/**`, `Transport/**`, `Push/**` and `iOS/NostromoNotificationService/**`; `ops-infra` lists `dist/**`, `infra/**`, `template.yaml` and both Xcode projects. The lens default is all four lenses (`:61`), so a wedge's `lenses.add` is now a no-op and only `remove` changes anything. |
+| 5 | `relay-test` gate after W13 | **Open.** Add after W13 merges: `cargo test --manifest-path infra/push-relay/Cargo.toml`, `where: sandbox`, `when: { paths: ["infra/push-relay/**"] }`, `timeout_s: 900`. The standalone crate is not covered by the root `cargo test`. |
+| 6 | Timeouts and budget for serial gates | **Partly open.** PR #519 (open) raises `python-test` to 1800 s and `swift-ci` to 2400 s. Still needed: `budget_minutes` about **90** (Mother runs checks one after another; measured ~25 min Rust + ~20 python + ~24 swift). |
+| 7 | `python-test` path filter | **Open.** `when` includes `tests/**` (`:30`), which matches every Rust test file, so a Rust-only wedge pays the ~20 min Python run. Replace `tests/**` with the Python suite directories (the `PY_FAST_SUITES`/slow lists in `Makefile:71-90` name them) plus `tests/**/*.py`. |
+| 8 | `phi-security` scope for the new CLI | **Open, small.** Add `src/bin/nostromo_cli.rs` (W10's `nostromo uplink pair` writes the satellite token). |
+
+Also new on main and used by the wedges: `rust-fmt` (non-blocking),
+`shellcheck`, `actionlint` (non-blocking) and `mother-contract`
+(non-blocking, `src/mother/**`). `max_attempts` is 2 (the plans' "up to three
+fix attempts" now reads two). Promotion to `enforce` is blocked by
+`python-test` flakiness (tracker row "gates-enforce"), so assume observe mode.
 
 ### Needs a Mother-side change (listed, not requested)
 
-- Run the lens wave automatically (PR #75, open); until it merges the lens
-  half of this plan is manual (`mother review-lens`).
+- ~~Run the lens wave automatically (PR #75)~~: **merged** (Mother
+  `8fd283d`). Lenses run in parallel with adherence on the gated commit.
 - A wire-safe `phi_sensitive` boolean on the job. The daemon keeps only
   `crew_opt_in` (the blob is opaque to clients), so W10's PHI override matches
   repo names only.
@@ -336,6 +338,11 @@ notification are different devices and can both fire.
   still show a scalar; the daemon decodes a scalar. Re-record (HC-16/MC6).
 
 ## What changed since 2026-10-10
+
+*History (2026-10-18 refresh).* Where this section disagrees with "What
+changed since 2026-10-18" above (for example `CLIENT_MSG_VARIANTS = 41`, the
+`peer.rs` line numbers, `Makefile:69-110`, "MC3–MC6 planned"), the newer
+section wins.
 
 Thirty-odd PRs merged between the first draft and this refresh. These are the
 ones that change the backplane, and what each wedge does about it.
@@ -455,7 +462,8 @@ ones that change the backplane, and what each wedge does about it.
 - **Q*N*** — **Question for Ada.** Product question to answer before the
   dependent wedge is dispatched.
 - **B*N*** — **Bet.** Architectural decision with cross-cutting consequences.
-  B1–B6 are defined in the platform memo; B7–B10 are new here.
+  B1–B6 are defined in the platform memo; B7–B11 are new here (B11 added
+  2026-11-23).
 
 ## The brief, restated
 
@@ -558,8 +566,68 @@ Kobe transcript off-host (Q3, open question 5).
   with its own PRD and Perri review) and is out of this memo. A future
   count-only push kind "Approval needed · <host>" is listed as a follow-up for
   Ada, not planned in W13.
+- *2026-11-23:* the same rule covers the newer operator-only verbs: queue
+  take-back/remove, `AuthoredPrMerge` and the PR hand-off verbs, `TrackerEdit`,
+  `SessionMcp`, conversation resume, terminal and remote-shell verbs. All are
+  `Refused` for every network trust today and stay so for `Paired`,
+  `Satellite` and `Routed`.
+
+### B11 — The merge gate counts only connections that can send user messages (new, 2026-11-23)
+
+**Problem.** Since #514 the daemon merges a busy session's queued typed
+messages into one turn only while every connection attached to that session
+declared `merged_turns_v1` in `Hello.capabilities`
+(`src/ipc/session_manager/mod.rs:3846-3855`; `docs/message-queue.md`, "Gate").
+The gate exists because a client that **echoes what it sent** and does not
+understand `Turn.user_parts` would draw a merged turn twice. Today every
+attached connection counts, including network peers. On the backplane that
+means: a W10 routed attach (the primary forwarding a phone's `SessionAttach`
+to a satellite) joins the satellite's session as an undeclared network
+connection, so merging silently stops on Sendai for as long as any phone
+watches; and a W9 `Paired` device on a single-host setup does the same if its
+build predates #514.
+
+**Rule.**
+1. A connection counts against the merge gate only if it is attached to the
+   session **and may send user messages to it**: today, a non-network peer
+   (`PeerTrust::OperatorApp` or `LocalOther`). Network peers (`Tcp`, and the
+   new `Paired`, `Satellite`, `Routed`) never count, whether or not they
+   declared the capability, because `SessionSend` is `Refused` for them
+   (`src/ipc/peer.rs:1076`) and they have nothing of their own to echo. A
+   legacy renderer still shows a merged turn readably: `user_input` is the
+   parts joined by a blank line.
+2. The Rust `DaemonClient` (`src/ipc/client.rs:196-201`) and any local test
+   client keep counting as legacy unless they declare it (unchanged; the CLI
+   W9 adds never attaches to a session, so it never touches the gate).
+3. **How each new peer declares capabilities.** The WebSocket handshake is the
+   same `Hello` JSON as a text frame (B8), parsed by the same code
+   (`src/ipc/server.rs:643-666`), so `capabilities` arrives on every
+   transport. W9: a `Paired` device's declared capabilities are recorded like
+   any connection's (harmless, since rule 1 ignores network peers for the
+   gate). W10: the satellite uplink's `Hello { role: Satellite }` declares
+   none (it attaches to nothing on the primary, which hosts no sessions);
+   frames routed down to a satellite run under a synthetic connection key that
+   W10 registers through `attach_network`, so rule 1 excludes it. W11: iOS
+   keeps declaring `merged_turns_v1` (it already does, through
+   `ClientHello`'s default, `Shared/NostromoKit/Sources/NostromoKit/Wire/
+   ClientMsg.swift:20`) and keeps rendering `user_parts`
+   (`iOS/Nostromo/Views/TranscriptView.swift:224-243`).
+4. **If a later bet lets a device send messages** (device-level operator
+   trust, out of this memo), that bet must make send-capable network peers
+   count again unless they declared the capability.
+
+**Where it lands.** W9 (the session-manager change and its tests, because W9
+is the first wedge that adds network peers; it is a few lines: subtract
+`network_clients` in `refresh_merge_gate` and recount on attach, detach and
+drop as today). W10 asserts the routed key is a network client. W11 asserts
+the WebSocket `Hello` carries the capability. It also fixes today's case of a
+pre-#514 iOS build attached over the legacy TCP listener.
 
 ## Wire inventory (FND-1 classification of every new message)
+
+*2026-11-23:* ordinals below are re-derived from `CLIENT_MSG_VARIANTS = 98`
+(`src/ipc/peer.rs:2491`). The table of verbs and frames merged on main since
+2026-10-18 follows this one.
 
 Network trusts after W9/W10: `Tcp` (legacy, unchanged), `Paired { device_id,
 sensitive }` (a device over WebSocket), `Satellite { host }` (a satellite's
@@ -569,26 +637,57 @@ for all four.
 
 | Message (direction) | Wedge | FND-1 class / policy | Notes |
 |---|---|---|---|
-| `PairCheck`, `Pair` (c→d) | W9 | `Refused` in `network_policy`; accepted only on a token-less pairing socket, enforced in `ws.rs` before dispatch | ordinals 41, 42 |
-| `DeviceUnpairSelf` (c→d) | W9 | `Allowed` for `Paired` only; `Refused` for `Tcp`, `Satellite`, `Routed` | ordinal 43 |
-| `DevicePairStart`, `DevicePairUpdate`, `DevicePairCancel`, `DeviceList`, `DeviceRevoke`, `DeviceSetScope` (c→d) | W9 | `Refused` for every network trust; on the primary, `Satellite` gets a W10 exception gated by the satellite's registry `admin` level | ordinals 44–49 |
+| `PairCheck`, `Pair` (c→d) | W9 | `Refused` in `network_policy`; accepted only on a token-less pairing socket, enforced in `ws.rs` before dispatch | ordinals 98, 99 |
+| `DeviceUnpairSelf` (c→d) | W9 | `Allowed` for `Paired` only; `Refused` for `Tcp`, `Satellite`, `Routed` | ordinal 100 |
+| `DevicePairStart`, `DevicePairUpdate`, `DevicePairCancel`, `DeviceList`, `DeviceRevoke`, `DeviceSetScope` (c→d) | W9 | `Refused` for every network trust; on the primary, `Satellite` gets a W10 exception gated by the satellite's registry `admin` level | ordinals 101–106 |
 | `PairOffer`, `Paired`, `PairRefused`, `Unauthorized`, `DeviceUnpaired` (d→c) | W9 | `Open`, **targeted only** (never broadcast; `Paired` carries the token) | a test asserts none enters the broadcast channel |
 | `DevicePairing`, `DevicePairOutcome`, `Devices`, `DeviceRevoked`, `DeviceAdminError` (d→c) | W9 | new `ServerClass::Admin`: local peers yes; `Satellite` only per its `admin` level (W10); `Paired`, `Tcp` never | |
 | `Hosts`, `HostUnavailable` (d→c) | W10 | `Open` | host names and timestamps only |
 | `MotherJobs.host`, `MotherStatusline.host`, `MotherAwaitDetected.host`, `Activity.host`, `FocusListResp.host`, `SessionListResp.host`, `ApprovalPending.host`, `PerriState.host`, `DecisionRequest.host`, `DecisionResolved.host` (fields) | W10 | class unchanged | `#[serde(default, skip_serializing_if = "Option::is_none")]` |
-| `Hello.role`, `Subscribe.resume` (fields) | W10, W12 | — | additive |
+| `Hello.role`, `Subscribe.resume` (fields) | W10, W12 | — | additive; `Hello` already has `client_kind` and `capabilities` (`protocol.rs:1638-1652`) |
+| `Hello.capabilities` on WebSocket (existing field) | W9, W10, W11 | — | parsed by the shared handshake; B11: network peers never count against the merge gate; iOS declares `merged_turns_v1`, the uplink declares nothing |
 | `Gap` (d→c) | W12 | `Open` | topic, host, seq bounds, reason enum |
-| `RegisterPush`, `SetPushPrefs`, `PushSentLog`, `PushWaiting` (c→d) | W13 | `Allowed` for `Paired` only, self-scoped to the connection's own device id; `Refused` for `Tcp`, `Satellite`, `Routed` | ordinals 50–53 |
+| `RegisterPush`, `SetPushPrefs`, `PushSentLog`, `PushWaiting` (c→d) | W13 | `Allowed` for `Paired` only, self-scoped to the connection's own device id; `Refused` for `Tcp`, `Satellite`, `Routed` | ordinals 107–110 |
 | `PushSentLog`, `PushWaiting`, `PushStatus` (d→c) | W13 | `Open`, targeted only | closed vocabulary text |
 | `PushAvailability` | — | **dropped** (B10; S7) | |
-| `PushDetail` (c→d) | W16 | `Allowed` for `Paired`, self-scoped; reply follows B9 and the device's `sensitive` scope | ordinal 54 |
+| `PushDetail` (c→d) | W16 | `Allowed` for `Paired`, self-scoped; reply follows B9 and the device's `sensitive` scope | ordinal 111 |
 | `PushDetail` (d→c) | W16 | `Open`, targeted only | text present only for `personal`-profile, non-PHI items |
 | `DecisionAnswer.host`, `DecisionAnswerResult` | — | **dropped** (B10; S7) | |
 
 Every new `ClientMsg` adds an arm to `network_policy`, `targets_sensitive_session`
-and the ordinal table, and bumps `CLIENT_MSG_VARIANTS` (41 → 50 after W9 → 54
-after W13 → 55 after W16; if another plan lands a verb first, the next free
-ordinal is used and the count re-derived on the wedge's base).
+and the ordinal table, and bumps `CLIENT_MSG_VARIANTS` (98 on `8f0328b9` → 107 after W9 → 111
+after W13 → 112 after W16; if another plan lands a verb first, the next free
+ordinal is used and the count re-derived on the wedge's base). It also adds the
+variant to `every_client_msg()` and, for an allowed verb, to `NETWORK_ALLOWED`
+(`peer.rs:2461`); a `Paired`-only verb stays out of that list (it is `Refused`
+in `network_policy` and admitted by `paired_extra_allowed`).
+
+### Verbs and frames merged on main since 2026-10-18 (all already classified)
+
+Every row is `Refused` (verbs) or `LocalOnly` (frames) for every network
+trust unless the row says otherwise. The backplane changes none of them: the
+new trusts inherit `Tcp`'s refusals, and `LocalOnly` is never published on an
+uplink (W10 drops it before the egress filter).
+
+| Family (PRs) | Client verbs (ordinals) | Server frames | Backplane note |
+|---|---|---|---|
+| Claude sign-in (CL1 #311, CL2 #314) | `ClaudeLoginAction` (41) | `ClaudeLoginState` | Mac-local. |
+| Background tasks (BA1 #315, BA4 #399) | `SessionTaskStop` (42), `SessionTaskOutput` (43) | `SessionTaskStopResult`, `SessionTaskOutputResult` | `SessionTasks` (metadata) stays `Focus`. |
+| Terminal panes, follow, staging (1a–3e, S1a–S3b) | `Terminal*` (44–51, 55–60, 62–64, 66–68, 76) | `TerminalList`, `TerminalState`, `TerminalClosed`, `TerminalReplay`, `TerminalOutput`, `TerminalRemoteSummary`, `TerminalRefused`, `TerminalStagingList` | No terminal frame of any kind, not even metadata (open question 4 stands). |
+| Remote shells (2a–2e) | `RemoteShellTargetsRequest` (52), `RemoteShellOpen` (53), `RemoteShellAnswer` (54) | `RemoteShellTargets`, `RemoteShellConfirmRequest`, `RemoteShellResolved` | Production targets: never off-host. |
+| Huey document panes (H6) | `PaneAction` (61) | `PaneActionResult`; `PaneContent` with a `Document` body is `LocalOnly` (`peer.rs:731-734`) | Huey's tags are sensitive (`is_huey_tag`, `peer.rs:88`). |
+| Mother notices (MF2a–MF6) | `MotherNoticeSettingsSet` (65) | `MotherNoticeState` | Mac-local. |
+| Approvals rules and log (AP4–AP7) | `ApprovalRevokeSessionRule` (69), `ApprovalsLogQuery` (70), `ApprovalsLogEntry` (71), `ApprovalRemoveRule` (72), `ApprovalRulesKeep` (73), `ApprovalRulesDiscard` (74) | `ApprovalSessionRules`, `ApprovalRules`, `ApprovalPreview`, `ApprovalsLogPage`, `ApprovalsLogDetail`, `ApprovalsLogRefused` | B10. |
+| Tracker (T0b–T6, T3a, T4) | `TrackerOpenLink` (75), `TrackerEdit` (92) | `TrackerBoard`, `TrackerEditResult` (`LocalOnly`); **`TrackerSummary { tag, has_tracker, counts }` is `Focus(tag)`** (`peer.rs:831`, `protocol.rs:3749-3753`) | Board content, notes, links and staged commands (`kind: command`) never leave the host. `TrackerSummary` is published per the topic table. |
+| Slash commands (#458) | `SessionCommandsGet` (77) | `SessionCommands` | Mac-local. |
+| Authored PRs, Perri verdict, Merge (#461, #486, #493, #495, #508) | `AuthoredPrsDemand` (78), `AuthoredPrsRefresh` (79), `AuthoredPrPreviewRequest` (88), `AuthoredPrNotify` (89), `AuthoredPrStartSession` (90), `AuthoredPrLink` (91), `AuthoredPrMerge` (93) | `AuthoredPrs`, `AuthoredPrPreview`, `AuthoredPrNotifyResult`, `AuthoredPrStartSessionResult`, `AuthoredPrLinkResult`, `AuthoredPrMergeResult` | The daemon holds the operator's GitHub token and a verdict store, and `AuthoredPrMerge` enqueues or merges irreversibly: local-only on every host, never routed. `Topic::AuthoredPrs` is never in a satellite's `publish_topics`. (Perri's verdict is recorded through the MCP tool `perri.record_verdict`, not a client verb.) |
+| Conversation history (#464–#475) | `ConversationHistoryGet` (80), `ConversationResume` (81), `…Remove` (82), `…Restore` (83), `…PurgeRemoved` (84), `…SettingsSet` (85), `ConversationResumeRelease` (86), `…Rename` (87) | `ConversationHistory`, `ConversationResumeResult`, `ConversationHistoryChanged`, `ConversationResumeFailed` | Entries carry a `sensitive` flag (`src/conversations/store.rs:50`) but the whole family is `LocalOnly` regardless. |
+| Message queue (S1 #506, S3 #514) | `SessionQueueWatch` (94), `SessionQueueTakeBack` (95), `SessionQueueRemove` (96); `SessionSend.client_ref` (field) | `SessionQueue`, `SessionQueueResult`, `SessionQueueReturned`; `Turn.user_parts` and `QueueEntryWire.merge_group` (fields) | Local-only (D7). `user_parts` travels inside `SessionTurns`/`SessionTurnDelta`, so it follows the transcript rule. B11 for the gate. |
+| `/mcp` panel (#515) | `SessionMcp` (97) | `SessionMcpResult` | Operator-only. |
+| Session lifecycle extras (BA6a, MF2c, #430) | — | **`SessionTurnOrigin` and `SessionBridge` are `Focus(tag)`** (`peer.rs:742-744`) | Topic table: transcript family / boolean. |
+
+Composer history (#509, #511) has **no wire form**: it is a Mac-local store
+(`macOS/Nostromo/Data/ComposerHistoryStore.swift`) and never leaves the Mac.
 
 ### What a satellite publishes, per topic
 
@@ -607,7 +706,15 @@ ordinal is used and the count re-derived on the wedge's base).
 | `PerriState` | PR titles, repos | `Focus` class as today | `{requested count, per PR: number, changed_lines}`; no repo, title or author |
 | `TeriState`, `FredState`, `Work*`, `TeriPicks` | mail, todos, tickets | only if `publish_sensitive = true` (default false) | never |
 | `ModelCatalog`, `ModelDefaults`, `ActivityHealth` | no | yes | yes |
-| future tracker frames (T0b) | yes (guarded by T0g) | follow their FND-1 class when they land | never |
+| `TrackerSummary` (2026-11-23) | counts only | `Focus` class as today (non-sensitive tags only) | `{pseudonymous tag, has_tracker, counts}` |
+| `TrackerBoard`, `TrackerEditResult` (staged commands, notes, links) | yes | never (`LocalOnly`) | never |
+| `SessionTurnOrigin` (2026-11-23) | origin kind and ids of a transcript turn | `Focus` class as today | never (transcript family) |
+| `SessionBridge` (2026-11-23) | a boolean | `Focus` class as today | `{pseudonymous tag, connected}` |
+| `SessionQueue*` (message queue) | queued text | never (`LocalOnly`; D7) | never |
+| `AuthoredPrs*` (PR list, verdicts, merge results) | repos, titles, owner focuses | never (`LocalOnly`) | never |
+| `ConversationHistory*`, `SessionCommands`, `SessionMcpResult`, `ClaudeLoginState`, `MotherNoticeState` | titles, prompts, names | never (`LocalOnly`) | never |
+| `Terminal*`, `RemoteShell*`, approval rules/log frames | yes | never (`LocalOnly`) | never |
+| `PaneContent` with a Huey `Document` body; any frame for a Huey tag | personal notes | never (`LocalOnly` / sensitive tag) | never |
 
 ## Dependency graph
 
@@ -623,40 +730,54 @@ W11 needs W9 for pairing and W10 for the `host` field; it may start once W9 is
 merged and W10 is merged or nearly so (`--depends-on "$W9,$W10"` is the safe
 form). W15 touches only `macOS/` and needs W10's relay.
 
-## Dispatch order (fits the existing queue)
+## Dispatch order (rewritten 2026-11-23 to today's queue)
 
-The approvals chain (AP2a next, then AP2b, AP3…) and MC3 → MC4 go first.
-CL1/CL2 are held. Rule from the operator: **no backplane wedge runs
-concurrently with AP2a, AP3 or MC4 if it touches the session wire
-(`src/ipc/protocol.rs`, `server.rs`, `peer.rs`) or an Xcode project.** Every
-wedge except W14 touches one of those.
+**What the 2026-10-18 rule waited for is merged.** AP2a (#278, #287), AP2b
+(#308), AP2c (#301), AP3 (#310), MC3 (#297), MC4 (#299), MC5 (#290), MC6
+(#381), CL1 (#311), CL2 (#314), terminal 1a–3e (#319–#373), tracker T1 (#312)
+and T0b–T6/T1w, and message queue S1–S5 (#505–#514) are all on main. Open on
+2026-11-23: PR #518 (Mac leftovers; edits `macOS/Nostromo.xcodeproj` and
+`NostromodClient.swift`) and PR #519 (crew timeouts). Parked or unplanned, so
+not in the way: model switching M4–M7, browser pane BP1–BP6, QA fixture mode,
+message queue S6 (steer; it will edit the session wire when planned).
+
+**The rule now:** no backplane wedge runs concurrently with **any** other job
+that edits `src/ipc/protocol.rs`, `src/ipc/server.rs`, `src/ipc/peer.rs` or
+`src/ipc/session_manager/` (the exhaustive matches and the ordinal table make
+such merges painful, not just textual), or the same Xcode project. In
+practice: hold S6 and M4–M7 until W10 merges, or slot them between wedges.
 
 | Step | Wedge | Start when | Touches |
 |---|---|---|---|
 | 0 | this docs PR | merge first | docs |
-| 1 | **W14** | now; may run beside AP2a and MC3 (disjoint files). Must merge before MC4 starts, or wait until MC4 merges: both edit `src/mother/mod.rs` | Makefile, `dist/systemd/`, `src/mother/mod.rs`, `nostromd.rs` startup |
-| 2 | **W9** | AP2a, AP3 and MC4 are all merged (or not yet started and held behind W9 by the operator). CL1, when released, must also not overlap: it edits `peer.rs`/`protocol.rs` | session wire |
+| 0′ | crew follow-up (prerequisite 2) | before W9 is added | `.mother/crew.yml` |
+| 1 | **W14** | now; runs beside anything (disjoint files except `src/bin/nostromd.rs` startup and `src/mother/mod.rs`, which no queued job edits) | Makefile, `dist/systemd/`, `src/mother/mod.rs`, `nostromd.rs` startup, `ci.yml` |
+| 1′ | nextest (prerequisite 5, recommended) | now, beside W14; merge before W9 if it is ready, otherwise W9 does not wait | `.github/workflows/ci.yml`, `.rwx/sandbox.yml`, `docs/ci.md`, `.mother/crew.yml` `rust-test.run` |
+| 2 | **W9** | after steps 0 and 0′; no other session-wire job running. Beside W14 is fine, but W14 and W9 both edit `nostromd.rs` startup and the Makefile: merge W14 first or expect a small conflict | session wire, `session_manager/mod.rs` (B11), Makefile, new CLI |
+| 2′ | iOS test target (prerequisite 6, recommended) | any time before W11; beside W9/W10 | `iOS/Nostromo.xcodeproj`, `ci.yml`, `Makefile`, `docs/ios-verification.md` |
 | 3 | **W10** | W9 merged; same exclusion | session wire |
-| 4 | **W11** | W9 + W10 merged, Ada D1–D6 signed off, and no Xcode-touching job running (AP*, MC*, terminal 1d/1e, T1) | NostromoKit, `iOS/Nostromo.xcodeproj` |
-| 4′ | **W15** | W10 merged, Ada D1–D6 signed off, no Xcode-touching job running; not beside W11 (both may add Kit wire types) | `macOS/`, `macOS/Nostromo.xcodeproj` |
+| 4 | **W11** | W9 + W10 merged, Ada D1–D7 signed off, prerequisite 6 merged (or knowingly skipped), no other job editing `iOS/Nostromo.xcodeproj` | NostromoKit, `iOS/Nostromo.xcodeproj` |
+| 4′ | **W15** | W10 merged, Ada D1–D7 signed off, no other job editing `macOS/Nostromo.xcodeproj` (PR #518 today); not beside W11 (both add Kit wire types) | `macOS/`, `macOS/Nostromo.xcodeproj` |
 | 5 | **W12** | W10 + W11 merged | session wire, Kit |
-| 6 | **W13** | W12 merged, Ada S1–S8 signed off; same exclusions (it touches the session wire and the iOS project) | session wire, `src/push/`, `infra/push-relay/`, iOS |
-| 7 | **W16** | W13 merged; operator has requested the filtering entitlement | iOS project (new extension target), daemon |
+| 6 | **W13** | W12 merged, Ada S1–S8 signed off, AWS account ready; same exclusions (session wire and the iOS project) | session wire, `src/push/`, `infra/push-relay/`, iOS |
+| 6′ | relay-test gate (crew delta 5) | right after W13 merges | `.mother/crew.yml` |
+| 7 | **W16** | W13 merged; entitlement requested (granted is not required) | iOS project (new extension target), daemon |
 
-Gates and lenses: a wedge is gated only if MC5's `.mother/crew.yml` (with the
-deltas in "Mother features adopted") is on `origin/main` when `mother add` runs.
-Enqueue W9 onward after it; W14 may go ungated. Run `mother gates check` once
-after the merge to validate the file before the first job.
+Gates and lenses: every wedge added after this PR merges is gated in observe
+mode by the `.mother/crew.yml` on its base. Run `mother gates check` once after
+the crew follow-up merges. Lenses now run automatically (Mother #75), and the
+repo's lens default is all four, so the wedges' `lenses` blocks matter only for
+`remove`.
 
 ```bash
 cd ~/Code/nostromo
 W14=$(mother add --plan-file docs/plans/backplane/W14-linux-primary.md    --repo nostromo --branch feat/backplane-linux-primary    --max-cost 20)
-# after AP2a, AP3, MC4 merge:
+# after this docs PR and the crew follow-up merge:
 W9=$( mother add --plan-file docs/plans/backplane/W9-ws-transport.md      --repo nostromo --branch feat/backplane-ws-transport      --max-cost 60)
 W10=$(mother add --plan-file docs/plans/backplane/W10-satellite-uplink.md --repo nostromo --branch feat/backplane-satellite-uplink --max-cost 55 --depends-on "$W9")
-# after Ada signs D1-D6:
+# after Ada signs D1-D7 (and the iOS test target merges):
 W11=$(mother add --plan-file docs/plans/backplane/W11-ios-ws-client.md    --repo nostromo --branch feat/backplane-ios-ws-client    --max-cost 60 --depends-on "$W9,$W10")
-W15=$(mother add --plan-file docs/plans/backplane/W15-mac-device-admin.md --repo nostromo --branch feat/backplane-mac-device-admin --max-cost 35 --depends-on "$W10,$W11")
+W15=$(mother add --plan-file docs/plans/backplane/W15-mac-device-admin.md --repo nostromo --branch feat/backplane-mac-device-admin --max-cost 45 --depends-on "$W10,$W11")
 W12=$(mother add --plan-file docs/plans/backplane/W12-seq-resume.md       --repo nostromo --branch feat/backplane-seq-resume       --max-cost 50 --depends-on "$W10,$W11")
 # after Ada signs S1-S8:
 W13=$(mother add --plan-file docs/plans/backplane/W13-push-relay.md       --repo nostromo --branch feat/backplane-push-relay       --max-cost 75 --depends-on "$W12")
@@ -664,67 +785,110 @@ W16=$(mother add --plan-file docs/plans/backplane/W16-ios-push-enrichment.md --r
 ```
 
 (`--depends-on "$W10,$W11"` on W15 serialises the two Swift wedges; drop
-`$W11` if the operator prefers W15 first.)
+`$W11` if the operator prefers W15 first. W15's cap is raised from $35 to $45:
+the comparable Mac UI slice, message queue S2, spent $39.)
 
-## Estimate (calibration: wall ≈ 43 min + 2.6 min per actual $; expected spend ≈ 40% of cap; ±33 min per job)
+## CI prerequisites (new, 2026-11-23)
 
-**Baseline kept.** The numbers below are the original formula and are still the
-plan of record. They predate gates and lenses, so add the gate time per pass
-from the third column; they are not re-fitted.
+**Rust: nextest first, recommended, not blocking.** Numbers and caveats are in
+"Readiness", prerequisite 5. W9 adds `tests/ipc_ws_transport.rs` and
+`tests/device_pairing.rs`, W10 `tests/uplink_roundtrip.rs` and
+`tests/uplink_egress.rs`, W12 and W13 more; each is one more binary in the
+serial run. If nextest is not in first, the wedges still work; the hop and the
+`rust-test` gate are just ~10 min longer each.
 
-**Per-pass gate time (observe mode, one pass):** Rust ≈ 5 min (clippy ≈ 0.5,
-`cargo test` ≈ 3.3 from a fresh sandbox, sandbox start ≈ 1.25), `swift-ci` ≈
-7.5 min, `python-test` under 1 min. Enforce adds a pass plus a worker turn per
-failed attempt, up to 3. So W9 +5, W10 +5, W11 +8, W12 +13, W13 +13, W14 +5,
-W15 +8, W16 +13 min. On the critical path that is about +63 min, so about
-**15 h** end to end instead of 14 h. Lens spend is extra and unverified
-(see the Mother-side list).
+**iOS: add a test target, recommended before W11.** Today iOS is verified in
+three layers (`docs/ios-verification.md`): L1 logic in NostromoKit
+(`swift-tests-kit`, runs on macOS), L2 Python source scans (`tests/ios_policy`),
+L3 a compile (`ios-simulator-build`, generic simulator, no tests). The
+ios-curated-view-parity W2 plan decided **not** to add a target, because that
+PRD forbade a simulator and the target means hand-editing four `pbxproj`
+sections and committing a shared scheme. The backplane changes the balance:
+W11 adds a Keychain credential store, a `nostromo://pair` URL handler, an
+encrypted content cache and the pairing screens; W13 adds APNs registration;
+W16 adds a Notification Service Extension. The wedges already push the logic
+into Kit (W11's `WebSocketClientTests`, `PairingClientTests`,
+`DeviceCredentialTests`, `ContentCacheTests`; W16's `EnrichmentPolicyTests`,
+`PushDetailFetcherTests`), but Keychain access groups, the URL handler, the
+cache's file protection class and the extension's App Group wiring only run in
+an iOS process, and the operator cannot test on a device until the backplane
+exists (tracker: "iOS untestable until backplane"). Proposed wedge
+**iOS-T** (W8-style infrastructure, not numbered in this memo):
+- add a hosted unit-test target `NostromoTests` to `iOS/Nostromo.xcodeproj`
+  and commit a shared `Nostromo` scheme that includes it;
+- `make ios-test`: `xcodebuild test -project iOS/Nostromo.xcodeproj -scheme
+  Nostromo -destination 'platform=iOS Simulator,name=<a device the macos-26
+  image ships>' CODE_SIGNING_ALLOWED=NO`;
+- in `ci.yml`, turn `ios-simulator-build` (`:510-545`) into build-and-test on
+  the same runner and paths, and add `ONLY=ios` coverage to `make ci-remote`;
+- one smoke test (the app delegate launches and `NetworkClient` constructs),
+  plus a `docs/ios-verification.md` "L4 — simulator" section that says what
+  belongs in it (only what Kit cannot run) and keeps L1 as the default.
+Cost: cap $20, expected ≈ $8, ≈ 65 min, plus ~5–10 min of macOS runner time on
+each Swift PR (off the critical path; the Mac shards are longer). If the
+operator declines, W11 and W16 keep their Kit-only tests and the plan says
+so; nothing else changes.
+
+## Estimate (refreshed 2026-11-23; calibration 2026-10-14 checked against recent jobs; ±33 min per job)
+
+**Calibration used.** Wall time ≈ 38 min + 3 min × expected spend; expected
+spend ≈ 40% of the cap (fitted 2026-10-14 on 64 Nostromo jobs). Recent
+Nostromo jobs agree on the middle and show a wide spread: message queue S1
+spent $5.9 of a $40 cap (15%), S2 (Mac UI) $39 of $45 (87%), S3 $9.6 of $60
+(16%); most recent jobs carried $20–45 caps. So caps stay sized for the bad
+case (Swift UI work runs near its cap), and expected spend stays 40%. **Per
+hop ≈ 45 min** (was 40): GitHub CI is now ~20 min for Rust tests and up to
+~35 min per Mac shard, and every `src/` change also runs the Swift jobs
+(`docs/ci.md`, "Path gate"), then Perri and the merge, plus the one-in-three
+chance of a fix-up. **Gate time is now real**: Mother runs the gates after the
+worker exits, serially, before the PR is presented; a Rust wedge's gates take
+~25 min (+ ~20 if `python-test` still triggers), a Swift wedge's ~24, a mixed
+wedge's ~45–70, capped by `budget_minutes`. The job times below include one
+gate pass at the post-follow-up budget.
+
+| Wedge | Cap | Expected spend | Job time (incl. one gate pass) | Starts after |
+|---|---|---|---|---|
+| W14 linux-primary | $20 | ≈ $8 | ≈ 62 + 25 ≈ 85 min | now |
+| W9 ws-transport | $60 | ≈ $24 | ≈ 110 + 25 ≈ 135 min | this PR, crew follow-up |
+| W10 satellite-uplink | $55 | ≈ $22 | ≈ 104 + 25 ≈ 130 min | W9 |
+| W11 ios-ws-client | $60 | ≈ $24 | ≈ 110 + 25 ≈ 135 min | W9, W10, Ada D1–D7, iOS-T |
+| W15 mac-device-admin | $45 | ≈ $18 | ≈ 92 + 25 ≈ 115 min | W10, W11, Ada D1–D7 |
+| W12 seq-resume | $50 | ≈ $20 | ≈ 98 + 50 ≈ 150 min | W10, W11 |
+| W13 push-relay | $75 | ≈ $30 | ≈ 128 + 50 ≈ 180 min | W12, Ada S1–S8 |
+| W16 ios-push-enrichment | $50 | ≈ $20 | ≈ 98 + 50 ≈ 150 min | W13 |
+| *Prereq: crew follow-up* | $5 | ≈ $2 | ≈ 45 min (or an operator edit) | now |
+| *Prereq: nextest* | $15 | ≈ $6 | ≈ 55 + 25 ≈ 80 min | now |
+| *Prereq: iOS-T* | $20 | ≈ $8 | ≈ 62 + 25 ≈ 85 min | now |
+
+Critical path: W9 → W10 → W11 → W12 → W13 → W16 ≈ 135 + 130 + 135 + 150 +
+180 + 150 = 880 min of jobs plus 6 hops × 45 min ≈ **19 h end to end** (range
+15–23 h), counted from W9's start and assuming the Ada sign-offs land before
+W10 merges. nextest would take about 6 × 10 min off (≈ 18 h). W14, W15 and the
+prerequisites run off the critical path. Fastest finish with concurrency 3 is
+the same ≈ 19 h: the chain is serial.
+**Total cap $415; expected spend ≈ $166** (range $120–$250, the high end if
+the Swift wedges behave like S2). With the three prerequisites: cap $455,
+expected ≈ $182.
+Quota: unknown. W14, the prerequisites and W9 (≈ $48 expected) can land in one
+week; the rest spans at least one weekly reset. Ada's sign-offs, not compute,
+remain the likely long pole for W11/W15/W13/W16.
 
 **Use Mother's own figure as the live estimate.** Every running job shows an
-approximate `≈NN%` and an ETA band in `mother list`, `mother status`, the
-statusline and the Mother panel. The band is calibrated from past jobs: per
-repo once 20 jobs exist, else the fleet, else `?`. Nostromo has few jobs, so
-expect the fleet basis and wide bands for the first wedges; trust the 43 min +
-2.6 min/$ line until a band shows `basis: repo`. The cost signal divides by the
-`--max-cost` cap, and our expected spend is about 40% of the cap, so
-`burn_ahead` (cost fraction at least 0.5 and twice the progress fraction) can
-fire on a normal, slow-starting wedge; ack it rather than raising the cap.
+approximate `≈NN%` and an ETA band (`mother list`, `mother status`, the Mother
+panel); trust the line above until a band shows `basis: repo`. `burn_ahead`
+can fire on a slow-starting wedge because expected spend is ~40% of the cap;
+ack it rather than raising the cap.
 
 **Record per wedge so `mother retro` calibrates:** job id; cap and actual cost;
-active time; the ETA band at about 50% (`progress_half` event) and whether the
-job finished inside it; gate time per pass, attempts used and any gate left
-`unavailable`; `moved_back` reasons; lens count and spend; whether CI agreed
-with the gates (`gates_ci_agreement`). Keep the rows in
-`docs/plans/backplane/` notes or the PR body; `mother retro` has the tables
-(`stage_calibration`, `progress_accuracy`, `gates`, `gates_ci_agreement`,
-`red_at_presentation`, `interruptions`).
+active time; the ETA band at about 50% and whether the job finished inside it;
+gate time per pass, attempts used and any gate left `unavailable`;
+`moved_back` reasons; lens count and spend; whether CI agreed with the gates
+(`gates_ci_agreement`).
 
-
-| Wedge | Cap | Expected spend | Job time | Starts after |
-|---|---|---|---|---|
-| W14 linux-primary | $20 | ≈ $8 | ≈ 65 min | queue (now) |
-| W9 ws-transport | $60 | ≈ $24 | ≈ 105 min | AP2a, AP3, MC4 merged |
-| W10 satellite-uplink | $55 | ≈ $22 | ≈ 100 min | W9 |
-| W11 ios-ws-client | $60 | ≈ $24 | ≈ 105 min | W9, W10, Ada D1–D6 |
-| W15 mac-device-admin | $35 | ≈ $14 | ≈ 80 min | W10, W11, Ada D1–D6 |
-| W12 seq-resume | $50 | ≈ $20 | ≈ 95 min | W10, W11 |
-| W13 push-relay | $75 | ≈ $30 | ≈ 120 min | W12, Ada S1–S8 |
-| W16 ios-push-enrichment | $50 | ≈ $20 | ≈ 95 min | W13 |
-
-Critical path: W9 → W10 → W11 → W12 → W13 → W16 ≈ 105+100+105+95+120+95 =
-620 min of jobs plus 6 hops × 40 min ≈ **14 h end to end** (range 11–17 h),
-counted from W9's start. W14 and W15 run off the critical path (W15 beside
-W12). Fastest finish with concurrency 3 is the same ≈ 14 h: the chain is
-serial, and the AP/MC exclusions remove most parallelism in practice.
-**Total cap $405; expected spend ≈ $162** (range $120–$200).
-Quota: unknown. Roughly $50 (W14, W9) could land before the next weekly reset
-if W9's slot opens this week; the rest spans at least one reset. Ada's
-sign-offs, not compute, are the likely long pole for W11/W15/W13/W16.
-
-W13 is the largest job (daemon engine, a Lambda crate and iOS screens). If the
-operator wants the iOS/Xcode half off the AP serialisation, split it into
-W13a (daemon + relay, Rust only) and W13b (iOS registration and settings);
-the split is flagged, not made (open question 8).
+W13 is still the largest job (daemon engine, a Lambda crate and iOS screens).
+If the iOS project is contended when W12 merges, split it into W13a (daemon +
+relay, Rust only) and W13b (iOS registration and settings); the split is
+flagged, not made (open question 8).
 
 ## Install coordination
 
