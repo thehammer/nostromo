@@ -109,7 +109,7 @@ class CrewConfigTests(unittest.TestCase):
         self.assertIs(by["mother-contract"]["blocking"], False)
 
     def test_budget_and_hints(self):
-        self.assertEqual(self.doc["gates"]["budget_minutes"], 45)
+        self.assertEqual(self.doc["gates"]["budget_minutes"], 75)
         self.assertEqual(self.doc["gates"]["max_attempts"], 2)
         lenses = self.doc["lenses"]
         self.assertEqual(lenses["mandatory"], [])
