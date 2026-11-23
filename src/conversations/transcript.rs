@@ -261,7 +261,7 @@ pub fn scan(bytes: &[u8]) -> Facts {
                         && v.get("isMeta").and_then(Value::as_bool) != Some(true)
                     {
                         f.first_user = user_text(&v)
-                            .map(|t| first_part_of_merged(t))
+                            .map(first_part_of_merged)
                             .filter(|t| is_real_prompt(t));
                     }
                 } else if let Some(m) = v.pointer("/message/model").and_then(Value::as_str) {

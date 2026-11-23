@@ -349,7 +349,7 @@ async fn a_failed_write_puts_every_part_back_in_order_with_the_same_ids_and_the_
 #[tokio::test]
 async fn a_take_back_racing_an_in_flight_batch_answers_already_delivered_for_every_part() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut reap, shared, _out) = idle_session(&dir);
+    let (reap, shared, _out) = idle_session(&dir);
     let ids = queue(&shared, vec![typed("a"), typed("b")]);
     advance(&shared);
 
@@ -362,7 +362,7 @@ async fn a_take_back_racing_an_in_flight_batch_answers_already_delivered_for_eve
 #[tokio::test]
 async fn taking_back_the_newest_of_three_then_resending_it_merges_it_at_the_end() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut reap, shared, out) = idle_session(&dir);
+    let (reap, shared, out) = idle_session(&dir);
     let ids = queue(&shared, vec![typed("a"), typed("b"), typed("c")]);
     let answer = reap.0.queue_verb("t", &ids[2], QueueVerb::TakeBack);
     assert_eq!(answer.text.as_deref(), Some("c"));
@@ -426,18 +426,18 @@ async fn a_bound_batch_exposes_its_parts_to_the_reader() {
 #[tokio::test]
 async fn a_held_batch_is_one_entry_whose_take_back_returns_all_texts_and_images() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut reap, shared, out) = idle_session(&dir);
+    let (reap, shared, out) = idle_session(&dir);
     let (i1, i2) = (png(&dir, "1.png"), png(&dir, "2.png"));
     let ids = queue(
         &shared,
         vec![
-            PendingMessage::typed("one", &[i1.clone()], None),
-            PendingMessage::typed("two", &[i2.clone()], None),
+            PendingMessage::typed("one", std::slice::from_ref(&i1), None),
+            PendingMessage::typed("two", std::slice::from_ref(&i2), None),
         ],
     );
     advance(&shared);
     eventually("the batch frame", || {
-        Some(()).filter(|_| !frames_read(&out).is_empty())
+        (!frames_read(&out).is_empty()).then_some(())
     })
     .await;
     login::on_turn_started(&shared);

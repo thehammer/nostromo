@@ -67,7 +67,6 @@ struct Rig {
     _kill: KillOnDrop,
     _server: Server,
     socket_path: PathBuf,
-    mgr: Arc<Mutex<SessionManager>>,
     tmp: TempDir,
     fake_dir: PathBuf,
 }
@@ -143,7 +142,6 @@ impl Rig {
             _kill: KillOnDrop(Arc::clone(&mgr)),
             _server: server,
             socket_path,
-            mgr,
             tmp,
             fake_dir,
         }
