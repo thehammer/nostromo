@@ -1,10 +1,16 @@
 # PRD: Tell the operator what needs them, without telling anyone else
 
 **Author:** Ada
-**Status:** Draft (Ada, 2026-10-10)
+**Status:** Signed off by Ada 2026-11-23. Design loop closed for Archie (S1–S8 signed, S4 withdrawn, new S7a specified; the operator answered Q3–Q7 of Ada's memo). Operator questions still open, each with a v1 default, are listed in `docs/prds/daemon-pairing-flow.md`, open questions 3–5; open question 4 (employer policy on Kobe metadata) has a permissive default and must be confirmed before W10 ships. See "Sign-off and decision log" at the end.
 **Answers:** Q2 in `docs/plans/backplane-sequencing.md`
-**Unblocks wedge:** W13 `push-relay` (`docs/plans/backplane/W13-push-relay.md`)
+**Unblocks wedge:** W13 `push-relay` (`docs/plans/backplane/W13-push-relay.md`) and W16 `ios-push-enrichment`
 **Surface:** iPhone (and iPad, same app) notifications; the operator's own machines; the hosted relay as seen from outside.
+
+> **How to read this PRD after sign-off.** Text marked **(v1)** is a decision for
+> this version. Text marked **(later, when opened up)** is deliberately deferred
+> and is **not** an acceptance criterion for v1. Sections that sign-off withdrew
+> are kept, struck through in words ("Withdrawn"), so the reasoning stays
+> visible. The operator called v1 "a conservative first step".
 
 ## Problem
 
@@ -32,8 +38,9 @@ Carefeed-managed MacBook, work) and **sendai**/**tokyo** (personal, always on).
 They read notifications:
 
 - **On the commuter train, ~60 min each way**, phone in hand, VPN usually up
-  but cellular coverage patchy. They will act on the phone if the thing is
-  small; otherwise they want to know it can wait until the desk.
+  but cellular coverage patchy. **(v1)** They do not act on the phone; they
+  want to know whether a thing needs them now (and is worth getting to a
+  Mac for) or can wait until the desk.
 - **In a meeting**, phone face-up on the table or glanced at under it. Two
   seconds of attention, colleagues within reading distance of the lock screen.
 - **First thing in the morning**, before the commute, deciding what the train
@@ -57,11 +64,36 @@ interruption.
 
 Hosts are classified by the operator, on their own machines (not from the
 phone), as **work** or **personal**. A host that has not been classified is
-treated as **work**. The one fact that varies by class is the repository name:
-it may appear for items from a personal host, never for items from a work
-host.
+treated as **work**. Kobe is work. The one fact that varies by class is the
+repository name. **(v1)** For **every kind**, a repository name appears only
+if the host is personal **and** the repository's owner is not a work
+organisation (default: Carefeed). It never appears for items from a work
+host, and never for an employer-owned repository on any host. The list of
+work owners can only be changed on the operator's machines; the phone shows
+it read-only, like host class. **(v1)** When a repository's owner cannot be
+told (for example, only a bare repository name is known), it counts as a
+work owner, so no name is shown. Today every review in the queue is a Carefeed
+PR, so in practice no review shows a repository name. *(Gating Mother job
+repository names on owner as well as host is Ada's conservative default at
+sign-off, 2026-11-23; the operator may open it up.)*
 
-The host appears as its operator-chosen name (`kobe`, `tokyo`). Host names are
+**(v1) What a work-host notification says.** The operator decided on
+2026-11-23 (Q5) that a Kobe notification says the kind, the host, a short
+reference and a fixed reason. The per-kind fields below go a little beyond
+those four words. They are part of Ada's payload contract, which the
+operator's blanket acceptance of Ada's recommendations covers. He was not
+shown each one separately:
+- a Mother job: the 8-character job reference and the reason phrase;
+- a decision: no reference at all, but the agent from the fixed set (or *A
+  session*), the number of choices and the minutes left before it times out;
+- a review: the PR number, the size phrase and the count of PRs waiting on
+  that host;
+- a Summary: counts by host and the age of the oldest item.
+
+Nothing more, on the relay or on the phone. Kobe items are never enriched
+(see "On-phone enrichment").
+
+The host appears as its operator-chosen name (`kobe`, `sendai`). Host names are
 the operator's own nicknames and are not Carefeed-identifying.
 
 #### Payload contract, per kind
@@ -76,24 +108,37 @@ Mother already uses for its Mac notification.
 | Host name | Adherence notes, hold details, failure text |
 | Short job reference: the 8-character random suffix of Mother's job id (`3f9a1c2e`), exactly as `mother list` shows it | Plan title, job title, branch name, file paths |
 | Reason, from a fixed set: *asked a question* / *blocked after review* / *held after a failure* / *paused at its spend cap* / *pipeline blocked* / *needs you* (any other reason) | Dollar amounts |
-| Repository name — **personal hosts only** | Repository name from a work host |
+| Repository name — **personal hosts only, and only when its owner is not a work organisation** | Repository name from a work host, or of an employer-owned repository on any host |
 
 - Work host — **Title:** `Mother · kobe` **Body:** `Job 3f9a1c2e asked a question`
-- Personal host — **Title:** `Mother · tokyo · nostromo` **Body:** `Job 7c01d4aa is blocked after review`
+- Personal host, personally owned repository — **Title:** `Mother · sendai · nostromo` **Body:** `Job 7c01d4aa is blocked after review`
+- Personal host, Carefeed-owned repository — **Title:** `Mother · sendai` **Body:** `Job 7c01d4aa is blocked after review`
 
-**Decision request** — sent when an agent session raises a decision and no
-operator client is presenting it.
+**Decision request** — **(v1, amended 2026-11-23)** a decision only exists
+while the verified Mac app is connected to answer it, so "nobody is
+presenting it" can never be the trigger. Instead, a decision is pushed:
+
+- **at once**, if the Mac showing it is locked, asleep, or has had no
+  operator input for 2 minutes;
+- **otherwise, 30 seconds after it was raised**, if it is still unanswered.
+
+A decision answered at the Mac inside those 30 seconds never buzzes the
+phone. If whether the Mac is locked or idle cannot be observed, the
+30-second rule alone applies.
 
 | May appear | Never appears |
 |---|---|
 | Kind ("Decision") | The decision prompt, its detail, or any fragment |
 | Host name | Choice labels or choice details |
-| Which agent is asking, from a fixed set: *Mother*, *Perri*, *Fred*, *Teri*, *Claudia*; any other session is *A session* | A dynamic session's own name (e.g. "Claudia in <project>") |
+| Which agent is asking, from a fixed set: *Mother*, *Perri*, *Fred*, *Teri*, *Claudia*; any other session is *A session* | A dynamic session's own name (e.g. "Claudia in `<project>`") |
 | Number of choices | Repository or project name, on any host |
-| Time left before it times out, rounded down to the minute ("times out in 4 min"), when the decision has a timeout | |
+| Time left before it times out, rounded down to the minute ("times out in 4 min"), when the decision has a timeout; **(v1)** with under a minute left, *times out in under 1 min* (never "0 min") | |
 
 - **Title:** `Decision · kobe` **Body:** `Claudia is waiting on you · 3 choices · times out in 4 min`
-- No timeout — **Title:** `Decision · tokyo` **Body:** `A session is waiting on you · 2 choices`
+- No timeout — **Title:** `Decision · sendai` **Body:** `A session is waiting on you · 2 choices`
+
+A decision notification is a signal to go to the Mac. It never carries
+answer buttons (see "Lock-screen actions on decisions", withdrawn).
 
 **PR review requested** — sent when a PR enters the operator's review queue.
 
@@ -104,10 +149,20 @@ operator client is presenting it.
 | PR number (`#4821`) | Organisation or owner name |
 | Size, from a fixed set: *small change* (under 50 changed lines) / *medium change* / *large change* (over 400) | CI log text, file paths |
 | Number of PRs currently waiting on the operator from that host | Repository name from a work host |
-| Repository name — **personal hosts only** | |
+| Repository name — **personal hosts only, and only when its owner is not a work organisation** | Repository name of an employer-owned repository on any host |
 
 - Work host — **Title:** `Review · kobe` **Body:** `PR #4821 · small change · 3 waiting`
-- Personal host — **Title:** `Review · sendai · bishop` **Body:** `PR #212 · large change · 1 waiting`
+- Personal host, personal owner (illustrative only; cannot occur while the
+  queue holds only Carefeed PRs) — **Title:** `Review · sendai · bishop`
+  **Body:** `PR #212 · large change · 1 waiting`
+- **(v1)** Size unknown (GitHub never returned the line counts during the
+  grace delay): the size phrase is omitted, never guessed — `PR #4821 · 3 waiting`.
+
+**Withdrawn item** — **(v1)** when an item stops needing the operator (see
+"Answered elsewhere means gone"), its notification is replaced in place, passively and without sound,
+by `<Kind> · <host>` / `<ref> no longer needs you` (for example
+`Mother · kobe` / `Job 3f9a1c2e no longer needs you`). *no longer needs you*
+is part of the closed vocabulary.
 
 **Summary** (coalesced burst, or the morning digest — see below).
 
@@ -116,23 +171,56 @@ operator client is presenting it.
 | Count of items, split by host | Anything per-item beyond what its own kind allows |
 | Age of the oldest item, rounded ("oldest 14 h") | Repository names, even from personal hosts |
 
-- **Title:** `Waiting for you` **Body:** `3 items · 2 on kobe, 1 on tokyo · oldest 14 h`
+- **Title:** `Waiting for you` **Body:** `3 items · 2 on kobe, 1 on sendai · oldest 14 h`
 
 If the operator later wants more text through the relay for a kind, that is a
 new PRD revision, not a setting.
 
-#### On-phone enrichment — **ambitious bet**
+#### On-phone enrichment — **ambitious bet** (personal hosts only in v1)
 
 When the phone can reach the operator's machines at the moment a notification
-arrives (VPN up), the notification is upgraded **on the phone** with the real
-content, fetched directly from the operator's machines and never via the
-relay: the first line of the worker's question, the decision prompt, the PR
-title. This is the "useful" notification the brief describes, without paying
-for it in relay or Apple exposure.
+arrives (VPN up), a notification from a **personal** host is upgraded **on
+the phone** with the real content, fetched directly from the operator's
+machines and never via the relay: the first line of the worker's question,
+or the PR title. This is the "useful" notification the brief describes,
+without paying for it in relay or Apple exposure.
 
-- Enrichment is **on** by default for personal hosts and **off** for work
-  hosts. The operator can turn it on for a work host in the app's notification
-  settings; that choice is per device.
+- **(v1)** Enrichment is **on** by default for personal hosts, with a
+  per-host off switch on each device.
+- **(v1) Enrichment is also gated on the repository's owner.** An item from
+  a repository owned by a work organisation (default Carefeed), or whose
+  owner cannot be told, shows only the contract text, even from a personal
+  host. A session's or job's owner is the owner of the repository its
+  project lives in, as named by that repository's remote. **An item with no
+  repository** (for example Claudia's private folder, or the Fred, Teri and
+  Perri sessions) has no owner and counts as "owner cannot be told". So, in
+  practice, Sendai shows enriched detail only for Mother jobs and decisions
+  in a repository with a known, non-work owner, and **never for reviews**,
+  since Sendai's review queue holds only Carefeed PRs. Without this gate,
+  enrichment would put Carefeed PR titles on the lock screen. (This gate
+  covers the lock screen only. Read-only transcripts in the app follow the
+  pairing PRD: personal host, not sensitive, not PHI.) *(Ada's
+  conservative default at sign-off, 2026-11-23; the operator may open it
+  up.)*
+- **(v1) Work hosts are never enriched**, and neither are items from the PHI
+  repositories on any host. The server never holds a Kobe question or PR
+  title, so there is nothing the phone could fetch. A work host's row in the
+  notification settings reads **"Details stay on kobe"**, with no toggle.
+  This reverses the operator's 2026-10-10 answer that work-host enrichment
+  should be opt-in (see the decision log). *(later, when opened up: a
+  possible bet where the phone fetches one item's detail on demand through
+  Kobe's own outbound connection, encrypted end to end so the server never
+  holds it. Its own PRD and security review.)*
+- **(v1) Decisions from a personal host are enriched read-only** (Ada's
+  sign-off choice, made within the operator's 2026-11-23 acceptance of
+  Ada's recommendations; not one of his explicit decisions). The
+  notification shows the first line of the decision's prompt, ending
+  `· answer on your Mac`, and offers no choice buttons. The owner gate
+  above applies: a decision from a session in an employer-owned repository
+  shows only the contract text. Seeing the question
+  is what lets the operator decide whether to walk back to the Mac; the app
+  already shows the same prompt read-only on tap. Decisions from a work host
+  or a PHI repository show only the contract text.
 - Enriched text never exceeds what that device is allowed to see in the app.
 - If the content cannot be fetched within a few seconds, the notification
   shows the contract text unchanged. The operator never sees a spinner, a
@@ -142,20 +230,48 @@ for it in relay or Apple exposure.
 
 - **Previews are not force-hidden.** Contract text is safe by construction, so
   Nostromo follows the operator's iOS preview setting. The notification setup
-  screen recommends "Show Previews: When Unlocked" for anyone who enables
-  enrichment on a work host, and says why in one sentence.
+  screen recommends "Show Previews: When Unlocked" while personal-host
+  enrichment is on, and says why in one sentence (enriched text is real
+  content on the lock screen).
 - **Grouped by host.** Everything from kobe stacks together; everything from
-  tokyo stacks together. Work and personal never interleave in one stack.
+  sendai stacks together. Work and personal never interleave in one stack.
 - **The badge is the truth.** The app icon badge equals the number of items
   currently waiting on the operator across all hosts, and is updated with
   every notification and every time the app opens.
 - **Answered elsewhere means gone.** When an item stops needing the operator
-  — answered at the Mac, answered on the iPad, cancelled, timed out, resumed —
-  its notification disappears from the lock screen and Notification Center,
-  and the badge drops. **Ambitious bet:** this happens within 2 minutes while
-  the phone has a network connection, without the operator opening the app.
+  — answered at the Mac, cancelled, timed out, resumed — its notification
+  stops claiming it needs an answer, and the badge drops. **Ambitious bet:**
+  this happens within 2 minutes while the phone has a network connection,
+  without the operator opening the app. **(v1) This is the design:**
+  - **Replace in place.** Within 2 minutes, the stale notification is
+    **replaced** where it sits (same notification slot), passively and
+    without sound, by `<Kind> · <host>` / `<ref> no longer needs you`, and
+    the badge is corrected. A notification that honestly says "no longer
+    needs you" keeps trust; one that is stale some of the time does not.
+  - **Removal when the app opens or comes to the foreground.** Every
+    notification whose item is no longer waiting, replaced or not, is
+    removed then (the floor, below).
+  - **If the operator already dismissed the original**, the replacement
+    still arrives, once, as a new passive entry with no sound. It uses the
+    same collapse identifier, so a later removal or the app opening clears
+    it. The phone never shows two entries for one item.
+  - **No silent removal in v1.** Nostromo sends no background push to
+    remove a delivered notification. iOS rations those, never delivers them
+    to a force-quit app, and does not keep them in order with alert pushes,
+    so combined with a replacement they could put back a notification for a
+    resolved item. Replace-in-place plus removal on app open is the whole v1
+    design.
+
+  **(later, when opened up)** Best-effort silent removal, and silent removal
+  with no "no longer needs you" line at all, are optional later
+  enhancements. The second needs Apple's notification-filtering
+  entitlement. That is an
+  optional enhancement, pursued only if Apple's eligible categories ever
+  truthfully fit Nostromo. It was investigated on 2026-11-23 and not
+  requested (see the decision log).
+
   The floor, which is not a bet: the moment the app opens and connects, every
-  stale notification is removed.
+  stale notification, replaced or not, is removed.
 - **No late arrivals.** A notification that could not reach the phone in time
   is never delivered late: a decision's notification expires at its timeout;
   all others expire after 4 hours. A dead item never buzzes the phone.
@@ -170,7 +286,21 @@ off, the item screen says the operator's machines are unreachable and still
 shows the kind, host and reference from the notification, so the operator
 knows what they are waiting to see.
 
-### Lock-screen actions on decisions — **ambitious bet, wanted in the first version**
+**(v1)** Every notification's only action is **Open**. Tapping a decision
+shows it read-only with **"Answer it on your Mac"** (a personal-host
+decision shows its prompt; a work-host decision shows its metadata). Tapping
+a Kobe item shows its metadata and **"Details stay on kobe."** The phone
+answers nothing in this version: no decisions, approvals, Mother questions
+or PR actions.
+
+### Lock-screen actions on decisions — **Withdrawn at sign-off (2026-11-23)**
+
+*Withdrawn (sign-off S7, operator decision Q4).* Only the verified Mac app,
+by a real click, may answer a decision. A stolen phone plus a VPN profile
+must never become a way to approve an agent's action on a machine that holds
+PHI repositories. The text below is the original bet, kept for the record;
+none of it is v1, and none of it is a criterion. *(later, when opened up:
+only through a device-trust PRD and its own security review.)*
 
 A decision request is the one kind where acting from the lock screen matters:
 it blocks a session and times out, and the operator is often in a meeting.
@@ -194,19 +324,35 @@ tap-through is the experience.
 - **Grace delay for things that can wait.** Mother and review notifications
   wait 2 minutes before sending; if the item is resolved in that time (the
   operator was at the desk and saw Mother's Mac notification), the phone never
-  buzzes. Decisions are sent immediately.
-- **Bursts coalesce.** If more than 3 notifications become due within 2
-  minutes, the operator gets one Summary instead, mirroring Mother's own
-  coalescing.
+  buzzes. **(v1)** Decisions follow their own timing (above): at once if the
+  Mac is locked, asleep or idle, otherwise after 30 seconds if unanswered.
+- **Bursts coalesce.** If more than 3 Mother or review notifications become
+  due within 2 minutes, the operator gets one Summary instead, mirroring
+  Mother's own coalescing. **(v1)** Decisions are never coalesced and never
+  count toward the threshold: a Summary cannot carry a timeout, and a
+  decision is the one kind where minutes matter.
 - **Quiet hours.** Default 22:00–07:00 in the phone's local time, editable in
-  the app. During quiet hours **nothing is pushed, of any kind.** Items that
-  arise and resolve overnight never appear.
+  the app. During quiet hours **nothing that alerts is pushed, of any kind.**
+  Items that arise and resolve overnight never appear. Replacing a
+  resolved notification with "no longer needs you" and correcting the badge
+  make no sound and still happen.
 - **The morning digest replaces the daily reminder.** At the end of quiet
   hours, if anything is still waiting, the operator gets one Summary push.
   The phone does **not** mirror Mother's 24-hour and daily Mac reminders; the
   digest is the phone's daily reminder, timed for before the commute. If the
   operator turns quiet hours off, the digest still fires at the configured
   end time.
+- **The evening summary** (operator answer, 2026-10-10). A second Summary at
+  17:30 phone-local time by default, configurable per device, under the same
+  rules as the morning one (count by host, oldest age, never a repository
+  name). It is sent only if at least one enabled item is waiting, and is
+  skipped if 17:30 falls inside the device's quiet hours.
+- **(v1) Count-only signals.** A job whose progress has stalled, a spend pace
+  running ahead of budget, and a PR whose checks are incomplete count toward
+  the badge and the next Summary, but never push on their own. None of them
+  is act-now.
+- **(v1) Nothing from the message queue.** Messages waiting in a busy
+  session's queue on a Mac never produce a notification.
 - **Per-kind switches.** Each kind can be turned off per device. A kind that is
   off produces nothing, including in summaries.
 
@@ -216,7 +362,8 @@ The app has a **Sent notifications** screen listing every notification
 attempted for this device in the last 7 days: time, kind, host, the exact
 title and body as sent, and the outcome — *delivered to Apple*, *rejected by
 Apple*, *relay unreachable*, *held for quiet hours*, *coalesced into a
-summary*, *withdrawn*, *skipped: resolved during grace delay*. This record is
+summary*, *withdrawn* (the "no longer needs you" replacement was sent), *skipped:
+resolved during grace delay*. This record is
 kept on the operator's own machines, not in the relay, and is deleted after 7
 days.
 
@@ -228,21 +375,37 @@ screen says so and links to iOS Settings.
 
 ### Privacy note (paste-ready)
 
-> Nostromo sends push notifications through a small relay that runs in the
-> operator's own cloud account. A notification contains only the kind of event,
-> the name of the machine it came from, a short reference number, and fixed
-> phrases such as "asked a question" or "times out in 4 min". It never contains
-> questions, prompts, PR titles, people's names, mail subjects, or the names of
-> work repositories; repository names appear only for machines the operator has
-> marked personal. The relay passes each notification to Apple and does not
-> store it. It keeps a delivery record — the time, the kind of event, whether
-> Apple accepted it, and an anonymous device reference — for 7 days, then
-> deletes it. Apple holds an undelivered notification for at most 4 hours (or
-> until a decision's deadline). Fuller details are fetched by the phone
-> directly from the operator's own machines over their private VPN and are
-> never sent through the relay.
+> Nostromo sends push notifications through a small relay that runs in a
+> cloud account dedicated to it, owned personally by the operator and
+> separate from any employer account. A notification contains only the kind
+> of event, the name of the machine it came from, a short reference number,
+> and fixed phrases such as "asked a question" or "times out in 4 min". It
+> never contains questions, prompts, PR titles, people's names, mail
+> subjects, or the names of work repositories; repository names appear only
+> for machines the operator has marked personal, and never for repositories
+> owned by the operator's employer. The relay passes each notification to
+> Apple and does not store it. It keeps a delivery record — the time, the
+> kind of event, whether Apple accepted it, and an anonymous device
+> reference — for 7 days, then deletes it. Apple holds an undelivered
+> notification for at most 4 hours (or until a decision's deadline). For
+> machines the operator has marked personal, fuller details are fetched by
+> the phone directly from the operator's own machines over their private VPN
+> and are never sent through the relay. For work machines, no fuller details
+> reach the phone at all.
+
+### Where the relay runs (v1)
+
+The relay runs in a **new AWS account used only for it**: either a dedicated
+personal account or a member account in the operator's personal AWS
+Organization. Never a Carefeed account, and never beside unrelated personal
+workloads. The APNs signing key and the 7-day delivery records live there
+and nowhere else, so they are easy to account for or delete.
 
 ## Acceptance criteria
+
+Criteria amended at sign-off say **(amended 2026-11-23)**; criteria added at
+sign-off say **(new 2026-11-23)**; withdrawn criteria are kept, marked
+**Withdrawn**, and are not tests.
 
 Payload contract (all observable at the boundary where a notification leaves
 the operator's machines, and on the phone):
@@ -251,30 +414,44 @@ the operator's machines, and on the phone):
   repository each contain a unique marker string, the notification that leaves
   the operator's machines contains none of the markers, and its title and body
   match `Mother · <host>` / `Job <8-char ref> <reason phrase>` exactly.
-- The same job on a **personal** host produces title `Mother · <host> · <repo>`
-  and still contains none of the question, title, plan or branch markers.
+- **(amended 2026-11-23)** The same job on a **personal** host, in a
+  repository whose owner is not on the work-owners list, produces title
+  `Mother · <host> · <repo>` and still contains none of the question, title,
+  plan or branch markers. In a repository owned by a work organisation
+  (default Carefeed) on a personal host, the title is `Mother · <host>`, with
+  no repository name.
 - A host that has never been classified behaves exactly like a work host.
 - Each Mother `awaiting` reason maps to its fixed phrase (*asked a question*,
   *blocked after review*, *held after a failure*, *paused at its spend cap*,
   *pipeline blocked*); an unrecognised reason produces *needs you*. A quota
   pause produces no notification.
-- A decision request whose prompt, detail, choice labels, choice details and
-  session name each contain a marker produces a notification containing none
-  of them; its body names the agent from the fixed set (or *A session*), the
-  choice count, and, when a timeout exists, the minutes remaining rounded down.
-- A PR review request whose title, author, owner, branch and labels each
-  contain a marker produces a notification containing none of them; it shows
-  `#<number>`, the size phrase for the PR's changed-line count (49 → small,
-  50 → medium, 400 → medium, 401 → large), and the current waiting count for
-  that host. The repository name appears only for a personal host.
+- **(amended 2026-11-23)** A decision request whose prompt, detail, choice
+  labels, choice details and session name each contain a marker produces a
+  notification containing none of them; its body names the agent from the
+  fixed set (or *A session*), the choice count, and, when a timeout exists,
+  the minutes remaining rounded down, or *times out in under 1 min* when
+  less than a minute remains (never "0 min").
+- **(amended 2026-11-23)** A PR review request whose title, author, owner,
+  branch and labels each contain a marker produces a notification containing
+  none of them; it shows `#<number>`, the size phrase for the PR's
+  changed-line count (49 → small, 50 → medium, 400 → medium, 401 → large),
+  and the current waiting count for that host. The repository name appears
+  only for a personal host **and** an owner not on the work-owners list
+  (default Carefeed): a Carefeed-owned PR on a personal host shows no
+  repository name.
+- **(new 2026-11-23)** A review whose line counts are unknown when it comes
+  due has the body `PR #<n> · <k> waiting`, with no size phrase.
 - A Summary never contains a repository name, even when every item is from a
   personal host.
-- Every notification's title and body consist only of host names, repository
-  names (personal hosts only), the reference/number/count/duration values, and
-  the fixed phrases listed in this document — checked against the full
-  vocabulary, not a deny-list.
-- Changing a host's classification can only be done from the operator's
-  machines; the phone shows it but offers no control to change it.
+- **(amended 2026-11-23)** Every notification's title and body consist only
+  of host names, repository names (personal hosts and non-work owners only,
+  for every kind),
+  the reference/number/count/duration values, and the fixed phrases listed in
+  this document, including *no longer needs you* and *times out in under 1
+  min* — checked against the full vocabulary, not a deny-list.
+- **(amended 2026-11-23)** Changing a host's classification, or the
+  work-owners list, can only be done from the operator's machines; the phone
+  shows both but offers no control to change them.
 
 Lock screen and lifecycle:
 
@@ -282,12 +459,26 @@ Lock screen and lifecycle:
   from the same host stack together.
 - After any notification arrives or the app opens, the badge equals the number
   of items currently waiting on the operator across all hosts.
-- When an item is resolved elsewhere, its notification is removed and the
-  badge decremented within 2 minutes while the phone is online, without the
-  app being opened — **ambitious bet**: a stale "needs an answer" on the lock
-  screen is the fastest way to teach the operator to ignore the real ones.
-- Opening the app removes every notification whose item is no longer waiting,
-  before the operator can interact with the first screen.
+- **(amended 2026-11-23)** When an item is resolved elsewhere, within 2
+  minutes while the phone is online and without the app being opened, the
+  badge is corrected and the notification stops claiming the item needs an
+  answer — **ambitious bet**: a stale "needs an answer" on the lock screen is
+  the fastest way to teach the operator to ignore the real ones.
+  The notification is replaced in its own slot, with no sound and at the
+  passive level, by `<Kind> · <host>` / `<ref> no longer needs you`,
+  including when the app has been force-quit. It is never left unchanged.
+  If the operator dismissed the original, the replacement arrives once as a
+  passive entry with no sound, and the item never has two entries. (Test
+  with the app force-quit as well as suspended.)
+- **(new 2026-11-23)** In v1 the operator's machines never send a
+  background (silent) push to remove a notification. Checkable at the
+  boundary where pushes leave the operator's machines: no push of that kind
+  is ever sent.
+- **(amended 2026-11-23)** Opening the app, or bringing it to the
+  foreground, removes every notification whose item is no longer waiting,
+  including "no longer needs you" replacements, once the app reaches the
+  operator's machines and before the operator can
+  interact with the first screen.
 - A phone that is offline for longer than 4 hours (or past a decision's
   timeout) does not receive that notification when it reconnects.
 - Decision notifications are delivered at the time-sensitive interruption
@@ -295,49 +486,75 @@ Lock screen and lifecycle:
 - Tapping a notification with the VPN off opens a screen that shows the kind,
   host and reference from the notification and states that the operator's
   machines are unreachable — never an empty screen.
+- **(new 2026-11-23)** Every notification offers **Open** as its only
+  action. Tapping a decision shows it read-only with "Answer it on your Mac"
+  and no control that answers it. Tapping a Kobe item shows its metadata and
+  "Details stay on kobe."
 
-Enrichment and actions:
+Enrichment:
 
-- With the VPN up and a personal-host item, the displayed notification shows
-  the real question / prompt / PR title within 5 seconds of arrival, while
-  the notification that left the operator's machines still contains none of
-  it — **ambitious bet**: this is what makes the notification worth reading
-  without making it worth stealing.
-- With the VPN up and a work-host item, the displayed notification is the
-  contract text unless the operator has turned enrichment on for that host on
-  that device.
+- **(amended 2026-11-23)** With the VPN up and a personal-host Mother or review item from a
+  repository whose owner is not a work organisation, the displayed
+  notification shows the real question / PR title within 5 seconds of
+  arrival, while the notification that left the operator's machines still
+  contains none of it — **ambitious bet**: this is what makes the
+  notification worth reading without making it worth stealing.
+- **(new 2026-11-23)** With the VPN up, a decision from a personal, non-PHI
+  host, in a repository whose owner is not a work organisation, displays the first line of its prompt, ending `· answer on your
+  Mac`, within 5 seconds, and the displayed notification offers no choice
+  actions.
+- **(amended 2026-11-23)** With the VPN up, an item from a work host, or from
+  a PHI repository on any host, always displays the contract text exactly.
+  The notification settings show the work host as "Details stay on `<host>`"
+  with no toggle.
+- **(new 2026-11-23)** With the VPN up, an item or decision from a personal
+  host whose repository is owned by a work organisation (default Carefeed),
+  or whose owner cannot be told, displays the contract text exactly.
+- **(new 2026-11-23)** Turning enrichment off for a personal host on a device
+  makes that host's notifications on that device display the contract text.
 - With the VPN down, every notification displays the contract text exactly;
   no notification ever shows a placeholder, spinner text or error.
-- On an unlocked phone with the VPN up, long-pressing a decision notification
-  shows one button per choice with the real labels; choosing one resolves the
-  decision on the host (observable at the Mac: the modal closes as answered
-  with that choice) and the notification changes to `Answered: <label>` —
-  **ambitious bet, wanted in v1**: decisions time out while the operator is in
-  a meeting, and tap-through-then-VPN-then-find-the-button loses them.
-- Choosing a lock-screen action on a locked phone requires authentication
-  before anything is sent.
-- If a lock-screen answer cannot be delivered, a local notification within 10
-  seconds says which of *unreachable*, *already resolved* or *timed out*
-  happened; the decision is not answered later behind the operator's back.
-- With the VPN down, a decision notification offers only **Open**.
+- **Withdrawn (S7):** long-press decision buttons with real labels and
+  `Answered: <label>`; authentication before a lock-screen action; the local
+  notification when a lock-screen answer cannot be delivered; "with the VPN
+  down a decision offers only Open" (now true of every notification, above).
 
 Frequency:
 
-- A decision request is delivered to a reachable phone within 10 seconds of
-  being raised.
+- **(amended 2026-11-23)** A decision request is delivered to a reachable
+  phone within 10 seconds of being raised **when its Mac is locked, asleep,
+  or has had no operator input for 2 minutes**, and otherwise between 30 and
+  40 seconds after being raised if still unanswered. A decision answered at
+  the Mac within 30 seconds produces no notification and a *skipped:
+  resolved during grace delay* line in Sent notifications. (If the Mac's
+  locked or idle state cannot be observed, only the 30–40 second rule is
+  tested.)
 - A Mother or review item is delivered between 2 minutes and 2 minutes 10
   seconds after it starts waiting; an item resolved within the first 2 minutes
   produces no notification and a *skipped: resolved during grace delay* line in
   Sent notifications.
 - An item produces at most one notification over its whole life (excluding
-  summaries).
-- Four or more notifications becoming due within 2 minutes produce exactly one
-  Summary push and no individual pushes.
-- No notification of any kind is delivered between the start and end of quiet
-  hours. At the end of quiet hours exactly one Summary is delivered if, and
-  only if, at least one enabled item is still waiting.
+  summaries and its own "no longer needs you" replacement).
+- **(amended 2026-11-23)** Four or more Mother or review notifications
+  becoming due within 2 minutes produce exactly one Summary push and no
+  individual pushes. Decisions are never folded into a Summary and do not
+  count toward the four.
+- **(amended 2026-11-23)** No notification that alerts (sound, banner, new
+  lock-screen entry) is delivered between the start and end of quiet hours;
+  "no longer needs you" replacements and badge corrections still happen,
+  with no sound. At the
+  end of quiet hours exactly one Summary is delivered if, and only if, at
+  least one enabled item is still waiting.
+- **(new 2026-11-23)** An evening Summary is delivered at the device's
+  configured time (default 17:30) if, and only if, at least one enabled item
+  is waiting and that time is outside the device's quiet hours.
 - No reminder is ever sent for an item 24 hours after it started waiting, other
-  than through the morning digest.
+  than through the morning and evening summaries.
+- **(new 2026-11-23)** A stalled job, a spend pace ahead of budget, or a PR
+  with incomplete checks never produces a notification of its own; each is
+  counted in the badge and the next Summary.
+- **(new 2026-11-23)** A message waiting in a busy session's queue on any
+  Mac never produces a notification.
 - With a kind turned off on a device, that device receives nothing for that
   kind, and summaries on that device do not count it.
 - A device that is revoked receives no further notifications from 1 minute
@@ -349,7 +566,7 @@ Visibility and retention:
   time, kind, host, exact title and body as sent, and one of the outcomes named
   above; entries older than 7 days are gone.
 - With the relay unreachable for more than 15 minutes, the open app shows the
-  "not delivered since <time>" banner; it clears after the next successful
+  "not delivered since `<time>`" banner; it clears after the next successful
   delivery.
 - Every delivery record the operator can retrieve from the relay contains only
   time, kind, outcome and an anonymous device reference — no title, body, host
@@ -362,13 +579,16 @@ Visibility and retention:
 ## In scope
 
 - Three kinds: Mother awaiting, decision request, PR review requested; plus the
-  Summary (burst coalescing and morning digest).
-- The closed-vocabulary payload contract above, and the work/personal host
-  classification it depends on.
-- Lock-screen grouping by host, badge, withdrawal of resolved items, expiry,
-  interruption levels.
-- On-phone enrichment (bet) and decision quick actions (bet).
-- Grace delay, coalescing, quiet hours, morning digest, per-kind switches.
+  Summary (burst coalescing, morning digest, evening summary).
+- The closed-vocabulary payload contract above, the work/personal host
+  classification and the work-owners list it depends on.
+- Lock-screen grouping by host, badge, withdrawal of resolved items
+  (replace-in-place and removal on app open or foreground; no silent
+  removal in v1), expiry, interruption levels.
+- On-phone enrichment for personal hosts (bet), including read-only decision
+  prompts.
+- Grace delay, decision timing, coalescing, quiet hours, morning and evening
+  summaries, per-kind switches.
 - Sent notifications screen, delivery-failure banner, the privacy note.
 - iPhone and iPad, each as an independently configured device.
 
@@ -376,61 +596,95 @@ Visibility and retention:
 
 - **Any worker-, agent- or third-party-authored text through the relay**, for
   any kind or host, including as an opt-in setting.
-- **Answering a Mother question from the lock screen** (text-reply action).
-  Mother answers are consequential free text; they get the app.
-- **Approve / request-changes on a PR from the lock screen.**
+- **(v1) Answering anything from the phone**: decisions and permission
+  requests (lock-screen buttons or in the app), Mother questions (including a
+  text-reply action), PR approve / request-changes / merge, Mother enqueue.
+  *(later, when opened up: only through a device-trust PRD.)*
+- **(v1) Enrichment for work hosts or PHI repositories**, including as an
+  opt-in. *(later, when opened up: possibly an end-to-end-encrypted
+  on-demand fetch through Kobe's own connection, as its own PRD.)*
+- **(v1) Any notification about the message queue.** *(later: a count is a
+  cheap option in the app first.)*
 - **Notifications for other events**: Mother jobs succeeding or failing,
-  calendar events, budget posture changes, mail. Each is a candidate later
-  kind with its own row in this contract.
+  calendar events, budget posture changes, mail, approvals. Each is a
+  candidate later kind with its own row in this contract (a count-only
+  "approval needed" kind is the most natural next one).
 - **Re-notifying an unanswered item** on a timer, including mirroring Mother's
   24-hour and daily Mac reminders.
 - **Changing Mother's Mac notifications.** They keep working as they do today.
 - **Live Activities and widgets.**
 - **Overriding quiet hours** for urgent decisions.
 - **Android or any non-Apple push.**
-- **Routing notifications through Carefeed-owned infrastructure.**
+- **Routing notifications through Carefeed-owned infrastructure**, including
+  hosting the relay in any Carefeed AWS account.
 
 ## Product risks
 
-- **Too thin to act on.** "Job 3f9a1c2e asked a question" may not tell the
-  operator enough to choose now-or-later on a work host, which is where most
-  jobs run. If they open the app for every one, the closed vocabulary has
-  failed its purpose and enrichment becomes the product, not the bet. Watch
-  how often a work-host notification is opened within a minute.
-- **Misclassified host.** A personal host that ends up with a Carefeed
-  checkout would leak that repository's name. Defaulting unclassified hosts to
-  work limits this to an explicit operator mistake.
-- **Lock-screen exposure via enrichment.** Enriched text is on the phone's own
-  screen. If the operator turns enrichment on for kobe without "When Unlocked"
-  previews, Carefeed content is readable on a table in a meeting. The setup
-  screen warns once; the operator owns the choice.
+- **Too thin to act on, especially for Kobe.** "Job 3f9a1c2e asked a
+  question" may not tell the operator enough to choose now-or-later on a
+  work host, which is where most jobs run. In v1 Kobe items are never
+  enriched, so this risk is accepted, not mitigated: expect to open the app
+  more for Kobe items, and the app shows only metadata there too. Watch how
+  often a work-host notification is opened within a minute; that is the
+  evidence for or against the later on-demand-detail bet.
+- **A decision push means "walk back or lose it".** With no answering from
+  the phone, a decision raised while the operator is in a meeting is likely
+  to time out unless they return to the Mac. The decision timing (at once
+  when the Mac is idle) and the personal-host prompt line are there so the
+  operator can judge quickly whether to go.
+- **Misclassified host.** A Carefeed host marked personal by mistake gets
+  personal treatment for anything not caught by the owner gate. Defaulting
+  unclassified hosts to work limits this to an explicit operator mistake.
+- **Carefeed code under a personal owner.** A Carefeed checkout on a
+  personal host whose owner is not on the work-owners list (for example, a
+  fork under a personal account) would show that repository's name in
+  notifications, and its questions and prompts would be enriched on the
+  phone (never sent through the relay). Keep Carefeed checkouts off Sendai,
+  or classify Sendai as work.
+- **Lock-screen exposure via enrichment.** Enriched personal-host text is on
+  the phone's own screen. The setup screen recommends "When Unlocked"
+  previews once; the operator owns the choice.
 - **Silent quiet hours cost a decision.** A session that raises a decision at
   23:00 will time out unseen. Acceptable because overnight sessions should not
   be waiting on a human; if they routinely are, that is a signal about the
   session, not about quiet hours.
 - **Trust erosion from stale notifications.** If withdrawal lags, the operator
   will answer something already answered, find nothing, and start ignoring
-  pushes. This is why withdrawal is fought for rather than deferred.
-- **Lock-screen action on the wrong choice.** A button press in a pocket or a
-  hurried tap answers an agent irrevocably. Requiring an unlocked phone and
-  confirming in the notification is the mitigation; there is no undo.
+  pushes. This is why withdrawal is fought for rather than deferred, and why
+  the design is an honest "no longer needs you", not a reliance on best-effort removal.
 
 ## Open questions
 
-1. **Is the rhythm right?** Quiet hours default to 22:00–07:00 with the digest
-   at 07:00. Does that land before the morning train, and would an evening
-   digest before the commute home also be wanted?
-2. **Is Carefeed content allowed on a personal phone's screen at all?** This
-   PRD keeps it out of the relay, but enrichment (off by default for kobe)
-   would let it appear on the phone. If employer policy says no, enrichment
-   and lock-screen choice labels for work hosts come out of scope, not into a
-   setting.
+Both answered by the operator on 2026-10-10. Answer 2 was partly reversed on
+2026-11-23 (see the decision log).
+
+1. ~~**Is the rhythm right?**~~ **Answered:** quiet hours 22:00–07:00 with
+   the 07:00 digest fit the commute; add an evening summary at 17:30 (now in
+   "How often").
+2. ~~**Is Carefeed content allowed on a personal phone's screen at all?**~~
+   **Answered 2026-10-10:** yes, with work-host enrichment opt-in.
+   **Reversed 2026-11-23:** work hosts and PHI repositories are never
+   enriched, and the phone answers nothing. Carefeed content stays off the
+   phone's screen in v1 except as fixed-vocabulary metadata.
+
+**Still open for the operator** (each with a conservative v1 default, listed
+in `docs/prds/daemon-pairing-flow.md`, open questions 3–5): whose Microsoft
+365 mail Fred reads on Sendai; whether the employer's policy allows Kobe's
+job states, references and host name to leave Kobe for the server, this
+relay, Apple and a personal phone (v1 assumes yes; if not, Kobe sends no
+pushes); and whether calendar stays home too (v1: yes; calendar is not a
+push kind either way).
 
 ---
 
 ## Design-loop notes for Ada
 
-**Author:** Archie (Phase 3, 2026-10-10). Ada's sections above are unchanged.
+**Signed off by Ada 2026-11-23.** Archie's turns below are kept as the record
+of the loop. The sections above carry every agreed change; where a turn below
+disagrees with them, the sections above win. The sign-off and the operator's
+decisions follow the last turn.
+
+**Author:** Archie (Phase 3, 2026-10-10). Ada's sections above were unchanged at the time.
 Plans: `docs/plans/backplane/W13-push-relay.md` (daemon engine, relay, app
 basics) and `docs/plans/backplane/W16-ios-push-enrichment.md` (Notification
 Service Extension, enrichment, lock-screen decision actions, withdrawal on the
@@ -483,7 +737,10 @@ Evidence behind the table:
   `com.apple.developer.usernotifications.filtering` entitlement, which Apple
   grants on request. W16 builds (b) and the app tells the daemon per device
   whether it has the entitlement. W13 uses (a) plus the badge-only push until
-  then.
+  then. *[Superseded at sign-off, 2026-11-23: Apple's request form limits
+  the entitlement to four use cases, none of which fits Nostromo, so it is
+  not to be requested. Replace-in-place is the design. See the decision
+  log.]*
 - **Enrichment.** A Notification Service Extension gets about 30 s of wall
   time to modify a `mutable-content` push before display, and its network
   traffic uses the WireGuard tunnel when the tunnel is up. W16 caps its own
@@ -664,9 +921,105 @@ S1–S8 still await your sign-off; no new deviation. Two notes:
   S1's 2-minute withdrawal depends on it; until it is granted, the badge is
   corrected within 2 minutes and removing the notification is best effort.
   The operator step is in `docs/plans/backplane-sequencing.md`, open
-  question 6.
+  question 6. *[Superseded at sign-off, 2026-11-23: the entitlement was
+  investigated and is **not** to be requested; see the decision log.]*
 
 Nothing merged on main since turn 2 adds a push source: the new authored-PR
 list, Perri's verdicts, merge results, the tracker board and the message queue
 all stay on the Mac that owns them and never reach the server.
 
+
+---
+
+## Sign-off and decision log
+
+**Signed off by Ada 2026-11-23.** S1–S8 are signed below (S4 withdrawn with
+S7; S7a is new). The operator answered Q3–Q7 of Ada's sign-off memo (the
+same Q1–Q8 numbering the pairing PRD's log uses) on
+2026-11-23. He took the recommendation on every question and called v1 "a
+conservative first step; things can open up later". All of it is written
+into the sections above.
+
+### Operator decisions
+
+| Date | # | Decision (v1) | What it reverses or narrows | Later, when opened up |
+|---|---|---|---|---|
+| 2026-10-10 | OQ1 | Quiet hours 22:00–07:00, 07:00 digest; add a 17:30 evening summary. | Nothing. | — |
+| 2026-10-10 | OQ2 | Carefeed content allowed on the phone's screen; work-host enrichment opt-in. | — | Reversed in part on 2026-11-23 (next row). |
+| 2026-11-23 | Q3 | **Work hosts (Kobe) and PHI repositories are never enriched on the phone.** The setting reads "Details stay on kobe", with no toggle. | **Reverses the operator's 2026-10-10 answer 2** (work-host enrichment as a per-device opt-in) and the draft's opt-in criterion. | A possible end-to-end-encrypted on-demand fetch through Kobe's own connection, as its own PRD. |
+| 2026-11-23 | Q4 | **The phone answers nothing in this sequence**: no decisions, approvals, Mother questions or PR actions. | Withdraws the "Lock-screen actions on decisions" bet (wanted in v1 by the draft) and narrows `docs/visions/iphone.md` and `docs/visions/ipad.md` (amended in the same change). | A device-trust PRD and security review. |
+| 2026-11-23 | Q5 | **A Kobe notification says kind, host, short reference and a fixed reason.** The per-kind fields in the payload contract (a decision's agent name, choice count and time left, with no reference; a review's size phrase and waiting count; a Summary's counts and oldest age) are Ada's contract, covered by his blanket acceptance of Ada's recommendations. He did not review each field. | Nothing; confirms the contract. | — |
+| 2026-11-23 | Q6 | **The relay runs in a new, dedicated personal AWS account, or a member account in the operator's personal AWS Organization.** Never a Carefeed account. | Narrows "the operator's own cloud account" to a dedicated one. | — |
+| 2026-11-23 | Q7 | **Nothing from the message queue**, in notifications or in the app. | Nothing (today's behaviour). | A count in the app, "2 messages waiting". |
+| 2026-11-23 | S8 amendment (Ada) | **Personal-host decisions show the first line of the prompt, read-only**, ending "· answer on your Mac". This is **Ada's sign-off choice**, made within the operator's 2026-11-23 acceptance of Ada's recommendations; it is not one of his explicit decisions. His explicit reversal is Q3 (Kobe, work and PHI detail). | Reverses Archie's turn-2 proposal (no decision enrichment). | — |
+| 2026-11-23 | Ada default | **Repository names gated on owner for every kind**, not only reviews, and **an unknown owner counts as a work owner**: Ada's conservative default, which the operator may open up. | Tightens the draft's Mother row (host class only). | Open up if Mother runs on personally owned repositories and the operator wants their names. |
+| 2026-11-23 | Ada default | **Enrichment gated on owner too**: items (including decisions) from employer-owned or unknown-owner repositories show only contract text, even from a personal host. Ada's conservative default, which the operator may open up. | Narrows personal-host enrichment (the draft gated on host class only). | Open up per owner if the operator wants it. |
+
+### Apple's notification-filtering entitlement: investigated 2026-11-23, not requested
+
+The operator opened Apple's request form for the Notification Service
+Extension filtering entitlement on 2026-11-23. It requires the App Store URL
+and numeric Apple ID of a published app, and a choice between four use cases
+only: end-to-end encrypted messaging, earthquake warnings, education or
+learning platforms retracting urgent alerts, and healthcare professionals'
+patient-care alerts being retracted. Location-sharing apps are named as
+ineligible. Nostromo is a personal operations tool, is not on the App Store,
+and truthfully fits none of the four. **The request was not made**, and must
+not be made by choosing a category that does not apply. So S1's
+replace-in-place is the v1 design, not a fallback. The entitlement stays a
+"later, when opened up" enhancement only if Apple's categories ever fit.
+
+### Ada's sign-offs
+
+- **S1, withdrawal: accepted, with a change.** Replace in place (same
+  notification slot, passive, no sound) with `<ref> no longer needs you` is
+  the primary design from day one. Removal on app open or foreground is the
+  floor. **No silent (background) removal in v1**, as Ada's memo signed:
+  removal and replacement are not combined, because Apple does not order
+  them and a replacement after a removal would put back a resolved item.
+  Best-effort silent removal is a later, optional enhancement. A dismissed
+  original still gets its replacement, once, as a passive entry. (Settled
+  2026-11-23 after review. An earlier revision of this PR allowed silent
+  removal after the replacement; that is withdrawn, along with its ordering
+  criterion and the *silently removed* outcome, which could not be tested.)
+  *no longer needs you* joins the vocabulary. Archie: if you
+  have evidence that replacement is unreliable for a force-quit app, or that
+  it lights the screen at the passive level, bring it back to Ada.
+- **S2, decisions never coalesced: accepted;** decisions also don't count
+  toward the threshold.
+- **S3, unknown size omitted: accepted as written.**
+- **S4, action limit: withdrawn** with S7.
+- **S5, repository names also gated on owner: accepted,** plus: the
+  work-owners list changes only on the operator's machines, and the phone
+  shows it read-only. `Review · sendai · bishop` is illustrative only.
+- **S6, "times out in under 1 min": accepted as written.**
+- **S7, no lock-screen answers; a phone is not an operator: accepted**
+  (operator Q4). C3 is withdrawn with it; agents behave as today.
+- **S7a (new), when a decision is pushed:** at once if its Mac is locked,
+  asleep or idle for 2 minutes; otherwise 30 seconds after it was raised if
+  still unanswered (delivered by 40 s). Answered within 30 s means no push and
+  a *skipped: resolved during grace delay* line. Archie decides whether
+  "locked or idle" can be observed on both Macs; if not, the 30-second rule
+  stands alone.
+- **S8, no enrichment for work hosts and PHI repositories: accepted**
+  (operator Q3). **Amended for decisions:** personal-host decisions show the
+  prompt's first line read-only (Ada's choice, within the operator's
+  acceptance of Ada's recommendations; not an explicit operator decision).
+- **Clarifications:** C1, C2, C4, C5, C6 and C8 are accepted as read. C3 and
+  C7 are withdrawn (no decision buttons exist). Plus a sign-off call not in
+  S1–S8: progress-stalled, burn-ahead and gates-incomplete signals are
+  count-only in v1.
+
+### Code facts checked on `origin/main` (d191dd4d) for this sign-off
+
+- A network peer cannot answer a decision or an approval
+  (`src/ipc/peer.rs:1085-1086`), so the phone cannot be an operator.
+- An agent's decision fails at once with `no_operator` unless the verified
+  Mac app is connected (`src/mcp/tools/ask_decision.rs:89-90`). That is why
+  S7a's trigger replaces "no operator client is presenting it".
+- The Perri queue searches only `org:Carefeed`
+  (`src/data/perri_queue_native.rs:1037-1039`; Archie's S5 note cites
+  `:989-990`, which has since moved). That is why no review shows a
+  repository name today.
+- The message queue never reaches a network peer
+  (`src/ipc/peer.rs:798-800`, `:1103-1105`).
