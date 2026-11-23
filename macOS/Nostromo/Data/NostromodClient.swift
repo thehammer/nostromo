@@ -1588,12 +1588,6 @@ class NostromodClient {
         return advertisedFeatures.contains(claudeLoginFeature)
     }
 
-    /// Whether the connection's last `welcome` advertised `merged_turns_v1`.
-    var daemonAdvertisesMergedTurns: Bool {
-        sendLock.lock(); defer { sendLock.unlock() }
-        return advertisedFeatures.contains(mergedTurnsFeature)
-    }
-
     /// Whether the connection's last `welcome` advertised `session_queue_v1`.
     var daemonAdvertisesSessionQueue: Bool {
         sendLock.lock(); defer { sendLock.unlock() }

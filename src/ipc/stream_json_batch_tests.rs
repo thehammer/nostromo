@@ -159,3 +159,29 @@ fn the_golden_jsonl_rebuilds_as_two_parts_with_its_golden_ledger() {
         ["oh and backfill the rows", "use the new column name"]
     );
 }
+
+#[test]
+fn a_pasted_copy_of_a_real_envelope_shows_verbatim_because_its_record_is_used_up() {
+    // The real batch, then (later) the user pastes the same text as a lone message.
+    let jsonl = format!(
+        "{}\n{}\n{}\n{}\n",
+        user_line(&envelope()),
+        result_line(),
+        user_line(&envelope()),
+        result_line()
+    );
+    let mut t = transcript_from_jsonl(&jsonl, 50);
+
+    t.apply_batch_ledger(&[record(2)]);
+
+    let turns = t.snapshot();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(
+        turns[0].user_parts,
+        ["oh and backfill", "use the new column"],
+        "the real one splits"
+    );
+    assert!(turns[1].user_parts.is_empty(), "the copy shows verbatim");
+    assert_eq!(turns[1].user_input, envelope());
+    assert_eq!(t.retained_bytes, recount(&t));
+}

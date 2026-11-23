@@ -51,6 +51,41 @@ final class MergedUserBubblesViewTests: XCTestCase {
         XCTAssertEqual(view.userBubbleContent?.text, "hello")
     }
 
+    // A confirm-card reply queued behind a running turn can merge with a typed message: only the
+    // confirm part is hidden.
+    private let confirm = "Merge it\n\n(This answers your question: \"Land it?\" — please proceed.)"
+
+    private func turnView(_ turnParts: [String]) -> ChatTurnView {
+        let turn = ChatTurn(userInput: turnParts.joined(separator: "\n\n"), timestamp: Date(), isComplete: true,
+                            daemonId: "t0", userParts: turnParts)
+        return ChatTurnView(turn: turn, contentAvailable: true, interaction: TurnInteractionState())
+    }
+
+    func testAMergedTurnWithOneConfirmReplyAndOneTypedMessageShowsExactlyTheTypedBubble() {
+        let view = turnView([confirm, "and run the tests"])
+        XCTAssertNil(view.mergedBubblesView, "one bubble drawn: no group, no caption")
+        XCTAssertEqual(view.userBubbleContent?.text, "and run the tests")
+        XCTAssertTrue(view.hasUserBubble)
+    }
+
+    func testAMergedTurnOfOnlyConfirmRepliesDrawsNoBubble() {
+        let view = turnView([confirm, confirm])
+        XCTAssertNil(view.mergedBubblesView)
+        XCTAssertFalse(view.hasUserBubble)
+    }
+
+    func testAMergedTurnKeepsTheCaptionWhenTwoPartsRemainAfterTheConfirmReplyIsHidden() {
+        let view = turnView([confirm, "one", "two"])
+        XCTAssertEqual(view.mergedBubblesView?.shownParts, ["one", "two"])
+        XCTAssertEqual(view.mergedBubblesView?.captionText, "sent together")
+    }
+
+    func testAPlainMergedTurnIsUnchangedByTheConfirmRule() {
+        let view = turnView(["one", "two"])
+        XCTAssertEqual(view.mergedBubblesView?.shownParts, ["one", "two"])
+        XCTAssertFalse(view.hasUserBubble)
+    }
+
     // MARK: height estimate
 
     func testTheEstimatorCountsEveryBubbleAndTheCaption() {

@@ -179,8 +179,13 @@ pub(super) fn record_batch(shared: &Shared, batch: &Batch) {
 
 /// A fresh boundary that occurs in none of `texts`.
 pub(super) fn fresh_boundary(texts: &[&str]) -> String {
+    fresh_boundary_from(texts, || uuid::Uuid::new_v4().simple().to_string())
+}
+
+/// [`fresh_boundary`] with the candidate source injected (random by default).
+pub(super) fn fresh_boundary_from(texts: &[&str], mut source: impl FnMut() -> String) -> String {
     loop {
-        let b = uuid::Uuid::new_v4().simple().to_string();
+        let b = source();
         if !texts.iter().any(|t| t.contains(&b)) {
             return b;
         }
