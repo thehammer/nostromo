@@ -190,8 +190,16 @@ without paying for it in relay or Apple exposure.
 - **(v1) Enrichment is also gated on the repository's owner.** An item from
   a repository owned by a work organisation (default Carefeed), or whose
   owner cannot be told, shows only the contract text, even from a personal
-  host. Today Sendai's review queue holds only Carefeed PRs, so without this
-  gate enrichment would put Carefeed PR titles on the lock screen. *(Ada's
+  host. A session's or job's owner is the owner of the repository its
+  project lives in, as named by that repository's remote. **An item with no
+  repository** (for example Claudia's private folder, or the Fred, Teri and
+  Perri sessions) has no owner and counts as "owner cannot be told". So, in
+  practice, Sendai shows enriched detail only for Mother jobs and decisions
+  in a repository with a known, non-work owner, and **never for reviews**,
+  since Sendai's review queue holds only Carefeed PRs. Without this gate,
+  enrichment would put Carefeed PR titles on the lock screen. (This gate
+  covers the lock screen only. Read-only transcripts in the app follow the
+  pairing PRD: personal host, not sensitive, not PHI.) *(Ada's
   conservative default at sign-off, 2026-11-23; the operator may open it
   up.)*
 - **(v1) Work hosts are never enriched**, and neither are items from the PHI

@@ -19,7 +19,9 @@ sees. They cannot author new MCP tools or write code from the phone.
 **Amended 2026-11-23 (backplane sequence).** In this sequence the phone is a
 **"what needs me, and is it urgent"** surface. It can read the detail of
 personal-host items read-only (a Mother job's question, a decision's
-prompt), but not agent transcripts, which are later, as on the iPad. It can
+prompt) and, as today, read the transcripts of personal-host sessions that
+are not sensitive and not in a PHI repository. Kobe (work), sensitive and
+PHI transcripts never reach the phone. It can
 see what is waiting and how urgent it is, and react to a
 notification by deciding whether to go to the Mac. It **answers nothing**:
 no approving or denying decisions or permission requests, no answering or
@@ -96,7 +98,8 @@ sequence delivers it, or **(later, when opened up)** where it is deferred.
   on the Mac, Archie + Cody run there. The phone never spawns workers.
 - **Calendar quick-view (later, when opened up).** Today/tomorrow agenda.
   Tap for details, join link, mark as done. Read-only. Deferred because
-  the calendar comes from the same Microsoft 365 source as Fred's mail,
+  the calendar comes from the same Fred accounts (Microsoft 365 and/or
+  Google) as Fred's mail,
   which stays on the Macs in v1. Whether calendar stays home is an open
   operator question in `docs/prds/daemon-pairing-flow.md`; the v1 default
   is yes.

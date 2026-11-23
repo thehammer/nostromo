@@ -29,15 +29,17 @@ conversations — without pretending to be a full Mac.
 > **Mail and todos stay on the Macs**, so the Fred mailbox capability below
 > is deferred and the Fred and Teri views say "Mail, calendar and todos stay
 > on your Mac in this version." **Calendar stays home too by default** (it comes
-> from the same Microsoft 365 source as the mail; an open operator question
+> from the same Fred accounts (Microsoft 365 and/or Google) as the mail; an open operator question
 > in the pairing PRD). Kobe (work) items are metadata only.
 >
 > **What is v1 on the iPad** is exactly what the pairing PRD delivers to any
 > paired device: the merged "needs you" list across Macs, Mother job state
-> and personal-host detail read-only, PR review requests as number, size and
-> waiting count, decisions read-only with "Answer it on your Mac", and
-> notifications. Everything else below (plan viewer, PR diff viewer, Claudia
-> transcripts and chat, mail, calendar, drag-and-drop, Pencil annotation,
+> and personal-host detail read-only, read-only transcripts of personal-host
+> sessions that are not sensitive and not in a PHI repository (as today;
+> never Kobe, sensitive or PHI transcripts), PR review requests as number,
+> size and waiting count, decisions read-only with "Answer it on your Mac",
+> and notifications. Everything else below (plan viewer, PR diff viewer,
+> Claudia chat, mail, calendar, drag-and-drop, Pencil annotation,
 > answering of any kind) is **later, when opened up**: answering through a
 > device-trust PRD, mail and calendar once the operator chooses to let them
 > onto devices, richer reading through PRDs of their own.

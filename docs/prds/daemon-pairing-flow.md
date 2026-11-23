@@ -314,6 +314,12 @@ recency, across Macs. On the train the question is "what needs me", not
 - **Tapping a Kobe row** opens a card with that metadata and the line
   **"Details stay on kobe."** It never shows a blank screen or a spinner that
   does not end.
+- **Transcripts, read-only, from personal hosts only (v1).** As today, the
+  device shows the transcript of a personal-host session that is not marked
+  sensitive and is not in a PHI repository, read-only. Kobe (work)
+  transcripts, sensitive sessions' transcripts and PHI-repository
+  transcripts never reach the device. Opening a Kobe session shows the same
+  "Details stay on kobe." card.
 - **Nothing from a busy session's message queue.** Messages typed at the Mac
   while an agent is busy (the queue chips) do not appear on the device in
   any form: no text, no count, no take-back. **(later, when opened up)** a
@@ -337,7 +343,8 @@ confirmation) would be its own PRD and security review.
 **(v1) Decision: mail and todos stay on the Macs, for every host.** Nothing
 from Fred (mail) or Teri (todos, tickets) reaches any device in this
 version, from Sendai or from Kobe. **Calendar stays home too, by default**:
-Fred's calendar comes from the same Microsoft 365 source as the mail. The
+Fred's calendar comes from the same Fred accounts (Microsoft 365 and/or
+Google) as the mail. The
 operator has not decided calendar explicitly (open question 5); until he
 does, no calendar content reaches a device, and the copy below names it so
 nothing is promised.
@@ -833,10 +840,12 @@ things.
    satellite uplink) ships.** If the answer is no, Kobe sends nothing to
    the server: the phone shows no Kobe rows, sends no Kobe pushes, and
    Kobe's revoke-only device administration also goes, since it travels
-   over the same uplink. Revoking then happens from Sendai or the server's
-   terminal.
+   over the same uplink. Specifically, these lapse: criterion 12 (manage
+   from Kobe), the "works from Kobe" part of criterion 24, criterion 50, and
+   the lost-phone-at-work path. Revoking then happens from Sendai or the
+   server's terminal.
 5. **Open: does calendar stay home too?** Fred's calendar comes from the
-   same Microsoft 365 source as the mail. *v1 default:* yes, calendar stays
+   same Fred accounts (Microsoft 365 and/or Google) as the mail. *v1 default:* yes, calendar stays
    on the Macs with mail and todos, and the copy says "Mail, calendar and
    todos…". If he says no, only the copy and the calendar views change.
 
