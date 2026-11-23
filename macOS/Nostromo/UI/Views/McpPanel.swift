@@ -508,11 +508,9 @@ final class McpPanelController: NSObject {
         sheet.contentView = panelView
         self.sheet = sheet
         parent = window
-        if let window {
-            window.beginSheet(sheet) { [weak self] _ in self?.finishClose() }
-        } else {
-            sheet.makeKeyAndOrderFront(nil)
-        }
+        // Only ever a sheet on a pane's window, never a free-floating window.
+        guard let window else { finishClose(); return }
+        window.beginSheet(sheet) { [weak self] _ in self?.finishClose() }
         sheet.makeFirstResponder(panelView.refreshButton)
         refresh()
     }
@@ -653,11 +651,8 @@ final class McpPanelController: NSObject {
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Disable")
         alert.addButton(withTitle: "Cancel")
-        if let sheet {
-            alert.beginSheetModal(for: sheet) { completion($0 == .alertFirstButtonReturn) }
-        } else {
-            completion(alert.runModal() == .alertFirstButtonReturn)
-        }
+        guard let sheet else { return completion(false) }
+        alert.beginSheetModal(for: sheet) { completion($0 == .alertFirstButtonReturn) }
     }
 
     private func finishClose() {

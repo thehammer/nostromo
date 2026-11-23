@@ -27,18 +27,18 @@ final class McpFakeSender: McpRequestSending {
 final class McpHarness {
     let sender = McpFakeSender()
     var clock = Date(timeIntervalSince1970: 1_000_000)
-    private(set) var scheduled: [(delay: TimeInterval, work: () -> Void)] = []
+    private(set) var scheduled: [(due: Date, work: () -> Void)] = []
     private var counter = 0
     private(set) lazy var requests: McpRequests = {
         let r = McpRequests(makeRequestId: { [unowned self] in self.counter += 1; return "req-\(self.counter)" },
-                            schedule: { [unowned self] delay, work in self.scheduled.append((delay, work)) })
+                            schedule: { [unowned self] delay, work in self.scheduled.append((self.clock.addingTimeInterval(delay), work)) })
         r.sender = sender
         return r
     }()
 
     var now: () -> Date { { [unowned self] in self.clock } }
     var schedule: (TimeInterval, @escaping () -> Void) -> Void {
-        { [unowned self] delay, work in self.scheduled.append((delay, work)) }
+        { [unowned self] delay, work in self.scheduled.append((self.clock.addingTimeInterval(delay), work)) }
     }
 
     /// Answer the request `id`.
@@ -51,8 +51,8 @@ final class McpHarness {
     /// Time passes; everything scheduled to run by then runs.
     func advance(_ seconds: TimeInterval) {
         clock = clock.addingTimeInterval(seconds)
-        let due = scheduled.filter { $0.delay <= seconds }
-        scheduled.removeAll { $0.delay <= seconds }
+        let due = scheduled.filter { $0.due <= clock }
+        scheduled.removeAll { $0.due <= clock }
         due.forEach { $0.work() }
     }
 }
