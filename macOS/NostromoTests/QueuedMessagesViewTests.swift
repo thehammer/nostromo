@@ -500,12 +500,13 @@ final class QueuedMessagesViewTests: MouseQueueTestCase {
         }
     }
 
-    func testReturnOnAnAppChipDoesNothingButDeleteRemovesIt() {
+    func testReturnOnAnAppChipDoesNothingAndNeitherDoesDelete() {
+        // Deliberate behaviour change (was: Delete removes it): the daemon refuses to remove an app message.
         let rig = makeRig(entries: [entry("q-1", kind: "app", label: "work_item")])
         rig.view.chips[0].keyDown(with: key(36, in: rig.window))
         XCTAssertTrue(rig.edited.value.isEmpty)
         rig.view.chips[0].keyDown(with: key(51, in: rig.window))
-        XCTAssertEqual(rig.removed.value, ["q-1"])
+        XCTAssertTrue(rig.removed.value.isEmpty)
     }
 
     func testReturnOnAChipWhileTheComposerHasADraftDoesNothing() {
