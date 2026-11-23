@@ -140,3 +140,22 @@ fn a_turn_without_parts_serialises_without_the_field_and_an_old_turn_still_decod
     let turn: Turn = serde_json::from_value(old).unwrap();
     assert!(turn.user_parts.is_empty());
 }
+
+#[test]
+fn the_golden_jsonl_rebuilds_as_two_parts_with_its_golden_ledger() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/merged_turns");
+    let mut t = transcript_from_jsonl(
+        &std::fs::read_to_string(dir.join("rebuild.jsonl")).unwrap(),
+        50,
+    );
+    let ledger: Vec<BatchRecord> = std::fs::read_to_string(dir.join("batch_ledger.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    t.apply_batch_ledger(&ledger);
+    assert_eq!(
+        t.snapshot()[0].user_parts,
+        ["oh and backfill the rows", "use the new column name"]
+    );
+}

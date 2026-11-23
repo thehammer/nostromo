@@ -10324,3 +10324,112 @@ mod session_queue_wire_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod merged_turns_wire_tests {
+    use super::*;
+    use crate::ipc::stream_json::Turn;
+    use std::path::PathBuf;
+
+    fn path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/merged_turns")
+            .join(name)
+    }
+
+    fn read(name: &str) -> String {
+        std::fs::read_to_string(path(name)).unwrap()
+    }
+
+    fn merged_turn_started() -> ServerMsg {
+        ServerMsg::SessionTurnDelta {
+            tag: "cody-1".into(),
+            delta: crate::ipc::stream_json::TurnDelta::TurnStarted {
+                turn: Turn {
+                    id: "t1".into(),
+                    user_input: "oh and backfill the rows\n\nuse the new column name".into(),
+                    timestamp: None,
+                    blocks: vec![],
+                    is_complete: false,
+                    origin: None,
+                    user_parts: vec![
+                        "oh and backfill the rows".into(),
+                        "use the new column name".into(),
+                    ],
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn the_feature_string_is_pinned_and_advertised_the_same_for_clients() {
+        assert_eq!(FEATURE_MERGED_TURNS, "merged_turns_v1");
+    }
+
+    #[test]
+    fn a_merged_turn_frame_matches_its_golden_fixture() {
+        let json = serde_json::to_string(&merged_turn_started()).unwrap();
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            std::fs::write(path("turn_started_merged.json"), format!("{json}\n")).unwrap();
+        }
+        assert_eq!(json, read("turn_started_merged.json").trim_end());
+        let back: ServerMsg =
+            serde_json::from_str(read("turn_started_merged.json").trim_end()).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
+    }
+
+    #[test]
+    fn an_old_turn_without_user_parts_decodes_and_encodes_without_the_field() {
+        let old = read("old_turn_started.json");
+        let msg: ServerMsg = serde_json::from_str(old.trim_end()).unwrap();
+        match &msg {
+            ServerMsg::SessionTurnDelta {
+                delta: crate::ipc::stream_json::TurnDelta::TurnStarted { turn },
+                ..
+            } => assert!(turn.user_parts.is_empty()),
+            other => panic!("{other:?}"),
+        }
+        assert!(!serde_json::to_string(&msg).unwrap().contains("user_parts"));
+    }
+
+    #[test]
+    fn a_hello_declares_the_capability_and_an_old_hello_decodes_without_it() {
+        let new: ClientMsg =
+            serde_json::from_str(read("client_hello_merged_turns.json").trim_end()).unwrap();
+        match &new {
+            ClientMsg::Hello { capabilities, .. } => {
+                assert_eq!(capabilities, &[FEATURE_MERGED_TURNS.to_string()])
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            serde_json::to_string(&new).unwrap(),
+            read("client_hello_merged_turns.json").trim_end()
+        );
+        let old: ClientMsg =
+            serde_json::from_str(read("old_client_hello.json").trim_end()).unwrap();
+        match &old {
+            ClientMsg::Hello { capabilities, .. } => assert!(capabilities.is_empty()),
+            other => panic!("{other:?}"),
+        }
+        assert!(!serde_json::to_string(&old)
+            .unwrap()
+            .contains("capabilities"));
+    }
+
+    #[test]
+    fn a_queue_entry_carries_merge_group_only_when_it_is_in_one() {
+        let json = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/session_queue/snapshot_merge_group.json"),
+        )
+        .unwrap();
+        match serde_json::from_str::<ServerMsg>(json.trim_end()).unwrap() {
+            ServerMsg::SessionQueue { entries, .. } => {
+                let groups: Vec<Option<u32>> = entries.iter().map(|e| e.merge_group).collect();
+                assert_eq!(groups, [Some(1), Some(1), None, Some(2), Some(2)]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+}

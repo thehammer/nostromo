@@ -1,0 +1,1 @@
+{"type":"session_turn_delta","tag":"cody-1","delta":{"delta":"turn_started","turn":{"id":"t1","user_input":"oh and backfill the rows\n\nuse the new column name","timestamp":null,"blocks":[],"is_complete":false,"user_parts":["oh and backfill the rows","use the new column name"]}}}

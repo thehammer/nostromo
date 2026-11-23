@@ -1,0 +1,1 @@
+{"type":"session_turn_delta","tag":"cody-1","delta":{"delta":"turn_started","turn":{"id":"t1","user_input":"hello","timestamp":null,"blocks":[],"is_complete":false}}}

@@ -300,3 +300,41 @@ fn a_generated_sweep_of_cases_round_trips_exactly() {
         assert_eq!(parsed.boundary, boundary);
     }
 }
+
+// ── golden fixtures (`tests/fixtures/merged_turns/`) ─────────────────────────
+
+fn fixture(name: &str) -> String {
+    std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/merged_turns")
+            .join(name),
+    )
+    .unwrap()
+}
+
+#[test]
+fn the_golden_plain_frame_is_what_the_builder_makes() {
+    let env = build_envelope(B, &["oh and backfill the rows", "use the new column name"]);
+    assert_eq!(env, fixture("envelope_plain.txt"));
+    let frame: serde_json::Value =
+        serde_json::from_str(fixture("stdin_plain.jsonl").trim()).unwrap();
+    assert_eq!(frame["message"]["content"].as_str().unwrap(), env);
+    assert_eq!(
+        parse(&env).unwrap().parts,
+        ["oh and backfill the rows", "use the new column name"]
+    );
+}
+
+#[test]
+fn the_golden_array_frame_parses_once_its_text_blocks_are_joined() {
+    let frame: serde_json::Value =
+        serde_json::from_str(fixture("stdin_array.jsonl").trim()).unwrap();
+    let joined = frame["message"]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|b| b["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(parse(&joined).unwrap().parts, ["look at this", "and this"]);
+}
