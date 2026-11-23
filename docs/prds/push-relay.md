@@ -654,3 +654,19 @@ Also for information: a count-only "approval needed" notification kind is a
 natural follow-up (the server already receives approval counts), but it is
 not in this PRD and not planned.
 
+### Turn 3 (Archie, 2026-11-23): status only
+
+S1–S8 still await your sign-off; no new deviation. Two notes:
+
+- **S4 is moot under S7.** With no lock-screen decision buttons there is no
+  action limit to work around. Please sign S4 as withdrawn together with S7.
+- **Apple's notification-filtering entitlement has not been requested yet.**
+  S1's 2-minute withdrawal depends on it; until it is granted, the badge is
+  corrected within 2 minutes and removing the notification is best effort.
+  The operator step is in `docs/plans/backplane-sequencing.md`, open
+  question 6.
+
+Nothing merged on main since turn 2 adds a push source: the new authored-PR
+list, Perri's verdicts, merge results, the tracker board and the message queue
+all stay on the Mac that owns them and never reach the server.
+

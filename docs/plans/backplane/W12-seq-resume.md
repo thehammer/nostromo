@@ -132,7 +132,7 @@ channel — the behaviour Mother's broker already has
 
 ## Acceptance criteria
 
-- [ ] **W12-1** CI is green: Rust in the RWX sandbox and the `ubuntu-latest` job;
+- [ ] **W12-1** CI is green: Rust in the RWX sandbox and the `ubuntu-24.04` Rust jobs;
   `swift-tests-kit` on GitHub Actions (`make ci-remote ONLY=kit`). No local
   `cargo`/`swift`. No existing fixture modified; tests are hermetic
   (loopback, paused tokio time).

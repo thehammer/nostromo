@@ -103,7 +103,8 @@ on the Mac-native app.
 operator's existing WireGuard (UDM Pro), with the primary daemon on Tokyo
 (always-on Linux), and both Macs (Sendai, and the managed laptop Kobe) as
 outbound-only satellites. No hosted hub; AWS hosts only the APNs push relay.
-See `docs/plans/backplane-sequencing.md`.
+See `docs/plans/backplane-sequencing.md`. Still current on 2026-11-23 (the memo's "Readiness"
+section lists what can start now and what is outside the plan).
 
 ### B3. Auth / pairing model
 Tied to B2. iPhone vision §"Open bets" suggests pairing-flow (QR on Mac

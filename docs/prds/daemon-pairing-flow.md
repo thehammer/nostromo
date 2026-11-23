@@ -574,3 +574,31 @@ details.
   counts; it never sees the request or answers it. The PRD never promised
   otherwise.
 
+### Turn 3 (Archie, 2026-11-23): one new sign-off, one note
+
+D1–D6 above still await your sign-off; nothing in them changed. Main moved
+237 commits; the refresh of `docs/plans/backplane-sequencing.md` has the
+details. One new item needs you:
+
+**D7. Should a paired phone see, and take back, messages waiting in a busy
+session's queue?** On the Mac, a message typed while the agent is busy now
+waits as a chip under the composer; the operator can take it back to edit it,
+or remove it, and pressing Stop hands the waiting messages back to the
+composer. None of that reaches a phone: the daemon refuses the queue view and
+take-back to anything but the verified Mac app (`src/ipc/peer.rs:798-800`,
+`:1103-1105`; `docs/message-queue.md`). Options: (a) the phone shows the
+waiting messages and can take one back; (b) the phone shows nothing about
+them (today); (c) the phone shows a count only ("2 waiting") on the
+session's row. *Proposal: (b) in this version, (c) later if wanted.* A phone
+cannot send messages in this version, so it never has a message of its own
+waiting; taking one back is driving the session, which stays at the Mac like
+approvals; and waiting text is unsent input that need not travel to the
+server. If you choose (c), it needs one line of copy (mine for reference:
+"2 messages waiting"). (a) would need the device-trust work this PRD leaves
+out.
+
+*For information:* when several waiting messages are answered in one turn,
+the Mac shows them as separate bubbles under "sent together"; the phone
+already draws them the same way (stacked bubbles) and will keep doing so
+over the new connection. No criterion changes.
+
