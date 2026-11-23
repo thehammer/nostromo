@@ -1055,6 +1055,40 @@ final class ReplInputBarTakeBackTests: XCTestCase {
                        "the history is shared: two windows must not record the same messages twice")
     }
 
+    func testATakenBackAnswerForAComposerThatClosedMeanwhileIsKeptInHistoryByTheOtherWindow() {
+        let queue = FakeQueue()
+        let other = makeRig(queue: queue)
+        queue.queued([typedEntry("q-1", "typed on my phone")])
+        weak var closed: ReplInputBar?
+        autoreleasepool {
+            let bar = ReplInputBar(frame: NSRect(x: 0, y: 0, width: 600, height: 60))
+            bar.bindQueue(model: queue.model)
+            XCTAssertTrue(bar.takeBackForEdit(id: "q-1"), "harness: the request is out")
+            closed = bar
+        }
+        XCTAssertNil(closed, "harness: the composer is gone before the answer")
+
+        queue.answer("taken_back", text: "typed on my phone", images: [])
+
+        XCTAssertEqual(store.entries(tag: tag), ["typed on my phone"], "the text must not be lost")
+        XCTAssertEqual(other.bar.lastStatus, Self.lateStatus)
+        XCTAssertEqual(text(other), "", "the other window's draft is not touched")
+    }
+
+    func testAStopFrameWhoseRequesterIsGoneIsKeptInHistoryAndNoOtherComposerIsFilled() {
+        let queue = FakeQueue()
+        let other = makeRig(queue: queue)
+        let gone = NSObject()
+        queue.model.noteStop(requester: ObjectIdentifier(gone))
+        queue.date = queue.date.addingTimeInterval(1)
+
+        queue.returned([("dropped one", []), ("dropped two", [])])
+
+        XCTAssertEqual(text(other), "", "only the composer that pressed Stop is filled")
+        XCTAssertEqual(store.entries(tag: tag), ["dropped two", "dropped one"])
+        XCTAssertEqual(other.bar.lastStatus, Self.lateStatus)
+    }
+
     // MARK: A send the daemon refused for a full sign-in queue
 
     func testARefusedSendComesBackIntoAnEmptyComposerWithTheReason() {

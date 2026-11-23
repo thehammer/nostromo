@@ -192,6 +192,8 @@ class ChatSession: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isConnected in
                 guard let self, isConnected else { return }
+                // No queue on this daemon (a downgrade): no snapshot will ever replace the old chips.
+                if !self.client.daemonAdvertisesSessionQueue { self.queue.reset() }
                 self.spawnAndAttach()
             }
             .store(in: &cancellables)

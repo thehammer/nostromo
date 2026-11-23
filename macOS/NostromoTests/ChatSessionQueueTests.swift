@@ -448,6 +448,42 @@ final class ChatSessionQueueTests: XCTestCase {
         }
     }
 
+    // MARK: Review fixes (round 2)
+
+    func testAReconnectToADaemonWithoutTheQueueClearsTheChips() throws {
+        daemon = FakeDaemon(scripts: [.init(features: queueDaemon, end: .afterFirstAttach(delay: 0.5)),
+                                      .init(features: [], end: .never)])
+        try daemon.start()
+        client = NostromodClient(socketPath: daemon.path)
+        client.start()
+        session = ChatSession(tag: tag, agentName: "cody", displayName: "Cody", workingDirectory: nil, client: client)
+        XCTAssertTrue(pumpUntil { self.client.connected.value && self.session.attachCount >= 1 })
+        snapshot(rev: 1, entries: [entry("q-1", text: "waiting")])
+        XCTAssertEqual(session.queue.entries.map(\.text), ["waiting"])
+
+        XCTAssertTrue(pumpUntil(10) { self.daemon.connectionCount >= 2 && self.session.attachCount >= 2 },
+                      "the client never reconnected")
+
+        XCTAssertTrue(pumpUntil { self.session.queue.entries.isEmpty },
+                      "the old daemon holds no queue: the chips must go")
+        XCTAssertNil(session.queue.takeBackTarget(), "Up must not try to take back a message that is gone")
+    }
+
+    func testAnAdoptedEchoOfAnotherMessageWithTheSameTextSurvivesOurOwnQueuedSnapshot() throws {
+        try connect(features: queueDaemon)
+        session.send("yes")                                   // idle: echo, no daemonId
+        let ref = try clientRef()
+        // A phone's "yes" was delivered first; the echo adopts that turn by its text.
+        turnStarted(daemonTurn("t-phone", "yes", second: 1, complete: false))
+        XCTAssertEqual(session.turns.first?.daemonId, "t-phone")
+
+        // Our own "yes" was queued behind it: its snapshot must not delete the really delivered turn.
+        snapshot(rev: 1, entries: [entry("q-1", text: "yes", ref: ref)], change: (reason: "queued", ids: ["q-1"]))
+
+        XCTAssertEqual(texts(), ["yes"])
+        XCTAssertEqual(session.turns.first?.daemonId, "t-phone")
+    }
+
     // MARK: C2-17 an old daemon: today's behaviour
 
     func testAnOldDaemonGetsNoWatchAndASendWithNoClientRef() throws {

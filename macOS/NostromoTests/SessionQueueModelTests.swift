@@ -42,7 +42,7 @@ final class SessionQueueModelTests: XCTestCase {
                 now: { [unowned self] in date },
                 newRequestId: { [unowned self] in counter += 1; return "req-\(counter)" })
             model.events.sink { [unowned self] in events.append($0) }.store(in: &bag)
-            model.returned.sink { [unowned self] in returns.append($0) }.store(in: &bag)
+            model.returned.sink { [unowned self] in returns.append($0); model.claimReturn() }.store(in: &bag)   // a composer that pressed Stop
         }
 
         func fireTimers() {
@@ -707,6 +707,50 @@ final class SessionQueueModelTests: XCTestCase {
         again.model.handle(returned([("first", nil)]))
         again.model.handle(returned([("second", nil)]))
         XCTAssertEqual(lateAgain.batches, [["first"]], "one Stop, one recovery")
+    }
+
+    func testAStopFrameNoComposerClaimedIsRecoveredLateAsText() {
+        let model = SessionQueueModel(tag: "t", sendTakeBack: { _, _ in true }, sendRemove: { _, _ in true })
+        var late: [[String]] = []
+        let sub = model.recoveredLate.sink { late.append($0) }
+        model.noteStop(requester: ObjectIdentifier(Marker()))   // nobody subscribes to `returned`
+
+        model.handle(returned([("a", nil), ("b", ["/tmp/x.png"])]))
+
+        XCTAssertEqual(late, [["a", "b"]])
+        sub.cancel()
+    }
+
+    // MARK: Reset (the connection moved to a daemon with no queue)
+
+    func testResetForgetsTheChipsHeldMessageEpochAndRevSoTheNextSnapshotIsAdopted() {
+        let rig = Rig()
+        rig.model.apply(snapshot(rev: 5, epoch: epochA, entries: [entry("q-1", text: "x")]))
+        XCTAssertEqual(rig.model.entries.count, 1)
+
+        rig.model.reset()
+
+        XCTAssertTrue(rig.model.entries.isEmpty)
+        XCTAssertNil(rig.model.held)
+        XCTAssertNil(rig.model.epoch)
+        XCTAssertEqual(rig.model.rev, -1)
+        XCTAssertTrue(rig.model.apply(snapshot(rev: 1, epoch: epochA, entries: [entry("q-2", text: "y")])).applied,
+                      "a lower rev of the same epoch is adopted after a reset")
+    }
+
+    func testResetEndsATakeBackInFlightAsNoAnswerAndAnAnswerAfterItIsIgnored() {
+        let rig = Rig()
+        let late = collectLate(rig)
+        var outcomes: [TakeBackOutcome] = []
+        _ = rig.model.takeBack(id: "q-1") { outcomes.append($0) }
+
+        rig.model.reset()
+        rig.model.handle(result("req-1", id: "q-1", code: "taken_back", text: "x", images: []))
+        rig.fireTimers()
+
+        XCTAssertEqual(outcomes, [.noAnswer], "run exactly once")
+        XCTAssertEqual(rig.model.takeBack(id: "q-1") { _ in }, .sent, "the entry is free again")
+        XCTAssertTrue(late.batches.isEmpty)
     }
 
     // MARK: The notice words

@@ -701,6 +701,7 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
         model.returned
             .sink { [weak self] returned in
                 guard let self, returned.requester == ObjectIdentifier(self) else { return }
+                model.claimReturn()
                 self.restoreStopped(returned.entries)
             }
             .store(in: &queueBindings)
@@ -746,8 +747,14 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     /// Ask for `id` back; the composer stays as it is until the answer arrives. True means a request is out.
     private func beginTakeBack(id: String, recallHistoryOnFailure: Bool) -> Bool {
         guard let queue = queueModel else { return false }
-        let start = queue.takeBack(id: id) { [weak self] outcome in
-            self?.finishTakeBack(outcome, recallHistoryOnFailure: recallHistoryOnFailure)
+        let start = queue.takeBack(id: id) { [weak self, weak queue] outcome in
+            guard let self else {
+                // The composer closed while the request was out: the message is gone from the queue, so
+                // hand its text to the other windows of this focus (they keep it in history).
+                if case .takenBack(let text, _) = outcome, !text.isEmpty { queue?.recoveredLate.send([text]) }
+                return
+            }
+            self.finishTakeBack(outcome, recallHistoryOnFailure: recallHistoryOnFailure)
         }
         return start == .sent
     }

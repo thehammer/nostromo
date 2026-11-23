@@ -427,8 +427,40 @@ final class QueuedMessagesViewTests: MouseQueueTestCase {
         XCTAssertTrue(chip.editButton.isHidden)
         XCTAssertFalse(chip.edit())
         XCTAssertTrue(rig.edited.value.isEmpty)
-        XCTAssertTrue(chip.remove(), "it can still be removed")
-        XCTAssertEqual(rig.removed.value, ["q-1"])
+        // Deliberate behaviour change (was: "it can still be removed"): the daemon answers `not_allowed` to a
+        // remove of an app message and a remove has no answer to show, so the control is not offered.
+        XCTAssertTrue(chip.removeButton.isHidden)
+        XCTAssertFalse(chip.remove())
+        XCTAssertTrue(rig.removed.value.isEmpty)
+    }
+
+    func testAChipThePersonCannotRemoveOffersNoRemoveAnyWayAndNeverFiresOnRemove() {
+        let rig = makeRig(entries: [entry("q-1", text: "Mother overview", kind: "app", label: "mother_overview"),
+                                    entry("q-2", canTakeBack: false)])
+        for chip in rig.view.chips {
+            XCTAssertTrue(chip.removeButton.isHidden)
+            XCTAssertNil(action("Remove", of: chip))
+            XCTAssertFalse(chip.remove())
+            chip.removeButton.performClick(nil)
+            chip.keyDown(with: key(51, in: rig.window))
+        }
+        XCTAssertTrue(rig.removed.value.isEmpty)
+    }
+
+    func testAKeyboardFocusedChipReportsAFocusRingAroundItsBody() throws {
+        let rig = makeRig(entries: typed(1))
+        let chip = rig.view.chips[0]
+        XCTAssertTrue(chip.acceptsFirstResponder)
+        XCTAssertEqual(chip.focusRingMaskBounds, chip.bounds)
+        XCTAssertFalse(chip.bounds.isEmpty)
+
+        let image = NSImage(size: chip.bounds.size)
+        image.lockFocus()
+        chip.drawFocusRingMask()
+        image.unlockFocus()
+        let rep = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
+        let center = try XCTUnwrap(rep.colorAt(x: rep.pixelsWide / 2, y: rep.pixelsHigh / 2))
+        XCTAssertGreaterThan(center.alphaComponent, 0.5, "the mask must cover the chip")
     }
 
     func testATypedChipTheDaemonSaysCannotBeTakenBackHasNoEdit() {
@@ -566,9 +598,10 @@ final class QueuedMessagesViewTests: MouseQueueTestCase {
         XCTAssertEqual(Set(actions(of: rig.view.chips[0])), ["Edit", "Remove"])
     }
 
-    func testAnAppChipOffersOnlyRemove() {
+    func testAnAppChipOffersNoAccessibilityActions() {
+        // Deliberate behaviour change (was: only "Remove"): the daemon refuses to remove an app message.
         let rig = makeRig(entries: [entry("q-1", kind: "app", label: "agent_seed")])
-        XCTAssertEqual(actions(of: rig.view.chips[0]), ["Remove"])
+        XCTAssertEqual(actions(of: rig.view.chips[0]), [])
     }
 
     func testThePerformedAccessibilityActionsEditAndRemoveForAPerson() {

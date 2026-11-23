@@ -85,6 +85,9 @@ final class QueuedChipView: NSView {
     }
 
     private var canEdit: Bool { entry.isTyped && entry.canTakeBack }
+    /// The daemon answers `not_allowed` to a remove of an app message (or one it cannot take back), and a
+    /// remove has no answer to show, so such a chip offers no Remove at all.
+    private var canRemove: Bool { canEdit }
 
     init(entry: QueuedMessage, index: Int, total: Int) {
         self.entry = entry
@@ -111,9 +114,10 @@ final class QueuedChipView: NSView {
         editButton.setAccessibilityLabel("Edit queued message")
         removeButton.setAccessibilityLabel("Remove queued message")
         editButton.isHidden = !canEdit
+        removeButton.isHidden = !canRemove
         applyEditState()
 
-        // One element for VoiceOver: the full text, with Edit and Remove as actions (no Edit on app messages).
+        // One element for VoiceOver: the full text, with Edit and Remove as actions (neither on app messages).
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel(QueuedMessageText.accessibilityLabel(entry, index: index, total: total))
@@ -124,13 +128,20 @@ final class QueuedChipView: NSView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    /// A keyboard-focused chip shows the system focus ring around its rounded body.
+    override var focusRingMaskBounds: NSRect { bounds }
+
+    override func drawFocusRingMask() {
+        NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6).fill()
+    }
+
     override func layout() {
         super.layout()
         let buttonSize: CGFloat = 22
         var right = bounds.width - 6
         removeButton.frame = NSRect(x: right - buttonSize, y: (bounds.height - buttonSize) / 2,
                                     width: buttonSize, height: buttonSize)
-        right = removeButton.frame.minX - 2
+        if canRemove { right = removeButton.frame.minX - 2 }
         if canEdit {
             editButton.frame = NSRect(x: right - buttonSize, y: removeButton.frame.minY, width: buttonSize, height: buttonSize)
             right = editButton.frame.minX - 4
@@ -163,7 +174,7 @@ final class QueuedChipView: NSView {
     /// The Remove action as a person triggers it. False when it did nothing.
     @discardableResult
     func remove() -> Bool {
-        guard case .human = permit(self) else { return false }
+        guard canRemove, case .human = permit(self) else { return false }
         onRemove?(entry)
         return true
     }
@@ -196,7 +207,9 @@ final class QueuedChipView: NSView {
         if canEdit && editEnabled {
             actions.append(NSAccessibilityCustomAction(name: "Edit") { [weak self] in self?.edit() ?? false })
         }
-        actions.append(NSAccessibilityCustomAction(name: "Remove") { [weak self] in self?.remove() ?? false })
+        if canRemove {
+            actions.append(NSAccessibilityCustomAction(name: "Remove") { [weak self] in self?.remove() ?? false })
+        }
         setAccessibilityCustomActions(actions)
         setAccessibilityHelp(canEdit && !editEnabled ? QueuedMessageText.editDisabledReason : nil)
     }

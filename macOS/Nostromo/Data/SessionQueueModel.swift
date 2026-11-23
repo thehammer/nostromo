@@ -219,6 +219,7 @@ final class SessionQueueModel: ObservableObject {
     private var requests: [String: Request] = [:]
     /// Entry ids with a request in flight, so two windows of this process cannot both act on one entry.
     private var inFlight: [String: String] = [:]
+    private var returnClaimed = false
     private var stopRequester: (who: ObjectIdentifier, at: Date)?
     /// Request ids that timed out, so a late `taken_back` can still be recovered.
     private var timedOutRequests: Set<String> = []
@@ -243,6 +244,22 @@ final class SessionQueueModel: ObservableObject {
     var clientRefs: Set<String> { Set(entries.compactMap { $0.clientRef }) }
 
     // MARK: Snapshots
+
+    /// Forget everything the daemon told us: the connection now goes to a daemon with no queue (a downgrade,
+    /// another branch), so the last chips describe messages it no longer holds. A take-back in flight is
+    /// answered `.noAnswer` now (its composer stops waiting); the old daemon will never reply.
+    func reset() {
+        let pending = requests.values.compactMap { $0.completion }
+        if !entries.isEmpty { entries = [] }
+        if held != nil { held = nil }
+        epoch = nil
+        rev = -1
+        requests = [:]
+        inFlight = [:]
+        timedOutRequests = []
+        stopRequester = nil
+        pending.forEach { $0(.noAnswer) }
+    }
 
     /// Adopt `wire`. A snapshot whose `rev` is not above the last one of the same epoch is dropped; a
     /// new epoch (the daemon restarted) replaces everything.
@@ -352,8 +369,14 @@ final class SessionQueueModel: ObservableObject {
             recoveredLate.send(wire.entries.map { $0.text })
             return
         }
+        returnClaimed = false
         returned.send(SessionQueueReturn(
             requester: stop.who,
             entries: wire.entries.map { .init(text: $0.text, images: $0.images ?? []) }))
+        // The composer that pressed Stop is gone: nobody took the text, so keep it in history.
+        if !returnClaimed { recoveredLate.send(wire.entries.map { $0.text }) }
     }
+
+    /// The requester's composer calls this from its `returned` subscription: the text is its to restore.
+    func claimReturn() { returnClaimed = true }
 }
