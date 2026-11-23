@@ -20,6 +20,18 @@ afternoon to work" backup. It needs to support meaningfully more than
 the phone — light implementation work, PR reviewing, longer Claudia
 conversations — without pretending to be a full Mac.
 
+> **Amended 2026-11-23 (backplane sequence).** The iPad is a paired device like
+> the iPhone, so the same v1 decisions apply (`docs/prds/daemon-pairing-flow.md`
+> and `docs/prds/push-relay.md`, decision logs). In this sequence the iPad
+> **answers nothing**: no approve/deny on Mother jobs or decisions, no PR
+> approve/request-changes/comment, no Claudia messages, no Mother queuing.
+> **Mail and todos stay on the Macs**, so the Fred mailbox capability below
+> is deferred and the Fred and Teri views say "Mail and todos stay on your
+> Mac in this version." Kobe (work) items are metadata only. The
+> capabilities below that act or show mail are **later, when opened up**:
+> answering through a device-trust PRD, mail once the operator chooses to
+> let it onto devices. Reading, browsing and urgency at a glance are v1.
+
 ## Audience and context of use
 
 The operator, away from the Mac, with the iPad accessible:
