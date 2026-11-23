@@ -9,8 +9,8 @@ Versus the 2026-10-18 version:
   `featureTopics` `:1089`, `send(_:type:tag:)` `:1892`, `decode` `:2030`;
   `AppDelegate.setupMenu` `macOS/Nostromo/AppDelegate.swift:492`.
   `HumanGesture` is still `macOS/Nostromo/Security/HumanGesture.swift`.
-- **Collisions now.** AP3, BA3, FV4, AP2a, T1 and terminal 1d are merged.
-  Today the Mac Xcode project is edited by PR #518 (open); do not run this
+- **Collisions now.** AP3, BA3, FV4, AP2a, T1 and terminal 1d are merged,
+  and so is PR #518 (merged after this refresh, `1d30909a`). Do not run this
   wedge while any job edits `macOS/Nostromo.xcodeproj` or
   `NostromodClient.swift`. Newer menu owners to avoid: slash commands, session
   history (⌘N New Focus…, ⇧⌘N Resume Conversation…, #475) and the Mother
@@ -18,9 +18,120 @@ Versus the 2026-10-18 version:
   `setupMenu` on the base (or none).
 - **Cap $45** (was $35): the comparable Mac UI slice, message queue S2, spent
   $39.
-- **Gates.** `swift-ci` (≈ 24 min, measured 2026-11-23 per #519; #519 raises its
-  timeout to 2400 s) and `python-test` (≈ 20 min; its `when` includes
-  `macOS/**`): ≈ 44 min per pass.
+- **Gates.** `swift-ci` (≈ 24 min, measured 2026-11-23 per #519, which set its
+  timeout to 2400 s and is merged) and `python-test` (≈ 20 min; its `when`
+  includes `macOS/**`, so crew delta 7 does not change it): ≈ 44 min per pass.
+
+## Sign-offs folded in (2026-11-23: Ada's memo and the operator's decisions)
+
+Ada signed off D1–D7 and the operator answered Q1–Q8 (memo, "Decision log
+2026-11-23"). Ada is rewriting `docs/prds/daemon-pairing-flow.md` in parallel;
+decisions are cited by id. This section wins over older body text. Nothing
+here waits on anyone.
+
+- **D3, the code dies with its window or connection.** Pair window copy on
+  `connection_lost`: **"Lost the connection to your Nostromo server, so this
+  code no longer works."** Button **New Code**, disabled with "Waiting for the
+  server…" until the connection returns, then enabled. Never show a fresh code
+  that cannot work (same rule as the unreachable state). Devices typing the
+  dead code get the existing "That code isn't right"; no new device copy.
+- **D5, lockout across two open codes.** Each open Pair window (and terminal)
+  shows the existing "Too many wrong attempts. This code is no longer valid"
+  with **New Code**. A model test drives two models sharing one fake daemon
+  and asserts both reach `locked_out`.
+- **D6, re-pair revokes the old entry.** A Revoked row whose `revoked_by` is
+  `replaced` reads "Replaced by re-pairing" instead of a revoke time label; no
+  control on it. The window does nothing else for D6 (W9 and W11 own it).
+- **Operator Q2: mail and todos stay home in v1.** When `DevicePairing.
+  mail_and_todos_shared` (or `Devices.mail_and_todos_shared`) is false, the
+  Pair window shows **"Mail and todos aren't shared from your Macs"** with no
+  checkbox, the paired line is "Paired: <name>." with no mail clause, and the
+  Devices window shows no **Mail and todos** toggle column. The checkbox and
+  toggle stay built behind that flag.
+- **Operator Q1: the `revoke-only` level** (defined below). Kobe is enrolled at
+  it by default.
+- **S7a: the Mac reports "locked or idle" for decision pushes.** See "Operator
+  presence reporter (S7a)" below. It is inert until W13's daemon advertises
+  `"presence"`.
+
+### Revoke-only device-admin level (Q1)
+
+This is the definition the other wedges cite. Principle (Ada): actions that
+reduce access are safe from any surface; actions that widen it come only from
+surfaces the operator fully controls.
+
+| Level | Sees the Devices list | Revoke | Mail and todos off | Pair a device | Mail and todos on |
+|---|---|---|---|---|---|
+| `full` (Sendai, the primary's own CLI) | yes | yes | yes | yes | yes (when sharing is on) |
+| `revoke_only` (Kobe; default for a `work` satellite) | yes | yes | yes | **no** | **no** |
+| `read_only` | yes | no | no | no | no |
+| `off` | no | no | no | no | no |
+
+- **Where it is stored and enforced.** The level is the satellite's registry
+  record on the primary (`admin`, W9), set with `nostromo device admin <host>
+  full|revoke-only|read-only|off` or at enrolment (`--admin`; W10 defaults it
+  from the egress: `work` → `revoke_only`, `personal` → `full`). A satellite's
+  local `uplink.device_admin` may only lower it. The primary enforces it (W10).
+- **Wire.** No new client verb and no new ordinal: `revoke_only` is a new value
+  of the existing `admin` field, and the existing verbs carry the requests.
+  One new server frame, `DeviceAdminLevel { level, pair_from }` (W10; class
+  `Admin`, targeted to local clients subscribed to `devices`, never sent to a
+  network peer). `DeviceAdminError { not_permitted_on_this_mac }` stays the
+  refusal.
+- **Network policy, per verb, for a relayed request at `revoke_only`:**
+  `DeviceList` runs; `DeviceRevoke` runs; `DevicePairCancel` runs (it can only
+  shrink access); `DeviceSetScope { sensitive: false }` runs;
+  `DevicePairStart`, `DevicePairUpdate` and `DeviceSetScope { sensitive: true
+  }` are refused with no side effect. Every device-admin verb stays `Refused`
+  for every network trust (`Tcp`, `Paired`, `Routed`), whatever the level.
+- **Mac app.** `DeviceAdminModel.adminAvailability` gains `revokeOnly`, set
+  from `DeviceAdminLevel` (and, as a fallback, from a
+  `not_permitted_on_this_mac` answer to `DevicePairStart`). At `revokeOnly`:
+  **Pair a Device…** stays in the menu and opens a window that shows no code
+  and says **"Pairing new devices is turned off on this Mac. Pair from
+  <pair_from[0]> or run `nostromo device pair` on your server."** (with no
+  `pair_from`, "Pair from your other Mac" is replaced by just the command
+  sentence); it sends no `DevicePairStart`. In **Devices…**, **Revoke…** works,
+  a **Mail and todos** toggle (when sharing is on) can be switched off but its
+  "on" direction is disabled with the line "Turning this on is only possible
+  from <pair_from[0]> or your server.", and nothing else changes. At
+  `readOnly` every control is disabled with "Changes are turned off on this
+  Mac." At `off` the menu items show "Device management is turned off on this
+  Mac."
+- **Gestures.** Revoke and scope-off still pass `HumanGesture.permit` (an
+  accidental revoke is a real cost even though it is safe).
+
+### Operator presence reporter (S7a)
+
+W13 pushes a decision at once when the Mac presenting it is locked, asleep or
+idle for 2 minutes, and otherwise 30 s after it was raised if still unanswered
+(Ada S7a). The signal exists on macOS and the app already computes it:
+`AuthoredPrsDemandReporter` (`macOS/Nostromo/UI/Mother/
+AuthoredPrsDemandReporter.swift`) observes `com.apple.screenIsLocked` /
+`com.apple.screenIsUnlocked` (distributed notifications; widely used but not
+documented by Apple), `NSWorkspace.willSleepNotification` /
+`didWakeNotification`, and idle time through
+`CGEventSource.secondsSinceLastEventType(.combinedSessionState, …)` (public
+API; the app already calls it on Kobe and Sendai without any extra privacy
+permission). This wedge adds:
+- `macOS/Nostromo/UI/Mother/OperatorPresenceReporter.swift` (new; a sibling,
+  not a change to the demand reporter): levels `active | away`, where `away` =
+  screen locked, or asleep, or `systemIdleSeconds() >= 120`. Re-evaluate every
+  15 s and on every lock, unlock, sleep and wake notification; send only on
+  change and again after each reconnect's welcome; no debounce on the change
+  to `away` (it is the urgent direction), 1 s on the change to `active`. Reuse
+  `AuthoredPrsDemandReporter.systemIdleSeconds()` and its injectable
+  notification centres for tests.
+- `NostromodClient.sendOperatorPresence(state:)`: `{"type":
+  "operator_presence", "state": "active"|"away"}`, sent **only** when
+  `Welcome.features` contains `"presence"` (W13 adds it). Until W13 merges it
+  sends nothing, and W13 falls back to its 30-second rule.
+- Owned by `AppStore` next to `authoredPrsDemand` (`AppStore.swift:99`).
+- `macOS/NostromoTests/OperatorPresenceReporterTests.swift` (new): lock →
+  `away` at once; unlock with fresh input → `active`; idle 119 s → `active`,
+  121 s → `away`; nothing sent without the feature; re-sent after reconnect.
+
+New criteria W15-9 to W15-12.
 
 ## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
@@ -94,7 +205,9 @@ hosted in AppKit elsewhere (`macOS/Nostromo/UI/MainLayout.swift`).
 - **Repo:** nostromo
 - **Branch:** `feat/backplane-mac-device-admin`
 - **Base:** `origin/main` (W9 and W10 merged)
-- **Max cost:** $45 (expected ≈ $18; see the memo's Estimate; raised 2026-11-23)
+- **Max cost:** $50 (expected ≈ $20; see the memo's Estimate; raised to $45
+  on 2026-11-23 for the S2 comparison, then to $50 for the revoke-only UI and
+  the S7a presence reporter)
 
 ## Files to change
 
@@ -141,12 +254,13 @@ hosted in AppKit elsewhere (`macOS/Nostromo/UI/MainLayout.swift`).
     Includes mail and todos" (or "Mail and todos are off") with **Done**,
     within 2 s of redemption (PRD-AC13). `expired` → "This code expired"
     with **New Code**. `locked_out` → "Too many wrong attempts. This code is
-    no longer valid" with **New Code** (PRD-AC17). `connection_lost` → the
-    copy pending Ada (design-loop note D3) with **New Code**.
+    no longer valid" with **New Code** (PRD-AC17). `connection_lost` → D3's
+    copy with **New Code** disabled until the server is back.
   - **Unavailable** (`server_unreachable`, or the local daemon not running)
     → "Can't reach your Nostromo server, so this Mac can't make a pairing
-    code right now." and no code (PRD-AC18). `not_permitted_on_this_mac` →
-    copy pending Ada (open question 2).
+    code right now." and no code (PRD-AC18). `revoke_only` or
+    `not_permitted_on_this_mac` → the Q1 copy in "Revoke-only device-admin
+    level (Q1)".
   - Closing the window sends `DevicePairCancel` (the PRD's "Cancel"
     outcome; W9 cancels on disconnect anyway).
 - `macOS/Nostromo/UI/DevicesWindow.swift` (new; same pattern) — a list
@@ -163,9 +277,8 @@ hosted in AppKit elsewhere (`macOS/Nostromo/UI/MainLayout.swift`).
     will be refused the next time it tries." (PRD-AC24–26).
   - Click budget from an open app (PRD-AC24): app-menu title (1) →
     **Devices…** (2) → row **Revoke…** (3) → alert **Revoke** (4).
-  - `readOnly` → the list shows, and the toggle and Revoke are disabled
-    with a one-line explanation (copy pending Ada; only if the operator
-    answers open question 2 "read-only").
+  - `revokeOnly` and `readOnly` → as specified in "Revoke-only device-admin
+    level (Q1)".
   - Unreachable → the last list received, marked stale, under the "Can't
     reach your Nostromo server" line, with every control disabled.
 - `macOS/NostromoTests/DeviceAdminModelTests.swift` (new) — a fake client
@@ -229,6 +342,20 @@ Technical criteria:
   - Toggle an iPad's **Mail and todos** off → its Fred/Teri tabs show the
     explanation within 5 s; on → content returns (PRD-AC35).
 - [ ] **W15-8** PR body references the sequencing memo (W15) and the PRD.
+- [ ] **W15-9** Q1: with `DeviceAdminLevel { revoke_only }` the model sends no
+  `DevicePairStart`, the Pair window shows the "Pairing new devices is turned
+  off on this Mac" copy naming `pair_from`, Revoke and scope-off are sent, and
+  scope-on is disabled; `read_only` and `off` disable as specified
+  (`DeviceAdminModelTests`).
+- [ ] **W15-10** D3 and D5: `connection_lost` shows D3's copy with **New Code**
+  disabled until the client reconnects; two models over one fake daemon both
+  reach `locked_out`; a `revoked_by: replaced` row reads "Replaced by
+  re-pairing".
+- [ ] **W15-11** Q2: with `mail_and_todos_shared: false` the Pair window has no
+  checkbox and says "Mail and todos aren't shared from your Macs", and the
+  Devices window has no toggle column.
+- [ ] **W15-12** S7a: `OperatorPresenceReporterTests` pass, and nothing is sent
+  unless `Welcome.features` contains `"presence"`.
 
 ## Mother crew: gates, lenses, checklist and calibration
 
@@ -252,7 +379,7 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   merged since this was first written); the repo default is all four lenses
   (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
 - **Review depth:** Lenses plus Mother's adherence review are enough here; no extra manual Perri pass beyond the `perri` entry below. Mac UI over W9/W10 verbs; no new wire, no new trust.
-- **Checklist:** the acceptance items above carry ids (`W15-1` to `W15-8`) so
+- **Checklist:** the acceptance items above carry ids (`W15-1` to `W15-12`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The
   worker ticks each with `mother check <job> --done --evidence <short ref>` only
   when its test or check has passed.
