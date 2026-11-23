@@ -150,9 +150,10 @@ verbs from **its own local clients** up its existing outbound uplink, and
 relay the answers back. Nothing ever connects *toward* the satellite, so this
 works from Kobe (PRD-AC12, AC24). How much a satellite may do is held on the
 **primary**, in the satellite's own registry record (`admin: full |
-read_only | off`, from W9). A satellite's local config can narrow it but
-never widen it. That keeps the decision about a managed laptop (the PRD's
-open question 2) on the operator's own host.
+revoke_only | read_only | off`, from W9). A satellite's local config can
+narrow it but never widen it. That keeps the decision about a managed laptop
+(the PRD's open question 2, answered 2026-11-23: Kobe is `revoke_only`, Q1) on
+the operator's own host.
 
 ## Target
 - **Repo:** nostromo
