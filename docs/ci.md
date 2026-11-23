@@ -430,8 +430,9 @@ cost **$0**. The real limit is concurrency: a personal Free account runs at most
 Settings > Billing). A full dispatch uses up to 5 macOS slots at once (python-tooling, 3 Mac shards, and
 the Kit-then-iOS chain one at a time), so two simultaneous full dispatches or a
 dispatch plus a PR run will queue. Prefer
-`ONLY=swift`, `mac` or `kit`. Typical wall time: about 14 min for everything
-(`Build & Lint` dominates), about 7.5 min without it, about 2 min for `kit`.
+`ONLY=swift`, `mac` or `kit`. Typical wall time (measured 2026-11-23): about 25 min for everything
+(the slowest Mac shard, 20-25 min, dominates; the Rust tests job takes 15-20 min), about 4 min for `kit`.
+Step limits: Rust `Test` 35 min in a 45 min job, Mac shard 35 min in a 45 min job.
 
 If the repo ever goes private (rates assumed; check current pricing): a full
 run bills about 14 macOS minutes (8 + 2 + 2 + 2, rounded up per job) at about
