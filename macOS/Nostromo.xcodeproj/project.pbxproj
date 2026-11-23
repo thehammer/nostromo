@@ -17,6 +17,7 @@
 		RT0000000000000000000010 /* ReviewPaneTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000009 /* ReviewPaneTestSupport.swift */; };
 		RT0000000000000000000012 /* ReviewWebViewIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000011 /* ReviewWebViewIntegrationTests.swift */; };
 		RT0000000000000000000014 /* PerriRowControlsRenderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000013 /* PerriRowControlsRenderTests.swift */; };
+		RT00000000000000000099A2 /* ReviewLeftoversSweepTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT00000000000000000099A1 /* ReviewLeftoversSweepTests.swift */; };
 		RT0000000000000000000016 /* PerriRowControlsHitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000015 /* PerriRowControlsHitTests.swift */; };
 		RT0000000000000000000018 /* PerriFocusContainerLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000017 /* PerriFocusContainerLayoutTests.swift */; };
 		RT0000000000000000000020 /* ReviewPaneRedactionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000019 /* ReviewPaneRedactionTests.swift */; };
@@ -917,6 +918,7 @@
 		RT0000000000000000000009 /* ReviewPaneTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPaneTestSupport.swift; sourceTree = "<group>"; };
 		RT0000000000000000000011 /* ReviewWebViewIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewWebViewIntegrationTests.swift; sourceTree = "<group>"; };
 		RT0000000000000000000013 /* PerriRowControlsRenderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriRowControlsRenderTests.swift; sourceTree = "<group>"; };
+		RT00000000000000000099A1 /* ReviewLeftoversSweepTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewLeftoversSweepTests.swift; sourceTree = "<group>"; };
 		RT0000000000000000000015 /* PerriRowControlsHitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriRowControlsHitTests.swift; sourceTree = "<group>"; };
 		RT0000000000000000000017 /* PerriFocusContainerLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriFocusContainerLayoutTests.swift; sourceTree = "<group>"; };
 		RT0000000000000000000019 /* ReviewPaneRedactionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPaneRedactionTests.swift; sourceTree = "<group>"; };
@@ -2015,6 +2017,7 @@
 				RT000000000000000000064 /* GitHubSignedOut404HintTests.swift */,
 				RT000000000000000000062 /* PerriTicketControlRenderTests.swift */,
 				RT000000000000000000060 /* PerriTicketControlTests.swift */,
+				RT00000000000000000099A1 /* ReviewLeftoversSweepTests.swift */,
 				RT0000000000000000000015 /* PerriRowControlsHitTests.swift */,
 				RT0000000000000000000017 /* PerriFocusContainerLayoutTests.swift */,
 				RT0000000000000000000019 /* ReviewPaneRedactionTests.swift */,
@@ -3063,6 +3066,7 @@
 				RT000000000000000000065 /* GitHubSignedOut404HintTests.swift in Sources */,
 				RT000000000000000000063 /* PerriTicketControlRenderTests.swift in Sources */,
 				RT000000000000000000061 /* PerriTicketControlTests.swift in Sources */,
+				RT00000000000000000099A2 /* ReviewLeftoversSweepTests.swift in Sources */,
 				RT0000000000000000000016 /* PerriRowControlsHitTests.swift in Sources */,
 				RT0000000000000000000018 /* PerriFocusContainerLayoutTests.swift in Sources */,
 				RT0000000000000000000020 /* ReviewPaneRedactionTests.swift in Sources */,

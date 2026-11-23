@@ -912,6 +912,10 @@ final class CodeCopyButton: NSButton {
     private(set) var symbolName = "doc.on.doc"
     /// How long `checkmark` stays after a copy.
     var feedbackDuration: TimeInterval = 1.2
+    /// How the feedback reset is scheduled; tests replace it to run the work by hand, on no clock.
+    var scheduleReset: (TimeInterval, DispatchWorkItem) -> Void = { delay, work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
 
     private let pasteboard: NSPasteboard
     private var resetWork: DispatchWorkItem?
@@ -974,7 +978,7 @@ final class CodeCopyButton: NSButton {
             self.show(symbol: "doc.on.doc", tip: Self.copyLabel)
         }
         resetWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + feedbackDuration, execute: work)
+        scheduleReset(feedbackDuration, work)
     }
 
     override func updateTrackingAreas() {

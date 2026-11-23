@@ -18,6 +18,7 @@ final class SlashCommandEchoTests: XCTestCase {
 
     private let newDaemon = [NostromodClient.slashCommandsFeature]
 
+    private var daemon: FakeDaemon!
     private var client: NostromodClient!
     private var session: ChatSession!
     private var changes: [TurnChange] = []
@@ -25,7 +26,15 @@ final class SlashCommandEchoTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        client = NostromodClient(socketPath: "/dev/null")
+        // Connected to a scripted daemon: a send that is written shows `· sent`; one that is not (an
+        // offline client) shows `· not sent`. Server frames are still fed straight to `client.messages`.
+        daemon = FakeDaemon(scripts: [.init(features: [])])
+        XCTAssertNoThrow(try daemon.start())
+        client = NostromodClient(socketPath: daemon.path)
+        client.start()
+        let deadline = Date().addingTimeInterval(5)
+        while !client.connected.value, Date() < deadline { RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02)) }
+        XCTAssertTrue(client.connected.value, "the client never connected to the fake daemon")
         session = ChatSession(tag: "test", agentName: "cody", displayName: "Cody", workingDirectory: nil, client: client)
         changes = []
         subscription = session.changes.sink { [weak self] in self?.changes.append($0) }
@@ -36,6 +45,8 @@ final class SlashCommandEchoTests: XCTestCase {
         subscription = nil
         session = nil
         client = nil
+        daemon?.stop()
+        daemon = nil
         super.tearDown()
     }
 
@@ -109,6 +120,98 @@ final class SlashCommandEchoTests: XCTestCase {
                            TurnHeightEstimator.turnChrome + TurnHeightEstimator.wakeMarkerHeight + TurnHeightEstimator.userSlotGap,
                            accuracy: 0.001, "width \(width)")
         }
+    }
+
+    // MARK: A command that never gets an answer
+
+    private func offlineSession() -> (ChatSession, NostromodClient) {
+        let offline = NostromodClient(socketPath: "/dev/null")
+        offline.setAdvertisedFeaturesForTesting(newDaemon)
+        return (ChatSession(tag: "test", agentName: "cody", displayName: "Cody", workingDirectory: nil, client: offline), offline)
+    }
+
+    func testACommandWhoseSendDidNotLeaveTheProcessShowsNotSentAndStaysOneMutedLine() {
+        let (offlineSession, offlineClient) = offlineSession()
+        var offlineChanges: [TurnChange] = []
+        let sub = offlineSession.changes.sink { offlineChanges.append($0) }
+        defer { sub.cancel(); _ = offlineClient }
+
+        offlineSession.send("/context")
+
+        let echo = offlineSession.turns[0]
+        XCTAssertEqual(echo.markerContent?.line, "/context · not sent")
+        XCTAssertEqual(echo.markerContent?.accessibilityLabel, "Command /context, not sent")
+        XCTAssertTrue(echo.isPendingCommandEcho, "still one muted line, not a bubble")
+        XCTAssertFalse(view(echo).hasUserBubble)
+        XCTAssertEqual(view(echo).wakeMarkerView?.shownText, "/context · not sent")
+        XCTAssertTrue(offlineChanges.contains { if case .spliced(replacedFrom: 0) = $0 { return true } else { return false } },
+                      "the view is told to redraw the line")
+    }
+
+    func testASentCommandThatTheDaemonIsStillWorkingOnStaysSent() {
+        advertiseSlashCommands()
+        session.send("/context")
+        XCTAssertEqual(session.turns[0].markerContent?.line, "/context · sent")
+        XCTAssertNil(session.turns[0].pendingCommandEnd)
+    }
+
+    func testASessionThatExitsLeavesAnUnansweredCommandWithNoAnswer() {
+        advertiseSlashCommands()
+        session.send("/context")
+
+        client.messages.send(.sessionExited(tag: "test", exitCode: 1))
+        modelFlushMain()
+
+        XCTAssertEqual(session.turns[0].markerContent?.line, "/context · no answer")
+        XCTAssertEqual(session.turns[0].markerContent?.accessibilityLabel, "Command /context, no answer")
+        XCTAssertEqual(view(session.turns[0]).wakeMarkerView?.shownText, "/context · no answer")
+    }
+
+    func testASessionThatGoesDownLeavesAnUnansweredCommandWithNoAnswer() {
+        advertiseSlashCommands()
+        session.send("/model haiku")
+
+        client.messages.send(.sessionDown(tag: "test", reason: .user))
+        modelFlushMain()
+
+        XCTAssertEqual(session.turns[0].markerContent?.line, "/model haiku · no answer")
+    }
+
+    func testAnotherSessionsExitLeavesThisCommandSent() {
+        advertiseSlashCommands()
+        session.send("/context")
+
+        client.messages.send(.sessionExited(tag: "someone-else", exitCode: 1))
+        modelFlushMain()
+
+        XCTAssertEqual(session.turns[0].markerContent?.line, "/context · sent")
+    }
+
+    func testACommandTheDaemonAnsweredIsNotTouchedWhenTheSessionLaterEnds() {
+        advertiseSlashCommands()
+        session.send("/context")
+        deliver(daemonTurn(input: "/context", origin: localCommand()))
+        XCTAssertTrue(session.turns[0].hasLocalCommandOrigin)
+
+        client.messages.send(.sessionExited(tag: "test", exitCode: 0))
+        modelFlushMain()
+
+        XCTAssertTrue(session.turns[0].hasLocalCommandOrigin, "the record stays a record")
+        XCTAssertNil(session.turns[0].markerContent)
+    }
+
+    func testALateAnswerStillAdoptsACommandMarkedNoAnswer() {
+        advertiseSlashCommands()
+        session.send("/context")
+        client.messages.send(.sessionExited(tag: "test", exitCode: 1))
+        modelFlushMain()
+        XCTAssertEqual(session.turns[0].markerContent?.line, "/context · no answer")
+
+        deliver(daemonTurn(input: "/context", origin: localCommand()))
+
+        XCTAssertEqual(session.turns.count, 1)
+        XCTAssertTrue(session.turns[0].hasLocalCommandOrigin)
+        XCTAssertNil(session.turns[0].pendingCommandEnd)
     }
 
     // MARK: Old daemon
