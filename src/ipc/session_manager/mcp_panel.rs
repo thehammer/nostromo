@@ -618,7 +618,11 @@ mod tests {
         );
         drop(fetching);
         panel.fetch_lock("other");
-        assert_eq!(panel.tracked_sessions(), 1, "once the fetch is over it goes");
+        assert_eq!(
+            panel.tracked_sessions(),
+            1,
+            "once the fetch is over it goes"
+        );
     }
 
     #[test]
