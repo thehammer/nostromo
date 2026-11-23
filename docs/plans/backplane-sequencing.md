@@ -963,9 +963,17 @@ flagged, not made (open question 8).
 - **Sensitive data on the primary.** With B9 defaults, nothing from Kobe
   beyond metadata reaches Tokyo, and Sendai's Teri/Fred stay home unless
   `publish_sensitive` is turned on.
-- **Queue contention.** Every wedge but W14 collides with the approvals and
-  crew chains on the session wire or Xcode; the calendar is set by those
-  chains and by Ada, not by compute.
+- **Queue contention.** *2026-11-23:* the approvals and crew chains are
+  merged. The remaining risk is new session-wire work started beside a wedge
+  (message queue S6, model switching M4–M7) and Mac Xcode-project edits beside
+  W15. The calendar is now set by Ada's sign-offs, not by other chains.
+- **Merge gate regressions (new).** Without B11, attaching any phone or a
+  satellite route silently stops merging on that session; with B11 wrong, a
+  local legacy client could see a merged turn drawn twice. W9's tests pin
+  both directions.
+- **Gate data lost (new).** With `budget_minutes: 45` and serial gates, mixed
+  Rust/Swift wedges end gates `incomplete`; observe mode loses the data
+  without holding the job. Crew deltas 6 and 7.
 
 ## Open technical item — RESOLVED 2026-10-18
 

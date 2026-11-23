@@ -1,6 +1,41 @@
 # W9 — Add an authenticated WebSocket transport and device pairing to nostromd
 
-## Refreshed 2026-10-18 against `origin/main` `d61c62d`
+## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
+
+Read the memo's "Readiness", "What changed since 2026-10-18", bet **B11** and
+the re-derived "Wire inventory" first. Versus the 2026-10-18 version of this
+file (line numbers in this file are re-derived; the 2026-10-18 notes further
+down are history):
+- **Ordinals.** `CLIENT_MSG_VARIANTS` is **98** (`src/ipc/peer.rs:2491`,
+  asserted again at `:2639-2640`). This wedge's nine verbs take **98–106**
+  (`PairCheck` 98 … `DeviceSetScope` 106) and the constant becomes **107**.
+  Each new verb also gets a fixture in `every_client_msg()`; none goes into
+  `NETWORK_ALLOWED` (`:2461`), because `DeviceUnpairSelf` is admitted by
+  `paired_extra_allowed`, not by `network_policy`.
+- **Unblocked.** AP2a, AP3 and MC4 are merged; the only exclusion left is "no
+  other job editing the session wire at the same time" (memo, "Dispatch
+  order").
+- **B11 lands here.** The merge gate (`merged_turns_v1`, #514) must count only
+  attached connections that can send user messages. This wedge changes
+  `refresh_merge_gate` (`src/ipc/session_manager/mod.rs:3846-3855`) so network
+  peers never count, and the WebSocket handshake carries `Hello.capabilities`
+  through the shared parse (`src/ipc/server.rs:643-666`). New criteria
+  W9-19 and W9-20.
+- **Packaging.** `make install-daemon` (`Makefile:136-193`) now builds through
+  `make daemon` (`:129-130`), copies from `$(NOSTROMO_TARGET_DIR)/release`,
+  stages and signs three binaries and runs the restart guard first. The
+  `nostromo` CLI joins that recipe as a fourth, independent binary (details
+  under Files).
+- **More verbs are refused for a `Paired` device.** The 57 verbs merged since
+  2026-10-18 are all `Refused` in `network_policy` (`peer.rs:1070-1181`) and
+  the new frames are almost all `LocalOnly`; a `Paired` peer inherits that.
+  The B10 gating cases add the newest operator-only verbs (below).
+- **Gates.** `.mother/crew.yml` exists. `python-test` runs on the host
+  (`where: any`, correct) and triggers on this wedge because `tests/**`
+  matches the new Rust test files. Lenses run automatically (Mother #75); the
+  repo default is all four.
+
+## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
 Read `docs/plans/backplane-sequencing.md` first: "What changed since
 2026-10-10", bets B9/B10 and the "Wire inventory" table are binding on this
@@ -22,19 +57,21 @@ plan. In short, versus the 2026-10-10 draft of this file:
 ## Context
 
 `nostromd` serves the Mac app over a Unix socket and legacy iOS builds over a
-raw, **unauthenticated** TCP listener (bound in `src/bin/nostromd.rs:196-215`,
+raw, **unauthenticated** TCP listener (bound in `src/bin/nostromd.rs:353-378`,
 default **loopback** `127.0.0.1:47100`, `src/config.rs:46`, `tcp_listen_addr`
-`:221`; found by Bonjour via `src/mdns.rs`). Both run the generic
-`handle_client` loop (`src/ipc/server.rs:412`) with the length-prefixed
-framing in `src/ipc/codec.rs`, then `handle_client_msg` (`:941`). Trust:
-`PeerTrust` (`src/ipc/peer.rs:44-52`) is `OperatorApp` (a Unix peer the
+`:482`; found by Bonjour via `src/mdns.rs`, advertised at `nostromd.rs:384`).
+Both run the generic `handle_client` loop (`src/ipc/server.rs:617`) with the
+length-prefixed framing in `src/ipc/codec.rs`, then `handle_client_msg`
+(`:1430`). Trust: `PeerTrust` (`src/ipc/peer.rs:47-55`) is `OperatorApp` (a Unix peer the
 macOS-only verifier in `src/ipc/peer_verify.rs` matched against
 `~/.nostromo/operator-app.pin`), `LocalOther` (any other Unix peer) or `Tcp`.
-FND-1 (`peer.rs`) classifies every frame: `classify_server_msg` (`:632`),
-`may_receive` (`:755`), `outbound` (`:772`), the default-deny
-`network_policy` (`:833`, 13 verbs `Allowed`), `targets_sensitive_session`
-(`:892`), `redact_for_network` (`:975`), `withheld_msg` (`:1034`), and the
-ordinal tripwire `CLIENT_MSG_VARIANTS = 41` (`:1547`).
+FND-1 (`peer.rs`) classifies every frame: `classify_server_msg` (`:717`),
+`may_receive` (`:970`), `outbound` (`:987`), the default-deny
+`network_policy` (`:1054`, 13 verbs `Allowed`, 85 `Refused`),
+`targets_sensitive_session` (`:1197`), `redact_for_network` (`:1344`),
+`withheld_msg` (`:1424`), and the ordinal tripwire `CLIENT_MSG_VARIANTS = 98`
+(`:2491`). The session manager's merge gate counts attached connections that
+did not declare `merged_turns_v1` (`src/ipc/session_manager/mod.rs:3846-3855`).
 
 This wedge adds a third transport, **WebSocket**. It carries the same
 `ClientMsg`/`ServerMsg` JSON, one message per text frame. It authenticates
@@ -66,22 +103,23 @@ Devices redeem codes over the WebSocket listener without a token.
 
 ## Files to change
 
-- `Cargo.toml:96` — `tokio-tungstenite = { version = "0.24", features =
+- `Cargo.toml:106` — `tokio-tungstenite = { version = "0.24", features =
   ["rustls-tls-native-roots"] }` is already present (a client in
   `src/data/relay_client.rs`). Server-side `accept_hdr_async` needs no new
-  feature. Add `sha2 = "0.10"` and `rand = "0.8"` unless already direct
-  dependencies (check `Cargo.lock`). Add `qrcode = "0.14"` with
+  feature. `sha2 = "0.10"` is already a direct dependency (`:92`). Add
+  `rand = "0.8"` unless it is already direct (check `Cargo.lock`; a `uuid` v4
+  is not a token source). Add `qrcode = "0.14"` with
   `default-features = false` for the terminal QR. Add a `[[bin]]` entry
-  `nostromo` → `src/bin/nostromo_cli.rs` next to the existing five
-  (`Cargo.toml:13-31`).
-- `src/ipc/peer.rs:33-70` — add `Transport::Ws` and
+  `nostromo` → `src/bin/nostromo_cli.rs` next to the existing seven
+  (`Cargo.toml:13-39`).
+- `src/ipc/peer.rs:34-74` — add `Transport::Ws` and
   `PeerTrust::Paired { sensitive: bool }` (the device id travels on the
   connection, not in the trust value, so `PeerTrust` stays `Copy`).
   `is_network()` returns `true` for `Paired`. Every exhaustive match that
   names `PeerTrust::Tcp` gains a deliberate `Paired` arm; the default is
   "same as `Tcp`". `PeerTrust::Paired` is never `OperatorApp`-equivalent for
   any purpose (decision operators, approval renderers, `operator_nonce`).
-  - `may_receive`/`outbound` (`:755-780`): a `Paired { sensitive: true }`
+  - `may_receive`/`outbound` (`:970-996`): a `Paired { sensitive: true }`
     peer passes the `ServerClass::Sensitive` gate for Teri/Fred **state**
     frames only (`TeriState`, `FredState`, `WorkSourceStatus`,
     `WorkSnapshot`, `TeriPicks`); `WorkDetail`, `WorkSendPreview` and
@@ -89,27 +127,29 @@ Devices redeem codes over the WebSocket listener without a token.
     `LocalOnly` stays `false` for `Paired` (approval frames, task detail).
     Everything else treats `Paired` exactly like `Tcp`, including
     `redact_for_network`.
-  - `classify_server_msg` (`:632-721`): add `ServerClass::Admin` for the
+  - `classify_server_msg` (`:717-888`): add `ServerClass::Admin` for the
     device-admin frames (below). `may_receive` delivers `Admin` to
     non-network peers only in this wedge; W10 adds the satellite exception.
     The pairing-reply frames (`PairOffer`, `Paired`, `PairRefused`,
     `Unauthorized`, `DeviceUnpaired`) are `Open` and are only ever written
     targeted to the socket that asked; a unit test asserts `Server::broadcast`
     is never called with them.
-  - `network_policy` (`:833-878`), `targets_sensitive_session` (`:892-950`)
-    and the ordinal table (`:1547-1610`) gain every new `ClientMsg`:
-    `PairCheck` 41, `Pair` 42, `DeviceUnpairSelf` 43, `DevicePairStart` 44,
-    `DevicePairUpdate` 45, `DevicePairCancel` 46, `DeviceList` 47,
-    `DeviceRevoke` 48, `DeviceSetScope` 49; `CLIENT_MSG_VARIANTS` 41 → 50 (if
-    another merged plan took ordinal 41 first, continue from the next free
-    one and re-derive). Policy: `PairCheck`/`Pair` → `Refused` (they are
+  - `network_policy` (`:1054-1183`), `targets_sensitive_session`
+    (`:1197`) and the ordinal table (`:2494-2595`) gain every new
+    `ClientMsg`: `PairCheck` 98, `Pair` 99, `DeviceUnpairSelf` 100,
+    `DevicePairStart` 101, `DevicePairUpdate` 102, `DevicePairCancel` 103,
+    `DeviceList` 104, `DeviceRevoke` 105, `DeviceSetScope` 106;
+    `CLIENT_MSG_VARIANTS` 98 → 107 (if another merged plan took ordinal 98
+    first, continue from the next free one and re-derive), plus the two
+    asserts at `:2639-2640`, the history comment above them, and one fixture
+    each in `every_client_msg()`. Policy: `PairCheck`/`Pair` → `Refused` (they are
     accepted only on a token-less pairing socket, enforced in `ws.rs` before
     dispatch); `DeviceUnpairSelf` → `Refused` here and allowed by a
     `Paired`-only check in `handle_client_msg`; every `Device*` admin verb →
     `Refused` for every network peer (W10 adds the one satellite exception).
     `NetworkPolicy` stays a two-value enum; the `Paired` special cases live
     in one function, `peer::paired_extra_allowed(&ClientMsg) -> bool`.
-  - `withheld_msg` (`:1034`) takes a reason. Today's
+  - `withheld_msg` (`:1424`) takes a reason. Today's
     `requires_secure_connection` stays for `Tcp`. A `Paired { sensitive:
     false }` peer gets reason `device_scope`, so the client can say *why*
     (PRD-AC34).
@@ -156,10 +196,10 @@ Devices redeem codes over the WebSocket listener without a token.
   `MAX_FRAME_LEN` (`src/ipc/protocol.rs:45`) closes with 1009.
   Unauthenticated upgrades are rate-limited per source IP: 20 per minute,
   then refused at upgrade with HTTP 429.
-- `src/ipc/server.rs:412-940` — `handle_client` is already generic over the
+- `src/ipc/server.rs:617-1429` — `handle_client` is already generic over the
   stream type; give it a framing seam (a send/receive pair) so a
   `WebSocketStream<TcpStream>` can drive the same body. Unix and TCP keep
-  today's behaviour byte-for-byte. Both call `handle_client_msg` (`:941`)
+  today's behaviour byte-for-byte. Both call `handle_client_msg` (`:1430`)
   and the `peer::outbound` filter. The body's `trust` becomes mutable for WS
   peers. AP1b's answer-time re-inspection and `operator_nonce` paths are
   Unix-only and must not be reachable from a WS peer (a test sends
@@ -180,7 +220,11 @@ Devices redeem codes over the WebSocket listener without a token.
     retained frames that now pass (PRD-AC35). Other connections are
     untouched (PRD-AC28).
   - Add `Server::bind_ws(listener, devices, pairing, …)` mirroring
-    `bind_tcp` (`:186`).
+    `bind_tcp` (`:280`).
+  - **Hello capabilities on WebSocket (B11).** The WS path feeds its first
+    text frame to the same Hello parse (`:643-666`), so `capabilities` and
+    `merge_capable` are recorded for a WS connection exactly as for Unix and
+    TCP. Do not special-case it; B11 is enforced in the session manager.
   - **On disconnect** of any connection, cancel the pairings it owns
     (outcome `connection_lost`). A pairing never outlives the window or
     command that shows its code.
@@ -198,7 +242,8 @@ Devices redeem codes over the WebSocket listener without a token.
     topic `devices`).
 - `src/ipc/protocol.rs` — **no `PROTOCOL_VERSION` change** (stays 4 at
   `:26`; capability is the `Welcome.features` strings below). Add
-  `Topic::Devices` (`Topic` enum `:66-104`). Messages:
+  `Topic::Devices` (`Topic` enum `:73-89`; `Unknown` stays last with
+  `#[serde(other)]`). Messages:
   - Client → daemon, device side: `PairCheck { code }`;
     `Pair { code, name, kind }`; `DeviceUnpairSelf`.
   - Daemon → device: `PairOffer { name_hint: Option<String>, sensitive,
@@ -220,11 +265,11 @@ Devices redeem codes over the WebSocket listener without a token.
     and **never** a token or hash. Satellites are excluded from the
     phone/iPad list and reported in a separate `hosts` array.
   - Add `"ws"`, `"pair"` and `"devices"` to `Welcome.features` (built in
-    `src/ipc/server.rs:474`; constants next to the existing ones at
-    `server.rs:57-75`).
+    `welcome_msg`, `src/ipc/server.rs:568-600`; constants next to the
+    existing ones at `server.rs:83-100`).
   - The QR/URL payload is `nostromo://pair?v=1&host=<h>&port=<p>&code=<c>`.
     Name and scope are *not* in it; the device learns them from `PairOffer`.
-- `src/config.rs:43-60, 215-230` — add `ws_addr: Option<SocketAddr>` and
+- `src/config.rs:46-60, 475-490` — add `ws_addr: Option<SocketAddr>` and
   `ws_listen_addr()` (`NOSTROMD_WS_ADDR` → `config.toml ws_addr` → default
   **`127.0.0.1:47101`**, matching `DEFAULT_TCP_ADDR`; `off` disables). The
   primary opts in with `ws_addr = "0.0.0.0:47101"` (or its WireGuard/LAN
@@ -232,7 +277,7 @@ Devices redeem codes over the WebSocket listener without a token.
   the address devices are told to use. The default is the bound WS address
   if it is specific; otherwise the first non-loopback, non-link-local IPv4
   of the host. Log the chosen value at INFO.
-- `src/bin/nostromd.rs:196-215` — construct the `DeviceRegistry` and
+- `src/bin/nostromd.rs:353-398` — construct the `DeviceRegistry` and
   `PairingTable`, bind the WS listener next to the TCP one, and log its
   address. Keep mDNS for the TCP port (W10 turns it off in satellite mode).
 - `src/bin/nostromo_cli.rs` (new) — a small clap binary named `nostromo`
@@ -240,10 +285,23 @@ Devices redeem codes over the WebSocket listener without a token.
   exits 0 (there is no TUI any more). Every subcommand talks to the
   **local** daemon over the Unix socket with `DaemonClient`
   (`src/ipc/client.rs`).
-- `Makefile:69-110` (`install-daemon`) — stage, sign and install the
-  `nostromo` binary with the same new-inode-then-rename pattern as
-  `nostromo-guard`, and update the `install` target's echo (`:9-13`). If
-  W14's `install-daemon-linux` is on main, install `nostromo` there too.
+- `Makefile` — the CLI fits the current recipe like this:
+  `daemon` (`:129-130`) adds `--bin nostromo`; `install-daemon`
+  (`:136-193`) copies `$(NOSTROMO_TARGET_DIR)/release/nostromo` to a new
+  inode beside the real `nostromd`, `codesign --force -s - --identifier
+  nostromo`, and moves it into place **after** `nostromd` (it is not part of
+  the bridge/guard/daemon all-or-nothing swap: nothing the daemon runs depends
+  on it, so a failed CLI copy prints a warning and leaves the daemon
+  installed), then symlinks `~/.local/bin/nostromo` if absent and echoes
+  `Installed nostromo to …`. The restart guard already runs first; the CLI
+  adds no restart. `uninstall-daemon` (`:195-201`) removes it; `install`
+  (`:22-28`, `cargo install --path .`) picks the new bin up by itself and
+  lists it in its echo; replace the comment at `:25` (an old TUI binary named
+  `nostromo` may still sit in `~/.cargo/bin` on the operator's Macs, and the
+  new CLI deliberately overwrites it; if `~/.local/bin/nostromo` and
+  `~/.cargo/bin/nostromo` differ after install, print which one `PATH`
+  resolves first). If W14's `install-daemon-linux` is on
+  main, install `nostromo` there too (no `codesign` on Linux).
   On the primary that daemon does the work itself; on a satellite W10
   relays it. Subcommands:
   - `device pair [NAME] [--no-mail-and-todos]` — prints the server URL, the
@@ -280,11 +338,26 @@ Devices redeem codes over the WebSocket listener without a token.
   like `Tcp`, `Withheld` reason `device_scope`) and `Paired { sensitive:
   true }` (receives `TeriState`/`FredState`) cases, plus B10 cases: a
   `Paired { sensitive: true }` peer subscribed to everything never receives
-  `ApprovalRequest`, `ApprovalsSnapshot`, `ApprovalResolved`,
-  `ApprovalGuardBlocked`, `ApprovalAnswerRefused` or `SessionTaskDetail`,
-  does receive `ApprovalPending` for a non-sensitive tag, and has
-  `ApprovalAnswer`, `ApprovalRefusalReport`, `DecisionAnswer`,
-  `MotherResume` and `MotherAction` refused with no side effect.
+  any `LocalOnly` frame (drive it from the classification list rather than a
+  hand list: approval frames, `SessionTaskDetail`, `SessionQueue*`,
+  `AuthoredPrs*`, `TrackerBoard`, `ConversationHistory*`, `SessionMcpResult`,
+  `Terminal*`, `RemoteShell*` are all in it), does receive `ApprovalPending`
+  and `TrackerSummary` for a non-sensitive tag, and has `ApprovalAnswer`,
+  `ApprovalRefusalReport`, `DecisionAnswer`, `MotherResume`, `MotherAction`,
+  `SessionSend`, `SessionQueueTakeBack`, `AuthoredPrMerge`, `TrackerEdit` and
+  `SessionMcp` refused with no side effect.
+- `src/ipc/session_manager/mod.rs:3846-3855` (`refresh_merge_gate`) and its
+  call sites (`:1965-1970` attach, `:2059-2076` network attach and detach,
+  `:3218-3231` connection drop) — B11: a connection counts as legacy only if
+  it is attached and is **not** in `network_clients` (`:720-723`). Pass
+  `&self.network_clients` in beside `&self.merge_capable`. Unit tests next to
+  the existing merge tests (`src/ipc/session_manager/merge_delivery_tests.rs`):
+  (1) the verified app (declared) plus a network peer that declared nothing,
+  both attached → merges; (2) the app plus a local client that declared
+  nothing → does not merge (unchanged); (3) a network peer detaches or drops →
+  the gate is recounted and the queue snapshot rebroadcast as today. Update
+  the "Gate" paragraph of `docs/message-queue.md` to say network peers do not
+  count, and why (they cannot send, so cannot echo).
 - `README.md:88-160` — §Daemon: WebSocket endpoint, `pair_host`, the
   `nostromo device` commands, a pairing walkthrough. Mark the raw TCP
   listener deprecated.
@@ -350,7 +423,11 @@ Devices redeem codes over the WebSocket listener without a token.
    (m) `DeviceUnpairSelf` → the record is revoked with `revoked_by: device`
    and the socket is closed;
    (n) device-admin verbs on a WS device socket → refused;
-   (o) a device token never appears in captured log output.
+   (o) a device token never appears in captured log output;
+   (p) a WS device whose `Hello` declares `capabilities: ["merged_turns_v1"]`
+   and one that declares nothing both attach to a busy session with the
+   verified app attached: queued typed messages still merge (B11), and the
+   connection's declared capability is recorded.
 9. **CLI.** Implement `nostromo device …` in `src/bin/nostromo_cli.rs`
    over `DaemonClient`. Test the
    output formatting and exit codes with the outcome stream stubbed, and
@@ -408,6 +485,13 @@ Technical criteria:
 - [ ] **W9-17** No clippy warnings (`cargo clippy --all-targets -- -D warnings`).
 - [ ] **W9-18** PR body references `docs/plans/backplane-sequencing.md` (W9) and
   `docs/prds/daemon-pairing-flow.md`.
+- [ ] **W9-19** B11: an attached network peer (legacy `Tcp` or `Paired`) never closes
+  the merge gate, with or without `merged_turns_v1`; an attached local peer
+  that did not declare it still closes it. Unit tests (1)–(3) and socket test
+  (p) pass, and `tests/session_queue_bytes.rs` is unmodified and green.
+- [ ] **W9-20** `make install-daemon` installs the signed `nostromo` CLI after the
+  three existing binaries without changing their order or the restart guard,
+  and `make uninstall-daemon` removes it.
 
 ## Mother crew: gates, lenses, checklist and calibration
 
@@ -416,7 +500,13 @@ Adopts the Mother features summarised in the memo's "Mother features adopted"
 `.mother/crew.yml` is merged before this job is added (it is read from the job's
 base ref, so a worker can neither add nor loosen a gate).
 
-- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `python-test` (always on; sandbox). `swift-ci` is skipped (no Swift paths).
+- **Gates that apply (2026-11-23, `.mother/crew.yml` on main):** `rust-fmt`
+  (non-blocking), `rust-clippy`, `rust-test` (`where: sandbox`), `python-test`
+  (`where: any`, on the host; it triggers because `tests/**` matches the new
+  Rust test files and `Makefile`), `shellcheck` only if a script changes.
+  `swift-ci` is skipped (no Swift paths). Gates run serially; at
+  `budget_minutes: 45` this wedge is close to the limit (memo, crew delta 6).
+  `max_attempts` is 2.
   Mother runs them on the pushed head after the worker exits: sandbox gates
   through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
   from the job worktree. Gate commands never go through the worker's Bash tool,
@@ -426,10 +516,10 @@ base ref, so a worker can neither add nor loosen a gate).
   observe mode a red gate is recorded, not enforced, so the criteria above remain
   the contract; if the repo has been promoted to enforce by dispatch time, the
   same worker session gets up to three fix attempts, then a `gate_hold`.
-- **Reviewer lenses:** the plan's yaml block adds `correctness`, `tests`, `phi-security`. Lenses run
-  in parallel with adherence on the gated commit once Mother PR #75 merges
-  (open at the time of writing); until then run
-  `mother review-lens <id> --lens <name>` on the PR's job, one lens at a time.
+- **Reviewer lenses:** all four are the repo default (`.mother/crew.yml:61`);
+  the yaml block below keeps its `add` list for readability. They run
+  automatically in parallel with adherence on the gated commit (Mother #75,
+  merged).
 - **Review depth:** **Manual Perri pass is still required** (the `perri` entry below at xhigh, then the operator's review). Lens findings are input to it, not a substitute: a lens sees only the diff (patch input is capped at 120 KB, so a large wedge will report `coverage_gap` findings), and Mother's `phi-security` checklist is written for care data, so it does not know this repo's trust tiers (B9, B10). First authenticated listener and token issuer.
 - **Checklist:** the acceptance items above carry ids (`W9-1` to `W9-18`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The
