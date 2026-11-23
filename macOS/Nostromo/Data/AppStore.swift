@@ -1989,6 +1989,11 @@ class AppStore: ObservableObject {
             ModelStore.shared.ingest(msg)
 
         // Background tasks: the store every window's chip and popover binds to.
+        // The message queue (`session_queue_v1`): each `ChatSession` reads its own focus's frames from
+        // `client.messages`; the store keeps nothing.
+        case .sessionQueue, .sessionQueueResult, .sessionQueueReturned:
+            break
+
         case .sessionTasks, .sessionTaskDetail:
             BackgroundTaskStore.shared.ingest(msg)
 

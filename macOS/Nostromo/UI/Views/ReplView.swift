@@ -124,6 +124,10 @@ class ReplView: NSView {
     /// A turn was seen running since the Compact click (so a later idle is that turn's end).
     private var compactSawRunning = false
     private let contextMeter = ContextMeterView()
+    /// The queued-message chips between the transcript and the composer (message queue S2). Zero height
+    /// with no chips; never taller than a third of the pane.
+    let queuedView = QueuedMessagesView()
+    private var queuedHeight: NSLayoutConstraint!
 
     /// Geometry for *every* turn; views for only a window of them.
     private let virtualizer = TurnListVirtualizer()
@@ -393,7 +397,10 @@ class ReplView: NSView {
             self.followTail.setPinned(true, cause: .send)
             self.session.send(text, images: images)
         }
-        inputBar.onInterrupt = { [weak self] in self?.session.interrupt() }
+        inputBar.onInterrupt = { [weak self] in
+            guard let self else { return }
+            self.session.interrupt(requester: ObjectIdentifier(self.inputBar))
+        }
         // Every window showing this focus binds to the one shared store, so a switch made in
         // any of them (or by an agent, or a script) reaches all their chips.
         inputBar.bindModel(tag: session.tag, agentName: session.agentName, store: ModelStore.shared)
@@ -405,6 +412,7 @@ class ReplView: NSView {
         inputBar.onSetMode = { [weak self] mode in self?.setTranscriptViewMode(mode) }
         inputBar.bindSlashCommands(tag: session.tag, store: SlashCommandStore.shared)
         inputBar.bindHistory(tag: session.tag, agentName: session.agentName, store: ComposerHistoryStore.shared)
+        inputBar.bindQueue(model: session.queue)
         addSubview(inputBar)
 
         // "Jump to latest" — covers exactly the transcript area (so it sits above
@@ -450,8 +458,13 @@ class ReplView: NSView {
         contextMeter.translatesAutoresizingMaskIntoConstraints = false
         addSubview(contextMeter)
 
-        // Scroll view's bottom connects to the strip (if present) or the meter.
-        let scrollBottomTarget = quickActionStrip?.topAnchor ?? contextMeter.topAnchor
+        // Queued-message chips sit directly above the context meter and composer.
+        queuedView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(queuedView)
+        queuedHeight = queuedView.heightAnchor.constraint(equalToConstant: 0)
+
+        // Scroll view's bottom connects to the strip (if present) or the chips.
+        let scrollBottomTarget = quickActionStrip?.topAnchor ?? queuedView.topAnchor
 
         var constraints: [NSLayoutConstraint] = [
             inputBar.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -463,6 +476,11 @@ class ReplView: NSView {
             contextMeter.leadingAnchor.constraint(equalTo: leadingAnchor),
             contextMeter.trailingAnchor.constraint(equalTo: trailingAnchor),
             contextMeter.heightAnchor.constraint(equalToConstant: 2),
+
+            queuedView.bottomAnchor.constraint(equalTo: contextMeter.topAnchor),
+            queuedView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            queuedView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            queuedHeight,
 
             scrollView.topAnchor.constraint(equalTo: toolbarBottomBorder.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -489,7 +507,7 @@ class ReplView: NSView {
             constraints += [
                 strip.leadingAnchor.constraint(equalTo: leadingAnchor),
                 strip.trailingAnchor.constraint(equalTo: trailingAnchor),
-                strip.bottomAnchor.constraint(equalTo: contextMeter.topAnchor),
+                strip.bottomAnchor.constraint(equalTo: queuedView.topAnchor),
                 strip.heightAnchor.constraint(equalToConstant: QuickActionStripView.height),
             ]
         }
@@ -567,10 +585,7 @@ class ReplView: NSView {
             .sink { [weak self] text in self?.announceNote(text) }
             .store(in: &cancellables)
 
-        session.$pendingCount
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] count in self?.inputBar.setPendingCount(count) }
-            .store(in: &cancellables)
+        bindQueuedMessages()
 
         session.$contextFraction
             .receive(on: DispatchQueue.main)
@@ -764,6 +779,73 @@ class ReplView: NSView {
             if case .group = $0 { return true } else { return false }
         }), group.isStuck else { return }
         foldSync.recordAuto(key: group.key, turnKey: turn.identityKey)
+    }
+
+    /// Chips from the session's queue, the header, Edit and Remove, and what VoiceOver says about the queue.
+    /// Every window of this focus binds to the one `session.queue`, so they all show the same chips.
+    private func bindQueuedMessages() {
+        queuedView.onHeightChange = { [weak self] in self?.updateQueuedHeight() }
+        queuedView.onEdit = { [weak self] entry in self?.inputBar.takeBackForEdit(id: entry.id) }
+        queuedView.onRemove = { [weak self] entry in self?.session.queue.remove(id: entry.id) }
+        inputBar.onStatus = { [weak self] text in self?.showQueueStatus(text) }
+        inputBar.onDraftEmptyChange = { [weak self] empty in self?.queuedView.composerHasDraft = !empty }
+
+        session.queue.$entries
+            .combineLatest(session.queue.$held)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshQueuedMessages() }
+            .store(in: &cancellables)
+        ClaudeLoginStore.shared.changes
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] tags in
+                guard let self, tags.contains(self.session.tag) else { return }
+                self.refreshQueuedMessages()
+            }
+            .store(in: &cancellables)
+        session.queue.events
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] event in
+                switch event {
+                case .queued(let waiting): self?.announceNote("Queued. \(waiting) waiting.")
+                case .delivered: self?.announceNote("Queued messages sent.")
+                }
+            }
+            .store(in: &cancellables)
+        session.sendRefused
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] refused in self?.inputBar.restoreRefusedSend(text: refused.text, images: refused.images) }
+            .store(in: &cancellables)
+        refreshQueuedMessages()
+    }
+
+    private func refreshQueuedMessages() {
+        let signIn = session.queue.held != nil || ClaudeLoginStore.shared.session(tag: session.tag)?.holdId != nil
+        queuedView.composerHasDraft = !inputBar.draftIsEmpty
+        queuedView.setContent(entries: session.queue.entries, displayName: session.displayName, waitingForSignIn: signIn)
+        updateQueuedHeight()
+    }
+
+    /// A third of the pane at most, so the composer and enough transcript always stay visible.
+    private func updateQueuedHeight() {
+        queuedView.maxHeight = bounds.height / 3
+        let height = queuedView.preferredHeight
+        guard abs(queuedHeight.constant - height) > 0.5 else { return }
+        queuedHeight.constant = height
+    }
+
+    private var queueStatusToken = 0
+
+    /// "Already sent", "Couldn't reach Nostromo": shown under the chips for a few seconds.
+    private func showQueueStatus(_ text: String) {
+        queuedView.setStatus(text)
+        updateQueuedHeight()
+        queueStatusToken += 1
+        let token = queueStatusToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+            guard let self, self.queueStatusToken == token else { return }
+            self.queuedView.setStatus(nil)
+            self.updateQueuedHeight()
+        }
     }
 
     /// Tell VoiceOver about a transcript note, when this pane is the one being looked at.
@@ -1286,6 +1368,10 @@ class ReplView: NSView {
 
     override func layout() {
         super.layout()
+        if abs(queuedView.maxHeight - bounds.height / 3) > 0.5 {
+            // Not inside this layout pass: it changes a constraint.
+            DispatchQueue.main.async { [weak self] in self?.updateQueuedHeight() }
+        }
         // A width change invalidates every estimate and every measurement, since
         // both were taken at the old width. Re-estimating five thousand turns is
         // a few million float ops — which is what keeps a resize interactive. (Tool

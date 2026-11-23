@@ -836,6 +836,418 @@ final class TurnReconcilerTests: XCTestCase {
                        "a different conversation is the one case history may go")
         XCTAssertTrue(replaced.didReplaceAll)
     }
+
+    // MARK: - 14. A "queued messages were not sent" notice among the turns (message queue S2)
+    //
+    // The notice is local, like an optimistic echo: no daemon entry stands behind it, so no snapshot can
+    // ever contain it. A reconnect must carry it along exactly once, where it was, without taking it for
+    // history that went missing (a "gap") and without letting it stop the real turns from matching.
+
+    private func makeNotice(_ count: Int = 2, at seconds: Double = 500) -> ChatTurn {
+        ChatTurn.marker(.queuedNotSent(count: count), timestamp: Self.baseDate.addingTimeInterval(seconds))
+    }
+
+    private func noticeCounts(_ turns: [ChatTurn]) -> [Int] {
+        turns.compactMap { if case .queuedNotSent(let n)? = $0.marker { return n } else { return nil } }
+    }
+
+    /// One line per turn: the record entry's text, `[n]` for a notice, `[gap]` for a gap marker.
+    private func shape(_ turns: [ChatTurn]) -> [String] {
+        turns.map { turn in
+            switch turn.marker {
+            case .queuedNotSent(let n)?: return "[\(n)]"
+            case .gap?: return "[gap]"
+            case nil: return turn.userInput
+            default: return "[marker]"
+            }
+        }
+    }
+
+    private func messages(_ seqs: Range<Int>) -> [String] { seqs.map { "message \($0)" } }
+
+    func testATrailingNoticeSurvivesAFullyOverlappingReattachOnceAndMakesNoGap() {
+        let body = makeRetained(Array(0 ..< 10))
+        let notice = makeNotice(2)
+        let retained = body + [notice]
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(0 ..< 10), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertFalse(outcome.insertedGapMarker, "the notice is not missing history")
+        XCTAssertEqual(gapMarkerCount(outcome.turns), 0)
+        XCTAssertFalse(outcome.didReplaceAll)
+        XCTAssertEqual(outcome.overlap, 10, "the notice neither counts as nor blocks an overlapping turn")
+        XCTAssertEqual(shape(outcome.turns), messages(0 ..< 10) + ["[2]"], "kept once, after the turn it followed")
+        XCTAssertEqual(outcome.turns.last?.id, notice.id, "its view identity carries over")
+        XCTAssertEqual(outcome.turns.prefix(10).map { $0.id }, body.map { $0.id })
+        for (i, turn) in outcome.turns.prefix(10).enumerated() {
+            XCTAssertEqual(turn.epoch, 1, "turn \(i) adopts the snapshot's epoch")
+            XCTAssertEqual(turn.daemonId, "t\(i)")
+        }
+        assertNoDuplicateEntries(outcome.turns)
+        assertUniqueViewIdentities(outcome.turns)
+        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testATrailingNoticeStaysAfterTheTurnItFollowedWhenTheSnapshotBringsNewerTurns() {
+        let retained = makeRetained(Array(0 ..< 10)) + [makeNotice(1)]
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(5 ..< 15), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(shape(outcome.turns), messages(0 ..< 10) + ["[1]"] + messages(10 ..< 15),
+                       "it happened after message 9 and before the turns that arrived since")
+        XCTAssertEqual(gapMarkerCount(outcome.turns), 0)
+        XCTAssertEqual(outcome.overlap, 5)
+        assertNoDuplicateEntries(outcome.turns)
+        assertUniqueViewIdentities(outcome.turns)
+        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testANoticeInTheMiddleStaysWhereItWasThroughAReattach() {
+        let retained = makeRetained(Array(0 ..< 5)) + [makeNotice(3)] + makeRetained(Array(5 ..< 10))
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(0 ..< 10), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(shape(outcome.turns), messages(0 ..< 5) + ["[3]"] + messages(5 ..< 10))
+        XCTAssertEqual(gapMarkerCount(outcome.turns), 0)
+        XCTAssertEqual(outcome.turns.map { $0.id }, retained.map { $0.id }, "every view keeps its identity, the notice's too")
+        assertNoDuplicateEntries(outcome.turns)
+        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testANoticeInTheMiddleSurvivesASnapshotThatStartsBeforeAndEndsAfterIt() {
+        let retained = makeRetained(Array(0 ..< 5)) + [makeNotice(3)] + makeRetained(Array(5 ..< 10))
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(3 ..< 12), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(shape(outcome.turns), messages(0 ..< 5) + ["[3]"] + messages(5 ..< 12),
+                       "the notice follows message 4 however much of the list the snapshot rewrote")
+        XCTAssertEqual(noticeCounts(outcome.turns), [3])
+        XCTAssertEqual(gapMarkerCount(outcome.turns), 0)
+        assertNoDuplicateEntries(outcome.turns)
+        assertUniqueViewIdentities(outcome.turns)
+        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testANoticeInTheMiddleSurvivesASnapshotThatStartsAfterIt() {
+        let retained = makeRetained(Array(0 ..< 5)) + [makeNotice(3)] + makeRetained(Array(5 ..< 10))
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(7 ..< 12), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(shape(outcome.turns), messages(0 ..< 5) + ["[3]"] + messages(5 ..< 12))
+        assertNoDuplicateEntries(outcome.turns)
+        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testANoticeFollowedByAPendingEchoKeepsBothInOrderWithTheEchoStillLast() {
+        let echo = makeOptimisticEcho(text: "run the tests")
+        let notice = makeNotice(1)
+        let retained = makeRetained(Array(0 ..< 10)) + [notice, echo]
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(0 ..< 10), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(shape(outcome.turns), messages(0 ..< 10) + ["[1]", "run the tests"])
+        XCTAssertEqual(outcome.turns.last?.id, echo.id)
+        XCTAssertNil(outcome.turns.last?.daemonId, "the echo is still un-acknowledged")
+        XCTAssertEqual(gapMarkerCount(outcome.turns), 0)
+        assertUniqueViewIdentities(outcome.turns)
+        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testAPendingEchoBehindANoticeIsStillAbsorbedWhenTheSnapshotRecordedIt() {
+        let retained = makeRetained(Array(0 ..< 10)) + [makeNotice(1), makeOptimisticEcho(text: "run the tests")]
+        let snapshot = makeSnapshot(Array(0 ..< 11), epoch: 1, text: { $0 == 10 ? "run the tests" : "message \($0)" })
+
+        let outcome = TurnReconciler.reconcile(retained: retained, snapshot: snapshot, sessionIdChanged: false)
+
+        XCTAssertEqual(outcome.turns.filter { $0.userInput == "run the tests" }.count, 1,
+                       "the message appears once: the recorded turn supersedes the echo")
+        XCTAssertEqual(noticeCounts(outcome.turns), [1])
+        XCTAssertEqual(outcome.turns.last?.daemonId, "t10")
+        XCTAssertEqual(gapMarkerCount(outcome.turns), 0)
+        assertNoDuplicateEntries(outcome.turns)
+        assertUniqueViewIdentities(outcome.turns)
+    }
+
+    func testANoticeAfterAPendingEchoStaysAfterItAndAnAbsorbedEchoLeavesTheNoticeLast() {
+        let echo = makeOptimisticEcho(text: "run the tests")
+        let notice = makeNotice(1)
+        let retained = makeRetained(Array(0 ..< 10)) + [echo, notice]
+
+        let kept = TurnReconciler.reconcile(retained: retained,
+                                            snapshot: makeSnapshot(Array(0 ..< 10), epoch: 1),
+                                            sessionIdChanged: false)
+        XCTAssertEqual(shape(kept.turns), messages(0 ..< 10) + ["run the tests", "[1]"])
+        XCTAssertEqual(gapMarkerCount(kept.turns), 0)
+
+        let recorded = TurnReconciler.reconcile(
+            retained: retained,
+            snapshot: makeSnapshot(Array(0 ..< 11), epoch: 1, text: { $0 == 10 ? "run the tests" : "message \($0)" }),
+            sessionIdChanged: false)
+        XCTAssertEqual(recorded.turns.filter { $0.userInput == "run the tests" }.count, 1)
+        XCTAssertEqual(noticeCounts(recorded.turns), [1])
+        XCTAssertEqual(recorded.turns.last?.id, notice.id, "the notice is the last thing, as it was")
+        XCTAssertEqual(gapMarkerCount(recorded.turns), 0)
+    }
+
+    func testSeveralNoticesAllSurviveInOrder() {
+        let retained = makeRetained(Array(0 ..< 4)) + [makeNotice(1)] + makeRetained(Array(4 ..< 8)) + [makeNotice(2)]
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(0 ..< 8), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(shape(outcome.turns), messages(0 ..< 4) + ["[1]"] + messages(4 ..< 8) + ["[2]"])
+        XCTAssertEqual(gapMarkerCount(outcome.turns), 0)
+        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testTwoNoticesAfterTheSameTurnKeepTheirOrder() {
+        let retained = makeRetained(Array(0 ..< 5)) + [makeNotice(1), makeNotice(2)] + makeRetained(Array(5 ..< 10))
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(0 ..< 10), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(shape(outcome.turns), messages(0 ..< 5) + ["[1]", "[2]"] + messages(5 ..< 10))
+        XCTAssertEqual(outcome.turns.map { $0.id }, retained.map { $0.id }, "every view keeps its identity and its place")
+        XCTAssertEqual(gapMarkerCount(outcome.turns), 0)
+        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testSeveralTrailingNoticesKeepTheirOrderThroughASnapshotWithNewerTurns() {
+        let retained = makeRetained(Array(0 ..< 10)) + [makeNotice(1), makeNotice(2), makeNotice(3)]
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(5 ..< 15), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(shape(outcome.turns), messages(0 ..< 10) + ["[1]", "[2]", "[3]"] + messages(10 ..< 15))
+        assertNoDuplicateEntries(outcome.turns)
+        assertUniqueViewIdentities(outcome.turns)
+        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testTwoLeadingNoticesWithNoTurnBeforeThemKeepTheirOrder() {
+        let retained = [makeNotice(1), makeNotice(2)] + makeRetained(Array(0 ..< 5))
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(0 ..< 5), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(shape(outcome.turns), ["[1]", "[2]"] + messages(0 ..< 5))
+        XCTAssertEqual(outcome.turns.map { $0.id }, retained.map { $0.id })
+        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testTwoNoticesWithNothingElseRetainedKeepTheirOrderBeforeTheSnapshot() {
+        let retained = [makeNotice(1), makeNotice(2)]
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(0 ..< 3), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(shape(outcome.turns), ["[1]", "[2]"] + messages(0 ..< 3))
+        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testNoticesSharingAnAnchorAndNoticesAtOtherAnchorsAllKeepTheirPlaces() {
+        let retained = [makeNotice(1)] + makeRetained(Array(0 ..< 3)) + [makeNotice(2), makeNotice(3)]
+            + makeRetained(Array(3 ..< 6)) + [makeNotice(4), makeNotice(5)]
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(2 ..< 8), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(shape(outcome.turns),
+                       ["[1]"] + messages(0 ..< 3) + ["[2]", "[3]"] + messages(3 ..< 6) + ["[4]", "[5]"] + messages(6 ..< 8))
+        XCTAssertEqual(gapMarkerCount(outcome.turns), 0)
+        assertNoDuplicateEntries(outcome.turns)
+        assertUniqueViewIdentities(outcome.turns)
+        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testTwoNoticesBehindAPendingEchoKeepTheirOrderAndStayAfterIt() {
+        let echo = makeOptimisticEcho(text: "typed just now")
+        let retained = makeRetained(Array(0 ..< 4)) + [echo, makeNotice(1), makeNotice(2)]
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(0 ..< 4), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(shape(outcome.turns), messages(0 ..< 4) + ["typed just now", "[1]", "[2]"])
+        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testTwoNoticesSurviveAGapInOrder() {
+        let retained = makeRetained(Array(0 ..< 5)) + [makeNotice(1), makeNotice(2)]
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(100 ..< 103), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(shape(outcome.turns), messages(0 ..< 5) + ["[1]", "[2]", "[gap]"] + messages(100 ..< 103))
+        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testANoticeBeforeAnyTurnStaysFirst() {
+        let retained = [makeNotice(1)] + makeRetained(Array(0 ..< 5))
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(0 ..< 5), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(shape(outcome.turns), ["[1]"] + messages(0 ..< 5))
+        XCTAssertEqual(gapMarkerCount(outcome.turns), 0)
+        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testANoticeIsAllThatWasRetainedAndTheSnapshotArrivesAfterIt() {
+        let notice = makeNotice(2)
+
+        let outcome = TurnReconciler.reconcile(retained: [notice],
+                                               snapshot: makeSnapshot(Array(0 ..< 5), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(shape(outcome.turns), ["[2]"] + messages(0 ..< 5))
+        XCTAssertFalse(outcome.insertedGapMarker)
+        XCTAssertEqual(outcome.turns.first?.id, notice.id)
+    }
+
+    func testTheNoticeNeverMatchesASnapshotTurn() {
+        let notice = makeNotice(2)
+        let lookalike = ChatTurn(userInput: "", timestamp: notice.timestamp, timestampRaw: notice.timestampRaw,
+                                 isComplete: true, daemonId: "t0", epoch: 1)
+
+        XCTAssertFalse(TurnReconciler.matches(notice, lookalike))
+        XCTAssertFalse(TurnReconciler.matches(lookalike, notice))
+        XCTAssertFalse(TurnReconciler.matches(notice, notice), "not even with itself: a marker is no record entry")
+
+        let outcome = TurnReconciler.reconcile(retained: makeRetained(Array(0 ..< 3)) + [notice],
+                                               snapshot: makeSnapshot(Array(0 ..< 3), epoch: 1) + [lookalike],
+                                               sessionIdChanged: false)
+        XCTAssertEqual(noticeCounts(outcome.turns), [2], "the notice stayed a notice")
+        XCTAssertEqual(outcome.turns.filter { $0.marker == nil }.count, 4, "and the snapshot's turn stayed a turn")
+        XCTAssertEqual(outcome.turns.filter { $0.id == notice.id }.count, 1)
+    }
+
+    func testAnEmptySnapshotLeavesTheNoticeAndEverythingElseAsItWas() {
+        let retained = makeRetained(Array(0 ..< 5)) + [makeNotice(2)]
+
+        let outcome = TurnReconciler.reconcile(retained: retained, snapshot: [], sessionIdChanged: false)
+
+        XCTAssertEqual(outcome.turns.map { $0.id }, retained.map { $0.id })
+        XCTAssertEqual(outcome.replacedFrom, retained.count, "nothing was replaced")
+        XCTAssertFalse(outcome.insertedGapMarker)
+        XCTAssertFalse(outcome.didReplaceAll)
+    }
+
+    func testANoticeIsDroppedWhenTheSnapshotIsADifferentConversation() {
+        let retained = makeRetained(Array(0 ..< 10)) + [makeNotice(2)]
+        let snapshot = makeSnapshot(Array(100 ..< 110), epoch: 1)
+
+        let outcome = TurnReconciler.reconcile(retained: retained, snapshot: snapshot, sessionIdChanged: true)
+
+        XCTAssertTrue(outcome.didReplaceAll, "views must be cleared: this is another conversation")
+        XCTAssertTrue(noticeCounts(outcome.turns).isEmpty, "a notice about the old conversation's queue is stale")
+        XCTAssertEqual(outcome.turns.map { $0.id }, snapshot.map { $0.id }, "exactly the snapshot")
+        XCTAssertEqual(outcome.replacedFrom, 0)
+        XCTAssertFalse(outcome.insertedGapMarker)
+    }
+
+    func testANoticeIsDroppedWithTheOldConversationEvenWhenAnEchoFollowsIt() {
+        let echo = makeOptimisticEcho(text: "typed just now")
+        let retained = makeRetained(Array(0 ..< 10)) + [makeNotice(2), echo]
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(100 ..< 110), epoch: 1),
+                                               sessionIdChanged: true)
+
+        XCTAssertTrue(outcome.didReplaceAll)
+        XCTAssertTrue(noticeCounts(outcome.turns).isEmpty)
+        XCTAssertEqual(outcome.turns.last?.id, echo.id, "the pending echo is the person's, and stays")
+    }
+
+    func testANoticeSurvivesAGapAndSitsBeforeIt() {
+        let retained = makeRetained(Array(0 ..< 10)) + [makeNotice(2)]
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(100 ..< 110), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertTrue(outcome.insertedGapMarker, "history really is missing here, and the gap says so")
+        XCTAssertEqual(gapMarkerCount(outcome.turns), 1, "one gap marker: the notice did not add a second")
+        XCTAssertEqual(shape(outcome.turns), messages(0 ..< 10) + ["[2]", "[gap]"] + messages(100 ..< 110))
+        assertNoDuplicateEntries(outcome.turns)
+        assertUniqueViewIdentities(outcome.turns)
+        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+    }
+
+    func testTwentyReconnectsWithANoticeLeaveTheTranscriptAndTheNoticeExactlyAsTheyWere() {
+        var current = makeRetained(Array(0 ..< 30)) + [makeNotice(4)]
+        let originalIds = current.map { $0.id }
+
+        for round in 1 ... 20 {
+            let outcome = TurnReconciler.reconcile(retained: current,
+                                                   snapshot: makeSnapshot(Array(0 ..< 30), epoch: round),
+                                                   sessionIdChanged: false)
+            current = outcome.turns
+
+            XCTAssertEqual(current.map { $0.id }, originalIds, "round \(round)")
+            XCTAssertEqual(noticeCounts(current), [4], "round \(round)")
+            XCTAssertEqual(gapMarkerCount(current), 0, "round \(round)")
+            XCTAssertFalse(outcome.didReplaceAll, "round \(round)")
+            assertNoDuplicateEntries(current, "round \(round):")
+        }
+    }
+
+    func testANoticeNeverMakesAReconcileShedHistoryWhateverTheOverlap() {
+        for retainedCount in [1, 5, 30] {
+            for noticeAfter in [0, retainedCount / 2, retainedCount] {
+                for snapshotStart in [0, 1, 5, 29, 30, 100] {
+                    for snapshotCount in [0, 1, 30] {
+                        let all = makeRetained(Array(0 ..< retainedCount))
+                        let notice = makeNotice(2)
+                        let retained = Array(all[0 ..< noticeAfter]) + [notice] + Array(all[noticeAfter...])
+                        let snapshot = makeSnapshot(Array(snapshotStart ..< (snapshotStart + snapshotCount)), epoch: 1)
+
+                        let outcome = TurnReconciler.reconcile(retained: retained, snapshot: snapshot, sessionIdChanged: false)
+
+                        let context = "retained=\(retainedCount) notice after \(noticeAfter) snapshot=\(snapshotStart)..<\(snapshotStart + snapshotCount)"
+                        XCTAssertGreaterThanOrEqual(outcome.turns.count, retained.count, context)
+                        XCTAssertEqual(noticeCounts(outcome.turns), [2], "exactly one notice: \(context)")
+                        XCTAssertFalse(outcome.didReplaceAll, context)
+                        XCTAssertEqual(gapMarkerCount(outcome.turns), outcome.insertedGapMarker ? 1 : 0, context)
+                        assertUniqueViewIdentities(outcome.turns)
+                        assertPrefixBeforeReplacedFromIsUntouched(outcome, retained: retained)
+                    }
+                }
+            }
+        }
+    }
+
+    func testAReconcileWithNoNoticeIsExactlyWhatItWasBefore() {
+        let retained = makeRetained(Array(0 ..< 10))
+
+        let outcome = TurnReconciler.reconcile(retained: retained,
+                                               snapshot: makeSnapshot(Array(5 ..< 15), epoch: 1),
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(shape(outcome.turns), messages(0 ..< 15))
+        XCTAssertEqual(outcome.replacedFrom, 5)
+        XCTAssertEqual(outcome.overlap, 5)
+    }
 }
 
 // MARK: - Tool-fold wire enrichment (TF1): the Mac's own wire decode
