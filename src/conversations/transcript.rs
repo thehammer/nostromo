@@ -260,7 +260,9 @@ pub fn scan(bytes: &[u8]) -> Facts {
                     if f.first_user.is_none()
                         && v.get("isMeta").and_then(Value::as_bool) != Some(true)
                     {
-                        f.first_user = user_text(&v).filter(|t| is_real_prompt(t));
+                        f.first_user = user_text(&v)
+                            .map(|t| first_part_of_merged(t))
+                            .filter(|t| is_real_prompt(t));
                     }
                 } else if let Some(m) = v.pointer("/message/model").and_then(Value::as_str) {
                     f.model = Some(m.to_owned());
@@ -292,6 +294,17 @@ fn user_text(v: &Value) -> Option<String> {
             (!texts.is_empty()).then(|| texts.join("\n"))
         }
         _ => None,
+    }
+}
+
+/// A merged frame's first message, else `text` as it is. A title is not a
+/// bubble, so unlike the transcript rebuild this does not ask the batch ledger:
+/// an imitation of an envelope costs a title, never a misdrawn turn.
+fn first_part_of_merged(text: String) -> String {
+    let body = crate::ipc::stream_json::strip_nostromo_note(text.trim_start());
+    match crate::ipc::session_manager::merge::parse(body) {
+        Some(p) => p.parts.into_iter().next().unwrap_or(text),
+        None => text,
     }
 }
 
@@ -378,6 +391,27 @@ mod tests {
         assert_eq!(f.pr_numbers, vec![12]);
         assert_eq!(f.first_user.as_deref(), Some("Add the picker"));
         assert!(f.last_ts_ms.is_some());
+    }
+
+    #[test]
+    fn a_merged_first_prompt_titles_the_conversation_with_its_first_message() {
+        let env = crate::ipc::session_manager::merge::build_envelope(
+            "0123456789abcdef0123456789abcdef",
+            &["Add the picker", "and the tests"],
+        );
+        let f = scan(line(serde_json::json!({"type":"user","message":{"content":env}})).as_bytes());
+        assert_eq!(f.first_user.as_deref(), Some("Add the picker"));
+        // With a note in front, as the daemon writes it.
+        let noted = format!("<nostromo-note>n</nostromo-note>\n\n{env}");
+        let f =
+            scan(line(serde_json::json!({"type":"user","message":{"content":noted}})).as_bytes());
+        assert_eq!(f.first_user.as_deref(), Some("Add the picker"));
+        // Anything else starting with '<' is still not a prompt.
+        let f = scan(
+            line(serde_json::json!({"type":"user","message":{"content":"<nostromo-batch oops"}}))
+                .as_bytes(),
+        );
+        assert_eq!(f.first_user, None);
     }
 
     #[test]

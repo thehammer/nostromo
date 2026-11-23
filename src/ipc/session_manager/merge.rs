@@ -200,7 +200,7 @@ fn section(boundary: &str, k: usize, text: &str) -> String {
 }
 
 /// The merged frame's text for `texts` (at least two) under `boundary`.
-pub(super) fn build_envelope(boundary: &str, texts: &[&str]) -> String {
+pub(crate) fn build_envelope(boundary: &str, texts: &[&str]) -> String {
     let sections = texts
         .iter()
         .enumerate()

@@ -11,9 +11,9 @@ use super::turn_note_tests::{
     contents, eventually, frames_read, note_block, session, turn_runs, wait_for_contents, Offer,
 };
 use super::*;
-use std::sync::atomic::AtomicUsize;
 use crate::ipc::auth_failure::{AuthSignal, TurnAuthOutcome};
 use crate::ipc::protocol::QueueResultCode;
+use std::sync::atomic::AtomicUsize;
 
 fn typed(text: &str) -> PendingMessage {
     PendingMessage::typed(text, &[], None)

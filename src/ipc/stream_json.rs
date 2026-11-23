@@ -3401,6 +3401,10 @@ mod origin_tests;
 mod mother_tests;
 
 #[cfg(test)]
+#[path = "stream_json_batch_tests.rs"]
+mod batch_tests;
+
+#[cfg(test)]
 #[path = "stream_json_wake_tests.rs"]
 mod wake_tests;
 
