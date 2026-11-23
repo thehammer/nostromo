@@ -812,6 +812,8 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         ServerMsg::SessionTaskStopResult { .. } | ServerMsg::SessionTaskOutputResult { .. } => {
             ServerClass::LocalOnly
         }
+        // The answer to an MCP panel request: server names and states.
+        ServerMsg::SessionMcpResult { .. } => ServerClass::LocalOnly,
         // The commands a session reports: user skill and plugin names. The
         // operator's own; a network peer can never ask.
         ServerMsg::SessionCommands { .. } => ServerClass::LocalOnly,
@@ -950,6 +952,12 @@ pub fn is_refusal(msg: &ServerMsg) -> bool {
             text,
             ..
         } => text.is_empty() && message.starts_with("requires_secure_connection"),
+        ServerMsg::SessionMcpResult {
+            outcome: crate::ipc::protocol::McpOutcome::Refused,
+            message: Some(message),
+            servers: None,
+            ..
+        } => message.starts_with("requires_secure_connection"),
         _ => false,
     }
 }
@@ -1111,6 +1119,8 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         // ever available to a network peer.
         | ClientMsg::SessionTaskStop { .. }
         | ClientMsg::SessionTaskOutput { .. }
+        // Reads and changes a session's MCP servers: the app's alone.
+        | ClientMsg::SessionMcp { .. }
         // The commands a session's CLI reports (user skills, plugin names).
         | ClientMsg::SessionCommandsGet { .. }
         // The conversation history (titles, projects, first prompts): the
@@ -1205,6 +1215,7 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::ApprovalRevokeSessionRule { tag, .. }
         | ClientMsg::SessionTaskStop { tag, .. }
         | ClientMsg::SessionTaskOutput { tag, .. }
+        | ClientMsg::SessionMcp { tag, .. }
         | ClientMsg::SessionCommandsGet { tag, .. }
         | ClientMsg::ClaudeLoginAction { tag, .. }
         | ClientMsg::SessionQueueWatch { tag }
@@ -2242,6 +2253,13 @@ mod tests {
                 offset: None,
                 max_bytes: 4096,
             },
+            ClientMsg::SessionMcp {
+                request_id: "r".into(),
+                tag: "x1".into(),
+                action: crate::ipc::protocol::McpAction::Status,
+                server: None,
+                enabled: None,
+            },
             ClientMsg::SessionCommandsGet {
                 request_id: "r".into(),
                 tag: "x1".into(),
@@ -2470,7 +2488,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 97;
+    const CLIENT_MSG_VARIANTS: usize = 98;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2572,6 +2590,7 @@ mod tests {
             ClientMsg::SessionQueueWatch { .. } => 94,
             ClientMsg::SessionQueueTakeBack { .. } => 95,
             ClientMsg::SessionQueueRemove { .. } => 96,
+            ClientMsg::SessionMcp { .. } => 97,
         }
     }
 
@@ -2616,9 +2635,9 @@ mod tests {
         // 77 with `TerminalFollowInviteStagingOnly` (S3a); 78 with `SessionCommandsGet`;
         // 80 with the two authored-PR verbs; 87 with the seven conversation-history verbs; 88 with the rename;
         // 92 with the four authored-PR hand-off verbs (preview, notify, start session, link);
-        // 93 with `TrackerEdit` (T3a); 94 with `AuthoredPrMerge`; 97 with the three queue verbs.
-        assert_eq!(CLIENT_MSG_VARIANTS, 97);
-        assert_eq!(every_client_msg().len(), 97);
+        // 93 with `TrackerEdit` (T3a); 94 with `AuthoredPrMerge`; 97 with the three queue verbs; 98 with `SessionMcp`.
+        assert_eq!(CLIENT_MSG_VARIANTS, 98);
+        assert_eq!(every_client_msg().len(), 98);
     }
 
     #[test]

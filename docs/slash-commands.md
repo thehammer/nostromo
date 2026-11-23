@@ -156,6 +156,34 @@ is unrelated.
 * A CLI release may change the shapes above; `<local-command-*>` and `<command-*>` tags are matched by
   tag, not wording, and `discard_orphan_prompt` remains the net for an unknown tag.
 
+## /mcp panel
+
+Typing exactly `/mcp` in a pane (after trimming) opens a native sheet instead of sending text to the CLI.
+`/mcp <args>`, `/mcpx` and `/MCP` are sent as typed, and so is `/mcp` to a daemon without `session_mcp_v1`
+(the picker completes `/mcp ` and Enter sends the trimmed `/mcp`, so it opens the panel too).
+
+* **Wire.** `session_mcp` (`action`: `status`, `reconnect`, `toggle`; `server`, `enabled`) is answered by
+  `session_mcp_result` to the asking connection only (`outcome`: `ok`, `refused`, `timeout`, `unsupported`,
+  `not_running`, `rate_limited`, `invalid`). Operator app only; refused over TCP. The daemon sends the
+  CLI's `mcp_status`, `mcp_reconnect {serverName}` and `mcp_toggle {serverName, enabled}`.
+* **Shown:** name, status (Connected, Needs sign-in, Failed, Disabled, Starting, or the CLI's raw word),
+  scope, transport, tool count and, for a failed server, its error (URL queries cut, secrets redacted,
+  240 characters). **Never shown or sent:** `config`, env values, headers, URLs, commands, args, tokens.
+  `McpServerView::from_cli` is the only place a CLI entry becomes wire data.
+* **Disable persists.** The CLI writes it to `~/.claude.json` for the session's folder, so new sessions
+  there (terminal ones too) start with the server disabled until it is enabled. The panel confirms first.
+  `nostromo` cannot be disabled from the panel (the daemon answers `invalid`).
+* **Stale Connected.** `mcp_status` can keep saying `connected` after a stdio server was killed; it only
+  notices on next use. For `nostromo` the row also reads "Claude says connected · Nostromo bridge offline"
+  when the daemon's own bridge is down.
+* **Rate limits.** Daemon: one reconnect/toggle in flight per (session, server) and 5 s between starts;
+  `status` at least 1 s apart (inside that, the last list). The Mac also keeps a clicked row's buttons off
+  for 5 s. Audit: each reconnect and toggle is logged (opaque tag when sensitive, server name, outcome).
+* **Not running.** A tag with no running session answers `not_running`; the panel shows "This session
+  isn't running…" with no table and no buttons. An older CLI answers `unsupported`.
+* **Tools offline badge.** With `session_mcp_v1` a click reconnects `nostromo` for the active session at
+  once (label "Reconnecting…", failures as "Reconnect failed: …"). The automatic self-heal is unchanged.
+
 ## Known limitations
 
 * **Skill replies after a reload.** Live, a skill (prompt-type command) is one turn: the `/hi` bubble and

@@ -3,6 +3,8 @@
 Nostromo exposes an in-process MCP server so agents running inside its PTY
 views can query nostromd's state.
 
+The `/mcp` panel (status, reconnect, enable/disable per server): see [`docs/slash-commands.md`](../slash-commands.md#mcp-panel).
+
 ## Architecture
 
 ```

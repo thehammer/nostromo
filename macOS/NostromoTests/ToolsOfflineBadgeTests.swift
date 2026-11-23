@@ -387,7 +387,8 @@ final class ToolsOfflineBadgeViewTests: XCTestCase {
         XCTAssertFalse(tip.contains("/mcp"), "the tooltip must not send the operator to /mcp: \(tip)")
         XCTAssertTrue(tip.lowercased().contains("reconnect"), "the tooltip says Nostromo is reconnecting: \(tip)")
         XCTAssertTrue(tip.contains("claude --continue"), "the tooltip names the restart that keeps the conversation: \(tip)")
-        XCTAssertEqual(tip, ToolsOfflinePolicy.tooltip)
+        // No `session_mcp_v1` (no sender here): nothing to click, so the old advice.
+        XCTAssertEqual(tip, ToolsOfflinePolicy.legacyTooltip)
     }
 
     func testTheBadgeHasAnAccessibilityLabel() {
@@ -632,5 +633,129 @@ final class ToolsOfflineAppStoreTests: XCTestCase {
         XCTAssertTrue(tobSpin(timeout: 3) { !badge.isHidden })
         store.applyForTesting(.sessionBridge(tag: active, connected: true))
         XCTAssertTrue(tobSpin(timeout: 3) { badge.isHidden }, "the bridge is back: the badge goes")
+    }
+}
+
+
+// MARK: - 5. Click to reconnect (`session_mcp_v1`)
+
+final class ToolsOfflineBadgeClickTests: XCTestCase {
+    private let harness = McpHarness()
+
+    private func makeBadge() -> ToolsOfflineBadgeView {
+        let badge = ToolsOfflineBadgeView()
+        badge.requests = harness.requests
+        badge.activeTag = { "tag-1" }
+        badge.now = harness.now
+        badge.schedule = harness.schedule
+        badge.permit = { _ in .human(sourcePid: nil, sourceState: nil) }
+        badge.apply(offline: true)
+        return badge
+    }
+
+    func testAClickReconnectsNostromoForTheActiveTag() {
+        let badge = makeBadge()
+        badge.activate()
+        XCTAssertEqual(harness.sender.sent, [.init(id: "req-1", tag: "tag-1", action: "reconnect", server: "nostromo", enabled: nil)])
+        XCTAssertEqual(badge.text, "Reconnecting…")
+    }
+
+    func testAnOkAnswerGoesBackToTheNameAndTheBadgeLeavesTheNormalWay() {
+        let badge = makeBadge()
+        badge.activate()
+        harness.answer("req-1", action: "reconnect", .ok)
+        XCTAssertEqual(badge.text, ToolsOfflinePolicy.label)
+        XCTAssertFalse(badge.isHidden, "only the bridge reporting connected hides it")
+        badge.apply(offline: false)
+        XCTAssertTrue(badge.isHidden)
+    }
+
+    func testAFailureShowsANoticeThatFadesBackToTheName() {
+        let badge = makeBadge()
+        badge.activate()
+        harness.answer("req-1", action: "reconnect", .refused, message: "Server not found: nostromo")
+        XCTAssertEqual(badge.text, "Reconnect failed: Server not found: nostromo")
+        harness.advance(ToolsOfflinePolicy.noticeDuration)
+        XCTAssertEqual(badge.text, ToolsOfflinePolicy.label)
+    }
+
+    func testClicksAreIgnoredWhileRunningAndForFiveSeconds() {
+        let badge = makeBadge()
+        badge.activate()
+        badge.activate()
+        XCTAssertEqual(harness.sender.sent.count, 1, "in flight")
+        harness.answer("req-1", action: "reconnect", .timeout)
+        harness.advance(4)
+        badge.activate()
+        XCTAssertEqual(harness.sender.sent.count, 1, "inside five seconds")
+        harness.advance(1.5)
+        badge.activate()
+        XCTAssertEqual(harness.sender.sent.count, 2)
+    }
+
+    func testWithoutTheFeatureTheBadgeIsNotClickable() {
+        harness.sender.daemonAdvertisesSessionMcp = false
+        let badge = makeBadge()
+        badge.activate()
+        XCTAssertTrue(harness.sender.sent.isEmpty)
+        XCTAssertFalse(badge.isClickable)
+        XCTAssertEqual(badge.accessibilityRole(), .staticText)
+        XCTAssertEqual(badge.toolTip, ToolsOfflinePolicy.legacyTooltip)
+    }
+
+    func testWithTheFeatureItIsAFocusableButtonWithTheNewTooltip() throws {
+        let badge = makeBadge()
+        XCTAssertEqual(badge.accessibilityRole(), .button)
+        XCTAssertTrue(badge.acceptsFirstResponder)
+        XCTAssertEqual(badge.toolTip, ToolsOfflinePolicy.tooltip)
+        XCTAssertTrue(ToolsOfflinePolicy.tooltip.contains("Click to reconnect"))
+        let space = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                                   context: nil, characters: " ", charactersIgnoringModifiers: " ",
+                                                   isARepeat: false, keyCode: 49))
+        badge.keyDown(with: space)
+        XCTAssertEqual(harness.sender.sent.count, 1)
+    }
+
+    func testAHiddenBadgeDoesNothing() {
+        let badge = makeBadge()
+        badge.apply(offline: false)
+        badge.activate()
+        XCTAssertTrue(harness.sender.sent.isEmpty)
+    }
+
+    // MARK: Who may press
+
+    private func realBadge(in window: NSWindow) -> ToolsOfflineBadgeView {
+        let badge = ToolsOfflineBadgeView()
+        badge.requests = harness.requests
+        badge.activeTag = { "tag-1" }
+        badge.now = harness.now
+        badge.schedule = harness.schedule
+        badge.frame = NSRect(x: 10, y: 10, width: 100, height: 20)
+        window.contentView?.addSubview(badge)
+        badge.apply(offline: true)
+        return badge
+    }
+
+    func testAPressThatIsNotAPersonsDoesNotReconnect() throws {
+        let window = GestureFixtures.offscreenWindow()
+        addTeardownBlock { window.close() }
+        let badge = realBadge(in: window)
+        var event: NSEvent?
+        badge.permit = { HumanGesture.permit(event, control: $0, voiceOverEnabled: { false }, allowsSynthetic: { false }) }
+        let space = GestureFixtures.key(in: window, characters: " ", keyCode: 49)
+        let click = GestureFixtures.mouse(.leftMouseDown, in: window)
+        let stale = GestureFixtures.mouse(.leftMouseDown, in: window, timestamp: ProcessInfo.processInfo.systemUptime - 30)
+        for refused in [nil, try GestureFixtures.marked(click), stale] as [NSEvent?] {
+            event = refused
+            badge.mouseDown(with: click)
+            badge.keyDown(with: space)
+            XCTAssertTrue(badge.accessibilityPerformPress() == true)
+            XCTAssertTrue(harness.sender.sent.isEmpty, "nothing sent for \(String(describing: refused))")
+            XCTAssertEqual(badge.text, ToolsOfflinePolicy.label)
+        }
+        event = click
+        badge.mouseDown(with: click)
+        XCTAssertEqual(harness.sender.sent.map(\.action), ["reconnect"], "a person's click reconnects")
     }
 }
