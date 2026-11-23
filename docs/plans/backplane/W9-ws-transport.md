@@ -7,8 +7,10 @@ the re-derived "Wire inventory" first. Versus the 2026-10-18 version of this
 file (line numbers in this file are re-derived; the 2026-10-18 notes further
 down are history):
 - **Ordinals.** `CLIENT_MSG_VARIANTS` is **98** (`src/ipc/peer.rs:2491`,
-  asserted again at `:2639-2640`). This wedge's nine verbs take **98–106**
-  (`PairCheck` 98 … `DeviceSetScope` 106) and the constant becomes **107**.
+  asserted again at `:2639-2640`). This wedge's seven verbs take **98–104**
+  (`PairCheck` 98 … `DeviceRevoke` 104) and the constant becomes **105**
+  (2026-11-23: nine before Q2 removed `DevicePairUpdate` and
+  `DeviceSetScope`).
   Each new verb also gets a fixture in `every_client_msg()`; none goes into
   `NETWORK_ALLOWED` (`:2461`), because `DeviceUnpairSelf` is admitted by
   `paired_extra_allowed`, not by `network_policy`.
@@ -20,7 +22,7 @@ down are history):
   `refresh_merge_gate` (`src/ipc/session_manager/mod.rs:3846-3855`) so network
   peers never count, and the WebSocket handshake carries `Hello.capabilities`
   through the shared parse (`src/ipc/server.rs:643-666`). New criteria
-  W9-19 and W9-20.
+  W9-19 (W9-20 is the install criterion).
 - **Packaging.** `make install-daemon` (`Makefile:136-193`) now builds through
   `make daemon` (`:129-130`), copies from `$(NOSTROMO_TARGET_DIR)/release`,
   stages and signs three binaries and runs the restart guard first. The
@@ -44,16 +46,24 @@ Ada signed off D1–D7 and the operator answered Q1–Q8 on 2026-11-23 (memo,
 "Decision log 2026-11-23"). Ada is rewriting `docs/prds/daemon-pairing-flow.md`
 in parallel, so this file cites decisions by id, not by PRD line. What changes
 here:
-- **D6, re-pairing an already-paired phone, is new daemon work.** A phone that
-  re-pairs with the **same** server sends its current token in
-  `Pair.replaces_token`. Once the code is accepted, the registry revokes that
-  device's old record (`revoked_by: replaced`, shown as "Replaced by
-  re-pairing") **before** name dedup, so the phone keeps its name ("iPhone",
-  not "iPhone 2"), closes the old record's live sockets with 4001, and saves
-  once. A different-server re-pair never reaches this daemon with a token: the
-  phone never sends one server's token to another (W11), and tells the old
-  server with an ordinary `DeviceUnpairSelf`. Approach 4a, tests (q)–(s),
-  criterion W9-21.
+- **D6, re-pairing an already-paired phone, is new daemon work** (PRD AC57,
+  AC58). A server counts as "the same server" only if it proves it already
+  knows this device's pairing, without the device revealing its credential or
+  anything replayable. Mechanism (challenge and proof, Approach 4a): the
+  first `PairCheck` returns a per-code random `challenge` in `PairOffer`; a
+  device that holds a credential sends a second `PairCheck` carrying `proof =
+  HMAC-SHA256(key = SHA-256(token), msg = challenge ‖ code)`; the server
+  compares it with the same HMAC over each active device record's stored
+  `token_hash` and answers `knows_device: true | false`, **at most once per
+  code** (a later proof on that code gets no answer). A hostile server learns
+  only an HMAC bound to its own challenge and code, which neither connects as
+  the device nor replays anywhere. `server_id` is not trusted for this (it is
+  unauthenticated). On `Pair { replace: true }` after a `true` answer, the
+  registry revokes the matched record (`revoked_by: replaced`, "Replaced by
+  re-pairing") **before** name dedup, so the phone keeps its name, closes the
+  old record's sockets with 4001, and saves once. Any other case is a plain
+  pairing; the different-server path (warning, wipe, `DeviceUnpairSelf` to
+  the old server) is the phone's (W11). Tests (q)–(s), criterion W9-21.
 - **D4 (server check before confirmation): two rules made explicit.** A
   correct `PairCheck` never uses up the code; only `Pair` does. A wrong code at
   `PairCheck` counts toward the lockout like a wrong `Pair`. An unreachable
@@ -69,20 +79,21 @@ here:
   reaches the daemon, so it never uses up a code (Approach 7).
 - **Q1: Kobe's device-admin level is a new `revoke-only` level.** The
   satellite `admin` field gains `revoke_only` (`full | revoke_only | read_only
-  | off`). W9 stores and prints it, and `nostromo device pair --satellite`
-  defaults to it. W10 enforces it on the primary, and W15 defines the
+  | off`). W9 stores and prints it; an unset level is `revoke_only` (Ada's
+  rule), so Sendai needs an explicit `--admin full`. W10 enforces it on the primary, and W15 defines the
   behaviour in full (W15, "Revoke-only device-admin level (Q1)"). No new verb
   and no new ordinal.
-- **Q2: mail and todos stay home in v1, for every host.** New primary config
-  `[devices] share_mail_and_todos` (default **false**). While it is false, every
-  pairing and device is `sensitive: false` whatever the request says,
-  `DeviceSetScope { sensitive: true }` gets `DeviceAdminError {
-  mail_and_todos_not_shared }`, a `Paired` peer's subscribe gets `Withheld {
-  reason: "not_shared" }` (not `device_scope`), and `PairOffer`,
-  `DevicePairing` and `Devices` carry `mail_and_todos_shared: false`, so that no
-  surface promises mail or todos. The grant, the scope toggle and the live
-  re-scope stay built and tested with the flag set to true in tests, ready for
-  when the operator opens it up. Criterion W9-23.
+- **Q2: mail, calendar and todos stay home in v1, for every host, with no
+  checkbox, flag, toggle or config key** (Ada's PRD, decision log Q2). So this
+  wedge **does not build** the per-device mail-and-todos permission at all:
+  no `sensitive` field on `PeerTrust::Paired`, the registry, the pairing or
+  any frame; no `DevicePairUpdate` or `DeviceSetScope` verb (the ordinals
+  shrink to 98–104); no `--no-mail-and-todos` flag and no `device
+  mail-and-todos` subcommand; no live re-scope. A `Paired` peer is withheld
+  the Teri, Fred and work topics exactly like `Tcp`, with `Withheld { reason:
+  "not_shared" }`. The terminal's line is Ada's copy: **"Mail, calendar and
+  todos aren't shared from your Macs in this version."** Opening it up later
+  is a new wedge (the PRD's deferred AC35). Criterion W9-23.
 - **B11** is unchanged (above).
 
 ## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
@@ -131,8 +142,7 @@ every off-host client in `docs/plans/backplane-sequencing.md` (bets B2, B8).
 The primary daemon runs on an always-on host reached over the operator's
 WireGuard VPN. A managed laptop that may only *dial out* connects to it as a
 satellite (W10). Device tokens are required even inside the VPN: the token is
-the device's application identity (revocation, per-device mail-and-todos
-scope, the push relay's key), while WireGuard is only a network identity.
+the device's application identity (revocation, the push relay's key), while WireGuard is only a network identity.
 
 It also builds the **daemon side of device pairing and device management**
 specified by Ada's PRD `docs/prds/daemon-pairing-flow.md` (answers Q1). The
@@ -150,7 +160,8 @@ Devices redeem codes over the WebSocket listener without a token.
 - **Branch:** `feat/backplane-ws-transport`
 - **Base:** `origin/main`
 - **Max cost:** $65 (expected ≈ $26; see the memo's Estimate; raised from $60
-  on 2026-11-23 for D6, the revoke-only level and the v1 mail-and-todos switch)
+  on 2026-11-23 for D6 and the revoke-only level; Q2 then removed two verbs,
+  so the cap is kept as headroom)
 
 ## Files to change
 
@@ -164,20 +175,16 @@ Devices redeem codes over the WebSocket listener without a token.
   `nostromo` → `src/bin/nostromo_cli.rs` next to the existing seven
   (`Cargo.toml:13-39`).
 - `src/ipc/peer.rs:34-74` — add `Transport::Ws` and
-  `PeerTrust::Paired { sensitive: bool }` (the device id travels on the
-  connection, not in the trust value, so `PeerTrust` stays `Copy`).
+  `PeerTrust::Paired` (no fields: the device id travels on the connection,
+  not in the trust value, so `PeerTrust` stays `Copy`; Q2 means there is no
+  per-device scope in v1).
   `is_network()` returns `true` for `Paired`. Every exhaustive match that
   names `PeerTrust::Tcp` gains a deliberate `Paired` arm; the default is
   "same as `Tcp`". `PeerTrust::Paired` is never `OperatorApp`-equivalent for
   any purpose (decision operators, approval renderers, `operator_nonce`).
-  - `may_receive`/`outbound` (`:970-996`): a `Paired { sensitive: true }`
-    peer passes the `ServerClass::Sensitive` gate for Teri/Fred **state**
-    frames only (`TeriState`, `FredState`, `WorkSourceStatus`,
-    `WorkSnapshot`, `TeriPicks`); `WorkDetail`, `WorkSendPreview` and
-    `WorkSendResult` stay withheld (they answer verbs a device cannot send).
-    `LocalOnly` stays `false` for `Paired` (approval frames, task detail).
-    Everything else treats `Paired` exactly like `Tcp`, including
-    `redact_for_network`.
+  - `may_receive`/`outbound` (`:970-996`): `Paired` is treated exactly like
+    `Tcp`: `ServerClass::Sensitive` (Teri, Fred, work) and `LocalOnly` stay
+    `false`, and `redact_for_network` applies.
   - `classify_server_msg` (`:717-888`): add `ServerClass::Admin` for the
     device-admin frames (below). `may_receive` delivers `Admin` to
     non-network peers only in this wedge; W10 adds the satellite exception.
@@ -188,9 +195,8 @@ Devices redeem codes over the WebSocket listener without a token.
   - `network_policy` (`:1054-1183`), `targets_sensitive_session`
     (`:1197`) and the ordinal table (`:2494-2595`) gain every new
     `ClientMsg`: `PairCheck` 98, `Pair` 99, `DeviceUnpairSelf` 100,
-    `DevicePairStart` 101, `DevicePairUpdate` 102, `DevicePairCancel` 103,
-    `DeviceList` 104, `DeviceRevoke` 105, `DeviceSetScope` 106;
-    `CLIENT_MSG_VARIANTS` 98 → 107 (if another merged plan took ordinal 98
+    `DevicePairStart` 101, `DevicePairCancel` 102, `DeviceList` 103,
+    `DeviceRevoke` 104; `CLIENT_MSG_VARIANTS` 98 → 105 (if another merged plan took ordinal 98
     first, continue from the next free one and re-derive), plus the two
     asserts at `:2639-2640`, the history comment above them, and one fixture
     each in `every_client_msg()`. Policy: `PairCheck`/`Pair` → `Refused` (they are
@@ -201,33 +207,30 @@ Devices redeem codes over the WebSocket listener without a token.
     `NetworkPolicy` stays a two-value enum; the `Paired` special cases live
     in one function, `peer::paired_extra_allowed(&ClientMsg) -> bool`.
   - `withheld_msg` (`:1424`) takes a reason. Today's
-    `requires_secure_connection` stays for `Tcp`. A `Paired { sensitive:
-    false }` peer gets reason `device_scope`, so the client can say *why*
-    (PRD-AC34), or `not_shared` while the primary's
-    `[devices] share_mail_and_todos` is false (Q2: v1 default), so the phone
-    says "stay on your Mac in this version" rather than "turned off for this
-    iPad".
+    `requires_secure_connection` stays for `Tcp`. A `Paired` peer gets reason
+    `not_shared` (Q2), so the phone says "Mail, calendar and todos stay on
+    your Mac in this version." (PRD-AC34).
 - `src/ipc/devices.rs` (new) — `DeviceRegistry` over
   `~/.nostromo/devices.json` (`NOSTROMO_DEVICES_PATH` override, mode 0600,
   atomic write: `.tmp` then rename). Per device: `id`, `name`, `kind`
   (`iphone | ipad | satellite`), `token_hash` (SHA-256 of 32 random bytes,
-  base64url), `sensitive`, `admin` (satellites only: `full | revoke_only |
+  base64url), `admin` (satellites only: `full | revoke_only |
   read_only | off`, default `revoke_only`; Q1, meaning defined in W15),
   `paired_at`, `last_seen_at`, `revoked_at`, `revoked_by`
   (`operator | device | replaced`; `replaced` is D6). A `server_id` (random,
   minted on first load) is stored once at the top level. Revoked records are
   kept (PRD-AC23, AC30). Operations: validate a token; redeem a pairing (name
-  dedup, see Approach 4; replacement, Approach 4a); revoke by id; set
-  `sensitive`; set a satellite's `admin`; touch last-seen. The token's plaintext exists only in the `Paired` reply. The
+  dedup, see Approach 4; replacement, Approach 4a); revoke by id; set a
+  satellite's `admin`; touch last-seen. The token's plaintext exists only in the `Paired` reply. The
   registry publishes a `tokio::sync::watch` **registry epoch** that bumps
-  on every revoke, scope change and admin change, so live connections
+  on every revoke and admin change, so live connections
   re-check their own record.
 - `src/ipc/pairing.rs` (new) — the in-memory `PairingTable` on the primary.
-  Each open pairing holds the code hash, an optional name hint, `sensitive`,
+  Each open pairing holds the code hash, an optional name hint,
   `kind` (`device | satellite`), `expires_at` (5 min), the issuing
   connection's key (and, for one relayed by W10, the satellite's origin
   key) and a sender for its outcome. Outcomes are `paired { name, kind,
-  sensitive }`, `expired`, `cancelled`, `locked_out` and
+  replaced }`, `expired`, `cancelled`, `locked_out` and
   `connection_lost`. Wrong-attempt accounting is described in Approach 5.
   Expired code hashes are kept as tombstones for 1 hour so a late attempt
   gets `expired` rather than `invalid`. Cancelled, used and locked-out
@@ -237,7 +240,7 @@ Devices redeem codes over the WebSocket listener without a token.
   `tokio_tungstenite::accept_hdr_async` with a callback that reads
   `Authorization: Bearer <token>` (never a query string). There are three
   admission outcomes. **Paired** (valid, unrevoked token): run
-  `handle_client_ws` under `Paired { sensitive }` with the device id.
+  `handle_client_ws` under `Paired` with the device id.
   **Pairing-only** (no header): the socket may send `Hello`, any number of
   `PairCheck`, then one `Pair`; it is closed after the `Pair` reply or 60 s,
   and any other message gets `Unauthorized { reason: "not_paired" }` and
@@ -258,7 +261,7 @@ Devices redeem codes over the WebSocket listener without a token.
   and the `peer::outbound` filter. The body's `trust` becomes mutable for WS
   peers. AP1b's answer-time re-inspection and `operator_nonce` paths are
   Unix-only and must not be reachable from a WS peer (a test sends
-  `DecisionAnswer` and `ApprovalAnswer` from a `Paired { sensitive: true }`
+  `DecisionAnswer` and `ApprovalAnswer` from a `Paired`
   socket and asserts `requires_secure_connection` with no side effect). Then:
   - **Retained replay** (the `Subscribe` and re-subscribe paths in
     `handle_client`):
@@ -269,11 +272,8 @@ Devices redeem codes over the WebSocket listener without a token.
     everything retained today, and still is).
   - **Registry epoch** in the WS `select!`: on change, re-read this
     connection's device record. If revoked: send `Unauthorized { reason:
-    "revoked" }`, close 4001 (under 1 s). If `sensitive` changed to false:
-    set `trust`, send `Withheld { topics: [fred, teri, work], reason:
-    "device_scope" }`. If it changed to true: set `trust` and replay the
-    retained frames that now pass (PRD-AC35). Other connections are
-    untouched (PRD-AC28).
+    "revoked" }`, close 4001 (under 1 s). Other connections are untouched
+    (PRD-AC28). (No scope re-check: Q2 removed per-device scope in v1.)
   - Add `Server::bind_ws(listener, devices, pairing, …)` mirroring
     `bind_tcp` (`:280`).
   - **Hello capabilities on WebSocket (B11).** The WS path feeds its first
@@ -287,8 +287,10 @@ Devices redeem codes over the WebSocket listener without a token.
     only (`OperatorApp` or `LocalOther`; the CLI is `LocalOther`, and Tokyo
     has no `OperatorApp` at all because the verifier is macOS-only). W10 adds
     satellites. Every admin verb is appended to the daemon log with the
-    peer's trust and verb name, never a code or token: `DevicePairStart`, `DevicePairUpdate`,
-    `DevicePairCancel`, `DeviceList`, `DeviceRevoke`, `DeviceSetScope`. Plus
+    peer's trust and verb name, never a code or token: `DevicePairStart`,
+    `DevicePairCancel` (honoured only from the connection that owns the
+    pairing; any other caller gets `DeviceAdminError { unknown_pairing }`),
+    `DeviceList`, `DeviceRevoke`. Plus
     `DeviceUnpairSelf` for an authenticated device, which revokes only the
     connection's own device id (`revoked_by: device`), replies
     `DeviceUnpaired`, then closes 4001 (PRD-AC31).
@@ -299,39 +301,37 @@ Devices redeem codes over the WebSocket listener without a token.
   `:34`; capability is the `Welcome.features` strings below). Add
   `Topic::Devices` (`Topic` enum `:73-89`; `Unknown` stays last with
   `#[serde(other)]`). Messages:
-  - Client → daemon, device side: `PairCheck { code }`;
-    `Pair { code, name, kind, replaces_token: Option<String> }` (D6;
-    `#[serde(default, skip_serializing_if = "Option::is_none")]`, never
-    logged); `DeviceUnpairSelf`.
-  - Daemon → device: `PairOffer { name_hint: Option<String>, sensitive,
-    server_id, mail_and_todos_shared }`; `Paired { device_id, token, name,
-    sensitive, server_id, replaced: bool }`;
+  - Client → daemon, device side: `PairCheck { code, proof: Option<String> }`;
+    `Pair { code, name, kind, replace: bool }` (D6; new fields
+    `#[serde(default)]`; `proof` never logged); `DeviceUnpairSelf`.
+  - Daemon → device: `PairOffer { name_hint: Option<String>, server_id,
+    challenge, knows_device: Option<bool> }` (`knows_device` present only in
+    the reply to the first proof on a code); `Paired { device_id, token, name,
+    server_id, replaced: bool }` (`replaced` only repeats the already-given
+    answer);
     `PairRefused { reason: expired | invalid }`;
     `Unauthorized { reason }`; `DeviceUnpaired`.
   - Client → daemon, admin side (each carries a client-minted `request_id`):
-    `DevicePairStart { name_hint, sensitive, satellite: Option<String> }`;
-    `DevicePairUpdate { pairing_id, sensitive }`;
+    `DevicePairStart { name_hint, satellite: Option<String> }`;
     `DevicePairCancel { pairing_id }`; `DeviceList`;
-    `DeviceRevoke { device }` (id, or exact name of an *active* device);
-    `DeviceSetScope { device, sensitive }`.
+    `DeviceRevoke { device }` (id, or exact name of an *active* device).
   - Daemon → admin client: `DevicePairing { request_id, pairing_id, code,
-    server_url, expires_at, sensitive, mail_and_todos_shared }`;
+    server_url, expires_at }`;
     `DevicePairOutcome { pairing_id, outcome }` (`paired` also carries
-    `replaced: bool`); `Devices { devices: Vec<DeviceSummary>,
-    mail_and_todos_shared }`;
+    `replaced: bool`); `Devices { devices: Vec<DeviceSummary> }`;
     `DeviceRevoked { request_id, device_id, was_connected }`;
     `DeviceAdminError { request_id, reason }` (reasons in this wedge:
-    `unknown_device`, `ambiguous_name`, `mail_and_todos_not_shared`; W10 adds
+    `unknown_device`, `ambiguous_name`, `unknown_pairing`; W10 adds
     `server_unreachable` and `not_permitted_on_this_mac`). `DeviceSummary`
-    has `id, name, kind, paired_at, last_seen_at, connected, sensitive,
-    revoked_at, revoked_by` and **never** a token or hash. Every new field is
+    has `id, name, kind, paired_at, last_seen_at, connected, revoked_at,
+    revoked_by` and **never** a token or hash. Every new field is
     `#[serde(default)]`. Satellites are excluded from the
     phone/iPad list and reported in a separate `hosts` array.
   - Add `"ws"`, `"pair"` and `"devices"` to `Welcome.features` (built in
     `welcome_msg`, `src/ipc/server.rs:568-600`; constants next to the
     existing ones at `server.rs:83-100`).
   - The QR/URL payload is `nostromo://pair?v=1&host=<h>&port=<p>&code=<c>`.
-    Name and scope are *not* in it; the device learns them from `PairOffer`.
+    The name hint is *not* in it; the device learns it from `PairOffer`.
 - `src/config.rs:46-60, 475-490` — add `ws_addr: Option<SocketAddr>` and
   `ws_listen_addr()` (`NOSTROMD_WS_ADDR` → `config.toml ws_addr` → default
   **`127.0.0.1:47101`**, matching `DEFAULT_TCP_ADDR`; `off` disables). The
@@ -339,15 +339,8 @@ Devices redeem codes over the WebSocket listener without a token.
   address); a non-loopback bind logs one INFO line naming the address. Also add `pair_host: Option<String>`:
   the address devices are told to use. The default is the bound WS address
   if it is specific; otherwise the first non-loopback, non-link-local IPv4
-  of the host. Log the chosen value at INFO. Also add a `[devices]` table
-  with `share_mail_and_todos: bool` (default **false**; operator decision Q2,
-  2026-11-23). It is read on the primary only. While false: `DevicePairStart`
-  and `DevicePairUpdate` store `sensitive: false` whatever they ask for;
-  `DeviceSetScope { sensitive: true }` answers `DeviceAdminError {
-  mail_and_todos_not_shared }` and changes nothing; the `withheld_msg` reason
-  for a `Paired` peer is `not_shared`; and `mail_and_todos_shared` is `false` on
-  `PairOffer`, `DevicePairing` and `Devices`. It is not hot-reloaded (a restart
-  is fine for a v1 switch).
+  of the host. Log the chosen value at INFO. (No mail-and-todos config key:
+  Q2.)
 - `src/bin/nostromd.rs:353-398` — construct the `DeviceRegistry` and
   `PairingTable`, bind the WS listener next to the TCP one, and log its
   address. Keep mDNS for the TCP port (W10 turns it off in satellite mode).
@@ -375,15 +368,11 @@ Devices redeem codes over the WebSocket listener without a token.
   main, install `nostromo` there too (no `codesign` on Linux).
   On the primary that daemon does the work itself; on a satellite W10
   relays it. Subcommands:
-  - `device pair [NAME] [--no-mail-and-todos]` — prints the server URL, the
-    code as `NNN NNN`, a text QR, a live countdown on one updating line,
-    and the scope line. With `mail_and_todos_shared: false` (the v1 default,
-    Q2) the scope line is `Mail and todos aren't shared from your Macs.` and
-    no other mail wording appears anywhere in the command's output; with it
-    true, "Will see mail and todos" / "Won't see mail and todos". It **stays
-    running** until the outcome. Paired: `Paired: <final name>.` (plus
-    ` Includes mail and todos.` or ` Mail and todos are off.` only when
-    sharing is on), exit 0. Expired: `Code expired. Run the command again for a
+  - `device pair [NAME]` — prints the server URL, the code as `NNN NNN`, a
+    text QR, a live countdown on one updating line, and Ada's line `Mail,
+    calendar and todos aren't shared from your Macs in this version.` (Q2; no
+    flag, no other mail wording). It **stays running** until the outcome.
+    Paired: `Paired: <final name>.`, exit 0. Expired: `Code expired. Run the command again for a
     new one.`, exit 1. Locked out: `Too many wrong attempts. This code is no
     longer valid. Run the command again for a new one.`, exit 1. Ctrl-C sends
     `DevicePairCancel`, prints `Cancelled. The code no longer works.`, exit
@@ -392,20 +381,17 @@ Devices redeem codes over the WebSocket listener without a token.
     you're connected.`, exit 1 (PRD-AC14, AC17).
   - `device pair --satellite <host> [--admin full|revoke-only|read-only|off]`
     — primary only (refused when relayed). Issues a satellite enrolment code
-    for W10's `nostromo uplink pair`. `--admin` defaults to `revoke-only`
-    (Q1; W10 makes a `personal` enrolment default to `full`). This replaces
+    for W10's `nostromo uplink pair`. An unset `--admin` means `revoke-only`
+    for every enrolment (Q1 and Ada's rule that unset means revoke-only);
+    Sendai gets `--admin full` explicitly. This replaces
     the earlier `device add`, which printed a token (PRD-AC37 forbids that).
   - `device list [--all]` — columns: NAME, KIND, PAIRED, LAST SEEN
-    (`Connected now` or `2 h ago`), and MAIL & TODOS (`on`/`off`) only while
-    sharing is on. Then a `Revoked` group with revoke times, and `Replaced by
+    (`Connected now` or `2 h ago`). Then a `Revoked` group with revoke times, and `Replaced by
     re-pairing` for `revoked_by: replaced` (D6). `--all` adds the satellites
     with their admin level (PRD-AC23).
   - `device revoke <name-or-id>` — prints `Revoked <name>. Disconnected
     just now.` or `Revoked <name>. Wasn't connected; it will be refused the
     next time it tries.` (PRD-AC25, AC26, AC29).
-  - `device mail-and-todos <name-or-id> on|off` (PRD-AC35). `on` while
-    sharing is off prints `Mail and todos aren't shared from your Macs in this
-    version.` and exits 1; `off` always works.
   - `device admin <host> full|revoke-only|read-only|off` — primary only;
     changes a satellite's device-admin capability (used by W10/W15).
 - `tests/ipc_ws_transport.rs` (new) — mirrors `tests/ipc_tcp_transport.rs`.
@@ -414,10 +400,9 @@ Devices redeem codes over the WebSocket listener without a token.
   `tokio_tungstenite::connect_async`.
 - `tests/device_pairing.rs` (new) — pairing lifecycle driven from a Unix
   admin client plus WS device sockets; see Approach 8.
-- `tests/ipc_peer_gating.rs` — add `Paired { sensitive: false }` (behaves
-  like `Tcp`, `Withheld` reason `device_scope`) and `Paired { sensitive:
-  true }` (receives `TeriState`/`FredState`) cases, plus B10 cases: a
-  `Paired { sensitive: true }` peer subscribed to everything never receives
+- `tests/ipc_peer_gating.rs` — add `Paired` cases (behaves like `Tcp`, never
+  receives `TeriState`/`FredState`/work frames, `Withheld` reason
+  `not_shared`), plus B10 cases: a `Paired` peer subscribed to everything never receives
   any `LocalOnly` frame (drive it from the classification list rather than a
   hand list: approval frames, `SessionTaskDetail`, `SessionQueue*`,
   `AuthoredPrs*`, `TrackerBoard`, `ConversationHistory*`, `SessionMcpResult`,
@@ -462,19 +447,29 @@ Devices redeem codes over the WebSocket listener without a token.
    appends ` 2`, ` 3`, … to the first free suffix. The final name goes back
    in `Paired` and in the issuer's `DevicePairOutcome`. Revoked names do not
    block reuse.
-4a. **Re-pair replaces (D6).** On a `Pair` whose code is accepted and whose
-   `replaces_token` hashes to an **active** `iphone`/`ipad` record, do this in
-   one registry transaction and one save: mark the old record revoked
+4a. **Re-pair proof and replace (D6).** Each open pairing holds a random
+   32-byte `challenge` (returned in every `PairOffer` for it), a
+   `proof_answered` flag and an optional `matched_device`. The first
+   `PairCheck` with a `proof` on a code computes HMAC-SHA256(`token_hash`,
+   `challenge ‖ code`) for every active `iphone`/`ipad` record
+   (constant-time compares, all records, no early exit), stores the match,
+   sets `proof_answered`, and replies `knows_device`. Later proofs on that code
+   get a `PairOffer` with no `knows_device`. On a `Pair { replace: true }`
+   whose code is accepted and whose pairing has a `matched_device` still
+   active, do this in one registry transaction and one save: mark the old record revoked
    (`revoked_by: replaced`), then dedup the new name (so the old name is
    free), then insert the new record. Then bump the registry epoch, so the old
    record's live sockets get `Unauthorized { revoked }` and 4001 under 1 s
    (W11 has already closed its own old socket), and reply `Paired { replaced:
    true }`; the issuer's `DevicePairOutcome::paired` also says `replaced:
-   true`. A `replaces_token` that is unknown, revoked or belongs to a
-   satellite record is ignored: the pairing proceeds as a normal one with
-   `replaced: false` and nothing is revoked (no error, so the field cannot be
-   used to probe tokens). A wrong code with a `replaces_token` revokes nothing
-   and counts toward the lockout. The token is never logged.
+   true`. `Pair { replace: true }` without a match is a plain pairing with
+   `replaced: false`. The only oracle is `knows_device`, once per code, and
+   only with a valid code the operator issued (PRD AC58). A wrong code revokes
+   nothing and counts toward the lockout. The proof is never logged. If the
+   phone lost its old token (or sends no proof), the re-pair is a fresh
+   pairing: the name gets a suffix
+   ("iPhone 2") and the old entry stays active until the operator revokes it
+   (W11 says so).
 5. **Wrong-attempt lockout** (PRD-AC17). A wrong code (a `PairCheck` or
    `Pair` that matches no open pairing and no tombstone) cannot be pinned on
    one pairing. So it counts against **every pairing open at that moment**.
@@ -495,10 +490,10 @@ Devices redeem codes over the WebSocket listener without a token.
    (a) valid token → `Welcome` with `"ws"`, subscribe, receive a broadcast;
    (b) bad or unknown token → `Unauthorized` + close 4001;
    (c) oversize frame → 1009; binary frame → 1003;
-   (d) a `Paired { sensitive: false }` peer never receives `TeriState`, and
-   its subscribe yields `Withheld { reason: "device_scope" }`;
-   (e) a `sensitive: true` peer is replayed the retained `TeriState` on
-   subscribe.
+   (d) a `Paired` peer never receives `TeriState`, `FredState` or a work
+   frame, and its subscribe yields `Withheld { reason: "not_shared" }`;
+   (e) a `Paired` peer is replayed the retained frames its trust allows
+   (`MotherJobs`, `ApprovalPending`) on subscribe.
    In `tests/device_pairing.rs`:
    (f) an admin client sends `DevicePairStart`, a device sends `PairCheck`
    then `Pair` → device gets `Paired`, the admin gets `DevicePairOutcome::
@@ -512,9 +507,8 @@ Devices redeem codes over the WebSocket listener without a token.
    (k) `DeviceRevoke` on a connected device closes it with 4001 in under
    1 s with `was_connected: true`, and a second connected device is
    unaffected;
-   (l) `DeviceSetScope` false on a live `sensitive: true` device → it gets
-   `Withheld { device_scope }` and no further `TeriState`; true → it is
-   replayed the retained `TeriState` without reconnecting, within 1 s;
+   (l) `DevicePairCancel` for a pairing owned by another connection →
+   `DeviceAdminError { unknown_pairing }` and the pairing stays open;
    (m) `DeviceUnpairSelf` → the record is revoked with `revoked_by: device`
    and the socket is closed;
    (n) device-admin verbs on a WS device socket → refused;
@@ -527,26 +521,26 @@ Devices redeem codes over the WebSocket listener without a token.
    test can be the verified app): queued typed messages still merge (B11), and the
    connection's declared capability is recorded;
    (q) D6, same server: device A pairs as "iPhone" and stays connected; a new
-   code is redeemed with `replaces_token` = A's token and name "iPhone" → the
+   code is checked with A's proof (→ `knows_device: true`) and redeemed with
+   `replace: true` and name "iPhone" → the
    reply is `Paired { name: "iPhone", replaced: true }`, A's old socket is
    closed with 4001 in under 1 s, the old record is in the revoked group with
    `revoked_by: replaced`, and a `Devices` broadcast shows both;
-   (r) D6, ignored token: `replaces_token` that is unknown, already revoked,
-   or a satellite's → `replaced: false`, nothing revoked, the same reply shape
-   as a plain pairing; a wrong code with a valid `replaces_token` revokes
-   nothing and counts one wrong attempt;
-   (s) the `replaces_token` value never appears in captured log output
-   (extends (o));
+   (r) D6, no match: a proof from an unknown, revoked or satellite credential
+   → `knows_device: false`, then `Pair { replace: true }` → `replaced: false`,
+   nothing revoked; a second proof on the same code (even A's) → no
+   `knows_device` (AC58); the challenge differs per code, so a proof captured
+   for one code fails on another; no proof → "iPhone 2" and A stays active;
+   (s) proofs never appear in captured log output (extends (o)), and no
+   `Pair` or `PairCheck` field accepts a raw token or token hash;
    (t) D4: a correct `PairCheck` twice, then `Pair` → paired (the check used
    nothing); four wrong `PairCheck`s plus one wrong `Pair` → `locked_out`;
    `PairCheck` ok, then expiry, then `Pair` → `PairRefused { expired }`;
    `PairCheck` ok, then cancel, then `Pair` → `PairRefused { invalid }`;
-   (u) Q2, default config: `DevicePairStart { sensitive: true }` yields
-   `DevicePairing { sensitive: false, mail_and_todos_shared: false }`; the
-   paired device's subscribe gets `Withheld { reason: "not_shared" }` and no
-   `TeriState`; `DeviceSetScope { sensitive: true }` → `DeviceAdminError {
-   mail_and_todos_not_shared }`. Tests (d), (e) and (l) run with
-   `share_mail_and_todos = true`.
+   (u) Q2: no frame the pairing flow or `Devices` sends has a `sensitive` or
+   mail field (a serde round-trip test on the fixtures), and `nostromo device
+   pair` prints Ada's "Mail, calendar and todos aren't shared from your Macs
+   in this version." and no other mail wording.
 9. **CLI.** Implement `nostromo device …` in `src/bin/nostromo_cli.rs`
    over `DaemonClient`. Test the
    output formatting and exit codes with the outcome stream stubbed, and
@@ -589,8 +583,9 @@ Technical criteria:
   (test (o) greps the captured log).
 - [ ] **W9-9** Revoking a device closes its live sockets in under 1 s and leaves every
   other device's sockets open.
-- [ ] **W9-10** A scope change reaches a connected device in under 1 s, in both
-  directions, without a reconnect.
+- [ ] **W9-10** `DevicePairCancel` is honoured only from the connection that owns the
+  pairing (test (l)). (Was the scope-change criterion; Q2 removed per-device
+  scope in v1.)
 - [ ] **W9-11** A pairing is in daemon memory only. It is cancelled when its issuing
   connection drops, and `devices.json` never contains a code.
 - [ ] **W9-12** Lockout follows Approach 5. A wrong-code storm from one IP is also capped
@@ -614,22 +609,24 @@ Technical criteria:
 - [ ] **W9-20** `make install-daemon` installs the signed `nostromo` CLI after the
   three existing binaries without changing their order or the restart guard,
   and `make uninstall-daemon` removes it.
-- [ ] **W9-21** D6: re-pairing with a valid `replaces_token` revokes the old record
-  (`revoked_by: replaced`) in the same save, keeps the name without a suffix,
-  closes the old record's sockets with 4001 in under 1 s, and replies
-  `replaced: true`; an unknown, revoked or satellite token is ignored with
-  `replaced: false`; the token is never logged (tests (q)–(s)).
+- [ ] **W9-21** D6 (PRD AC57, AC58): `knows_device` is answered from a
+  challenge-bound HMAC proof at most once per code; `Pair { replace: true }`
+  after a match revokes the old record (`revoked_by: replaced`) in the same
+  save, keeps the name without a suffix, and closes the old record's sockets
+  with 4001 in under 1 s; nothing the device sends is its token, its hash or
+  replayable on another code; proofs are never logged (tests (q)–(s)).
 - [ ] **W9-22** D4: `PairCheck` never uses up a code, a wrong `PairCheck` counts toward
   the lockout, and expiry or cancel between check and `Pair` gives
   `PairRefused { expired }` / `{ invalid }` (test (t)).
-- [ ] **W9-23** Q2: with the default config no device is ever `sensitive: true`, no
-  `TeriState`/`FredState` reaches a `Paired` peer, the withheld reason is
-  `not_shared`, every pairing frame says `mail_and_todos_shared: false`, and no
-  CLI output mentions including mail or todos (test (u) plus a CLI output
-  test).
+- [ ] **W9-23** Q2 (PRD AC56): no `TeriState`, `FredState` or work frame reaches a
+  `Paired` peer, the withheld reason is `not_shared`, there is no
+  mail-and-todos verb, flag, config key or frame field, and the CLI prints
+  only "Mail, calendar and todos aren't shared from your Macs in this
+  version." (tests (d), (u)).
 - [ ] **W9-24** Q1: the registry and CLI accept `full | revoke_only | read_only | off`
-  (`revoke-only` on the command line) for a satellite, `device pair
-  --satellite` defaults to `revoke_only`, and `device list --all` prints the
+  (`revoke-only` on the command line) for a satellite, an enrolment without
+  `--admin` is `revoke_only` whatever its egress (Sendai is enrolled with an
+  explicit `--admin full`), and `device list --all` prints the
   level. (Enforcement is W10's.)
 
 ## Mother crew: gates, lenses, checklist and calibration
@@ -689,12 +686,13 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   MCP tool.
 - Renaming a device; multiple operators; permissions beyond mail-and-todos
   (PRD out of scope).
-- The phone's side of D6 (comparing `server_id`, the different-server
+- The phone's side of D6 (computing the proof, the different-server
   warning, wiping content, telling the old server): W11. The old server sees
   only an ordinary `DeviceUnpairSelf`.
 - Enforcing the `revoke_only` level for relayed admin verbs (W10) and its Mac
   UI (W15).
-- Turning mail and todos on for v1 (Q2): the switch ships `false`.
+- Any way to share mail, calendar or todos with a device (Q2, PRD AC56): no
+  flag, key, verb or field in v1; opening it up is a later wedge.
 - Widening what a `Paired` device may *do* (it gets the `Tcp` allow-list
   plus `DeviceUnpairSelf`, and W13's self-scoped push verbs later). Per bet
   B10, approval/decision answers are never accepted from it.
@@ -708,7 +706,7 @@ suggested_config:
   redd:
     model: sonnet
     effort: high
-    rationale: "Auth, revocation race, scope flip, lockout, TTL, dedup and CLI exit codes all need real socket tests with an injectable clock."
+    rationale: "Auth, revocation race, re-pair proof, lockout, TTL, dedup and CLI exit codes all need real socket tests with an injectable clock."
   marty:
     model: sonnet
     effort: medium
