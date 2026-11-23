@@ -283,6 +283,6 @@ public enum McpPanelModel {
     /// The confirmation before a disable. `folder` is the focus's project path, or nil.
     public static func disableConfirmation(server: String, folder: String?) -> String {
         let place = folder.flatMap { $0.isEmpty ? nil : $0 } ?? "this session's folder"
-        return "Disable \(server) for \(place)? Claude Code remembers this for every session in that folder, including terminal sessions, until you enable it again."
+        return "Disable \(server) for \(place)? Claude Code remembers this in ~/.claude.json for every session in that folder, including terminal sessions, until you enable it again."
     }
 }

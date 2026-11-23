@@ -88,9 +88,20 @@ final class McpRowView: NSView {
     let reconnectButton = McpActionButton(title: "Reconnect", target: nil, action: nil)
     let toggleButton = McpActionButton(title: "Disable", target: nil, action: nil)
 
-    var onReconnect: (() -> Void)?
-    var onToggle: (() -> Void)?
+    /// Called with the button that was pressed, so the owner can hold the press to `HumanGesture`.
+    var onReconnect: ((NSView) -> Void)?
+    var onToggle: ((NSView) -> Void)?
     private(set) var row: McpRow?
+    /// How many times `configure` changed what the row shows (a test seam: an unchanged row is left alone).
+    private(set) var applyCount = 0
+    private var shown: Shown?
+
+    private struct Shown: Equatable {
+        let row: McpRow
+        let note: McpRowNote?
+        let busy: Bool
+        let cooling: Bool
+    }
 
     override var isFlipped: Bool { true }
 
@@ -205,6 +216,9 @@ final class McpRowView: NSView {
             detailStack.topAnchor.constraint(equalTo: topAnchor, constant: McpRowView.rowHeight - 6),
             errorField.widthAnchor.constraint(equalTo: detailStack.widthAnchor),
             noteField.widthAnchor.constraint(equalTo: detailStack.widthAnchor),
+            // The row is as tall as its content: the detail lines (none, one or two) end 6 pt above its
+            // bottom edge, and a row with none is the one-line `rowHeight`.
+            bottomAnchor.constraint(equalTo: detailStack.bottomAnchor, constant: 6),
             heightAnchor.constraint(greaterThanOrEqualToConstant: McpRowView.rowHeight),
         ])
         setAccessibilityElement(true)
@@ -214,6 +228,10 @@ final class McpRowView: NSView {
     /// Show `row`. `note` is the last result for this row; `busy` a request in flight; `cooling` the 5 s
     /// after a click. Buttons are off in either case, and for whatever the row may not do.
     func configure(row: McpRow, note: McpRowNote?, busy: Bool, cooling: Bool) {
+        let next = Shown(row: row, note: note, busy: busy, cooling: cooling)
+        guard next != shown else { return }
+        shown = next
+        applyCount += 1
         self.row = row
         nameField.stringValue = row.name
         nameField.toolTip = row.name
@@ -246,8 +264,8 @@ final class McpRowView: NSView {
         setAccessibilityLabel(row.rowLabel + (note.map { ", \($0.text)" } ?? ""))
     }
 
-    @objc private func reconnectClicked() { onReconnect?() }
-    @objc private func toggleClicked() { onToggle?() }
+    @objc private func reconnectClicked() { onReconnect?(reconnectButton) }
+    @objc private func toggleClicked() { onToggle?(toggleButton) }
 }
 
 /// The result of the last action on a row: shown under it.
@@ -270,6 +288,8 @@ final class McpPanelView: NSView {
     let refreshButton = McpActionButton(title: "Refresh", target: nil, action: nil)
     let closeButton = McpActionButton(title: "Close", target: nil, action: nil)
     private(set) var rowViews: [McpRowView] = []
+    /// How often the row stack was rebuilt (a test seam).
+    private(set) var stackRebuildCount = 0
 
     private let columnHeader = NSView()
     private let scroll = NSScrollView()
@@ -398,35 +418,110 @@ final class McpPanelView: NSView {
         ])
     }
 
-    /// Replace the rows. `message` is the state line (loading, not running, an error).
+    /// Show `rows`. The same row views in the same order leave the stack alone; only a different set rebuilds it.
+    /// Either way the Tab order is rebuilt, because a button may have appeared, vanished or been enabled.
     func show(rows: [McpRowView], stateText: String?, showFootnote: Bool, refreshEnabled: Bool) {
-        // Keyboard focus survives the rebuild: find the same button in the new rows.
-        let focused = window?.firstResponder as? McpActionButton
-        let focusedKey = focused.flatMap { button -> (Int, Bool)? in
-            guard let idx = rowViews.firstIndex(where: { $0.reconnectButton === button || $0.toggleButton === button }) else { return nil }
-            return (idx, rowViews[idx].reconnectButton === button)
-        }
-        for v in stack.arrangedSubviews { stack.removeArrangedSubview(v); v.removeFromSuperview() }
-        rowViews = rows
-        for r in rows {
-            stack.addArrangedSubview(r)
-            r.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
-            r.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
+        if !rows.elementsEqual(rowViews, by: ===) {
+            // Keyboard focus survives the rebuild: find the same button in the new rows.
+            let focused = window?.firstResponder as? McpActionButton
+            let focusedKey = focused.flatMap { button -> (Int, Bool)? in
+                guard let idx = rowViews.firstIndex(where: { $0.reconnectButton === button || $0.toggleButton === button }) else { return nil }
+                return (idx, rowViews[idx].reconnectButton === button)
+            }
+            for v in stack.arrangedSubviews { stack.removeArrangedSubview(v); v.removeFromSuperview() }
+            rowViews = rows
+            for r in rows {
+                stack.addArrangedSubview(r)
+                r.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
+                r.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
+            }
+            stackRebuildCount += 1
+            if let (idx, wasReconnect) = focusedKey, idx < rows.count {
+                let target = wasReconnect ? rows[idx].reconnectButton : rows[idx].toggleButton
+                if target.isEnabled { window?.makeFirstResponder(target) }
+            }
         }
         columnHeader.isHidden = rows.isEmpty
         stateField.stringValue = stateText ?? ""
         stateField.isHidden = stateText == nil
         footnoteField.isHidden = !showFootnote
         refreshButton.isEnabled = refreshEnabled
-        if let (idx, wasReconnect) = focusedKey, idx < rows.count {
-            let target = wasReconnect ? rows[idx].reconnectButton : rows[idx].toggleButton
-            if target.isEnabled { window?.makeFirstResponder(target) }
+        rebuildKeyLoop()
+    }
+
+    /// Tab order, set by hand and rebuilt after every render (the rows are made after the window is up, and
+    /// the window does not work one out for itself): each row's Reconnect then Disable/Enable, in order,
+    /// then Refresh, then Close, then round again. A button that is off stays in the chain; the window skips it.
+    private func rebuildKeyLoop() {
+        var chain: [NSView] = []
+        for row in rowViews {
+            for button in [row.reconnectButton, row.toggleButton] {
+                if button.isHidden { button.nextKeyView = nil } else { chain.append(button) }
+            }
         }
+        chain += [refreshButton, closeButton]
+        for (a, b) in zip(chain, chain.dropFirst()) { a.nextKeyView = b }
+        chain.last?.nextKeyView = chain.first
     }
 
     func setHeader(focusName: String) {
         titleField.stringValue = "MCP servers · \(focusName)"
         closeButton.setAccessibilityLabel("Close MCP servers")
+    }
+}
+
+// MARK: - Confirmation
+
+/// A sheet window that turns Esc into its own cancel.
+final class McpConfirmWindow: NSWindow {
+    var cancel: (() -> Void)?
+    override func cancelOperation(_ sender: Any?) { cancel?() }
+}
+
+/// "Disable this MCP server?": Cancel is the default button (Return), so Return can never confirm the
+/// disable; Disable is a separate, destructive button that has to be pressed.
+final class McpConfirmSheet {
+    let window: McpConfirmWindow
+    let message: String
+    let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+    let disableButton = NSButton(title: "Disable", target: nil, action: nil)
+
+    init(message: String) {
+        self.message = message
+        window = McpConfirmWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 160), styleMask: [.titled],
+                                  backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: .darkAqua)
+        let title = NSTextField(labelWithString: "Disable this MCP server?")
+        title.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        let body = NSTextField(wrappingLabelWithString: message)
+        body.font = NSFont.systemFont(ofSize: 12)
+        body.preferredMaxLayoutWidth = 380
+        cancelButton.keyEquivalent = "\r"
+        cancelButton.setAccessibilityLabel("Cancel")
+        disableButton.hasDestructiveAction = true
+        disableButton.setAccessibilityLabel("Disable")
+        for v in [title, body, cancelButton, disableButton] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            window.contentView?.addSubview(v)
+        }
+        guard let content = window.contentView else { return }
+        NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
+            title.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            title.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+            body.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8),
+            body.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+            cancelButton.topAnchor.constraint(equalTo: body.bottomAnchor, constant: 16),
+            cancelButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+            cancelButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
+            cancelButton.widthAnchor.constraint(equalToConstant: 80),
+            disableButton.trailingAnchor.constraint(equalTo: cancelButton.leadingAnchor, constant: -10),
+            disableButton.centerYAnchor.constraint(equalTo: cancelButton.centerYAnchor),
+            disableButton.widthAnchor.constraint(equalToConstant: 80),
+        ])
+        window.initialFirstResponder = cancelButton
     }
 }
 
@@ -451,6 +546,17 @@ final class McpPanelController: NSObject {
     private(set) var isRefreshing = false
     private(set) var isClosed = false
 
+    /// Whether a press is a person's own (`HumanGesture`): Reconnect, Enable, Disable and the confirmation's
+    /// Disable all ask first, so app-control input or an Accessibility press does nothing. Tests replace it.
+    var permit: (NSView) -> HumanGestureVerdict = { HumanGesture.permit(NSApp?.currentEvent, control: $0) }
+
+    /// The confirmation sheet while it is up (a test seam: its buttons are the real ones).
+    private(set) var confirmSheet: McpConfirmSheet?
+    /// The sheet this panel is shown in (a test seam).
+    var sheetWindow: NSWindow? { sheet }
+    /// How many times the rows were brought up to date (a test seam).
+    private(set) var renderCount = 0
+
     /// Asks before a disable; calls back with the answer. The default is a sheet on the panel.
     var confirmDisable: (_ message: String, _ completion: @escaping (Bool) -> Void) -> Void = { _, completion in completion(false) }
 
@@ -458,6 +564,8 @@ final class McpPanelController: NSObject {
     private let now: () -> Date
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
     private var cooldownUntil: [String: Date] = [:]
+    /// One row view per server name, kept between renders: a change touches its own row, not all of them.
+    private var rowViewsByName: [String: McpRowView] = [:]
     private var sheet: NSWindow?
     private weak var parent: NSWindow?
 
@@ -537,7 +645,8 @@ final class McpPanelController: NSObject {
 
     /// Enable at once; disable after the confirmation.
     func toggle(_ server: String) {
-        guard canStart(server), case .list(let rows) = phase, let row = rows.first(where: { $0.name == server }) else { return }
+        guard canStart(server), case .list(let rows) = phase,
+              let row = rows.first(where: { $0.name == server }), row.canToggle else { return }
         if row.isDisabled {
             start(server)
             requests.request(tag: tag, action: "toggle", server: server, enabled: true) { [weak self] reply in
@@ -616,6 +725,7 @@ final class McpPanelController: NSObject {
     }
 
     private func render() {
+        renderCount += 1
         var rows: [McpRowView] = []
         var stateText: String?
         var footnote = false
@@ -625,14 +735,16 @@ final class McpPanelController: NSObject {
         case .list(let list):
             footnote = true
             if list.isEmpty { stateText = "This session has no MCP servers." }
-            rows = list.map { row in
-                let view = McpRowView()
+            var kept: [String: McpRowView] = [:]
+            for row in list {
+                // A name seen twice gets a view of its own that is not kept.
+                let view = kept[row.name] == nil ? (rowViewsByName[row.name] ?? makeRowView(for: row.name)) : makeRowView(for: row.name)
                 view.configure(row: row, note: notes[row.name], busy: inFlight.contains(row.name),
                                cooling: isCoolingOrBusy(row.name))
-                view.onReconnect = { [weak self] in self?.reconnect(row.name) }
-                view.onToggle = { [weak self] in self?.toggle(row.name) }
-                return view
+                if kept[row.name] == nil { kept[row.name] = view }
+                rows.append(view)
             }
+            rowViewsByName = kept
         case .notRunning:
             stateText = McpPanelModel.notRunningMessage
         case .unsupported(let message):
@@ -640,19 +752,55 @@ final class McpPanelController: NSObject {
         case .failed(let message):
             stateText = message
         }
+        if case .list = phase {} else { rowViewsByName = [:] }
         if isRefreshing, case .list = phase { stateText = "Refreshing…" }
         panelView.show(rows: rows, stateText: stateText, showFootnote: footnote, refreshEnabled: !isRefreshing)
     }
 
+    private func makeRowView(for name: String) -> McpRowView {
+        let view = McpRowView()
+        view.onReconnect = { [weak self] button in
+            guard let self, self.isHuman(button) else { return }
+            self.reconnect(name)
+        }
+        view.onToggle = { [weak self] button in
+            guard let self, self.isHuman(button) else { return }
+            self.toggle(name)
+        }
+        return view
+    }
+
+    private func isHuman(_ control: NSView) -> Bool {
+        if case .human = permit(control) { return true }
+        return false
+    }
+
     private func confirmWithSheet(_ message: String, _ completion: @escaping (Bool) -> Void) {
-        let alert = NSAlert()
-        alert.messageText = "Disable this MCP server?"
-        alert.informativeText = message
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Disable")
-        alert.addButton(withTitle: "Cancel")
         guard let sheet else { return completion(false) }
-        alert.beginSheetModal(for: sheet) { completion($0 == .alertFirstButtonReturn) }
+        let confirm = McpConfirmSheet(message: message)
+        // Disable is pressed by a person or not at all: it ends the sheet itself once `permit` says so.
+        confirm.disableButton.target = self
+        confirm.disableButton.action = #selector(confirmDisableClicked(_:))
+        confirm.cancelButton.target = self
+        confirm.cancelButton.action = #selector(confirmCancelClicked(_:))
+        confirm.window.cancel = { [weak self] in self?.endConfirmation(confirmed: false) }
+        confirmSheet = confirm
+        sheet.beginSheet(confirm.window) { [weak self] response in
+            self?.confirmSheet = nil
+            completion(response == .OK)
+        }
+    }
+
+    @objc private func confirmDisableClicked(_ sender: NSButton) {
+        guard isHuman(sender) else { return }
+        endConfirmation(confirmed: true)
+    }
+
+    @objc private func confirmCancelClicked(_ sender: NSButton) { endConfirmation(confirmed: false) }
+
+    private func endConfirmation(confirmed: Bool) {
+        guard let confirm = confirmSheet else { return }
+        sheet?.endSheet(confirm.window, returnCode: confirmed ? .OK : .cancel)
     }
 
     private func finishClose() {

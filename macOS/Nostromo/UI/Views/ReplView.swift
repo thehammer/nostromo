@@ -1643,6 +1643,9 @@ extension ReplView: PaneRenderSubject {
         ]
     }
 
+    /// Test seam: what the input bar does when the operator sends `text` (no images).
+    func sendFromInputBarForTesting(_ text: String) { inputBar.onSend?(text, []) }
+
     /// Test seam: the quick-action strip, if the pane has one.
     var quickActionStripForTesting: QuickActionStripView? { quickActionStrip }
 

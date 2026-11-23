@@ -135,6 +135,62 @@ final class McpPanelAppearanceTests: XCTestCase {
         // The tail is an ellipsis: ink ends short of the column's right edge.
         let ink = try XCTUnwrap(shot.inkBounds(in: name, isInk: isInk))
         XCTAssertLessThan(ink.maxX, name.maxX - 0.5)
+        // What is drawn is what fits the column: not the whole name squeezed or spilled, but a cut one.
+        XCTAssertLessThanOrEqual(ink.width, name.width, "the drawn name is wider than its column")
+        XCTAssertGreaterThanOrEqual(ink.minX, name.minX - 0.5)
+        XCTAssertLessThan(ink.width, textWidth(row.nameField) - 20, "the drawn name is the whole name, not a cut one")
+        XCTAssertEqual(name.width, row.nameField.frame.width, accuracy: 0.5)
+        XCTAssertLessThan(name.width, textWidth(row.nameField), "the column is narrower than the name")
+        // The column is where the header puts it: everything to its right is fixed width, so the buttons
+        // still end at the row's edge.
+        let toggle = host.convert(row.toggleButton.bounds, from: row.toggleButton)
+        XCTAssertEqual(toggle.maxX, host.convert(row.bounds, from: row).maxX - McpColumns.inset, accuracy: 0.5)
+    }
+
+    // MARK: Row height
+
+    /// The detail lines (a server's error, the bridge note, an action's result) sit inside their own row:
+    /// each row is as tall as its content, so none draws over the next.
+    func testNoRowOverlapsTheNextAndTheDetailTextLiesInsideItsRow() throws {
+        let harness = McpHarness()
+        let c = McpPanelController(tag: "t", focusName: "Cody", projectPath: nil, requests: harness.requests,
+                                   now: harness.now, schedule: harness.schedule)
+        c.permit = { _ in .human(sourcePid: nil, sourceState: nil) }
+        c.refresh()
+        var list = servers
+        list[4] = McpServerViewWire(name: "nostromo", status: .connected, scope: "user", transport: "stdio", toolCount: 100, nostromoBridge: false)
+        harness.answer("req-1", tag: "t", action: "status", .ok, servers: list)
+        // A result note on the failing server (error line and note), and one on a plain server.
+        c.reconnect("callimachus")
+        harness.answer("req-2", tag: "t", action: "reconnect", .refused, message: "Server not found: callimachus")
+        c.reconnect("weird")
+        harness.answer("req-3", tag: "t", action: "reconnect", .ok, servers: list)
+        let (_, _) = try render(c.panelView, size: McpPanelView.defaultSize)
+
+        let rows = c.panelView.rowViews
+        XCTAssertEqual(rows.count, 5)
+        let frames = rows.map(\.frame).enumerated().sorted { $0.element.minY < $1.element.minY }
+        for (a, b) in zip(frames, frames.dropFirst()) {
+            XCTAssertLessThanOrEqual(a.element.maxY, b.element.minY + 0.5,
+                                     "row \(a.offset) (\(rows[a.offset].row?.name ?? "?")) overlaps row \(b.offset)")
+        }
+        var detailLines = 0
+        for row in rows {
+            let name = row.row?.name ?? "?"
+            for field in [row.errorField, row.noteField] where !field.isHidden {
+                detailLines += 1
+                let rect = row.convert(field.bounds, from: field)
+                XCTAssertGreaterThanOrEqual(rect.minY, row.bounds.minY - 0.5, "\(name): detail above its row")
+                XCTAssertLessThanOrEqual(rect.maxY, row.bounds.maxY + 0.5, "\(name): detail text spills below its row")
+                XCTAssertGreaterThan(rect.height, 8, "\(name): detail has a height")
+            }
+            XCTAssertGreaterThanOrEqual(row.frame.height, McpRowView.rowHeight - 0.5)
+        }
+        XCTAssertGreaterThanOrEqual(detailLines, 4, "the fixture has error, bridge and result lines")
+        let callimachus = try XCTUnwrap(rows.first { $0.row?.name == "callimachus" })
+        XCTAssertGreaterThan(callimachus.frame.height, McpRowView.rowHeight + 20, "error line and note both fit")
+        let off = try XCTUnwrap(rows.first { $0.row?.name == "off" })
+        XCTAssertEqual(off.frame.height, McpRowView.rowHeight, accuracy: 0.5, "a plain row stays one line tall")
     }
 
     func testStatusWordsKeepContrastOnThePanelBackground() throws {

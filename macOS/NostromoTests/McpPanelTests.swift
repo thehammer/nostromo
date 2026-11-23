@@ -67,8 +67,11 @@ final class McpPanelTests: XCTestCase {
     }
 
     private func makeController(path: String? = "/Users/me/code/app") -> McpPanelController {
-        McpPanelController(tag: "tag-1", focusName: "Cody", projectPath: path, requests: harness.requests,
-                           now: harness.now, schedule: harness.schedule)
+        let c = McpPanelController(tag: "tag-1", focusName: "Cody", projectPath: path, requests: harness.requests,
+                                   now: harness.now, schedule: harness.schedule)
+        // These tests are about what the panel does; who may press is `McpPanelGestureTests`.
+        c.permit = { _ in .human(sourcePid: nil, sourceState: nil) }
+        return c
     }
 
     /// A controller that has asked for and been given the list.
@@ -258,10 +261,10 @@ final class McpPanelTests: XCTestCase {
         c.confirmDisable = { _, completion in completion(true) }
         let before = harness.sender.sent.count
         c.toggle("nostromo")
-        // The model offers no Disable for it; a forced call still goes through the daemon's own refusal,
-        // which the panel shows. What matters here is the panel never offers it.
-        XCTAssertTrue(c.panelView.rowViews.first { $0.row?.name == "nostromo" }?.toggleButton.isHidden == true)
-        _ = before
+        XCTAssertTrue(c.panelView.rowViews.first { $0.row?.name == "nostromo" }?.toggleButton.isHidden == true,
+                      "the panel never offers it")
+        XCTAssertEqual(harness.sender.sent.count, before, "and a forced call writes nothing")
+        XCTAssertFalse(harness.sender.sent.contains { $0.action == "toggle" }, "no toggle request is written")
     }
 
     // MARK: States
@@ -323,5 +326,350 @@ final class McpPanelTests: XCTestCase {
         let c = makeController()
         XCTAssertTrue(c.panelView.titleField.stringValue.contains("Cody"))
         XCTAssertEqual(c.panelView.subtitleField.stringValue, "MCP servers as Claude Code reports them")
+    }
+}
+
+// MARK: - Real window fixtures
+
+/// A panel shown as a real sheet on an offscreen window, with the list answered.
+fileprivate final class McpWindowRig {
+    let harness = McpHarness()
+    let parent = GestureFixtures.offscreenWindow()
+    let controller: McpPanelController
+
+    static let servers: [McpServerViewWire] = [
+        McpServerViewWire(name: "nostromo", status: .connected, scope: "user", transport: "stdio", toolCount: 12, nostromoBridge: true),
+        McpServerViewWire(name: "callimachus", status: .failed, scope: "user", transport: "stdio", toolCount: 0, error: "spawn failed"),
+        McpServerViewWire(name: "claude.ai Metabase", status: .disabled, scope: "claudeai", transport: "claudeai-proxy", toolCount: nil),
+    ]
+
+    init(list: [McpServerViewWire] = McpWindowRig.servers) {
+        controller = McpPanelController(tag: "tag-1", focusName: "Cody", projectPath: "/Users/me/code/app",
+                                        requests: harness.requests, now: harness.now, schedule: harness.schedule)
+        controller.permit = { _ in .human(sourcePid: nil, sourceState: nil) }
+        controller.show(on: parent)
+        harness.answer("req-1", action: "status", .ok, servers: list)
+    }
+
+    var sheet: NSWindow { controller.sheetWindow! }
+    func row(_ name: String) -> McpRowView { controller.panelView.rowViews.first { $0.row?.name == name }! }
+    var toggles: [McpFakeSender.Sent] { harness.sender.sent.filter { $0.action == "toggle" } }
+
+    func close() {
+        controller.close()
+        parent.close()
+    }
+}
+
+private func mcpSpin(_ seconds: TimeInterval = 0.4) { RunLoop.current.run(until: Date().addingTimeInterval(seconds)) }
+
+// MARK: - Many servers
+
+/// The daemon lists up to 200 servers. A click, an answer and the 5 s cooldown each change one row, and
+/// must touch only that row: rebuilding all of them blocked the main thread for seconds.
+final class McpPanelScaleTests: XCTestCase {
+    private let harness = McpHarness()
+
+    private func list(_ count: Int = 200, failing: Set<Int> = []) -> [McpServerViewWire] {
+        (0..<count).map { i in
+            McpServerViewWire(name: "server-\(i)", status: failing.contains(i) ? .failed : .connected, scope: "user",
+                              transport: "stdio", toolCount: i, error: failing.contains(i) ? "boom" : nil)
+        }
+    }
+
+    private func timed(_ label: String, _ work: () -> Void) {
+        let start = Date()
+        work()
+        print("MCP-PERF \(label): \(Int(Date().timeIntervalSince(start) * 1000)) ms")
+    }
+
+    func testAChangeOnOneOfTwoHundredRowsTouchesOnlyThatRow() throws {
+        let c = McpPanelController(tag: "tag-1", focusName: "Cody", projectPath: nil, requests: harness.requests,
+                                   now: harness.now, schedule: harness.schedule)
+        c.permit = { _ in .human(sourcePid: nil, sourceState: nil) }
+        c.refresh()
+        timed("200 rows, first list") { harness.answer("req-1", action: "status", .ok, servers: list()) }
+        let views = c.panelView.rowViews
+        XCTAssertEqual(views.count, 200)
+
+        /// Run `change`, then assert every row view is the one it was, only `touched` did any work, and the
+        /// panel was brought up to date once, without rebuilding the stack.
+        func check(_ label: String, touched: Set<Int>, _ change: () -> Void) throws {
+            let applied = views.map(\.applyCount)
+            let renders = c.renderCount
+            let rebuilds = c.panelView.stackRebuildCount
+            timed(label, change)
+            let now = c.panelView.rowViews
+            XCTAssertEqual(now.count, 200, label)
+            for (i, view) in now.enumerated() {
+                XCTAssertTrue(view === views[i], "\(label): row \(i) is a new view")
+                XCTAssertEqual(view.applyCount - applied[i], touched.contains(i) ? 1 : 0, "\(label): row \(i)")
+            }
+            XCTAssertEqual(c.renderCount - renders, 1, "\(label): one render")
+            XCTAssertEqual(c.panelView.stackRebuildCount, rebuilds, "\(label): the stack is left alone")
+        }
+
+        try check("click", touched: [100]) { c.reconnect("server-100") }
+        try check("answer", touched: [100]) {
+            harness.answer("req-2", action: "reconnect", .ok, servers: list())
+        }
+        try check("cooldown expiry", touched: [100]) { harness.advance(6) }
+        c.refresh()
+        try check("another row failing", touched: [7]) {
+            harness.answer("req-3", action: "status", .ok, servers: list(failing: [7]))
+        }
+    }
+
+    func testAServerLeavingRebuildsTheStackButKeepsTheOtherRowViews() {
+        let c = McpPanelController(tag: "tag-1", focusName: "Cody", projectPath: nil, requests: harness.requests,
+                                   now: harness.now, schedule: harness.schedule)
+        c.refresh()
+        harness.answer("req-1", action: "status", .ok, servers: list(5))
+        let before = c.panelView.rowViews
+        c.refresh()
+        harness.answer("req-2", action: "status", .ok, servers: Array(list(5).dropFirst()))
+        let after = c.panelView.rowViews
+        XCTAssertEqual(after.count, 4)
+        for (a, b) in zip(after, before.dropFirst()) { XCTAssertTrue(a === b) }
+    }
+
+    func testTwoServersWithTheSameNameGetTheirOwnRows() {
+        let c = McpPanelController(tag: "tag-1", focusName: "Cody", projectPath: nil, requests: harness.requests,
+                                   now: harness.now, schedule: harness.schedule)
+        c.refresh()
+        let twin = McpServerViewWire(name: "twin", status: .connected, toolCount: 1)
+        harness.answer("req-1", action: "status", .ok, servers: [twin, twin])
+        let rows = c.panelView.rowViews
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertFalse(rows[0] === rows[1])
+    }
+}
+
+// MARK: - Tab
+
+/// Tab in a real window. The rows are made after the window is up, so the Tab order has to be set by hand
+/// and again after each render; it is walked here through the explicit `nextKeyView` chain and through the
+/// window's own `selectNextKeyView` (what Tab calls).
+final class McpPanelKeyLoopTests: MouseQueueTestCase {
+    private func buttons(_ rig: McpWindowRig, _ names: [(String, Bool)]) -> [NSView] {
+        names.map { name, reconnect in
+            let row = rig.row(name)
+            return reconnect ? row.reconnectButton : row.toggleButton
+        }
+    }
+
+    private func chain(from start: NSView, steps: Int) -> [NSView] {
+        var out: [NSView] = []
+        var at: NSView? = start
+        for _ in 0..<steps { at = at?.nextKeyView; if let at { out.append(at) } }
+        return out
+    }
+
+    func testEveryRowButtonIsReachableInOrderThenRefreshThenClose() throws {
+        let rig = McpWindowRig()
+        defer { rig.close() }
+        let panel = rig.controller.panelView
+        // nostromo: Reconnect only; callimachus: both; Metabase (disabled): Enable only.
+        let expected = buttons(rig, [("nostromo", true), ("callimachus", true), ("callimachus", false), ("claude.ai Metabase", false)])
+            + [panel.refreshButton, panel.closeButton]
+
+        XCTAssertEqual(chain(from: expected[0], steps: expected.count).map(ObjectIdentifier.init),
+                       (Array(expected.dropFirst()) + [expected[0]]).map(ObjectIdentifier.init),
+                       "the explicit chain runs the buttons in order and round again")
+
+        // What Tab does: the window moves on from the focused control.
+        XCTAssertTrue(rig.sheet.makeFirstResponder(expected[0]))
+        var visited: [NSResponder?] = []
+        for _ in 1..<expected.count {
+            rig.sheet.selectNextKeyView(nil)
+            visited.append(rig.sheet.firstResponder)
+        }
+        XCTAssertEqual(visited.map { $0.map(ObjectIdentifier.init) }, expected.dropFirst().map(ObjectIdentifier.init),
+                       "Tab reaches every enabled button in order, Refresh and Close last")
+    }
+
+    func testAButtonThatIsOffIsSkippedAndComesBackWhenItIsEnabled() throws {
+        let rig = McpWindowRig()
+        defer { rig.close() }
+        let panel = rig.controller.panelView
+        rig.controller.reconnect("callimachus")
+        XCTAssertFalse(rig.row("callimachus").reconnectButton.isEnabled)
+        XCTAssertTrue(rig.sheet.makeFirstResponder(rig.row("nostromo").reconnectButton))
+        rig.sheet.selectNextKeyView(nil)
+        XCTAssertTrue(rig.sheet.firstResponder === rig.row("claude.ai Metabase").toggleButton, "the busy row is skipped")
+
+        rig.harness.advance(6)
+        rig.harness.answer("req-2", action: "reconnect", .ok, servers: McpWindowRig.servers)
+        XCTAssertTrue(rig.sheet.makeFirstResponder(rig.row("nostromo").reconnectButton))
+        rig.sheet.selectNextKeyView(nil)
+        XCTAssertTrue(rig.sheet.firstResponder === rig.row("callimachus").reconnectButton)
+        _ = panel
+    }
+
+    func testRowsThatArriveLaterJoinTheLoop() throws {
+        let rig = McpWindowRig()
+        defer { rig.close() }
+        rig.controller.refresh()
+        rig.harness.advance(0)
+        var more = McpWindowRig.servers
+        more.append(McpServerViewWire(name: "late", status: .connected, scope: "user", transport: "stdio", toolCount: 1))
+        rig.harness.answer("req-2", action: "status", .ok, servers: more)
+        let late = rig.row("late")
+        let ring = chain(from: rig.controller.panelView.refreshButton, steps: 8)
+        XCTAssertTrue(ring.contains { $0 === late.reconnectButton })
+        XCTAssertTrue(ring.contains { $0 === late.toggleButton })
+        XCTAssertTrue(chain(from: rig.row("claude.ai Metabase").toggleButton, steps: 1)[0] === late.reconnectButton,
+                      "after the last old row comes the new one")
+    }
+}
+
+// MARK: - Who may press
+
+/// Every action is held to `HumanGesture`: Reconnect, Enable, Disable, the confirmation's Disable and the
+/// badge. Real `HumanGesture.permit` over real events in a real window.
+final class McpPanelGestureTests: MouseQueueTestCase {
+    enum Kind { case fresh, noEvent, appControl, stale }
+
+    private var kind: Kind = .fresh
+
+    private func event(for window: NSWindow?) throws -> NSEvent? {
+        let window = try XCTUnwrap(window, "the control is in a window")
+        switch kind {
+        case .fresh: return GestureFixtures.mouse(.leftMouseUp, in: window)
+        case .noEvent: return nil
+        case .appControl: return try GestureFixtures.marked(GestureFixtures.mouse(.leftMouseUp, in: window))
+        case .stale: return GestureFixtures.mouse(.leftMouseUp, in: window, timestamp: ProcessInfo.processInfo.systemUptime - 30)
+        }
+    }
+
+    private func makeRig() -> McpWindowRig {
+        let rig = McpWindowRig()
+        addTeardownBlock { rig.close() }
+        rig.controller.permit = { [unowned self] control in
+            HumanGesture.permit(try? self.event(for: control.window), control: control,
+                                voiceOverEnabled: { false }, allowsSynthetic: { false })
+        }
+        return rig
+    }
+
+    private let refusals: [Kind] = [.noEvent, .appControl, .stale]
+
+    func testAPersonsOwnClickReconnects() {
+        let rig = makeRig()
+        rig.row("callimachus").reconnectButton.performClick(nil)
+        XCTAssertEqual(rig.harness.sender.sent.last?.action, "reconnect")
+    }
+
+    func testAReconnectThatIsNotAPersonsDoesNothing() {
+        for k in refusals {
+            kind = k
+            let rig = makeRig()
+            rig.row("callimachus").reconnectButton.performClick(nil)
+            XCTAssertEqual(rig.harness.sender.sent.map(\.action), ["status"], "\(k): nothing was sent")
+            XCTAssertTrue(rig.row("callimachus").reconnectButton.isEnabled, "\(k): the row did not start")
+        }
+    }
+
+    func testADisableThatIsNotAPersonsDoesNotEvenAsk() {
+        for k in refusals {
+            kind = k
+            let rig = makeRig()
+            rig.row("callimachus").toggleButton.performClick(nil)
+            mcpSpin()
+            XCTAssertNil(rig.controller.confirmSheet, "\(k): no confirmation")
+            XCTAssertTrue(rig.toggles.isEmpty, "\(k)")
+        }
+    }
+
+    func testAnEnableThatIsNotAPersonsDoesNothing() {
+        for k in refusals {
+            kind = k
+            let rig = makeRig()
+            rig.row("claude.ai Metabase").toggleButton.performClick(nil)
+            XCTAssertTrue(rig.toggles.isEmpty, "\(k)")
+        }
+        kind = .fresh
+        let rig = makeRig()
+        rig.row("claude.ai Metabase").toggleButton.performClick(nil)
+        XCTAssertEqual(rig.toggles.map(\.enabled), [true], "a person's click enables")
+    }
+
+    func testTheConfirmationsDisableIsAPersonsPressOrNothing() throws {
+        for k in refusals {
+            kind = .fresh
+            let rig = makeRig()
+            rig.row("callimachus").toggleButton.performClick(nil)
+            let alert = try XCTUnwrap(rig.controller.confirmSheet, "the confirmation is up")
+            kind = k
+            alert.disableButton.performClick(nil)
+            mcpSpin()
+            XCTAssertTrue(rig.toggles.isEmpty, "\(k): nothing sent")
+            XCTAssertNotNil(rig.controller.confirmSheet, "\(k): the confirmation stays")
+
+            kind = .fresh
+            alert.disableButton.performClick(nil)
+            mcpSpin()
+            XCTAssertEqual(rig.toggles.map(\.enabled), [false], "a person's press disables")
+        }
+    }
+}
+
+// MARK: - The real confirmation sheet
+
+/// Every other test stubs `confirmDisable`; these drive the sheet that ships.
+final class McpPanelConfirmationTests: MouseQueueTestCase {
+    private func ask(_ rig: McpWindowRig) throws -> McpConfirmSheet {
+        rig.row("callimachus").toggleButton.performClick(nil)
+        return try XCTUnwrap(rig.controller.confirmSheet, "the confirmation is up")
+    }
+
+    func testCancelIsTheDefaultButtonAndDisableIsMarkedDestructive() throws {
+        let rig = McpWindowRig()
+        defer { rig.close() }
+        let alert = try ask(rig)
+        XCTAssertEqual([alert.cancelButton.title, alert.disableButton.title], ["Cancel", "Disable"])
+        XCTAssertTrue(alert.window.defaultButtonCell === alert.cancelButton.cell, "Cancel is the default button")
+        XCTAssertFalse(alert.window.defaultButtonCell === alert.disableButton.cell, "Disable is not the default")
+        XCTAssertTrue(alert.disableButton.hasDestructiveAction)
+        XCTAssertTrue(alert.message.contains("~/.claude.json"), alert.message)
+        XCTAssertTrue(alert.message.contains("/Users/me/code/app"), alert.message)
+        XCTAssertTrue(alert.message.contains("terminal sessions"), alert.message)
+        alert.cancelButton.performClick(nil)
+        mcpSpin()
+    }
+
+    func testReturnCancelsAndSendsNothingAndTheDisableGoesOnlyOnTheExplicitClick() throws {
+        let rig = McpWindowRig()
+        defer { rig.close() }
+        let alert = try ask(rig)
+        // Return presses the window's default button: that is Cancel.
+        let returnTarget = try XCTUnwrap(alert.window.defaultButtonCell, "the sheet has a default button")
+        XCTAssertEqual(returnTarget.title, "Cancel")
+        returnTarget.performClick(nil)
+        mcpSpin()
+        XCTAssertNil(rig.controller.confirmSheet, "the sheet is gone")
+        XCTAssertTrue(rig.toggles.isEmpty, "Return did not disable")
+        XCTAssertTrue(rig.row("callimachus").toggleButton.isEnabled, "the row did not start")
+
+        let again = try ask(rig)
+        mcpSpin()
+        XCTAssertTrue(rig.toggles.isEmpty, "an open confirmation sends nothing by itself")
+        again.disableButton.performClick(nil)
+        mcpSpin()
+        XCTAssertEqual(rig.toggles, [.init(id: "req-2", tag: "tag-1", action: "toggle", server: "callimachus", enabled: false)])
+    }
+
+    func testCancelAndEscapeSendNothing() throws {
+        let rig = McpWindowRig()
+        defer { rig.close() }
+        var alert = try ask(rig)
+        alert.cancelButton.performClick(nil)
+        mcpSpin()
+        XCTAssertTrue(rig.toggles.isEmpty)
+        alert = try ask(rig)
+        XCTAssertEqual(alert.cancelButton.title, "Cancel")
+        alert.window.cancelOperation(nil)  // what Esc does in a sheet
+        mcpSpin()
+        XCTAssertTrue(rig.toggles.isEmpty)
     }
 }

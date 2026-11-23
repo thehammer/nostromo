@@ -120,6 +120,9 @@ final class ToolsOfflineBadgeView: NSView {
     var schedule: (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
+    /// Whether a press is a person's own (`HumanGesture`). A click, a key press or an Accessibility press
+    /// that is not does nothing: only a person may ask a session to reconnect a server. Tests replace it.
+    var permit: (NSView) -> HumanGestureVerdict = { HumanGesture.permit(NSApp?.currentEvent, control: $0) }
     private var nextClickAllowed = Date.distantPast
     private var noticeToken = 0
 
@@ -242,9 +245,14 @@ final class ToolsOfflineBadgeView: NSView {
         return self
     }
 
+    /// Press the badge for a person: `activate`, unless `permit` refuses the gesture.
+    private func activateIfHuman() {
+        if case .human = permit(self) { activate() }
+    }
+
     override func mouseDown(with event: NSEvent) {
         if isClickable {
-            activate()
+            activateIfHuman()
         } else {
             super.mouseDown(with: event)
         }
@@ -253,7 +261,7 @@ final class ToolsOfflineBadgeView: NSView {
     override func keyDown(with event: NSEvent) {
         // Return, Enter and Space press it.
         if isClickable, [36, 76, 49].contains(event.keyCode) {
-            activate()
+            activateIfHuman()
         } else {
             super.keyDown(with: event)
         }
@@ -261,7 +269,7 @@ final class ToolsOfflineBadgeView: NSView {
 
     override func accessibilityPerformPress() -> Bool {
         guard isClickable else { return false }
-        activate()
+        activateIfHuman()
         return true
     }
 

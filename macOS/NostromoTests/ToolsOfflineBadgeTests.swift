@@ -648,6 +648,7 @@ final class ToolsOfflineBadgeClickTests: XCTestCase {
         badge.activeTag = { "tag-1" }
         badge.now = harness.now
         badge.schedule = harness.schedule
+        badge.permit = { _ in .human(sourcePid: nil, sourceState: nil) }
         badge.apply(offline: true)
         return badge
     }
@@ -720,5 +721,41 @@ final class ToolsOfflineBadgeClickTests: XCTestCase {
         badge.apply(offline: false)
         badge.activate()
         XCTAssertTrue(harness.sender.sent.isEmpty)
+    }
+
+    // MARK: Who may press
+
+    private func realBadge(in window: NSWindow) -> ToolsOfflineBadgeView {
+        let badge = ToolsOfflineBadgeView()
+        badge.requests = harness.requests
+        badge.activeTag = { "tag-1" }
+        badge.now = harness.now
+        badge.schedule = harness.schedule
+        badge.frame = NSRect(x: 10, y: 10, width: 100, height: 20)
+        window.contentView?.addSubview(badge)
+        badge.apply(offline: true)
+        return badge
+    }
+
+    func testAPressThatIsNotAPersonsDoesNotReconnect() throws {
+        let window = GestureFixtures.offscreenWindow()
+        addTeardownBlock { window.close() }
+        let badge = realBadge(in: window)
+        var event: NSEvent?
+        badge.permit = { HumanGesture.permit(event, control: $0, voiceOverEnabled: { false }, allowsSynthetic: { false }) }
+        let space = GestureFixtures.key(in: window, characters: " ", keyCode: 49)
+        let click = GestureFixtures.mouse(.leftMouseDown, in: window)
+        let stale = GestureFixtures.mouse(.leftMouseDown, in: window, timestamp: ProcessInfo.processInfo.systemUptime - 30)
+        for refused in [nil, try GestureFixtures.marked(click), stale] as [NSEvent?] {
+            event = refused
+            badge.mouseDown(with: click)
+            badge.keyDown(with: space)
+            XCTAssertTrue(badge.accessibilityPerformPress() == true)
+            XCTAssertTrue(harness.sender.sent.isEmpty, "nothing sent for \(String(describing: refused))")
+            XCTAssertEqual(badge.text, ToolsOfflinePolicy.label)
+        }
+        event = click
+        badge.mouseDown(with: click)
+        XCTAssertEqual(harness.sender.sent.map(\.action), ["reconnect"], "a person's click reconnects")
     }
 }

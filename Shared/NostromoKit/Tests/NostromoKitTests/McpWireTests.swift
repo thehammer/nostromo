@@ -132,6 +132,7 @@ final class McpWireTests: XCTestCase {
         let text = McpPanelModel.disableConfirmation(server: "gh", folder: "/Users/me/code/app")
         XCTAssertTrue(text.hasPrefix("Disable gh for /Users/me/code/app?"))
         XCTAssertTrue(text.contains("every session in that folder, including terminal sessions"))
+        XCTAssertTrue(text.contains("~/.claude.json"), "names the file it writes")
         XCTAssertTrue(text.contains("until you enable it again"))
         XCTAssertTrue(McpPanelModel.disableConfirmation(server: "gh", folder: nil).contains("this session's folder"))
     }
