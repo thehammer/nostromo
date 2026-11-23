@@ -50,12 +50,17 @@ W14):
 1. **Merge this docs PR.** No cost. Every wedge cites it.
 2. **Crew config follow-up** (`.mother/crew.yml`, config only). PR #519 (open)
    raises the `python-test` (900 → 1800 s) and `swift-ci` (1800 → 2400 s)
-   timeouts. Still open after it: raise `gates.budget_minutes` from 45 to about
-   **90**, because Mother runs the checks one after another
-   (`plugins/mother/lib/gates.sh`, the `while read check` loop, Mother
-   `origin/main` `0a38549`) and a Rust + Swift wedge measures about 25 (Rust) +
-   20 (python) + 24 (swift) = ~69 min; and narrow `python-test`'s `when` so a
-   Rust-only wedge's `tests/*.rs` does not trigger the 20 min Python run
+   timeouts and, on its branch, `gates.budget_minutes` from 45 to **75**
+   (approved by Perri). Keep 75. Why a larger budget is needed at all: Mother's own code runs the checks one after another inside one watchdog for the whole run (Mother's git, `origin/main` `0a38549`: `plugins/mother/lib/gates.sh:246-249`, the `while read check` loop in `mother_gates_run`; `plugins/mother/bin/mother-run-job:945-956`, `budget_minutes` × 60 s as the total; overrun is recorded `incomplete`). Nostromo's repo docs do not say this, and no gate run was observed.
+   Gate durations here are **unknown**; no gate run was measured. A serial sum
+   from other measurements would be about 60–65 min plus clippy for a wedge
+   that triggers Rust, Python and Swift: Rust tests 14.5–20 min on GitHub CI
+   (`.github/workflows/ci.yml:143-150`, not the RWX sandbox), `python-test`
+   ~20 min and `swift-ci` ~24 min (#502's measurements as quoted in #519's
+   body), clippy and fmt unmeasured. 75 covers that with little headroom;
+   revisit only if the first mixed wedge (W12) comes back `incomplete`. Also
+   narrow `python-test`'s `when` so a
+   Rust-only wedge's `tests/*.rs` does not trigger the ~20 min Python run
    (`tests/**` matches them today, `.mother/crew.yml:30`). Without this the
    gate rows of every Rust wedge come back `incomplete` (observe mode: data
    lost, nothing held). Cost: an operator edit, or a $5 cap job (≈ $2).
@@ -88,7 +93,7 @@ W14):
 
 **Decisions only the operator can make** (details and recommendations in
 "Open questions for the operator"): the queue view for phones (D7, recommend
-local-only in v1); whether to raise the gate budget (recommend 90); whether to
+local-only in v1); the gate budget (recommend #519's 75 and the `python-test` path filter); whether to
 add nextest and the iOS test target first (recommend both, neither blocks W9);
 whether to split W13 (recommend no unless the iOS project is contended).
 
@@ -200,7 +205,7 @@ Read against `origin/main` `8f0328b9`. Line numbers below are from that commit.
 ## Mother features adopted (2026-10-18, Mother `origin/main` `e597389`)
 
 *2026-11-23 updates (Mother `origin/main` `0a38549`):* the lens wave (#75) is
-merged; gates run serially; the checklist parser accepts `- **ID-n** text`
+merged; Mother's code runs the gates of one job serially (`plugins/mother/lib/gates.sh:246-249`, Mother's git; not stated in Nostromo's docs, not observed in a run); the checklist parser accepts `- **ID-n** text`
 with or without `[ ]` (`plugins/mother/lib/criteria.sh`); `.mother/crew.yml`
 exists on Nostromo's main. Statements below that say otherwise are history.
 
@@ -307,8 +312,8 @@ current content, by the 2026-10-18 delta numbers:
 | 3 | `gates.budget_minutes: 45` | **Applied** (`:6`), but now too small: see 6 below. |
 | 4 | Lens scopes for push, relay, transport, extension, `dist/**` | **Applied** (`:63-65`): `phi-security` lists `src/ipc/**`, `src/push/**`, `infra/**`, `template.yaml`, Kit `Wire/**`, `Transport/**`, `Push/**` and `iOS/NostromoNotificationService/**`; `ops-infra` lists `dist/**`, `infra/**`, `template.yaml` and both Xcode projects. The lens default is all four lenses (`:61`), so a wedge's `lenses.add` is now a no-op and only `remove` changes anything. |
 | 5 | `relay-test` gate after W13 | **Open.** Add after W13 merges: `cargo test --manifest-path infra/push-relay/Cargo.toml`, `where: sandbox`, `when: { paths: ["infra/push-relay/**"] }`, `timeout_s: 900`. The standalone crate is not covered by the root `cargo test`. |
-| 6 | Timeouts and budget for serial gates | **Partly open.** PR #519 (open) raises `python-test` to 1800 s and `swift-ci` to 2400 s. Still needed: `budget_minutes` about **90** (Mother runs checks one after another; measured ~25 min Rust + ~20 python + ~24 swift). |
-| 7 | `python-test` path filter | **Open.** `when` includes `tests/**` (`:30`), which matches every Rust test file, so a Rust-only wedge pays the ~20 min Python run. Replace `tests/**` with the Python suite directories (the `PY_FAST_SUITES`/slow lists in `Makefile:71-90` name them) plus `tests/**/*.py`. |
+| 6 | Timeouts and the total gate budget | **In PR #519** (open, Perri-approved): `python-test` 1800 s, `swift-ci` 2400 s, `budget_minutes` 75. Checks run serially per Mother's code (`gates.sh:246-249` in Mother's git). Actual gate durations are unknown; the serial sum from CI and #502 numbers is ~60–65 min plus clippy for a Rust + Python + Swift wedge, so 75 fits with little headroom. |
+| 7 | `python-test` path filter | **Open.** `when` includes `tests/**` (`:30`), which matches every Rust test file, so a Rust-only wedge pays the Python run (~20 min per #502, as quoted in #519). Replace `tests/**` with the Python suite directories (the `PY_FAST_SUITES`/slow lists in `Makefile:71-90` name them) plus `tests/**/*.py`. |
 | 8 | `phi-security` scope for the new CLI | **Open, small.** Add `src/bin/nostromo_cli.rs` (W10's `nostromo uplink pair` writes the satellite token). |
 
 Also new on main and used by the wedges: `rust-fmt` (non-blocking),
@@ -840,11 +845,14 @@ case (Swift UI work runs near its cap), and expected spend stays 40%. **Per
 hop ≈ 45 min** (was 40): GitHub CI is now ~20 min for Rust tests and up to
 ~35 min per Mac shard, and every `src/` change also runs the Swift jobs
 (`docs/ci.md`, "Path gate"), then Perri and the merge, plus the one-in-three
-chance of a fix-up. **Gate time is now real**: Mother runs the gates after the
-worker exits, serially, before the PR is presented; a Rust wedge's gates take
-~25 min (+ ~20 if `python-test` still triggers), a Swift wedge's ~24, a mixed
-wedge's ~45–70, capped by `budget_minutes`. The job times below include one
-gate pass at the post-follow-up budget.
+chance of a fix-up. **Gate time is now real but unmeasured**: Mother runs the
+gates after the worker exits and before the PR is presented, one check after
+another (Mother's code, `gates.sh:246-249`), capped by `budget_minutes`. No
+gate duration has been measured for this repo. The job times below **assume**
+one gate pass of ~25 min for a single-toolchain wedge and ~50 min for a mixed
+one, guessed from GitHub CI's Rust test time (`ci.yml:143-150`) and #502's
+`python-test`/`swift-ci` times quoted in #519; replace them with Mother's
+recorded gate times after W14 and W9.
 
 | Wedge | Cap | Expected spend | Job time (incl. one gate pass) | Starts after |
 |---|---|---|---|---|
@@ -971,9 +979,10 @@ flagged, not made (open question 8).
   satellite route silently stops merging on that session; with B11 wrong, a
   local legacy client could see a merged turn drawn twice. W9's tests pin
   both directions.
-- **Gate data lost (new).** With `budget_minutes: 45` and serial gates, mixed
-  Rust/Swift wedges end gates `incomplete`; observe mode loses the data
-  without holding the job. Crew deltas 6 and 7.
+- **Gate data lost (new).** At `budget_minutes: 45`, a mixed Rust/Swift wedge
+  probably overruns (serial sum ~60–65 min plus clippy, estimated, not
+  measured) and records `incomplete`; observe mode loses the data without
+  holding the job. #519's 75 and crew delta 7 address it.
 
 ## Open technical item — RESOLVED 2026-10-18
 
@@ -1057,8 +1066,10 @@ Driving Mother, sessions or Perri from a phone needs a new bet and PRD.
     count ("2 waiting") would be a new metadata field on `SessionInfo`, safe
     for `work` hosts too, and is cheap to add later. Parity needs the
     device-trust bet.
-11. **Gate budget.** *Recommend* `budget_minutes: 90` and the `python-test`
-    path filter (crew deltas 6 and 7) before W9 is added.
+11. **Gate budget.** *Recommend* merging #519 as is (`budget_minutes: 75`)
+    plus the `python-test` path filter (crew delta 7) before W9 is added.
+    Gate durations are unknown; raise the budget only if a real run comes
+    back `incomplete`.
 12. **nextest and the iOS test target first?** *Recommend* both, beside W14
     and W9; neither blocks W9 ("CI prerequisites").
 

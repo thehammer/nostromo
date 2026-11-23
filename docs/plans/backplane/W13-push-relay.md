@@ -24,7 +24,8 @@ Versus the 2026-10-18 version (read the memo's "What changed since
   `TrackerSummary` counts reach it but are not a push kind in the PRD. No new
   push kind is added without Ada.
 - **Relay gate.** After merge, add the `relay-test` gate (memo, crew delta 5).
-- **Gates.** Rust, Python and Swift all run, serially (~45–70 min).
+- **Gates.** Rust, Python and Swift all run, one after another (Mother's
+  code); durations unmeasured, estimated ~60–65 min plus clippy.
 
 ## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 

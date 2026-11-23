@@ -504,8 +504,10 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   (non-blocking), `rust-clippy`, `rust-test` (`where: sandbox`), `python-test`
   (`where: any`, on the host; it triggers because `tests/**` matches the new
   Rust test files and `Makefile`), `shellcheck` only if a script changes.
-  `swift-ci` is skipped (no Swift paths). Gates run serially; at
-  `budget_minutes: 45` this wedge is close to the limit (memo, crew delta 6).
+  `swift-ci` is skipped (no Swift paths). Mother's code runs the checks
+  serially (memo, crew delta 6); durations are unmeasured, but Rust plus
+  `python-test` may approach 45 min, so prefer adding this job after #519's
+  `budget_minutes: 75` and the path filter.
   `max_attempts` is 2.
   Mother runs them on the pushed head after the worker exits: sandbox gates
   through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
