@@ -28,13 +28,13 @@ gates:
       run: "make python-test"
       where: any
       when: { paths: ["tests/**", "scripts/**", "bin/**", "Makefile", "*.py", "**/*.py", "macOS/**", "iOS/**", "Shared/**", ".github/**", "src/mother/**"] }
-      timeout_s: 900
+      timeout_s: 1800
       hint: "Run `make python-test` (or the failing suite with python3 -m unittest discover -s <dir>) and fix."
     - name: swift-ci
       run: "make ci-remote ONLY=swift"
       where: any
       when: { paths: ["macOS/**", "iOS/**", "Shared/**"] }
-      timeout_s: 1800
+      timeout_s: 2400
       hint: "Read the FAILED lines printed by make ci-remote; reproduce with `make ci-remote ONLY=mac|kit|ios` after pushing."
     - name: shellcheck
       run: "scripts/gates/shellcheck-changed.sh"

@@ -171,6 +171,16 @@ call in `scripts/qa/tests`, `codesign` in `tests/operator_pin`), so on a host wi
 average far above its core count they can hit the QA harness's 120 s per-script timeout;
 raise it with `QA_HARNESS_TIMEOUT=<seconds>`.
 
+### Mother gate timeouts (`.mother/crew.yml`)
+
+The `python-test` gate runs `make python-test` (~20 min serially on a loaded host) with
+`timeout_s: 1800` (was 900); it stays `where: any` because the suites need macOS tools
+(`codesign`/`lipo` in `tests/operator_pin`). The `swift-ci` gate runs
+`make ci-remote ONLY=swift` (~24 min) with `timeout_s: 2400` (was 1800). Both previously
+timed out and ended `unavailable`. To reproduce one area by hand use
+`make ci-remote ONLY=kit|ios|mac`. Mother snapshots `.mother/crew.yml` from a job's base
+ref, so changes apply only to jobs added after they merge.
+
 ### Measured and not shipped
 
 - **SwiftPM source cache:** no faster (33 s hit, 19-45 s miss), removed.
