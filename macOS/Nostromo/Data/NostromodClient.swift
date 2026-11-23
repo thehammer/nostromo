@@ -313,6 +313,8 @@ enum ServerMsg {
     case sessionTaskDetail(SessionTaskDetailWire)
     /// The answer to a `session_task_stop` of this connection. Local only.
     case sessionTaskStopResult(SessionTaskStopResultWire)
+    /// The answer to a `session_mcp` of this connection. Local only.
+    case sessionMcpResult(SessionMcpResultWire)
     /// The answer to a `session_task_output` of this connection. Local only.
     case sessionTaskOutputResult(SessionTaskOutputResultWire)
     /// The commands a session's CLI reports: the answer to a `session_commands_get`. Local only.
@@ -1565,10 +1567,39 @@ class NostromodClient {
         return trackerEditSupported(features: advertisedFeatures)
     }
 
+    /// The `welcome.features` of the current connection (empty before the first `welcome`).
+    var daemonFeatures: [String] {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return advertisedFeatures
+    }
+
     /// Whether the connection's last `welcome` advertised `slash_commands_v1`.
     var daemonAdvertisesSlashCommands: Bool {
         sendLock.lock(); defer { sendLock.unlock() }
         return NostromodClient.supportsSlashCommands(features: advertisedFeatures)
+    }
+
+    /// The `welcome.features` entry that says the daemon takes `session_mcp` (the `/mcp` panel).
+    static let sessionMcpFeature = "session_mcp_v1"
+
+    /// Does a daemon that advertised `features` take `session_mcp`? Without it `/mcp` goes to the CLI
+    /// as typed and the "Tools offline" badge is not clickable.
+    static func supportsSessionMcp(features: [String]?) -> Bool {
+        features?.contains(sessionMcpFeature) == true
+    }
+
+    /// Whether the connection's last `welcome` advertised `session_mcp_v1`.
+    var daemonAdvertisesSessionMcp: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return NostromodClient.supportsSessionMcp(features: advertisedFeatures)
+    }
+
+    /// Ask the daemon to read or change a session's MCP servers; answered with
+    /// `ServerMsg.sessionMcpResult`. Nothing is written unless the daemon advertised `session_mcp_v1`.
+    func sendSessionMcp(requestId: String, tag: String, action: String, server: String? = nil, enabled: Bool? = nil) {
+        guard daemonAdvertisesSessionMcp else { return }
+        send(ClientSessionMcp(requestId: requestId, tag: tag, action: action, server: server, enabled: enabled),
+             type: "session_mcp", tag: tag)
     }
 
     /// Whether the connection's last `welcome` advertised `claude_login_v1`.
@@ -2369,6 +2400,13 @@ class NostromodClient {
                 return .sessionTaskStopResult(m)
             } else {
                 log.error("failed to decode session_task_stop_result")
+            }
+
+        case "session_mcp_result":
+            if let m = try? decoder.decode(SessionMcpResultWire.self, from: raw) {
+                return .sessionMcpResult(m)
+            } else {
+                log.error("failed to decode session_mcp_result")
             }
 
         case "session_task_output_result":

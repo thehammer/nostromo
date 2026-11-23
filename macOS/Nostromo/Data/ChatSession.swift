@@ -158,6 +158,9 @@ class ChatSession: ObservableObject {
     /// Whether the daemon's last `welcome` advertised `slash_commands_v1`.
     var daemonAdvertisesSlashCommands: Bool { client.daemonAdvertisesSlashCommands }
 
+    /// What the daemon's last `welcome` advertised.
+    var daemonFeatures: [String] { client.daemonFeatures }
+
     /// Emits when the daemon connection comes or goes (a `welcome` has just been handled on true), so
     /// a view that gates on an advertised capability can look again.
     var daemonConnectionChanges: AnyPublisher<Bool, Never> { client.connected.eraseToAnyPublisher() }

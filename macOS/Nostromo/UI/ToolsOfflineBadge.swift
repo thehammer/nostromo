@@ -19,10 +19,17 @@ struct ToolsOfflinePolicy {
 
     static let label = "Tools offline"
     static let accessibilityLabel = "Nostromo tools offline for this session"
-    /// `/mcp` cannot reconnect a server in a Nostromo pane (its menu needs Claude Code's own
-    /// terminal UI), so the advice is what does work: the daemon asks the session to reconnect
-    /// (after 15 s, 1 min and 5 min), and a restart with `claude --continue` keeps the conversation.
-    static let tooltip = "Nostromo tools are offline for this session. Nostromo is asking the session to reconnect them; if this stays, restart the session with claude --continue."
+    static let reconnectingLabel = "Reconnecting…"
+    /// A click asks the session to reconnect the `nostromo` server at once (`session_mcp_v1`). The
+    /// daemon also retries by itself, and a restart with `claude --continue` keeps the conversation.
+    static let tooltip = "Nostromo tools are offline for this session. Click to reconnect them now. Nostromo also retries on its own; if this stays, restart the session with claude --continue."
+    /// For a daemon without `session_mcp_v1`: nothing to click, so no invitation to.
+    static let legacyTooltip = "Nostromo tools are offline for this session. Nostromo is asking the session to reconnect them; if this stays, restart the session with claude --continue."
+    static let clickAccessibilityHelp = "Reconnects the Nostromo tools for this session."
+    /// How long a click's failure notice stays in the badge.
+    static let noticeDuration: TimeInterval = 8
+    /// Least time between two clicks that send a reconnect.
+    static let clickCooldown: TimeInterval = 5
 
     private var lostAt: [String: Date] = [:]
     /// Sessions that have stopped running. A bridge usually drops just *after* its session's
@@ -82,7 +89,8 @@ struct ToolsOfflinePolicy {
 
 // MARK: - ToolsOfflineBadgeView
 
-/// The muted "Tools offline" badge. Hidden until `apply(offline: true)`.
+/// The muted "Tools offline" badge. Hidden until `apply(offline: true)`. Against a daemon with
+/// `session_mcp_v1` it is a button: a click reconnects `nostromo` for the active session now.
 ///
 /// Its label wraps and gives way first (low compression resistance), so a narrow window makes the
 /// badge taller, never wider than the room it is given. Its colours are explicit: the app is pinned
@@ -95,6 +103,29 @@ final class ToolsOfflineBadgeView: NSView {
     static let fillColor = NSColor.white.withAlphaComponent(0.10)
 
     private let label = NSTextField(wrappingLabelWithString: ToolsOfflinePolicy.label)
+
+    /// What the badge is saying: its name, a reconnect in flight, or why the last click failed.
+    enum Mode: Equatable {
+        case idle
+        case reconnecting
+        case failed(String)
+    }
+
+    private(set) var mode: Mode = .idle
+    /// The session a click reconnects.
+    var activeTag: () -> String? = { AppStore.shared.activeFocusSessionTag }
+    var requests: McpRequests = .shared
+    var now: () -> Date = Date.init
+    var schedule: (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+    private var nextClickAllowed = Date.distantPast
+    private var noticeToken = 0
+
+    /// A click does something only against a daemon that takes `session_mcp`.
+    var isClickable: Bool { requests.isAvailable }
+    override var acceptsFirstResponder: Bool { !isHidden && isClickable }
+    override var canBecomeKeyView: Bool { acceptsFirstResponder }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -130,16 +161,107 @@ final class ToolsOfflineBadgeView: NSView {
             label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.verticalPadding),
         ])
 
-        toolTip = ToolsOfflinePolicy.tooltip
         setAccessibilityElement(true)
-        setAccessibilityRole(.staticText)
         setAccessibilityLabel(ToolsOfflinePolicy.accessibilityLabel)
-        setAccessibilityHelp(ToolsOfflinePolicy.tooltip)
+        refreshAffordance()
     }
 
-    /// Show or hide the badge. Changes nothing else (no focus, no layout outside the badge).
+    /// Show or hide the badge. Changes nothing else (no focus, no layout outside the badge). A badge
+    /// that goes away forgets its reconnect state; one that comes back says its name again.
     func apply(offline: Bool) {
         isHidden = !offline
+        if !offline { setMode(.idle) }
+        refreshAffordance()
+    }
+
+    /// The tooltip and the accessibility role follow whether a click does anything.
+    func refreshAffordance() {
+        if isClickable {
+            toolTip = ToolsOfflinePolicy.tooltip
+            setAccessibilityRole(.button)
+            setAccessibilityHelp(ToolsOfflinePolicy.clickAccessibilityHelp)
+        } else {
+            toolTip = ToolsOfflinePolicy.legacyTooltip
+            setAccessibilityRole(.staticText)
+            setAccessibilityHelp(ToolsOfflinePolicy.legacyTooltip)
+        }
+    }
+
+    /// Ask the session to reconnect the `nostromo` server now. Ignored while a request is running, within
+    /// 5 s of the last click, without an active session, and against a daemon without `session_mcp_v1`.
+    func activate() {
+        guard isClickable, !isHidden, mode != .reconnecting, now() >= nextClickAllowed,
+              let tag = activeTag() else { return }
+        nextClickAllowed = now().addingTimeInterval(ToolsOfflinePolicy.clickCooldown)
+        setMode(.reconnecting)
+        requests.request(tag: tag, action: "reconnect", server: McpPanelModel.nostromoServer) { [weak self] reply in
+            self?.finish(reply)
+        }
+    }
+
+    private func finish(_ reply: TaskReply<SessionMcpResultWire>) {
+        guard mode == .reconnecting else { return }
+        switch reply {
+        case .answered(let wire) where wire.outcome == .ok:
+            // The badge goes the normal way once the bridge reports connected.
+            setMode(.idle)
+        case .answered(let wire):
+            setMode(.failed(McpPanelModel.failureText(wire)))
+        case .timedOut:
+            setMode(.failed("the daemon did not answer in time"))
+        case .failed(let reason):
+            setMode(.failed(reason))
+        }
+    }
+
+    private func setMode(_ new: Mode) {
+        mode = new
+        noticeToken += 1
+        switch new {
+        case .idle:
+            label.stringValue = ToolsOfflinePolicy.label
+        case .reconnecting:
+            label.stringValue = ToolsOfflinePolicy.reconnectingLabel
+        case .failed(let reason):
+            let text = "Reconnect failed: \(reason)"
+            label.stringValue = text
+            NSAccessibility.post(element: self, notification: .announcementRequested,
+                                 userInfo: [.announcement: text, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+            let token = noticeToken
+            schedule(ToolsOfflinePolicy.noticeDuration) { [weak self] in
+                guard let self, self.noticeToken == token else { return }
+                self.setMode(.idle)
+            }
+        }
+    }
+
+    /// The whole badge takes the click, not the label inside it.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard isClickable, !isHidden, bounds.contains(convert(point, from: superview)) else { return super.hitTest(point) }
+        return self
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if isClickable {
+            activate()
+        } else {
+            super.mouseDown(with: event)
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        // Return, Enter and Space press it.
+        if isClickable, [36, 76, 49].contains(event.keyCode) {
+            activate()
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard isClickable else { return false }
+        activate()
+        return true
     }
 
     /// The text the badge shows.

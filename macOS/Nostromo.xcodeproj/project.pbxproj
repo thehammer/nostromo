@@ -369,9 +369,11 @@
 		II000000000000000000032 /* ToolResultView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = II000000000000000000030 /* ToolResultView.swift */; };
 		TT000000000000000000011 /* ChatTurnView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000010 /* ChatTurnView.swift */; };
 		ZZ0000000000000000SC0301 /* SlashCommandPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC0300 /* SlashCommandPicker.swift */; };
+		ZZ0000000000000000MC0301 /* McpPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000MC0300 /* McpPanel.swift */; };
 		ZZ0000000000000000SC0201 /* LocalCommandRecordView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC0200 /* LocalCommandRecordView.swift */; };
 		TT000000000000000000012 /* ChatTurnView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000010 /* ChatTurnView.swift */; };
 		ZZ0000000000000000SC0302 /* SlashCommandPicker.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC0300 /* SlashCommandPicker.swift */; };
+		ZZ0000000000000000MC0302 /* McpPanel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000MC0300 /* McpPanel.swift */; };
 		ZZ0000000000000000SC0202 /* LocalCommandRecordView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC0200 /* LocalCommandRecordView.swift */; };
 		ZZ0000000000000000TF0101 /* ToolFoldAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0100 /* ToolFoldAdapter.swift */; };
 		ZZ0000000000000000TF0102 /* ToolFoldAdapter.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TF0100 /* ToolFoldAdapter.swift */; };
@@ -607,6 +609,7 @@
 		ZZ0000000000000000BA0202 /* TaskOutputModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA0200 /* TaskOutputModel.swift */; };
 		ZZ0000000000000000BA0301 /* TaskRequests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA0300 /* TaskRequests.swift */; };
 		ZZ0000000000000000SC0101 /* SlashCommandStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC0100 /* SlashCommandStore.swift */; };
+		ZZ0000000000000000MC0101 /* McpRequests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000MC0100 /* McpRequests.swift */; };
 		ZZ0000000000000000CH0301 /* ConversationHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0300 /* ConversationHistoryStore.swift */; };
 		ZZ0000000000000000NCA02 /* NoCodebaseCleanup.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCF02 /* NoCodebaseCleanup.swift */; };
 		ZZ0000000000000000NCA01 /* NoCodebaseFolder.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCF01 /* NoCodebaseFolder.swift */; };
@@ -614,6 +617,7 @@
 		ZZ0000000000000000CH0101 /* ConversationHistoryWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0100 /* ConversationHistoryWire.swift */; };
 		ZZ0000000000000000BA0302 /* TaskRequests.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA0300 /* TaskRequests.swift */; };
 		ZZ0000000000000000SC0102 /* SlashCommandStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC0100 /* SlashCommandStore.swift */; };
+		ZZ0000000000000000MC0102 /* McpRequests.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000MC0100 /* McpRequests.swift */; };
 		ZZ0000000000000000CH0302 /* ConversationHistoryStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0300 /* ConversationHistoryStore.swift */; };
 		ZZ0000000000000000NCB02 /* NoCodebaseCleanup.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCF02 /* NoCodebaseCleanup.swift */; };
 		ZZ0000000000000000NCB01 /* NoCodebaseFolder.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCF01 /* NoCodebaseFolder.swift */; };
@@ -669,6 +673,9 @@
 		ZZ0000000000000000SC1301 /* LocalCommandRecordTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC1300 /* LocalCommandRecordTests.swift */; };
 		ZZ0000000000000000SC1201 /* SlashCommandEchoTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC1200 /* SlashCommandEchoTests.swift */; };
 		ZZ0000000000000000SC1101 /* SlashCommandPickerAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC1100 /* SlashCommandPickerAppearanceTests.swift */; };
+		ZZ0000000000000000MC1101 /* McpPanelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000MC1100 /* McpPanelTests.swift */; };
+		ZZ0000000000000000MC1201 /* McpPanelAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000MC1200 /* McpPanelAppearanceTests.swift */; };
+		ZZ0000000000000000MC1301 /* McpIntentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000MC1300 /* McpIntentTests.swift */; };
 		ZZ0000000000000000CH1001 /* NewSessionCopyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH1000 /* NewSessionCopyTests.swift */; };
 		ZZ0000000000000000CH0901 /* ConversationResumeFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0900 /* ConversationResumeFlowTests.swift */; };
 		ZZ0000000000000000CH0801 /* ResumeTabAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0800 /* ResumeTabAppearanceTests.swift */; };
@@ -1151,6 +1158,7 @@
 		II000000000000000000030 /* ToolResultView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolResultView.swift; sourceTree = "<group>"; };
 		TT000000000000000000010 /* ChatTurnView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTurnView.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000SC0300 /* SlashCommandPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlashCommandPicker.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000MC0300 /* McpPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = McpPanel.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000SC0200 /* LocalCommandRecordView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalCommandRecordView.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TF0100 /* ToolFoldAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolFoldAdapter.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TF0200 /* ToolGroupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolGroupView.swift; sourceTree = "<group>"; };
@@ -1325,6 +1333,7 @@
 		ZZ0000000000000000BA0200 /* TaskOutputModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskOutputModel.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA0300 /* TaskRequests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskRequests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000SC0100 /* SlashCommandStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlashCommandStore.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000MC0100 /* McpRequests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = McpRequests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0300 /* ConversationHistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationHistoryStore.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000NCF02 /* NoCodebaseCleanup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoCodebaseCleanup.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000NCF01 /* NoCodebaseFolder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoCodebaseFolder.swift; sourceTree = "<group>"; };
@@ -1367,6 +1376,9 @@
 		ZZ0000000000000000SC1300 /* LocalCommandRecordTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalCommandRecordTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000SC1200 /* SlashCommandEchoTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlashCommandEchoTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000SC1100 /* SlashCommandPickerAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlashCommandPickerAppearanceTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000MC1100 /* McpPanelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = McpPanelTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000MC1200 /* McpPanelAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = McpPanelAppearanceTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000MC1300 /* McpIntentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = McpIntentTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH1000 /* NewSessionCopyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewSessionCopyTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0900 /* ConversationResumeFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationResumeFlowTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0800 /* ResumeTabAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResumeTabAppearanceTests.swift; sourceTree = "<group>"; };
@@ -1640,6 +1652,7 @@
 				ZZ0000000000000000BA0200 /* TaskOutputModel.swift */,
 				ZZ0000000000000000BA0300 /* TaskRequests.swift */,
 				ZZ0000000000000000SC0100 /* SlashCommandStore.swift */,
+				ZZ0000000000000000MC0100 /* McpRequests.swift */,
 				ZZ0000000000000000CH0300 /* ConversationHistoryStore.swift */,
 				ZZ0000000000000000NCF02 /* NoCodebaseCleanup.swift */,
 				ZZ0000000000000000NCF01 /* NoCodebaseFolder.swift */,
@@ -1814,6 +1827,7 @@
 				II000000000000000000030 /* ToolResultView.swift */,
 				TT000000000000000000010 /* ChatTurnView.swift */,
 				ZZ0000000000000000SC0300 /* SlashCommandPicker.swift */,
+				ZZ0000000000000000MC0300 /* McpPanel.swift */,
 				ZZ0000000000000000SC0200 /* LocalCommandRecordView.swift */,
 				ZZ0000000000000000FV0100 /* ActivityRowView.swift */,
 				TT000000000000000000020 /* MarkdownTableView.swift */,
@@ -2124,6 +2138,9 @@
 				ZZ0000000000000000SC1300 /* LocalCommandRecordTests.swift */,
 				ZZ0000000000000000SC1200 /* SlashCommandEchoTests.swift */,
 				ZZ0000000000000000SC1100 /* SlashCommandPickerAppearanceTests.swift */,
+				ZZ0000000000000000MC1100 /* McpPanelTests.swift */,
+				ZZ0000000000000000MC1200 /* McpPanelAppearanceTests.swift */,
+				ZZ0000000000000000MC1300 /* McpIntentTests.swift */,
 				ZZ0000000000000000CH1000 /* NewSessionCopyTests.swift */,
 				ZZ0000000000000000CH0900 /* ConversationResumeFlowTests.swift */,
 				ZZ0000000000000000CH0800 /* ResumeTabAppearanceTests.swift */,
@@ -2587,6 +2604,7 @@
 				II000000000000000000031 /* ToolResultView.swift in Sources */,
 				TT000000000000000000011 /* ChatTurnView.swift in Sources */,
 				ZZ0000000000000000SC0301 /* SlashCommandPicker.swift in Sources */,
+				ZZ0000000000000000MC0301 /* McpPanel.swift in Sources */,
 				ZZ0000000000000000SC0201 /* LocalCommandRecordView.swift in Sources */,
 				ZZ0000000000000000TF0101 /* ToolFoldAdapter.swift in Sources */,
 				ZZ0000000000000000TF0201 /* ToolGroupView.swift in Sources */,
@@ -2638,6 +2656,7 @@
 				ZZ0000000000000000BA0201 /* TaskOutputModel.swift in Sources */,
 				ZZ0000000000000000BA0301 /* TaskRequests.swift in Sources */,
 				ZZ0000000000000000SC0101 /* SlashCommandStore.swift in Sources */,
+				ZZ0000000000000000MC0101 /* McpRequests.swift in Sources */,
 				ZZ0000000000000000CH0301 /* ConversationHistoryStore.swift in Sources */,
 				ZZ0000000000000000NCA02 /* NoCodebaseCleanup.swift in Sources */,
 				ZZ0000000000000000NCA01 /* NoCodebaseFolder.swift in Sources */,
@@ -2956,6 +2975,7 @@
 				II000000000000000000032 /* ToolResultView.swift in TestSources */,
 				TT000000000000000000012 /* ChatTurnView.swift in TestSources */,
 				ZZ0000000000000000SC0302 /* SlashCommandPicker.swift in TestSources */,
+				ZZ0000000000000000MC0302 /* McpPanel.swift in TestSources */,
 				ZZ0000000000000000SC0202 /* LocalCommandRecordView.swift in TestSources */,
 				ZZ0000000000000000TF0102 /* ToolFoldAdapter.swift in TestSources */,
 				ZZ0000000000000000TF0202 /* ToolGroupView.swift in TestSources */,
@@ -3146,6 +3166,7 @@
 				ZZ0000000000000000BA0202 /* TaskOutputModel.swift in TestSources */,
 				ZZ0000000000000000BA0302 /* TaskRequests.swift in TestSources */,
 				ZZ0000000000000000SC0102 /* SlashCommandStore.swift in TestSources */,
+				ZZ0000000000000000MC0102 /* McpRequests.swift in TestSources */,
 				ZZ0000000000000000CH0302 /* ConversationHistoryStore.swift in TestSources */,
 				ZZ0000000000000000NCB02 /* NoCodebaseCleanup.swift in TestSources */,
 				ZZ0000000000000000NCB01 /* NoCodebaseFolder.swift in TestSources */,
@@ -3218,6 +3239,9 @@
 				ZZ0000000000000000SC1301 /* LocalCommandRecordTests.swift in Sources */,
 				ZZ0000000000000000SC1201 /* SlashCommandEchoTests.swift in Sources */,
 				ZZ0000000000000000SC1101 /* SlashCommandPickerAppearanceTests.swift in Sources */,
+				ZZ0000000000000000MC1101 /* McpPanelTests.swift in Sources */,
+				ZZ0000000000000000MC1201 /* McpPanelAppearanceTests.swift in Sources */,
+				ZZ0000000000000000MC1301 /* McpIntentTests.swift in Sources */,
 				ZZ0000000000000000CH1001 /* NewSessionCopyTests.swift in Sources */,
 				ZZ0000000000000000CH0901 /* ConversationResumeFlowTests.swift in Sources */,
 				ZZ0000000000000000CH0801 /* ResumeTabAppearanceTests.swift in Sources */,

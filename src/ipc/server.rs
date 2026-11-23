@@ -44,7 +44,8 @@ use super::{
         QueueReturnedEntry, ServerMsg, SessionAction, Topic, TrackerEditError,
         FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_MERGE, FEATURE_AUTHORED_PRS_MERGE_QUEUE,
         FEATURE_AUTHORED_PRS_NOTIFY, FEATURE_AUTHORED_PRS_PERRI, FEATURE_CONVERSATION_HISTORY,
-        FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_SESSION_QUEUE, FEATURE_SLASH_COMMANDS,
+        FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_SESSION_MCP, FEATURE_SESSION_QUEUE,
+        FEATURE_SLASH_COMMANDS,
         FEATURE_TERMINAL_STAGING_ONLY, FEATURE_TRACKER_ACK_DROPPED, FEATURE_TRACKER_CONFLICT_IDS,
         FEATURE_TRACKER_EDIT, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
@@ -576,6 +577,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
         FEATURE_SLASH_COMMANDS.to_string(),
         FEATURE_CONVERSATION_HISTORY.to_string(),
         FEATURE_SESSION_QUEUE.to_string(),
+        FEATURE_SESSION_MCP.to_string(),
         FEATURE_TRACKER_EDIT.to_string(),
         FEATURE_TRACKER_CONFLICT_IDS.to_string(),
         FEATURE_TRACKER_ACK_DROPPED.to_string(),
@@ -3166,6 +3168,29 @@ fn handle_client_msg(
             });
         }
 
+        // The MCP panel's verb: the same rule. An agent's script must not
+        // reconnect or disable another focus's servers.
+        ClientMsg::SessionMcp {
+            request_id,
+            tag,
+            action,
+            ..
+        } if trust != PeerTrust::OperatorApp => {
+            warn!(
+                conn_key,
+                ?trust,
+                "SessionMcp refused: not the verified Nostromo app"
+            );
+            let _ = targeted_tx.send(ServerMsg::SessionMcpResult {
+                request_id,
+                tag,
+                action,
+                outcome: crate::ipc::protocol::McpOutcome::Refused,
+                message: Some(NOT_OPERATOR_APP.to_string()),
+                servers: None,
+            });
+        }
+
         ClientMsg::SessionTaskOutput {
             request_id,
             tag,
@@ -3209,6 +3234,48 @@ fn handle_client_msg(
                     task_id,
                     outcome: report.outcome,
                     message: report.message,
+                });
+            });
+        }
+
+        // The MCP panel: runs off the manager lock, answers the asking
+        // connection only. Reconnects and toggles are logged before the reply.
+        ClientMsg::SessionMcp {
+            request_id,
+            tag,
+            action,
+            server,
+            enabled,
+        } => {
+            let run = session_mgr
+                .lock()
+                .unwrap()
+                .mcp(&tag, action, server.clone(), enabled);
+            let audit_tag = audit_focus_tag(&tag, sensitive);
+            let tx = targeted_tx.clone();
+            tokio::spawn(async move {
+                let reply = run.await;
+                if matches!(
+                    action,
+                    crate::ipc::protocol::McpAction::Reconnect
+                        | crate::ipc::protocol::McpAction::Toggle
+                ) {
+                    info!(
+                        focus = %audit_tag,
+                        ?action,
+                        server = %server.as_deref().map(crate::ipc::session_manager::mcp_panel::log_name).unwrap_or_default(),
+                        enabled = ?enabled,
+                        outcome = ?reply.outcome,
+                        "MCP request"
+                    );
+                }
+                let _ = tx.send(ServerMsg::SessionMcpResult {
+                    request_id,
+                    tag,
+                    action,
+                    outcome: reply.outcome,
+                    message: reply.message,
+                    servers: reply.servers,
                 });
             });
         }
@@ -4292,6 +4359,19 @@ fn network_refusal_reply(msg: &ClientMsg) -> ServerMsg {
             outcome: crate::ipc::protocol::TaskStopOutcome::Refused,
             message: Some(format!("{}: {}", refusal.code, refusal.message)),
         },
+        ClientMsg::SessionMcp {
+            request_id,
+            tag,
+            action,
+            ..
+        } => ServerMsg::SessionMcpResult {
+            request_id: request_id.clone(),
+            tag: tag.clone(),
+            action: *action,
+            outcome: crate::ipc::protocol::McpOutcome::Refused,
+            message: Some(format!("{}: {}", refusal.code, refusal.message)),
+            servers: None,
+        },
         ClientMsg::SessionTaskOutput {
             request_id,
             tag,
@@ -4717,6 +4797,7 @@ mod tests {
                     "tracker_edit_v1",
                     "tracker_conflict_ids_v1",
                     "tracker_ack_dropped_v1",
+                    "session_mcp_v1",
                 ] {
                     assert!(
                         features.iter().any(|f| f == advertised),
@@ -4783,6 +4864,16 @@ mod tests {
     }
 
     fn commands_get_as(trust: PeerTrust, tag: &str) -> Vec<ServerMsg> {
+        msg_as(
+            trust,
+            ClientMsg::SessionCommandsGet {
+                request_id: "rq-1".into(),
+                tag: tag.into(),
+            },
+        )
+    }
+
+    fn msg_as(trust: PeerTrust, msg: ClientMsg) -> Vec<ServerMsg> {
         let dir = tempfile::tempdir().unwrap();
         let mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
             dir.path().join("s.json"),
@@ -4790,10 +4881,7 @@ mod tests {
         let (ttx, mut trx) = mpsc::unbounded_channel();
         let (btx, _brx) = broadcast::channel(8);
         handle_client_msg(
-            ClientMsg::SessionCommandsGet {
-                request_id: "rq-1".into(),
-                tag: tag.into(),
-            },
+            msg,
             trust,
             None,
             None,
@@ -4844,6 +4932,77 @@ mod tests {
                 |m| matches!(m, ServerMsg::Error { message } if message.contains("requires_secure_connection"))
             ),
             "{out:?}"
+        );
+    }
+
+    fn mcp_status_request() -> ClientMsg {
+        ClientMsg::SessionMcp {
+            request_id: "rq-m".into(),
+            tag: "ghost".into(),
+            action: crate::ipc::protocol::McpAction::Reconnect,
+            server: Some("x".into()),
+            enabled: None,
+        }
+    }
+
+    #[test]
+    fn a_peer_that_is_not_the_verified_app_is_refused_the_mcp_verb() {
+        use crate::ipc::protocol::McpOutcome;
+        for trust in [PeerTrust::LocalOther, PeerTrust::Tcp] {
+            let out = msg_as(trust, mcp_status_request());
+            assert!(
+                matches!(
+                    out.as_slice(),
+                    [ServerMsg::SessionMcpResult {
+                        outcome: McpOutcome::Refused,
+                        servers: None,
+                        message: Some(_),
+                        ..
+                    }]
+                ),
+                "{trust:?}: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_verified_app_is_told_a_missing_session_is_not_running() {
+        use crate::ipc::protocol::McpOutcome;
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+            dir.path().join("s.json"),
+        )));
+        let (ttx, mut trx) = mpsc::unbounded_channel();
+        let (btx, _brx) = broadcast::channel(8);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        handle_client_msg(
+            mcp_status_request(),
+            PeerTrust::OperatorApp,
+            None,
+            None,
+            &SensitiveTags::in_memory(),
+            "conn",
+            "client",
+            &mgr,
+            &ttx,
+            &btx,
+            dir.path(),
+            &Arc::new(Mutex::new(DecisionRegistry::new())),
+            &Arc::new(Mutex::new(HashSet::new())),
+            None,
+            &TerminalManager::in_memory(),
+        );
+        let reply = rt.block_on(async { trx.recv().await }).unwrap();
+        assert!(
+            matches!(
+                reply,
+                ServerMsg::SessionMcpResult {
+                    outcome: McpOutcome::NotRunning,
+                    ..
+                }
+            ),
+            "{reply:?}"
         );
     }
 

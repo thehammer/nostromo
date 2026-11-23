@@ -394,6 +394,12 @@ class ReplView: NSView {
         inputBar.translatesAutoresizingMaskIntoConstraints = false
         inputBar.onSend = { [weak self] text, images in
             guard let self else { return }
+            // Exactly `/mcp` opens the native panel and goes nowhere else: no echo, no record, nothing sent.
+            if images.isEmpty, McpIntent.isPanelRequest(text: text, features: self.session.daemonFeatures) {
+                McpPanelController.present(on: self.window, tag: self.session.tag, focusName: self.session.displayName,
+                                           projectPath: self.session.workingDirectory)
+                return
+            }
             self.followTail.setPinned(true, cause: .send)
             self.session.send(text, images: images)
         }

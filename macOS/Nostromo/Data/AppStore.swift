@@ -644,6 +644,7 @@ class AppStore: ObservableObject {
         log.info("AppStore starting")
         ModelStore.shared.sender = client
         TaskRequests.shared.sender = client
+        McpRequests.shared.sender = client
         SlashCommandStore.shared.sender = client
         ConversationHistoryStore.shared.sender = client
         ConversationHistoryStore.shared.onResumeFailed = { ConversationHistoryStore.presentResumeFailure(transcriptPath: $0) }
@@ -796,6 +797,7 @@ class AppStore: ObservableObject {
                 } else {
                     WorkStore.shared.failPendingRequests(reason: "The daemon connection was lost")
                     TaskRequests.shared.failPendingRequests(reason: "The daemon connection was lost")
+                    McpRequests.shared.failPendingRequests(reason: "The daemon connection was lost")
                     ApprovalsLogStore.shared.failPendingRequests(reason: "The daemon connection was lost")
                     // The CLI dies with the daemon: nothing shows running until a new snapshot says so.
                     BackgroundTaskStore.shared.daemonDisconnected()
@@ -2000,6 +2002,10 @@ class AppStore: ObservableObject {
         // The answers to the output reads (the task window, `tasks output`) and, with BA5, to Stop.
         case .sessionTaskStopResult, .sessionTaskOutputResult:
             TaskRequests.shared.ingest(msg)
+
+        // The answers to the `/mcp` panel's and the "Tools offline" badge's requests.
+        case .sessionMcpResult:
+            McpRequests.shared.ingest(msg)
 
         // The slash commands a session's CLI reports: every window's picker reads them from the store.
         case .sessionCommands:

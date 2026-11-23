@@ -1211,6 +1211,10 @@ pub const FEATURE_FOCUS_ACTIVITY: &str = "focus_activity_v1";
 /// `local_command` turn origins and slash-command echo turns.
 pub const FEATURE_SLASH_COMMANDS: &str = "slash_commands_v1";
 
+/// The optional capability advertised in `Welcome.features`: this daemon takes
+/// `session_mcp` (answered with `session_mcp_result`).
+pub const FEATURE_SESSION_MCP: &str = "session_mcp_v1";
+
 /// The optional capability advertised in `Welcome.features`: this daemon keeps a
 /// private conversation history and takes the `conversation_*` verbs (operator
 /// app only; never offered to a network or non-operator peer).
@@ -2198,6 +2202,18 @@ pub enum ClientMsg {
         tag: String,
         task_id: String,
     },
+    /// Read or change a session's MCP servers through its CLI (refused over
+    /// TCP and for a non-operator-app peer). Answered with
+    /// `ServerMsg::SessionMcpResult` to the asking client.
+    SessionMcp {
+        request_id: String,
+        tag: String,
+        action: McpAction,
+        #[serde(default)]
+        server: Option<String>,
+        #[serde(default)]
+        enabled: Option<bool>,
+    },
     /// Read the slash commands a session's CLI reports (refused over TCP).
     /// Answered with `ServerMsg::SessionCommands` to the asking client; a tag
     /// with no running session gets the last list this daemon kept for it.
@@ -2624,6 +2640,63 @@ pub enum TaskEndReason {
     SessionEnded,
     /// The task left the CLI's live background set and never reported an end.
     Vanished,
+}
+
+/// What a `ClientMsg::SessionMcp` asks for. An action this daemon does not know
+/// decodes as `Unknown` and is answered `invalid`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpAction {
+    Status,
+    Reconnect,
+    Toggle,
+    #[serde(other)]
+    Unknown,
+}
+
+/// How an MCP request ended (`ServerMsg::SessionMcpResult`). A newer daemon's
+/// outcome decodes as `Unknown` on an older client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpOutcome {
+    Ok,
+    /// The CLI (or the daemon, for a non-app or network peer) said no.
+    Refused,
+    /// The CLI did not answer in time.
+    Timeout,
+    /// The CLI predates MCP control.
+    Unsupported,
+    /// The session is not running: nothing was sent.
+    NotRunning,
+    /// Too soon after the last request; `message` says how long to wait.
+    RateLimited,
+    /// The request itself was malformed or not allowed (nothing was sent).
+    Invalid,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One MCP server as the panel shows it: name, state and counts only. Built by
+/// `McpServerView::from_cli`, which never reads the server's `config`
+/// (commands, args, env, headers, URLs).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerView {
+    pub name: String,
+    /// The CLI's status word, kept raw so a new state still shows.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// For the `nostromo` server only: whether the daemon's own bridge is up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nostromo_bridge: Option<bool>,
 }
 
 /// How a stop request ended (`ServerMsg::SessionTaskStopResult`).
@@ -3602,6 +3675,19 @@ pub enum ServerMsg {
         outcome: TaskStopOutcome,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+    },
+    /// Answer to `SessionMcp`, to the asking client only. `servers` holds the
+    /// CLI's list after the action (names and states only; never a server's
+    /// configuration). `LocalOnly`.
+    SessionMcpResult {
+        request_id: String,
+        tag: String,
+        action: McpAction,
+        outcome: McpOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        servers: Option<Vec<McpServerView>>,
     },
     /// Answer to `SessionTaskOutput`, to the asking client only. `text` is
     /// sanitised output (no escape sequences) for the raw byte range
@@ -8545,6 +8631,53 @@ mod work_wire_tests {
             },
             r#"{"type":"session_task_stop","request_id":"r1","tag":"cody-1","task_id":"b7k2m9x1a"}"#,
         );
+    }
+
+    #[test]
+    fn the_mcp_verb_and_its_result_have_this_wire_form() {
+        assert_client_golden(
+            ClientMsg::SessionMcp {
+                request_id: "m1".into(),
+                tag: "cody-1".into(),
+                action: McpAction::Toggle,
+                server: Some("gh".into()),
+                enabled: Some(false),
+            },
+            r#"{"type":"session_mcp","request_id":"m1","tag":"cody-1","action":"toggle","server":"gh","enabled":false}"#,
+        );
+        let msg: ServerMsg = serde_json::from_str(
+            r#"{"type":"session_mcp_result","request_id":"m1","tag":"t","action":"status","outcome":"ok","servers":[{"name":"a","status":"weird"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            msg,
+            ServerMsg::SessionMcpResult { servers: Some(ref s), .. } if s[0].status == "weird" && s[0].tool_count.is_none()
+        ));
+    }
+
+    #[test]
+    fn an_unknown_mcp_action_or_outcome_decodes_as_unknown() {
+        let c: ClientMsg = serde_json::from_str(
+            r#"{"type":"session_mcp","request_id":"m","tag":"t","action":"authenticate"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            c,
+            ClientMsg::SessionMcp { action: McpAction::Unknown, server: None, enabled: None, .. }
+        ));
+        let s: ServerMsg = serde_json::from_str(
+            r#"{"type":"session_mcp_result","request_id":"m","tag":"t","action":"status","outcome":"brand_new"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            s,
+            ServerMsg::SessionMcpResult { outcome: McpOutcome::Unknown, .. }
+        ));
+    }
+
+    #[test]
+    fn the_mcp_capability_is_named_session_mcp_v1() {
+        assert_eq!(FEATURE_SESSION_MCP, "session_mcp_v1");
     }
 
     #[test]

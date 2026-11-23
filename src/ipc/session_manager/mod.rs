@@ -98,6 +98,7 @@ mod inject_tests;
 #[cfg(test)]
 mod injected_tests;
 mod login;
+pub mod mcp_panel;
 mod model_switch;
 #[cfg(test)]
 mod notice_inject_tests;
@@ -743,6 +744,8 @@ pub struct SessionManager {
     claude_bin_cache: Mutex<Option<(Option<PathBuf>, Instant)>>,
     /// How new sessions read and control their background tasks.
     task_io: TaskIoConfig,
+    /// The MCP panel's rate limits and waits.
+    mcp_panel: mcp_panel::McpPanelState,
     /// Told when a session ends (terminal follow ends with it).
     session_end_hook: Option<SessionEndHook>,
     /// Told when a turn starts (and who wrote its message) or ends.
@@ -861,6 +864,7 @@ impl SessionManager {
             login: None,
             claude_bin_cache: Mutex::new(None),
             task_io: TaskIoConfig::default(),
+            mcp_panel: mcp_panel::McpPanelState::default(),
             session_end_hook: None,
             turn_hook: Arc::new(std::sync::RwLock::new(None)),
             turn_note: Arc::new(std::sync::RwLock::new(None)),
@@ -2593,6 +2597,34 @@ impl SessionManager {
                 None => StopReport::not_running("the session is not running"),
             }
         }
+    }
+
+    /// Read or change `tag`'s MCP servers through its CLI (see
+    /// `ClientMsg::SessionMcp`). Limits and checks are decided here, under the
+    /// caller's lock; the returned future owns what it needs.
+    pub fn mcp(
+        &self,
+        tag: &str,
+        action: crate::ipc::protocol::McpAction,
+        server: Option<String>,
+        enabled: Option<bool>,
+    ) -> impl std::future::Future<Output = mcp_panel::McpReply> + Send + 'static {
+        let shared = self.sessions.get(tag).map(|s| s.shared.clone());
+        mcp_panel::begin(
+            self.mcp_panel.clone(),
+            shared,
+            self.bridges.clone(),
+            tag,
+            action,
+            server,
+            enabled,
+        )
+    }
+
+    /// Shorten the MCP panel's waits for a CLI answer (a test hook).
+    #[doc(hidden)]
+    pub fn set_mcp_wait_for_test(&mut self, wait: Duration) {
+        self.mcp_panel = mcp_panel::McpPanelState::default().with_timeouts(wait);
     }
 
     /// Read a range of one of `tag`'s tasks' output (see

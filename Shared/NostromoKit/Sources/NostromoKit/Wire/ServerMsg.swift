@@ -137,6 +137,8 @@ public enum ServerMsg {
     case sessionTaskDetail(SessionTaskDetailWire)
     /// The answer to a `session_task_stop`. Local clients only.
     case sessionTaskStopResult(SessionTaskStopResultWire)
+    /// The answer to a `session_mcp` of this connection. Local clients only.
+    case sessionMcpResult(SessionMcpResultWire)
     /// The answer to a `session_task_output`. Local clients only.
     case sessionTaskOutputResult(SessionTaskOutputResultWire)
     /// The commands a session's CLI reports, the answer to a `session_commands_get`. Local only.
@@ -1168,6 +1170,11 @@ extension ServerMsg {
         case "session_task_stop_result":
             if let m = try? dec.decode(SessionTaskStopResultWire.self, from: data) {
                 return .sessionTaskStopResult(m)
+            }
+
+        case "session_mcp_result":
+            if let m = try? dec.decode(SessionMcpResultWire.self, from: data) {
+                return .sessionMcpResult(m)
             }
 
         case "session_task_output_result":
