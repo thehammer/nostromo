@@ -9,7 +9,9 @@
 decisions ("Decision log 2026-11-23").
 **Status:** Draft. All product sign-offs are in. W14 and W9 can be dispatched
 now; W10 follows W9; W11, W15, W12, W13 and W16 follow their dependencies
-only. No wedge waits on Ada, the operator or Apple.
+only. No wedge waits on Ada or Apple; **W10 must not ship until the operator
+confirms the pairing PRD's open question 4** (employer policy on Kobe's
+metadata).
 **Inputs:** `docs/plans/platform-evolution-sequencing.md` (bets B1–B6),
 `docs/visions/iphone.md`, `docs/visions/ipad.md`,
 `docs/prds/daemon-pairing-flow.md` (Ada, answers Q1), `docs/prds/push-relay.md`
@@ -23,7 +25,8 @@ from either is needed to execute a wedge.
 
 ## Readiness (updated 2026-11-23 after Ada's sign-offs and the operator's decisions)
 
-**Plain answer: every product sign-off is in, and nothing waits on Apple.**
+**Plain answer: every product sign-off is in, nothing waits on Apple, and one
+operator answer gates W10's release** (pairing PRD open question 4).
 Ada signed off D1–D7 (pairing) and S1–S8 (push) on 2026-11-23, and the
 operator answered all eight questions the same day ("Decision log
 2026-11-23" below). The wedge plans now carry those decisions; each has a
@@ -42,7 +45,7 @@ parallel; the wedges cite decisions by id, not by PRD line.
 |---|---|---|
 | W14 linux-primary | **Yes, now** | Nothing. Independent packaging. |
 | W9 ws-transport | **Yes**, once this docs PR merges | Only the rule "no other job editing `src/ipc/{protocol,server,peer}.rs` or `src/ipc/session_manager/` at the same time". Run `mother list` first (the tracker showed stale rows for jobs 0848d0c0 and b7caf0f1). Crew delta 7 is **not** needed before W9: W9 edits the `Makefile`, so it pays `python-test` either way. |
-| W10 satellite-uplink | After W9 merges | W9 merged. Crew delta 7 merged first saves ≈ 20 min of gates (W10 is the only wedge it helps). |
+| W10 satellite-uplink | After W9 merges (can be built) | W9 merged. **Must not ship (merge and install) until the operator confirms the pairing PRD's open question 4**: may Kobe's job states, short refs and host name leave Kobe for the personal server, the relay, Apple and a personal phone? The v1 default is yes; if the answer is no, Kobe is simply never enrolled (no Kobe rows or pushes, no Kobe device admin; PRD criteria 12, 24's "works from Kobe" part, 50 and the lost-phone-at-work path lapse). Crew delta 7 merged first saves ≈ 20 min of gates (W10 is the only wedge it helps). |
 | W11 ios-ws-client | After W9 + W10 merge | W9, W10; iOS-T merged or knowingly skipped (operator's call, open question 12); no other job editing `iOS/Nostromo.xcodeproj`. **No sign-off pending.** |
 | W15 mac-device-admin | After W10 merges (and W11, as queued) | W10 (W11 only because the dispatch serialises the two Swift wedges); no other job editing `macOS/Nostromo.xcodeproj` (PR #518 has merged). **No sign-off pending.** |
 | W12 seq-resume | After W10 + W11 merge | Those two. |
@@ -82,7 +85,12 @@ parallel; the wedges cite decisions by id, not by PRD line.
    with gates; can run beside W9/W10 (it edits `iOS/Nostromo.xcodeproj` and
    `.github/workflows/ci.yml`, which neither touches).
 
-**Still with the operator** (none blocks a wedge): whether to add the iOS
+**Still with the operator.** One gates a release: **pairing PRD open
+question 4** (employer policy on Kobe's metadata) must be answered before W10
+ships. Two have conservative v1 defaults that need no action to proceed: open
+question 3 (which Microsoft 365 and/or Google accounts Fred reads) and open
+question 5 (does calendar stay home too; default yes, hence "Mail, calendar
+and todos"). None of the rest blocks a wedge: whether to add the iOS
 test target first (recommend yes; it reverses a committed policy); crew
 delta 7 (recommend yes, before W10); nextest (optional); whether to split W13
 (recommend no); creating the dedicated AWS account before deploying W13's
@@ -106,9 +114,9 @@ Read against `origin/main` `8f0328b9`. Line numbers below are from that commit.
    `TrackerSummary` (`classify_server_msg`, `peer.rs:717-888`). The new verbs
    and frames, by family, with what the backplane does about each, are in
    "Wire inventory" below. So the backplane's next free ordinal is **98**, and
-   W9's nine verbs make it 107 (W13 → 112 and W16 → 113 since the
-   2026-11-23 sign-offs added `OperatorPresence`), re-derived on each
-   wedge's base.
+   W9's verbs make it 105 (seven since Q2 removed `DevicePairUpdate` and
+   `DeviceSetScope`), W13 → 110 (with `OperatorPresence`) and W16 → 111, as
+   revised with the 2026-11-23 sign-offs; re-derived on each wedge's base.
 2. **`.mother/crew.yml` exists** (MC5 #290, then #292): version 1, observe
    mode, `max_attempts: 2`, `budget_minutes: 45`, checks `rust-fmt`,
    `rust-clippy`, `rust-test` (sandbox), `python-test`, `swift-ci`,
@@ -524,12 +532,12 @@ Every satellite has an `uplink.egress` profile, and the primary applies a
 second filter per downstream peer:
 
 - **`personal`** (Sendai): publish what FND-1 lets a network peer see today
-  (`peer::outbound` with network trust), plus Teri/Fred/work frames only if
-  `uplink.publish_sensitive = true` (default **false**). *v1 (operator Q2,
-  2026-11-23):* mail and todos stay home on every host, Sendai included,
-  because Fred reads Microsoft 365 mail that is probably the employer's; the
-  flag stays `false` and the primary's `[devices] share_mail_and_todos` (W9)
-  stays `false` too.
+  (`peer::outbound` with network trust). *v1 (operator Q2, 2026-11-23; PRD
+  AC56):* Teri, Fred and work frames are never published, on any profile,
+  and there is no flag or config key to change that (the 2026-10-10
+  `publish_sensitive` switch is not built): Fred reads Microsoft 365 mail
+  that is probably the employer's, so even Sendai's mail and todos stay home.
+  Opening it up is a later wedge.
 - **`work`** (Kobe, and the default for any satellite whose config does not
   say `personal`): publish **metadata only**, through an exhaustive
   per-variant function `peer::redact_for_uplink_metadata` (W10). It sends
@@ -648,29 +656,29 @@ for all four.
 
 | Message (direction) | Wedge | FND-1 class / policy | Notes |
 |---|---|---|---|
-| `PairCheck`, `Pair` (c→d) | W9 | `Refused` in `network_policy`; accepted only on a token-less pairing socket, enforced in `ws.rs` before dispatch | ordinals 98, 99; `Pair.replaces_token` (D6, same server only, never logged) |
+| `PairCheck`, `Pair` (c→d) | W9 | `Refused` in `network_policy`; accepted only on a token-less pairing socket, enforced in `ws.rs` before dispatch | ordinals 98, 99; `PairCheck.proof` (D6: HMAC over the per-code challenge, never the token or its hash; answered once per code), `Pair.replace` |
 | `DeviceUnpairSelf` (c→d) | W9 | `Allowed` for `Paired` only; `Refused` for `Tcp`, `Satellite`, `Routed` | ordinal 100 |
-| `DevicePairStart`, `DevicePairUpdate`, `DevicePairCancel`, `DeviceList`, `DeviceRevoke`, `DeviceSetScope` (c→d) | W9 | `Refused` for every network trust; on the primary, `Satellite` gets a W10 exception gated by the satellite's registry `admin` level | ordinals 101–106 |
-| `PairOffer`, `Paired`, `PairRefused`, `Unauthorized`, `DeviceUnpaired` (d→c) | W9 | `Open`, **targeted only** (never broadcast; `Paired` carries the token) | a test asserts none enters the broadcast channel; `PairOffer.mail_and_todos_shared` (Q2), `Paired.replaced` (D6) |
+| `DevicePairStart`, `DevicePairCancel`, `DeviceList`, `DeviceRevoke` (c→d) | W9 | `Refused` for every network trust; on the primary, `Satellite` gets a W10 exception gated by the satellite's registry `admin` level | ordinals 101–104 (`DevicePairUpdate`, `DeviceSetScope` dropped by Q2) |
+| `PairOffer`, `Paired`, `PairRefused`, `Unauthorized`, `DeviceUnpaired` (d→c) | W9 | `Open`, **targeted only** (never broadcast; `Paired` carries the token) | a test asserts none enters the broadcast channel; `PairOffer.challenge`, `PairOffer.knows_device` and `Paired.replaced` (D6); no `sensitive` or mail field (Q2) |
 | `DevicePairing`, `DevicePairOutcome`, `Devices`, `DeviceRevoked`, `DeviceAdminError` (d→c) | W9 | new `ServerClass::Admin`: local peers yes; `Satellite` only per its `admin` level (W10); `Paired`, `Tcp` never | satellite `admin` levels `full \| revoke_only \| read_only \| off` (Q1; defined in W15) |
-| `DeviceAdminLevel` (d→c) | W10 | `ServerClass::Admin`, targeted to local `devices` subscribers only | `{level, pair_from}`; no ordinal (server frame) |
+| `DeviceAdminLevel` (d→c) | W10 | own rule: always written to its own satellite's uplink, at every level including `off`, then by the satellite to its local `devices` subscribers; never to `Paired`, `Tcp`, `Routed` or another satellite | `{level, pair_from}`; no ordinal (server frame) |
 | `Hosts`, `HostUnavailable` (d→c) | W10 | `Open` | host names and timestamps only |
 | `MotherJobs.host`, `MotherStatusline.host`, `MotherAwaitDetected.host`, `Activity.host`, `FocusListResp.host`, `SessionListResp.host`, `ApprovalPending.host`, `PerriState.host`, `DecisionRequest.host`, `DecisionResolved.host` (fields) | W10 | class unchanged | `#[serde(default, skip_serializing_if = "Option::is_none")]` |
 | `Hello.role`, `Subscribe.resume` (fields) | W10, W12 | — | additive; `Hello` already has `client_kind` and `capabilities` (`protocol.rs:1638-1652`) |
 | `Hello.capabilities` on WebSocket (existing field) | W9, W10, W11 | — | parsed by the shared handshake; B11: network peers never count against the merge gate; iOS declares `merged_turns_v1`, the uplink declares nothing |
 | `Gap` (d→c) | W12 | `Open` | topic, host, seq bounds, reason enum |
-| `RegisterPush`, `SetPushPrefs`, `PushSentLog`, `PushWaiting` (c→d) | W13 | `Allowed` for `Paired` only, self-scoped to the connection's own device id; `Refused` for `Tcp`, `Satellite`, `Routed` | ordinals 107–110 |
-| `OperatorPresence` (c→d) | W13 (sender in W15) | accepted from `OperatorApp` only; `Refused` for every network trust | ordinal 111; S7a |
-| `DecisionRequest.operator_presence` (field) | W13 | class unchanged | `active \| away`; kept by W10's metadata arm |
+| `RegisterPush`, `SetPushPrefs`, `PushSentLog`, `PushWaiting` (c→d) | W13 | `Allowed` for `Paired` only, self-scoped to the connection's own device id; `Refused` for `Tcp`, `Satellite`, `Routed` | ordinals 105–108 |
+| `OperatorPresence` (c→d) | W13 (sender in W15) | accepted from `OperatorApp` only; `Refused` for every network trust | ordinal 109; S7a |
+| `DecisionRequest.operator_presence`, `.repo_owner` (fields) | W13 | class unchanged | presence `active \| away`: kept on the uplink, stripped by the primary before any `Paired`/`Tcp` peer; `repo_owner` for S5, dropped by the metadata arm |
 | `PushSentLog`, `PushWaiting`, `PushStatus` (d→c) | W13 | `Open`, targeted only | closed vocabulary text |
 | `PushAvailability` | — | **dropped** (B10; S7) | |
-| `PushDetail` (c→d) | W16 | `Allowed` for `Paired`, self-scoped; reply follows B9 and the device's `sensitive` scope | ordinal 112 |
-| `PushDetail` (d→c) | W16 | `Open`, targeted only | text present only for `personal`-profile, non-PHI items (decisions included, read-only, S8 as amended) |
+| `PushDetail` (c→d) | W16 | `Allowed` for `Paired`, self-scoped; reply follows B9, sensitive tags and the owner gate | ordinal 110 |
+| `PushDetail` (d→c) | W16 | `Open`, targeted only | text present only for `personal`-profile, non-PHI items whose owner is known and not a work owner (decisions included, read-only, S8 as amended) |
 | `DecisionAnswer.host`, `DecisionAnswerResult` | — | **dropped** (B10; S7) | |
 
 Every new `ClientMsg` adds an arm to `network_policy`, `targets_sensitive_session`
-and the ordinal table, and bumps `CLIENT_MSG_VARIANTS` (98 on `8f0328b9` → 107 after W9 → 112
-after W13 → 113 after W16; if another plan lands a verb first, the next free
+and the ordinal table, and bumps `CLIENT_MSG_VARIANTS` (98 on `8f0328b9` → 105 after W9 → 110
+after W13 → 111 after W16; if another plan lands a verb first, the next free
 ordinal is used and the count re-derived on the wedge's base). It also adds the
 variant to `every_client_msg()` and, for an allowed verb, to `NETWORK_ALLOWED`
 (`peer.rs:2461`); a `Paired`-only verb stays out of that list (it is `Refused`
@@ -718,7 +726,7 @@ Composer history (#509, #511) has **no wire form**: it is a Mac-local store
 | `ApprovalPending` | count | yes (non-sensitive tags) | yes, pseudonymous tag |
 | `DecisionRequest` / `DecisionResolved` | prompt, choices | `Focus` class as today | `{request_id, pseudonymous tag, deadline, choice count, agent from fixed set, operator_presence}` / `{request_id, outcome}` |
 | `PerriState` | PR titles, repos | `Focus` class as today | `{requested count, per PR: number, changed_lines}`; no repo, title or author |
-| `TeriState`, `FredState`, `Work*`, `TeriPicks` | mail, todos, tickets | only if `publish_sensitive = true` (default false; **v1: kept false**, Q2) | never |
+| `TeriState`, `FredState`, `Work*`, `TeriPicks` | mail, todos, tickets | **never in v1** (Q2; no switch) | never |
 | `ModelCatalog`, `ModelDefaults`, `ActivityHealth` | no | yes | yes |
 | `TrackerSummary` (2026-11-23) | counts only | `Focus` class as today (non-sensitive tags only) | `{pseudonymous tag, has_tracker, counts}` |
 | `TrackerBoard`, `TrackerEditResult` (staged commands, notes, links) | yes | never (`LocalOnly`) | never |
@@ -995,7 +1003,7 @@ flagged, not made (open question 8).
 |---|---|---|---|---|---|
 | W14 | first install: `make install-daemon-linux`, then `loginctl enable-linger $USER` once | — | — | — | none (no wire change) |
 | W9 | install; set `ws_addr = "0.0.0.0:47101"` (or its WireGuard/LAN address) and `pair_host` in `config.toml`; restart | optional, any time between jobs (listener stays loopback) | optional, between jobs (loopback; never listens off-box) | — (W11) | old Mac/iOS clients ignore the new features; legacy TCP unchanged |
-| W10 | install first; restart | install between jobs; set `mode = "satellite"`, `uplink.url`, `uplink.egress = "personal"`, `host_name`; run `nostromo device pair --satellite sendai --egress personal` on Tokyo (admin defaults to `full`) and `nostromo uplink pair --url … <code>` on Sendai; leave `publish_sensitive` off (Q2) | same, with `uplink.egress = "work"` (the default) and `nostromo device pair --satellite kobe` (admin defaults to `revoke-only`, Q1); WireGuard split tunnel | — | satellite before primary → satellite stays local-only and retries |
+| W10 | install first; restart | install between jobs; set `mode = "satellite"`, `uplink.url`, `uplink.egress = "personal"`, `host_name`; run `nostromo device pair --satellite sendai --egress personal --admin full` on Tokyo (`--admin full` must be explicit: unset means revoke-only) and `nostromo uplink pair --url … CODE` on Sendai | only after the operator confirms PRD open question 4 (employer policy): the same, with `uplink.egress = "work"` (the default) and `nostromo device pair --satellite kobe` (unset admin = revoke-only, Q1); WireGuard split tunnel | — | satellite before primary → satellite stays local-only and retries |
 | W11 | — | — | — | install from Xcode (operator); pair | needs Tokyo ≥ W9 (pairing) and ≥ W10 (host badge; absent host renders as one list) |
 | W15 | — | `make mac-install` | `make mac-install` | — | needs the local daemon ≥ W10 and Tokyo ≥ W10; against an older daemon the menu items show "Can't reach" |
 | W12 | install first | install between jobs | install between jobs | new iOS build | old clients ignore `seq`/`Gap`; a satellite resumes only if the primary advertises `"seq"` |
@@ -1025,8 +1033,8 @@ flagged, not made (open question 8).
   satellites and validates `^[a-z][a-z0-9-]{0,15}$`. Focus tags are
   pseudonymised for `work`.
 - **Sensitive data on the primary.** With B9 defaults, nothing from Kobe
-  beyond metadata reaches Tokyo, and Sendai's Teri/Fred stay home unless
-  `publish_sensitive` is turned on.
+  beyond metadata reaches Tokyo, and no host's Teri/Fred leave it in v1 (Q2;
+  there is no switch).
 - **Queue contention.** *2026-11-23:* the approvals and crew chains are
   merged. The remaining risk is new session-wire work started beside a wedge
   (message queue S6, model switching M4–M7) and Mac Xcode-project edits beside
@@ -1053,7 +1061,9 @@ Driving Mother, sessions or Perri from a phone needs a new bet and PRD.
 ## Open questions for the operator (with recommendations)
 
 *Updated 2026-11-23.* Items 1, 5, 6, 9 and 10 are resolved (see "Decision log
-2026-11-23"); nothing in this list blocks a wedge.
+2026-11-23"); nothing in this list blocks a wedge. The pairing PRD's own
+open questions 3–5 are listed under "Readiness" (question 4 gates W10's
+release).
 
 1. **Ada sign-offs D1–D7 (pairing) and S1–S8 (push). RESOLVED 2026-11-23.**
    Ada signed every item: D1 accepted with a change (a fifth failure message
@@ -1079,7 +1089,7 @@ Driving Mother, sessions or Perri from a phone needs a new bet and PRD.
    the terminal-pane 1e placeholder.
 5. **Kobe's egress profile, and Teri/Fred from Kobe. RESOLVED:** `work`
    (metadata only); Teri and Fred never leave Kobe; and, by Q2, they stay home
-   on Sendai too in v1 (`publish_sensitive = false`).
+   on Sendai too in v1, with no switch (Q2).
 6. **Apple's notification-filtering entitlement. RESOLVED 2026-11-23: do not
    request it.** The operator opened Apple's request form
    (developer.apple.com/contact/request/notification-service). It requires the
@@ -1116,7 +1126,7 @@ Driving Mother, sessions or Perri from a phone needs a new bet and PRD.
     effect on a backplane hop while the Mac shards are slower). Neither blocks
     W9 ("CI prerequisites").
 
-**The one operator action that was pending is closed:** the entitlement
+**The operator action that was pending is closed:** the entitlement
 investigation (item 6) ended in "do not request". What remains is optional or
 deploy-time: crew delta 7, the iOS-T call, and creating the dedicated AWS
 account before deploying W13's relay.
@@ -1129,8 +1139,9 @@ account before deploying W13's relay.
   2026-11-23**, with S4 withdrawn and S7a added; the attention items are
   count-only (Ada's call).
 - **Q3 — Multi-host presentation — ANSWERED 2026-11-23:** one merged list,
-  needs-you first, host badge only when more than one Mac is present, work
-  rows in the push vocabulary with "Details stay on <host>" (operator Q8; W11).
+  needs-you first, host badge on every row whenever the list holds rows
+  (live or last-known) from more than one Mac, work rows in the push
+  vocabulary with "Details stay on kobe" (operator Q8, PRD AC52/AC53; W11).
 - **Open with Ada, not blocking:** if W13's device check shows a passive
   collapse-id replacement lights the screen or is unreliable for a force-quit
   app, Ada asked for that evidence to revisit S1.
@@ -1142,13 +1153,13 @@ first step, to be opened up later), and the entitlement finding.
 
 | # | Question | Answer | Lands in |
 |---|---|---|---|
-| Q1 | What may Kobe (the employer-managed Mac) do with personal devices? | New `revoke-only` level: list, revoke, turn mail-and-todos **off**; cannot pair or widen anything. | W9 (enum, CLI), W10 (enforcement, `DeviceAdminLevel`), W15 (definition, UI) |
-| Q2 | Should mail and todos reach the phone in v1? | No, for every host. Fred's mail is probably the employer's Microsoft 365, so even Sendai's mail is treated as work-sensitive in v1. The pairing window and tabs must not promise them. | W9 (`[devices] share_mail_and_todos = false`, `not_shared`), W10 (`publish_sensitive` stays false), W11, W15 (copy) |
+| Q1 | What may Kobe (the employer-managed Mac) do with personal devices? | New `revoke-only` level: list, revoke (and turn mail-and-todos off, once that exists; there is no such control in v1); cannot pair or widen anything. Ada's addition: an unset level means revoke-only, and Sendai becomes `full` only when set explicitly. | W9 (enum, CLI), W10 (enforcement, `DeviceAdminLevel`), W15 (definition, UI) |
+| Q2 | Should mail and todos reach the phone in v1? | No, for every host, with no checkbox, flag, command or config key anywhere that turns sharing on (PRD AC56). Fred's mail is probably the employer's Microsoft 365, so even Sendai's mail is treated as work-sensitive. Copy: "Mail, calendar and todos aren't shared from your Macs in this version." (Mac pair window, `nostromo device pair`) and "Mail, calendar and todos stay on your Mac in this version." (device Fred, Teri, Settings). | W9 (no scope verbs or fields, `not_shared`), W10 (no `publish_sensitive`), W11, W15 (copy) |
 | Q3 | Do you accept that work-host notifications are never enriched? | Yes: Kobe, work and PHI notifications never carry extra detail on the phone (reverses the 2026-10-10 answer). | W16 |
 | Q4 | Does the phone answer nothing in this sequence? | Yes: no decisions, approvals, Mother questions or PRs from the phone; the iPhone vision is narrowed (Ada amends it). | all (B10) |
 | Q5 | What may a work-host notification say? | Kind, host, short ref, fixed reason. | W13 |
 | Q6 | Which AWS account hosts the relay? | A new dedicated personal account, or a member account in the operator's personal AWS Organization; never Carefeed. | W13 |
 | Q7 | Should the phone see a busy session's queued messages (D7)? | No, nothing from the message queue in v1. | W11 |
-| Q8 | How should the phone show work from several Macs? | One merged list, what needs you first; host badge only when more than one Mac is present. | W11 |
+| Q8 | How should the phone show work from several Macs? | One merged list, what needs you first; host badge whenever the list holds rows (live or last-known) from more than one Mac (PRD AC52). | W11 |
 | — | Apple notification-filtering entitlement | Investigated 2026-11-23, **not requested**: the form needs a published App Store app and one of four use cases (encrypted messaging, earthquake warnings, education alert retraction, healthcare patient-care alert retraction), none of which Nostromo truthfully fits. W13's replace-in-place is the v1 withdrawal. | W13, W16 |
-| — | S7a "locked or idle" signal | Observable: the verified Mac app already watches screen lock, sleep and idle time (`AuthoredPrsDemandReporter`). Chosen: push at once when the presenting Mac is locked, asleep or idle ≥ 2 min, else 30 s after raise if unanswered; falls back to the 30-second rule when no presence has been reported. | W13 (daemon), W15 (reporter) |
+| — | S7a "locked or idle" signal (Ada's rule; Archie's mechanism; not an operator answer) | Observable: the verified Mac app already watches screen lock, sleep and idle time (`AuthoredPrsDemandReporter`). Chosen: push at once when the presenting Mac is locked, asleep or idle ≥ 2 min, else 30 s after raise if unanswered; falls back to the 30-second rule when no presence has been reported. | W13 (daemon), W15 (reporter) |
