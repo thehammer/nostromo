@@ -20,7 +20,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::control::{control_within, says_unsupported, ControlFailure, CONTROL_TIMEOUT, SESSION_EXITED};
+use super::control::{
+    control_within, says_unsupported, ControlFailure, CONTROL_TIMEOUT, SESSION_EXITED,
+};
 use super::{Shared, TOOLS_RECONNECT_TIMEOUT};
 use crate::data::work::untrusted::sanitize_block;
 use crate::ipc::protocol::{McpAction, McpOutcome, McpServerView};
@@ -106,12 +108,18 @@ impl McpPanelState {
         self.limits(tag, |t| {
             if let Some(slot) = t.actions.get(server) {
                 if slot.in_flight {
-                    return Err(format!("a request for {} is already running", log_name(server)));
+                    return Err(format!(
+                        "a request for {} is already running",
+                        log_name(server)
+                    ));
                 }
                 let since = slot.started.elapsed();
                 if since < ACTION_GAP {
                     let left = (ACTION_GAP - since).as_secs_f64().ceil() as u64;
-                    return Err(format!("wait {left} s before trying {} again", log_name(server)));
+                    return Err(format!(
+                        "wait {left} s before trying {} again",
+                        log_name(server)
+                    ));
                 }
             }
             t.actions.insert(
@@ -232,7 +240,7 @@ fn cut_url_tails(text: &str) -> String {
 /// What [`begin`] settled synchronously.
 enum Step {
     Done(McpReply),
-    Run(Job),
+    Run(Box<Job>),
 }
 
 struct Job {
@@ -316,16 +324,20 @@ fn decide(
             return Step::Done(McpReply::plain(McpOutcome::RateLimited, wait));
         }
     }
-    Step::Run(Job {
+    Step::Run(Box::new(Job {
         panel,
         shared,
         bridges,
         tag: tag.to_owned(),
         kind,
-    })
+    }))
 }
 
-fn mark_bridge(list: &mut [McpServerView], bridges: Option<&crate::mcp::BridgeRegistry>, tag: &str) {
+fn mark_bridge(
+    list: &mut [McpServerView],
+    bridges: Option<&crate::mcp::BridgeRegistry>,
+    tag: &str,
+) {
     let up = bridges.and_then(|b| b.connected(tag));
     for server in list.iter_mut().filter(|s| s.name == MCP_SERVER_NAME) {
         server.nostromo_bridge = up;
@@ -341,7 +353,10 @@ impl Job {
             },
             JobKind::Reconnect { server } => {
                 let result = self
-                    .call(json!({"subtype": "mcp_reconnect", "serverName": server}), self.panel.reconnect_timeout)
+                    .call(
+                        json!({"subtype": "mcp_reconnect", "serverName": server}),
+                        self.panel.reconnect_timeout,
+                    )
                     .await;
                 self.panel.release_action(&self.tag, server);
                 match result {
@@ -388,7 +403,9 @@ impl Job {
     }
 
     async fn call(&self, request: Value, wait: Duration) -> Result<(), ControlFailure> {
-        control_within(&self.shared, request, wait).await.map(|_| ())
+        control_within(&self.shared, request, wait)
+            .await
+            .map(|_| ())
     }
 
     /// The fresh list after a change that succeeded. If only the list fails,
@@ -418,7 +435,12 @@ impl Job {
             .body
             .get("mcpServers")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(McpServerView::from_cli).take(MAX_SERVERS).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(McpServerView::from_cli)
+                    .take(MAX_SERVERS)
+                    .collect()
+            })
             .unwrap_or_default();
         self.panel.keep_list(&self.tag, &list);
         mark_bridge(&mut list, self.bridges.as_deref(), &self.tag);

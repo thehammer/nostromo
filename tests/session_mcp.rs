@@ -118,7 +118,12 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
-    async fn mcp(&self, action: McpAction, server: Option<&str>, enabled: Option<bool>) -> McpReply {
+    async fn mcp(
+        &self,
+        action: McpAction,
+        server: Option<&str>,
+        enabled: Option<bool>,
+    ) -> McpReply {
         let run = self
             .mgr
             .lock()
@@ -138,7 +143,10 @@ impl Fixture {
             .lines()
             .map(|l| {
                 let v: serde_json::Value = serde_json::from_str(l).unwrap();
-                (v["request"]["subtype"].as_str().unwrap().to_owned(), v["request"].clone())
+                (
+                    v["request"]["subtype"].as_str().unwrap().to_owned(),
+                    v["request"].clone(),
+                )
             })
             .collect()
     }
@@ -192,13 +200,31 @@ async fn the_nostromo_bridge_flag_follows_the_daemons_bridge_state() {
     let f = fixture(true);
     f.bridges.open(TAG);
     let up = f.mcp(McpAction::Status, None, None).await.servers.unwrap();
-    assert_eq!(up.iter().find(|s| s.name == "nostromo").unwrap().nostromo_bridge, Some(true));
-    assert_eq!(up.iter().find(|s| s.name == "remote").unwrap().nostromo_bridge, None);
+    assert_eq!(
+        up.iter()
+            .find(|s| s.name == "nostromo")
+            .unwrap()
+            .nostromo_bridge,
+        Some(true)
+    );
+    assert_eq!(
+        up.iter()
+            .find(|s| s.name == "remote")
+            .unwrap()
+            .nostromo_bridge,
+        None
+    );
 
     f.bridges.close(TAG);
     tokio::time::sleep(Duration::from_millis(1100)).await;
     let down = f.mcp(McpAction::Status, None, None).await.servers.unwrap();
-    assert_eq!(down.iter().find(|s| s.name == "nostromo").unwrap().nostromo_bridge, Some(false));
+    assert_eq!(
+        down.iter()
+            .find(|s| s.name == "nostromo")
+            .unwrap()
+            .nostromo_bridge,
+        Some(false)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -216,7 +242,10 @@ async fn reconnect_sends_one_request_then_a_fresh_status() {
     let f = fixture(true);
     let reply = f.mcp(McpAction::Reconnect, Some("odd"), None).await;
     assert_eq!(reply.outcome, McpOutcome::Ok);
-    assert!(reply.servers.is_some(), "the reply carries the refreshed list");
+    assert!(
+        reply.servers.is_some(),
+        "the reply carries the refreshed list"
+    );
     assert_eq!(f.subtypes(), ["mcp_reconnect", "mcp_status"]);
     assert_eq!(f.requests()[0].1["serverName"], "odd");
     for secret in SECRETS {
@@ -234,7 +263,11 @@ async fn a_second_reconnect_inside_five_seconds_is_rate_limited_and_sends_nothin
     assert_eq!(again.outcome, McpOutcome::RateLimited);
     assert!(again.message.unwrap().contains("wait"));
     let toggled = f.mcp(McpAction::Toggle, Some("odd"), Some(false)).await;
-    assert_eq!(toggled.outcome, McpOutcome::RateLimited, "toggle shares the server's limit");
+    assert_eq!(
+        toggled.outcome,
+        McpOutcome::RateLimited,
+        "toggle shares the server's limit"
+    );
     assert_eq!(f.requests().len(), before, "nothing sent");
 
     // Another server is not held back.
@@ -256,7 +289,9 @@ async fn toggle_sends_the_name_and_state_and_refreshes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disabling_nostromo_is_invalid_and_sends_nothing() {
     let f = fixture(true);
-    let reply = f.mcp(McpAction::Toggle, Some("nostromo"), Some(false)).await;
+    let reply = f
+        .mcp(McpAction::Toggle, Some("nostromo"), Some(false))
+        .await;
     assert_eq!(reply.outcome, McpOutcome::Invalid);
     assert!(f.requests().is_empty());
     // Enabling it is allowed.
@@ -267,9 +302,18 @@ async fn disabling_nostromo_is_invalid_and_sends_nothing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn malformed_requests_are_invalid_and_send_nothing() {
     let f = fixture(true);
-    assert_eq!(f.mcp(McpAction::Reconnect, None, None).await.outcome, McpOutcome::Invalid);
-    assert_eq!(f.mcp(McpAction::Toggle, Some("odd"), None).await.outcome, McpOutcome::Invalid);
-    assert_eq!(f.mcp(McpAction::Unknown, Some("odd"), None).await.outcome, McpOutcome::Invalid);
+    assert_eq!(
+        f.mcp(McpAction::Reconnect, None, None).await.outcome,
+        McpOutcome::Invalid
+    );
+    assert_eq!(
+        f.mcp(McpAction::Toggle, Some("odd"), None).await.outcome,
+        McpOutcome::Invalid
+    );
+    assert_eq!(
+        f.mcp(McpAction::Unknown, Some("odd"), None).await.outcome,
+        McpOutcome::Invalid
+    );
     assert!(f.requests().is_empty());
 }
 

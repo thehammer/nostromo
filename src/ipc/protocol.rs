@@ -8663,7 +8663,12 @@ mod work_wire_tests {
         .unwrap();
         assert!(matches!(
             c,
-            ClientMsg::SessionMcp { action: McpAction::Unknown, server: None, enabled: None, .. }
+            ClientMsg::SessionMcp {
+                action: McpAction::Unknown,
+                server: None,
+                enabled: None,
+                ..
+            }
         ));
         let s: ServerMsg = serde_json::from_str(
             r#"{"type":"session_mcp_result","request_id":"m","tag":"t","action":"status","outcome":"brand_new"}"#,
@@ -8671,7 +8676,10 @@ mod work_wire_tests {
         .unwrap();
         assert!(matches!(
             s,
-            ServerMsg::SessionMcpResult { outcome: McpOutcome::Unknown, .. }
+            ServerMsg::SessionMcpResult {
+                outcome: McpOutcome::Unknown,
+                ..
+            }
         ));
     }
 
