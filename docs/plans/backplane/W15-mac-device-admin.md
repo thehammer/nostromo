@@ -1,6 +1,27 @@
 # W15 — Pair a Device and Devices in the Mac app
 
-## Refreshed 2026-10-18 against `origin/main` `d61c62d`
+## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
+
+Versus the 2026-10-18 version:
+- **Line references re-derived** (`macOS/Nostromo/Data/NostromodClient.swift`):
+  `enum ServerMsg` `:167`, `sendHello` `:992-995` (still `protocolVersion: 4`;
+  its `ClientHello` now also sends `capabilities: [merged_turns_v1]`, `:18-27`),
+  `featureTopics` `:1089`, `send(_:type:tag:)` `:1892`, `decode` `:2030`;
+  `AppDelegate.setupMenu` `macOS/Nostromo/AppDelegate.swift:492`.
+  `HumanGesture` is still `macOS/Nostromo/Security/HumanGesture.swift`.
+- **Collisions now.** AP3, BA3, FV4, AP2a, T1 and terminal 1d are merged.
+  Today the Mac Xcode project is edited by PR #518 (open); do not run this
+  wedge while any job edits `macOS/Nostromo.xcodeproj` or
+  `NostromodClient.swift`. Newer menu owners to avoid: slash commands, session
+  history (⌘N New Focus…, ⇧⌘N Resume Conversation…, #475) and the Mother
+  Overview; pick a key equivalent for **Pair a Device…** only after checking
+  `setupMenu` on the base (or none).
+- **Cap $45** (was $35): the comparable Mac UI slice, message queue S2, spent
+  $39.
+- **Gates.** `swift-ci` (~24 min; PR #519 raises its timeout to 2400 s) and
+  `python-test` (its `when` includes `macOS/**`).
+
+## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
 Versus the 2026-10-10 draft (read the memo's "What changed" and "Install
 coordination"):
@@ -72,7 +93,7 @@ hosted in AppKit elsewhere (`macOS/Nostromo/UI/MainLayout.swift`).
 - **Repo:** nostromo
 - **Branch:** `feat/backplane-mac-device-admin`
 - **Base:** `origin/main` (W9 and W10 merged)
-- **Max cost:** $35 (expected ≈ $14; see the memo's Estimate)
+- **Max cost:** $45 (expected ≈ $18; see the memo's Estimate; raised 2026-11-23)
 
 ## Files to change
 

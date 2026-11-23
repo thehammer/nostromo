@@ -1,6 +1,27 @@
 # W12 — Per-topic sequence numbers, replay on resume, heartbeats and bounded client queues
 
-## Refreshed 2026-10-18 against `origin/main` `d61c62d`
+## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
+
+Versus the 2026-10-18 version (read the memo's "What changed since
+2026-10-18"):
+- **Line references re-derived:** `handle_client` `src/ipc/server.rs:617`;
+  `retain_broadcasts` `:4483`; topic matching is `message_matches_topics`
+  (`:4616`) and `deliver_broadcast` (`:4597`), which are the natural home for
+  the explicit `ServerMsg::topic()` (not `peer.rs:613`, which is now inside
+  the sensitive-tag code); `Topic` is `src/ipc/protocol.rs:73-89` and gained
+  `Terminal` and `AuthoredPrs`; `ActivityEvent.seq` is `src/agent_bus.rs:53`.
+- **Topics with no ring.** `Topic::Terminal` and `Topic::AuthoredPrs` carry
+  only `LocalOnly` frames, as do the targeted queue frames (`SessionQueue*`,
+  delivered only to a watching connection). Give them no `seq` and no replay
+  ring: a network peer can never receive them, and local clients re-request on
+  reconnect as today. The replay path still runs `peer::outbound` per peer.
+- **Merged turns.** A `SessionTurns`/`SessionTurnDelta` frame may carry
+  `Turn.user_parts` (#514); replay must carry it byte-for-byte (a Kit decode
+  test with a merged turn in the replayed window).
+- **Gates.** Rust and Swift both change, so all of `rust-*`, `python-test` and
+  `swift-ci` run, serially; expect ~45–70 min of gates (memo, crew delta 6).
+
+## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
 Read `docs/plans/backplane-sequencing.md` ("What changed", "Install
 coordination"). Versus the 2026-10-10 draft: no `PROTOCOL_VERSION` bump

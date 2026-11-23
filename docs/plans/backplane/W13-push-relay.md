@@ -1,6 +1,32 @@
 # W13 — Push notifications: closed-vocabulary push engine on the primary, a stateless AWS relay, and iOS registration
 
-## Refreshed 2026-10-18 against `origin/main` `d61c62d`
+## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
+
+Versus the 2026-10-18 version (read the memo's "What changed since
+2026-10-18"):
+- **Ordinals.** The four new verbs take **107–110** after W9 (98–106), not
+  50–53; `CLIENT_MSG_VARIANTS` 107 → 111. Re-derive on the base.
+- **MC4 is merged.** Kit's `NeedsYouAggregator` and `MotherNeedsYouProducer`
+  exist (`Shared/NostromoKit/Sources/NostromoKit/NeedsYou/NeedsYou.swift:142`,
+  `:186`); share the rules table with them as planned (the "if MC4 has not
+  landed" fallback is dead).
+- **Line references re-derived:** `MotherJob` `src/mother/mod.rs:174`
+  (`crew_opt_in` `:262-270`); `DecisionRequest` `src/ipc/protocol.rs:3286`;
+  `ApprovalPending` `:3367`; `PrQueueItem` `src/data/perri_queue.rs:105`;
+  `PrDetail` `src/data/perri_queue_native.rs:244`, `get_pr_head_sha` `:1989`;
+  the Perri queue still searches only `org:Carefeed`
+  (`perri_queue_native.rs:1037-1038`), so S5 stands; `ask_decision`'s
+  `no_operator` is `src/mcp/tools/ask_decision.rs:90`; the Mother poller is
+  `run_mother_pollers` (`src/bin/nostromd.rs:864`, 2 s at `:402`); retained
+  frames `src/ipc/server.rs:4483`.
+- **New push sources stay out.** Authored-PR events (CI state, Perri verdicts,
+  merge results) are `LocalOnly` and never reach the primary; tracker
+  `TrackerSummary` counts reach it but are not a push kind in the PRD. No new
+  push kind is added without Ada.
+- **Relay gate.** After merge, add the `relay-test` gate (memo, crew delta 5).
+- **Gates.** Rust, Python and Swift all run, serially (~45–70 min).
+
+## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
 Read `docs/plans/backplane-sequencing.md` first ("What changed", bets B9
 and B10, "Wire inventory", "Install coordination") and the push PRD's
@@ -37,7 +63,7 @@ design-loop notes **turn 2** (S7, S8). Versus the 2026-10-10 draft:
   (below) keeps Rust and Kit from drifting. Acknowledgement semantics are in
   "Acknowledgement and withdrawal".
 - No `PROTOCOL_VERSION` bump; the primary advertises `"push"`. New
-  `ClientMsg` ordinals per the memo's wire inventory (50–53), `Paired`-only
+  `ClientMsg` ordinals per the memo's wire inventory (107–110 since 2026-11-23), `Paired`-only
   and self-scoped.
 - Tests run in CI: Rust (daemon and the `infra/push-relay` crate) in the RWX
   sandbox, Kit/iOS on GitHub Actions. Hermetic: `wiremock` stands in for the
@@ -299,7 +325,7 @@ Daemon push engine (new module):
     failing_since }`: targeted reply to the device. Host classes are
     **read-only**; there is no `ClientMsg` that changes them.
   - A network peer may only read or write its *own* device's push record.
-  - FND-1: the four new `ClientMsg`s take ordinals 50–53 (or the next free
+  - FND-1: the four new `ClientMsg`s take ordinals 107–110 (or the next free
     ones; bump `CLIENT_MSG_VARIANTS`) and are `Refused` in `network_policy`
     and allowed by W9's `paired_extra_allowed` for `Paired` peers only; the
     three new `ServerMsg`s are `Open` and only ever sent targeted.

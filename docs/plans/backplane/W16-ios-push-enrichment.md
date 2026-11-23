@@ -1,6 +1,24 @@
 # W16 — iOS push enrichment: Notification Service Extension, on-phone enrichment for personal hosts, on-phone withdrawal
 
-## Refreshed 2026-10-18 against `origin/main` `d61c62d`
+## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
+
+Versus the 2026-10-18 version (read the memo's "What changed since
+2026-10-18" and "CI prerequisites"):
+- **Ordinal.** `ClientMsg::PushDetail` takes **111** (after W9's 98–106 and
+  W13's 107–110), not 54; `CLIENT_MSG_VARIANTS` 111 → 112. Re-derive on the
+  base.
+- **Entitlement.** Still not requested as of this refresh. The operator step
+  is spelled out in the memo, open question 6 (request for
+  `com.hammer.nostromo.ios`, `iOS/Nostromo.xcodeproj/project.pbxproj:404`;
+  this wedge creates the extension's bundle id).
+- **Tests.** If the iOS-T prerequisite has merged, add the extension target to
+  the shared scheme and cover the App Group and shared-keychain wiring with a
+  hosted simulator test; the pure pieces stay in Kit as planned. If not, say
+  so in the PR body.
+- **Dispatch.** Only "no other job editing `iOS/Nostromo.xcodeproj`" remains
+  of the old exclusions.
+
+## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
 Read `docs/plans/backplane-sequencing.md` first ("What changed since
 2026-10-10", bets B9 and B10) and the push PRD's design-loop notes **turn 2**.
@@ -19,8 +37,8 @@ Versus the 2026-10-10 draft of this file:
   PHI-repo items are metadata-only from any host. Work-host enrichment
   toggles are therefore not built.
 - No `PROTOCOL_VERSION` bump; the primary advertises `"push_detail"`.
-  `ClientMsg::PushDetail` takes the next free ordinal (54 in the memo's
-  inventory) and is `Paired`-only, self-scoped.
+  `ClientMsg::PushDetail` takes the next free ordinal (111 in the memo's
+  2026-11-23 inventory) and is `Paired`-only, self-scoped.
 - Tests run in CI (Rust in the RWX sandbox; Kit and the iOS build with the
   embedded extension on GitHub Actions). Hermetic: fake transports, no APNs,
   no VPN, no device.
