@@ -424,7 +424,7 @@ final class McpPanelView: NSView {
         refreshButton.isEnabled = refreshEnabled
         if !rows.elementsEqual(rowViews, by: ===) {
             // Keyboard focus survives the rebuild: on the same button of the same row (the views are reused
-            // by server), and if that row is gone, on the next row's button of the same kind, else Refresh.
+            // by server), and if that row is gone, on the next row's Reconnect or Disable (both ask first), else Refresh.
             // Never on another server's action just because it now sits where the old one was.
             let oldRows = rowViews
             let focused = window?.firstResponder as? McpActionButton
@@ -446,7 +446,9 @@ final class McpPanelView: NSView {
                 if rows.contains(where: { $0 === oldRows[at] }) {
                     target = focused
                 } else if let next = oldRows[(at + 1)...].first(where: { old in rows.contains { $0 === old } }),
-                          button(next).isEnabled, !button(next).isHidden {
+                          button(next).isEnabled, !button(next).isHidden,
+                          // Enable acts at once with no confirmation, so focus is never parked on it.
+                          focusedIsReconnect || next.toggleButton.title != "Enable" {
                     target = button(next)
                 } else {
                     target = refreshButton

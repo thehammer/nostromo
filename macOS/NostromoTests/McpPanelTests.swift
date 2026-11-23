@@ -812,6 +812,15 @@ final class McpPanelFocusTests: MouseQueueTestCase {
         XCTAssertTrue(rig.sheet.firstResponder === rig.row("other").toggleButton, "the following row's Disable")
     }
 
+    func testFocusedRowLeavingNeverLandsOnAnotherServersEnable() throws {
+        let rig = McpWindowRig(list: [server("A"), server("M", .disabled), server("B")])
+        defer { rig.close() }
+        XCTAssertTrue(rig.sheet.makeFirstResponder(rig.row("A").toggleButton))
+        refresh(rig, to: [server("M", .disabled), server("B")])
+        XCTAssertFalse(rig.sheet.firstResponder === rig.row("M").toggleButton, "M's Enable acts with no confirmation")
+        XCTAssertTrue(rig.sheet.firstResponder === rig.controller.panelView.refreshButton, "Refresh is the safe target")
+    }
+
     func testFocusedReconnectLeavingMovesFocusToTheNextRowsReconnect() throws {
         let rig = McpWindowRig(list: [server("callimachus", .failed), server("other")])
         defer { rig.close() }
