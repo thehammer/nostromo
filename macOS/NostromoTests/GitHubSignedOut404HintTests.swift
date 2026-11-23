@@ -186,6 +186,53 @@ final class GitHubSignedOut404HintTests: XCTestCase {
         XCTAssertFalse(hintShown(tab), "the hint belongs to the 404 page, which is gone")
     }
 
+    // The hint's same-page guard is two checks (`navigationSerial` and `sameDocument`), and each needs its own
+    // test: a navigation to a different URL trips both, so it proves neither alone.
+
+    func testAReloadOfTheSameURLWhileTheAnswerIsOnItsWayShowsNoHintOnThePageThatReplacedTheNotFound() async throws {
+        // Same URL, so only the navigation counter can tell the reloaded page from the 404 page.
+        model.environment.signedOutProbe = { _ in
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            return true
+        }
+        notFound[filesPath] = .some(nil)
+        let tab = openDiff()
+        let c = try XCTUnwrap(tab.controller)
+        await assertTrueA(await eventually(15) { !c.webView.isLoading && c.webView.url?.path == self.filesPath
+            && c.contentView.cover.isHidden }, "the 404 page loaded")
+        let before = world.handler.requested.filter { $0.path == filesPath }.count
+
+        notFound[filesPath] = nil           // the page exists now: the reload answers 200
+        c.webView.reload()
+        await assertTrueA(await eventually(15) {
+            !c.webView.isLoading && world.handler.requested.filter { $0.path == self.filesPath }.count > before
+        }, "the page was requested again")
+        XCTAssertEqual(c.webView.url?.path, filesPath, "the very same URL")
+        await spinA(1.5)
+        XCTAssertFalse(hintShown(tab), "the hint belongs to the 404 page, which the reload replaced")
+    }
+
+    func testAChangeOfURLWithNoNavigationWhileTheAnswerIsOnItsWayShowsNoHint() async throws {
+        // `history.pushState` changes the URL without a navigation starting or committing, so the counter
+        // does not move: only the same-document check can tell the page changed.
+        model.environment.signedOutProbe = { _ in
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            return true
+        }
+        notFound[filesPath] = .some(nil)
+        let tab = openDiff()
+        let c = try XCTUnwrap(tab.controller)
+        await assertTrueA(await eventually(15) { !c.webView.isLoading && c.webView.url?.path == self.filesPath
+            && c.contentView.cover.isHidden }, "the 404 page loaded")
+
+        _ = try? await c.webView.evaluateJavaScript("history.pushState({}, '', '/acme/secret/pull/9/files'); 1")
+        await assertTrueA(await eventually(15) { c.webView.url?.path == "/acme/secret/pull/9/files" },
+                          "the URL changed in place: \(String(describing: c.webView.url))")
+        XCTAssertFalse(c.webView.isLoading)
+        await spinA(1.5)
+        XCTAssertFalse(hintShown(tab), "the tab is no longer on the page that answered 404")
+    }
+
     func testTheSameDocumentCheckIgnoresOnlyTheFragment() throws {
         let a = try XCTUnwrap(URL(string: "https://github.com/a/b/pull/1/files?w=1"))
         XCTAssertTrue(ReviewTabController.sameDocument(URL(string: "https://github.com/a/b/pull/1/files?w=1#diff-x"), a))

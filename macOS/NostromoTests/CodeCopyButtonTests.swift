@@ -321,24 +321,31 @@ final class CodeCopyButtonTests: XCTestCase {
     }
 
     func testSecondCopyWithinTheWindowRestartsTheFeedbackTimer() throws {
+        // No clock: the button hands its reset to `scheduleReset`, and the test runs the scheduled
+        // work by hand, so "within the window" is a fact of the order of calls, not of wall time.
         let (card, _) = attachedCard("```\nagain\n```")
         let button = try XCTUnwrap(buttons(card).first)
+        var scheduled: [(delay: TimeInterval, work: DispatchWorkItem)] = []
+        button.scheduleReset = { delay, work in scheduled.append((delay, work)) }
         button.feedbackDuration = 0.4
+
         button.copyCode()
-        let wait1 = expectation(description: "0.25s elapsed")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { wait1.fulfill() }
-        wait(for: [wait1], timeout: 2)
-        button.copyCode() // restart: original timer would fire at 0.4s
-        let wait2 = expectation(description: "0.25s more elapsed")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { wait2.fulfill() }
-        wait(for: [wait2], timeout: 2)
+        XCTAssertEqual(scheduled.count, 1)
+        button.copyCode() // the second copy, while the first reset is still pending
+        XCTAssertEqual(scheduled.count, 2)
+        XCTAssertEqual(scheduled[1].delay, 0.4, accuracy: 0.0001, "the restarted timer is a full window again")
+
+        // The first timer comes due: it must do nothing, because the second copy replaced it.
+        scheduled[0].work.perform()
+        XCTAssertTrue(scheduled[0].work.isCancelled, "the first copy's reset was cancelled")
         XCTAssertTrue(button.isShowingCopied, "second copy must restart the timer, not let the first one reset it")
-        let reset = expectation(description: "eventually resets")
-        let timer = Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { t in
-            if !button.isShowingCopied { t.invalidate(); reset.fulfill() }
-        }
-        wait(for: [reset], timeout: 2)
-        timer.invalidate()
+        XCTAssertEqual(button.toolTip, "Copied")
+
+        // The restarted timer comes due: now the feedback ends.
+        scheduled[1].work.perform()
+        XCTAssertFalse(button.isShowingCopied)
+        XCTAssertEqual(button.toolTip, "Copy code")
+        XCTAssertEqual(button.symbolName, "doc.on.doc")
     }
 
     func testHoverRaisesAlphaAndLeavingRestsIt() throws {

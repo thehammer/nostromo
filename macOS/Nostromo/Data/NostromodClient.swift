@@ -1180,16 +1180,18 @@ class NostromodClient {
     }
 
     /// Enqueue a user message; the daemon writes it to the child's stdin.
-    func sessionSend(tag: String, text: String, imagePaths: [String] = []) {
+    @discardableResult
+    func sessionSend(tag: String, text: String, imagePaths: [String] = []) -> Bool {
         send(SessionSendMsg(tag: tag, text: text, images: imagePaths), type: "session_send", tag: tag)
     }
 
     /// `sessionSend` that names the message, so a queue snapshot can say which entry is this app's own.
     /// The `client_ref` goes out only when the daemon advertised `session_queue_v1`; otherwise this is
     /// the frame `sessionSend(tag:text:imagePaths:)` writes.
-    func sessionSend(tag: String, text: String, imagePaths: [String] = [], clientRef: String?) {
+    @discardableResult
+    func sessionSend(tag: String, text: String, imagePaths: [String] = [], clientRef: String?) -> Bool {
         let ref = daemonAdvertisesSessionQueue ? clientRef : nil
-        send(SessionSendMsg(tag: tag, text: text, images: imagePaths, clientRef: ref), type: "session_send", tag: tag)
+        return send(SessionSendMsg(tag: tag, text: text, images: imagePaths, clientRef: ref), type: "session_send", tag: tag)
     }
 
     /// Watch `tag`'s queue: a `session_queue` snapshot now and on every change. Nothing is sent to a
@@ -1889,18 +1891,21 @@ class NostromodClient {
     /// emits. The send is only recorded once every byte has actually left
     /// the process: recording a send that never left would leave a pending
     /// entry in `latency` that can never match, inflating `unmatchedPending`.
-    private func send(_ msg: some Encodable, type: String, tag: String? = nil) {
+    /// Returns whether every byte of the frame was written; false means it did not leave the process.
+    @discardableResult
+    private func send(_ msg: some Encodable, type: String, tag: String? = nil) -> Bool {
         guard fd >= 0, let body = try? encoder.encode(msg)
-        else { log.debug("send dropped — not connected (fd=\(self.fd, privacy: .public))"); return }
+        else { log.debug("send dropped — not connected (fd=\(self.fd, privacy: .public))"); return false }
 
         sendLock.lock(); defer { sendLock.unlock() }
         let curFd = fd
-        guard curFd >= 0 else { return }
-        writeFrameLocked(body, to: curFd, type: type, tag: tag)
+        guard curFd >= 0 else { return false }
+        return writeFrameLocked(body, to: curFd, type: type, tag: tag)
     }
 
     /// Write one length-prefixed frame to `curFd`. The caller holds `sendLock`.
-    private func writeFrameLocked(_ body: Data, to curFd: Int32, type: String, tag: String?) {
+    @discardableResult
+    private func writeFrameLocked(_ body: Data, to curFd: Int32, type: String, tag: String?) -> Bool {
         var bigEndianLen = UInt32(body.count).bigEndian
         var frame = Data(bytes: &bigEndianLen, count: 4)
         frame.append(body)
@@ -1918,6 +1923,7 @@ class NostromodClient {
         if wroteFully {
             latency.recordSend(type: type, tag: tag, bytes: frame.count)
         }
+        return wroteFully
     }
 
     // MARK: - Frame reading

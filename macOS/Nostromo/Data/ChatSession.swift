@@ -295,7 +295,8 @@ class ChatSession: ObservableObject {
             && client.daemonAdvertisesSlashCommands
         turns.append(echo)
         changes.send(.appended(index: turns.count - 1))
-        client.sessionSend(tag: tag, text: trimmed, imagePaths: images.map { $0.path })
+        let written = client.sessionSend(tag: tag, text: trimmed, imagePaths: images.map { $0.path })
+        if !written { endPendingCommands(echoId: echo.id, as: .notSent) }
         FocusStore.shared.clearResumed(tag: tag)
     }
 
@@ -317,8 +318,19 @@ class ChatSession: ObservableObject {
         isRunning = true
         lastSend = (trimmed, images, Date())
         Self.lastSenderTag = tag
-        client.sessionSend(tag: tag, text: trimmed, imagePaths: images.map { $0.path }, clientRef: clientRef)
+        let written = client.sessionSend(tag: tag, text: trimmed, imagePaths: images.map { $0.path }, clientRef: clientRef)
+        if !written, let echoId = echoesByClientRef[clientRef] { endPendingCommands(echoId: echoId, as: .notSent) }
         FocusStore.shared.clearResumed(tag: tag)
+    }
+
+    /// Give the pending command echoes that are still waiting an end state: only `echoId` when it is
+    /// given (its own send failed), every one otherwise (the session ended with them unanswered).
+    private func endPendingCommands(echoId: UUID? = nil, as end: ChatTurn.PendingCommandEnd) {
+        for i in turns.indices where turns[i].isPendingCommandEcho && turns[i].pendingCommandEnd == nil
+            && (echoId == nil || turns[i].id == echoId) {
+            turns[i].pendingCommandEnd = end
+            changes.send(.spliced(replacedFrom: i))
+        }
     }
 
     /// Remove the idle echoes the daemon queued after all, so the message is a chip and then one bubble.
@@ -484,9 +496,11 @@ class ChatSession: ObservableObject {
 
         case .sessionExited(let t, _) where t == tag:
             isRunning = false
+            endPendingCommands(as: .noAnswer)
 
         case .sessionDown(let t, let reason) where t == tag:
             isRunning = false
+            endPendingCommands(as: .noAnswer)
             if reason == .user {
                 // Benign user-requested stop — clear any indicator.
                 updateHealth(.healthy)
@@ -661,6 +675,7 @@ class ChatSession: ObservableObject {
                 var rebuild = false
                 if wasPendingCommand {
                     turns[i].pendingCommand = false
+                    turns[i].pendingCommandEnd = nil
                     rebuild = true
                 }
                 if case .localCommand? = turn.origin {

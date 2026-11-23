@@ -66,12 +66,14 @@ extension ChatTurn {
     /// The optimistic echo of a typed slash command, not yet adopted by a daemon turn.
     var isPendingCommandEcho: Bool { pendingCommand && daemonId == nil && origin == nil }
 
-    /// The one muted line of a pending command echo: `/context · sent`.
+    /// The one muted line of a pending command echo: `/context · sent`, or `· not sent` / `· no answer`
+    /// once it ended without an answer.
     var pendingCommandMarker: WakeMarkerContent? {
         guard isPendingCommandEcho else { return nil }
         let name = userInput.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? userInput
-        return WakeMarkerContent(line: "\(userInput) · sent", tooltipLines: [],
-                                 accessibilityLabel: "Command \(name), sent", target: .none)
+        let state = pendingCommandEnd?.words ?? "sent"
+        return WakeMarkerContent(line: "\(userInput) · \(state)", tooltipLines: [],
+                                 accessibilityLabel: "Command \(name), \(state)", target: .none)
     }
 
     /// The marker this turn shows in the user slot; nil for a turn that has none. Only a turn whose

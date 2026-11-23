@@ -71,6 +71,22 @@ struct ChatTurn: Identifiable {
     /// daemon's turn then adopts it as a record (`.localCommand` origin) or, for a prompt-type command,
     /// as the ordinary bubble (`ChatSession.apply`). Only set when the daemon speaks `slash_commands_v1`.
     var pendingCommand = false
+    /// How a pending command echo ended without an answer: the send did not leave the process, or the
+    /// session ended with the command unanswered. Nil while it is still waiting (`/x · sent`).
+    var pendingCommandEnd: PendingCommandEnd? = nil
+
+    /// The end state of a typed slash command that never got an answer.
+    enum PendingCommandEnd: Equatable {
+        case notSent
+        case noAnswer
+
+        var words: String {
+            switch self {
+            case .notSent: return "not sent"
+            case .noAnswer: return "no answer"
+            }
+        }
+    }
 
     /// Character counts for a turn whose text has been compressed away.
     struct TruncatedLengths {
