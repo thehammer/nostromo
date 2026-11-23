@@ -148,6 +148,19 @@ final class SlashCommandEchoTests: XCTestCase {
                       "the view is told to redraw the line")
     }
 
+    func testACommandSentThroughTheQueueThatDidNotLeaveTheProcessShowsNotSent() {
+        // A daemon with `session_queue_v1` takes the queue path (`sendThroughQueue`), the one today's daemons use.
+        let offline = NostromodClient(socketPath: "/dev/null")
+        offline.setAdvertisedFeaturesForTesting(newDaemon + [sessionQueueFeature])
+        let queued = ChatSession(tag: "test", agentName: "cody", displayName: "Cody", workingDirectory: nil, client: offline)
+
+        queued.send("/context")
+
+        XCTAssertEqual(queued.turns.count, 1)
+        XCTAssertEqual(queued.turns[0].markerContent?.line, "/context · not sent")
+        XCTAssertEqual(queued.turns[0].markerContent?.accessibilityLabel, "Command /context, not sent")
+    }
+
     func testASentCommandThatTheDaemonIsStillWorkingOnStaysSent() {
         advertiseSlashCommands()
         session.send("/context")
