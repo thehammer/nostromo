@@ -659,6 +659,23 @@ final class McpPanelConfirmationTests: MouseQueueTestCase {
         XCTAssertEqual(rig.toggles, [.init(id: "req-2", tag: "tag-1", action: "toggle", server: "callimachus", enabled: false)])
     }
 
+    /// `toggle()` no longer lets a second sheet up, so make one through the seam it uses: a sheet's own buttons
+    /// must end that sheet, not whichever one the controller holds at the moment.
+    func testASheetsCancelEndsThatSheetNotTheOneTheControllerHoldsNow() throws {
+        let rig = McpWindowRig()
+        defer { rig.close() }
+        let first = try ask(rig)
+        rig.controller.confirmDisable("a second question") { _ in }
+        let second = try XCTUnwrap(rig.controller.confirmSheet)
+        XCTAssertFalse(second === first, "the controller now holds the second sheet")
+        first.cancelButton.performClick(nil)
+        mcpSpin()
+        XCTAssertFalse(rig.sheet.sheets.contains(first.window), "the first sheet's own Cancel closed the first sheet")
+        XCTAssertTrue(rig.toggles.isEmpty)
+        rig.controller.confirmSheet?.cancelButton.performClick(nil)
+        mcpSpin()
+    }
+
     func testCancelAndEscapeSendNothing() throws {
         let rig = McpWindowRig()
         defer { rig.close() }
