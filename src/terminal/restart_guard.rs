@@ -79,6 +79,7 @@ pub async fn fetch(socket: &Path) -> std::result::Result<Vec<RemoteShellSummary>
 async fn ask(stream: UnixStream) -> Result<Vec<RemoteShellSummary>> {
     let (mut reader, mut writer) = tokio::io::split(stream);
     let hello = ClientMsg::Hello {
+        capabilities: Vec::new(),
         client_id: format!("remote-shells-{}", std::process::id()),
         protocol_version: PROTOCOL_VERSION.max(MIN_CLIENT_VERSION),
         client_kind: None,

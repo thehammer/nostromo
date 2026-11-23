@@ -4849,6 +4849,7 @@ mod wire {
 
     fn hello(kind: Option<&str>) -> ClientMsg {
         ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "pane-action-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: kind.map(str::to_string),

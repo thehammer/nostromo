@@ -2,8 +2,8 @@
 
 Slice S1 of the message queue. The daemon gives every user message a stable id, lets a client watch a session's
 queue live, and lets the verified Mac app take a queued message back or remove it. It ships no UI (slice S2 builds
-the chips and the Up-arrow take-back on this wire) and it does not merge queued messages into one turn (slice S3,
-not implemented: each queued message is still its own frame, written in order, byte for byte as before).
+the chips and the Up-arrow take-back on this wire). Slice S3 (see "Merging" below) merges typed messages waiting
+in the queue into one turn; everything else is written one frame per message, byte for byte as before.
 
 Code: `src/ipc/session_manager/queue.rs`; frames in `src/ipc/protocol.rs`; handlers in `src/ipc/server.rs`;
 golden frames in `tests/fixtures/session_queue/` (the Swift decoder tests read the same files).
@@ -148,7 +148,98 @@ New log lines about the queue carry counts, ids, codes and durations only: never
 - **User stop discards the queue.** Before this slice, Stop then Restart delivered the queued messages; now a user
   stop discards them, and nothing lets the user recall that text until S2 ships.
 
+## Merging
+
+Slice S3. When a turn ends and the front of the queue holds two or more consecutive mergeable messages, the daemon
+writes them to the CLI as ONE user frame, so the agent answers them in one turn.
+
+**Rule.** A message is mergeable when a person typed it in any client (kind `typed`, images allowed) and it is not a
+slash command. A slash command, an `app` message, an injected item (terminal output, Mother notices, pane
+selections) and the message held for a sign-in are boundaries: each is its own frame and ends the run. A run of one,
+and any message sent to an idle session, is written exactly as before (the frame bytes are pinned by
+`tests/session_queue_bytes.rs`).
+
+**Where.** Batches form only in `step`, at delivery, under the same locks as the single pop. `pending` keeps
+individual messages (ids, chips, take-back, remove). `merge::plan_batches` is the one function that groups them; the
+queue view (`merge_group`) and `step` both call it, so the prediction and the delivery agree.
+
+**Caps.** At most 20 messages (`MERGE_MAX_MESSAGES`), 256 KiB of message text (`MERGE_MAX_TEXT_BYTES`) and 20 images
+(`MERGE_MAX_IMAGES`) per batch. A run ends before the message that would break a cap; that message starts the next
+batch, written on the next turn. A single message over a cap goes alone.
+
+**Frame.** A fresh 32-hex boundary `B` per batch (drawn again if a message contains it). The first line is the only
+added prose:
+
+```
+<nostromo-batch count="N" boundary="B">The user sent these N messages while you were working: separate messages, in the order sent, each verbatim between its own markers.</nostromo-batch>
+
+<<<MESSAGE-B-1>>>
+{text 1}
+<<<END-MESSAGE-B-1>>>
+
+<<<MESSAGE-B-2>>>
+…
+```
+
+Without images the frame is one plain string. With any image it is an array: text block k holds section k (the
+header goes in front of section 1) and is followed by message k's image blocks. An unreadable-image note for message
+k goes right after section k's END marker, outside the section. The `<nostromo-note>` block (model note, then the
+tracker note), when there is one, goes in front of the header, once: one note and one tracker commit per frame,
+when the frame binds to its turn. `merge::parse` reads a frame back strictly (header first, count right, markers in
+order and carrying `B`, `B` nowhere inside a section, nothing but the unreadable-image note between sections) and
+accepts the array form joined with newlines and trimmed.
+
+**Restart note.** The approvals restart note rides only on a message written at once to an idle session; a queued
+message never carries it, and a merged frame is always built from the queue, so it carries it zero times (never
+once per message). This slice keeps that rule.
+
+**Atomic.** A batch is one `PendingMessage` that carries its original parts. If the write fails, `settle` puts the
+parts back at the front, in order, with their ids, as individual entries (chips again); the next `step` re-forms the
+batch with a fresh boundary. A successful write records every part id in the delivered ring, so a take-back racing an
+in-flight batch answers `already_delivered`. Only app entries carry delivered hooks, and app entries never merge (a
+typed entry with a hook is not merged either).
+
+**Held batch.** If the merged frame's turn fails to authenticate, the hold keeps the frame and resends it exactly,
+with the same boundary. In the view the hold is ONE held entry whose id is the first part's. Take-back returns every
+text joined by a blank line with all the images in order and leaves nothing to resend; remove discards the whole
+batch; Stop returns the parts as separate entries (held first). The ring gets every part id when the resend succeeds.
+
+**What the transcript shows.** `Turn.user_parts` (additive; absent or empty for a normal turn) holds the messages as
+typed; two or more mean a merged turn, and `user_input` is them joined by a blank line (so a client that ignores the
+field shows one readable bubble with no framing). A merged turn never gets an `origin`. The split is never read from
+text alone:
+
+* live, the reader calls `SessionTranscript::adopt_batch` when the frame the login cell bound to the turn is a
+  batch (what the daemon wrote);
+* on a rebuild from the CLI's JSONL (resume), `apply_batch_ledger` splits a turn only when `merge::parse` succeeds
+  AND the batch ledger holds its boundary with the same count. A lone typed message that imitates an envelope shows
+  verbatim.
+
+The batch ledger is `<dir>/session-batches/<session id>.jsonl`, beside the notes ledger (`src/model/batches.rs`,
+swept with it). Each line is `{boundary, count, ts}` and never carries message text. `step` appends it after
+releasing the locks and before the write; a failure only costs the split on a later rebuild (the error class is
+logged, delivery never waits). A failed write leaves an orphan line that matches nothing.
+
+**Titles.** A conversation backfilled from a JSONL whose first prompt is a merged frame gets its first part as its
+title (`conversations::transcript::scan`; no ledger check, a title is not a bubble). The send-time first-prompt
+candidate is the first message's own text and survives a batch delivery.
+
+**Gate (`merged_turns_v1`).** Older Macs and every iOS build echo what they send, which would draw a merged turn
+twice. `welcome.features` names `merged_turns_v1`; a client that renders merged turns says so in
+`hello.capabilities`. Merging is allowed for a session only while EVERY connection attached to it declared it (a
+session with no client attached merges; a connection that sent no Hello capability, a test client included, counts as
+legacy). While the gate is closed delivery is one frame per message, as before. The gate is a count of legacy
+attached connections kept per tag, recounted on attach, detach and connection drop (a client that disconnects
+without detaching reopens it), and every change rebroadcasts the queue snapshot because `merge_group` follows it.
+
+**`merge_group`.** `QueueEntryWire.merge_group` is present, and equal, on entries `plan_batches` puts in one group of
+two or more; absent on singletons, commands, app entries and the held message. Entries queued behind a held message
+may be grouped. The Mac shows `· sent together` in the queue header exactly when any entry has one.
+
+**Old clients.** A Mac older than S3 or any iOS build before this slice never declares the capability, so while one is
+attached nothing merges for that session. A client that does declare it but ignores `user_parts` shows one bubble
+of the joined text.
+
 ## Not in this slice
 
-Merging queued messages into one turn (S3, waiting on a product decision), mid-turn delivery, reordering, and
-persistence.
+Steering and interrupting mid-turn (S6), a setting to turn merging off, reordering, and persistence of the queue.

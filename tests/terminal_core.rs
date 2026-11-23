@@ -275,6 +275,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Client<S> {
     async fn handshake(stream: S, claim: Option<&str>, topics: Vec<Topic>, caps: &[&str]) -> Self {
         let mut c = Self::new(stream);
         c.send(&ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "terminal-core-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: claim.map(str::to_string),
@@ -2706,6 +2707,7 @@ async fn frames_written_before_the_nonce_was_seen_are_refused_until_a_subscribe_
     let mut c: Unix = Client::new(stream);
     // All buffered before the Welcome is read: no nonce anywhere.
     c.send(&ClientMsg::Hello {
+        capabilities: Vec::new(),
         client_id: "pre-exec".into(),
         protocol_version: PROTOCOL_VERSION,
         client_kind: Some("mac_app".into()),

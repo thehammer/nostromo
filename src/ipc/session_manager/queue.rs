@@ -17,13 +17,14 @@
 //! counts, ids, codes and durations only.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tracing::info;
 
 use super::login::LoginLink;
+use super::merge;
 use super::task_runtime::daemon_epoch;
 use super::{advance, local_command, lock_recover, SessionManager, SessionState};
 use super::{PendingMessage, Shared, WRITE_WAIT_LIMIT};
@@ -111,6 +112,14 @@ impl PendingMessage {
         m
     }
 
+    /// The ids this message stands for: its own, or each part's for a merged frame.
+    pub(super) fn ids(&self) -> Vec<String> {
+        match &self.batch {
+            Some(b) => b.parts.iter().map(|p| p.id.clone()).collect(),
+            None => vec![self.id.clone()],
+        }
+    }
+
     /// The text as it was sent, before any note was put in front of it.
     pub(super) fn original_text(&self) -> &str {
         self.original_text.as_deref().unwrap_or(&self.text)
@@ -146,9 +155,25 @@ pub(super) struct QueueState {
     /// revision of the snapshot the watch was answered with. Snapshots at or
     /// below the floor are not forwarded.
     watchers: Mutex<HashMap<String, Arc<AtomicU64>>>,
+    /// How many connections attached to the session did not declare
+    /// `merged_turns_v1` (kept by the manager's attach, detach and disconnect).
+    /// While it is not zero nothing merges: a client that echoes sends would
+    /// show a merged turn twice. A leaf: one atomic.
+    legacy_clients: AtomicUsize,
 }
 
 impl QueueState {
+    /// May queued typed messages merge into one frame now?
+    pub(super) fn merge_allowed(&self) -> bool {
+        self.legacy_clients.load(Ordering::SeqCst) == 0
+    }
+
+    /// Record how many attached connections are legacy; true when merging was
+    /// allowed before and is not now, or the other way round.
+    pub(super) fn set_legacy_clients(&self, n: usize) -> bool {
+        (self.legacy_clients.swap(n, Ordering::SeqCst) == 0) != (n == 0)
+    }
+
     pub(super) fn record_delivered(&self, id: &str) {
         let mut ring = lock_recover(&self.delivered);
         if ring.len() >= DELIVERED_RING {
@@ -260,6 +285,7 @@ fn entry_wire(m: &PendingMessage) -> Option<QueueEntryWire> {
         app_label,
         client_ref,
         can_take_back,
+        merge_group: None,
     })
 }
 
@@ -275,10 +301,23 @@ pub(super) struct QueueView {
 impl QueueView {
     /// Build the snapshot now. The caller holds `publish`.
     fn build(&self, change: Option<Change>) -> QueueSnapshot {
-        let entries = lock_recover(&self.pending)
-            .iter()
-            .filter_map(entry_wire)
-            .collect();
+        // The grouping is `step`'s own (`plan_batches`), read under the same
+        // gate, so what the view predicts is what is written.
+        let allowed = self.queue.merge_allowed();
+        let entries = {
+            let pending = lock_recover(&self.pending);
+            let groups = merge::merge_groups(&pending, allowed);
+            pending
+                .iter()
+                .zip(groups)
+                .filter_map(|(m, group)| {
+                    entry_wire(m).map(|mut e| {
+                        e.merge_group = group;
+                        e
+                    })
+                })
+                .collect()
+        };
         QueueSnapshot {
             rev: self.queue.rev.fetch_add(1, Ordering::SeqCst) + 1,
             entries,
@@ -355,7 +394,9 @@ impl Shared {
     /// A typed or app message was written to the CLI: remember its id.
     pub(super) fn note_delivered(&self, msg: &PendingMessage) {
         if !msg.kind.is_injected() {
-            self.queue.record_delivered(&msg.id);
+            for id in msg.ids() {
+                self.queue.record_delivered(&id);
+            }
         }
     }
 
@@ -471,7 +512,7 @@ pub(super) fn answer_verb(shared: &Shared, id: &str, verb: QueueVerb) -> QueueAn
         // Still writing after the limit (never under the test mutation, which
         // decides as if it had not looked).
         let in_flight = writing && !wait_skipped() && {
-            lock_recover(&shared.writing_id).as_deref() == Some(id)
+            lock_recover(&shared.writing_ids).iter().any(|w| w == id)
         };
         let mut pending = lock_recover(&shared.pending);
         let position = pending
@@ -570,9 +611,9 @@ pub(super) fn answer_verb(shared: &Shared, id: &str, verb: QueueVerb) -> QueueAn
 /// Take everything out of a session's queue for a Stop (or a user stop), with
 /// the held typed message (already taken out of the hold) first. The caller
 /// holds `state`, so a writer that pops afterwards finds nothing.
-pub(super) fn drain_for_stop(shared: &Shared, held: Option<QueueReturnedEntry>) -> DroppedQueue {
+pub(super) fn drain_for_stop(shared: &Shared, held: Vec<QueueReturnedEntry>) -> DroppedQueue {
     let mut dropped = DroppedQueue::default();
-    if let Some(held) = held {
+    for held in held {
         dropped.ids.push(held.id.clone());
         dropped.typed.push(held);
     }
@@ -647,16 +688,7 @@ impl SessionManager {
         };
         let shared = &session.shared;
         let state = lock_recover(&shared.state);
-        let held = shared.login.held_entry().and_then(|h| {
-            shared
-                .login
-                .take_held(&h.id, true)
-                .map(|(text, images)| QueueReturnedEntry {
-                    id: h.id,
-                    text,
-                    images,
-                })
-        });
+        let held = shared.login.take_held_entries();
         let dropped = drain_for_stop(shared, held);
         drop(state);
         shared.candidate_left(&dropped.ids);

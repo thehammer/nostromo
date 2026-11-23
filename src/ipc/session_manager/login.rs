@@ -22,8 +22,8 @@ use uuid::Uuid;
 
 use super::queue::EntryKind;
 use super::{
-    advance, lock_recover, resolve_claude, write_user_frame, PendingMessage, SessionEvent,
-    SessionManager, Shared, TurnAuthor, TurnNote,
+    advance, lock_recover, resolve_claude, write_batch_frame, write_user_frame, PendingMessage,
+    SessionEvent, SessionManager, Shared, TurnAuthor, TurnNote,
 };
 use crate::ipc::auth_failure::TurnAuthOutcome;
 use crate::ipc::claude_login::{
@@ -250,9 +250,9 @@ impl LoginLink {
     /// Stop was pressed: drop the hold unless its message is being resent (that
     /// turn's interrupted end clears it). True when a hold was dropped.
     ///
-    /// `Some` when a hold was dropped: the typed message it held (as typed,
-    /// no note in front), if it held one.
-    pub(super) fn discard_for_stop(&self) -> Option<Option<QueueReturnedEntry>> {
+    /// `Some` when a hold was dropped: the typed message(s) it held (as typed,
+    /// no note in front; a merged frame as its parts), if it held any.
+    pub(super) fn discard_for_stop(&self) -> Option<Vec<QueueReturnedEntry>> {
         let mut cell = lock_recover(&self.cell);
         if cell
             .hold
@@ -260,17 +260,30 @@ impl LoginLink {
             .is_some_and(|h| h.phase != HoldPhase::Resending)
         {
             let hold = cell.hold.take()?;
-            let typed = hold
-                .frame
-                .filter(|f| matches!(f.kind, EntryKind::Typed { .. }))
-                .map(|f| QueueReturnedEntry {
-                    id: f.id.clone(),
-                    text: f.original_text().to_owned(),
-                    images: f.images,
-                });
-            return Some(typed);
+            return Some(hold.frame.map(returned_entries).unwrap_or_default());
         }
         None
+    }
+
+    /// Take the hold's typed message(s) out of the hold for a session stop
+    /// (the caller holds `state`): the same entries Stop returns.
+    pub(super) fn take_held_entries(&self) -> Vec<QueueReturnedEntry> {
+        let mut cell = lock_recover(&self.cell);
+        match cell.hold.take() {
+            Some(hold)
+                if hold.phase == HoldPhase::Held
+                    && hold
+                        .frame
+                        .as_ref()
+                        .is_some_and(|f| matches!(f.kind, EntryKind::Typed { .. })) =>
+            {
+                hold.frame.map(returned_entries).unwrap_or_default()
+            }
+            other => {
+                cell.hold = other;
+                Vec::new()
+            }
+        }
     }
 
     /// The typed message the hold keeps, for the queue view: only while it is
@@ -305,7 +318,12 @@ impl LoginLink {
         {
             return None;
         }
-        let taken = (frame.original_text().to_owned(), frame.images.clone());
+        // A merged frame comes back as every text, a blank line apart, with
+        // all the images in order (as Stop restore does).
+        let taken = match &frame.batch {
+            Some(batch) => (batch.joined_text(), batch.all_images()),
+            None => (frame.original_text().to_owned(), frame.images.clone()),
+        };
         if remove {
             cell.hold = None;
         } else {
@@ -339,6 +357,24 @@ impl LoginLink {
     }
 }
 
+/// The typed messages a dropped frame stands for: itself, or each part of a
+/// merged frame (never a note in front); none for an app message.
+fn returned_entries(frame: PendingMessage) -> Vec<QueueReturnedEntry> {
+    let singles = match frame.batch {
+        Some(batch) => batch.parts,
+        None => vec![frame],
+    };
+    singles
+        .into_iter()
+        .filter(|f| matches!(f.kind, EntryKind::Typed { .. }))
+        .map(|f| QueueReturnedEntry {
+            id: f.id.clone(),
+            text: f.original_text().to_owned(),
+            images: f.images,
+        })
+        .collect()
+}
+
 // ── writing ────────────────────────────────────────────────────────────────────
 
 /// Write `msg` verbatim as one user frame, remembering it as the message the
@@ -356,7 +392,10 @@ pub(super) fn write_recorded(
     note: Option<Box<dyn TurnNote>>,
 ) -> Result<()> {
     shared.login.remember_written(msg, note);
-    let result = write_user_frame(&shared.stdin, &msg.text, &msg.images);
+    let result = match &msg.batch {
+        Some(batch) => write_batch_frame(&shared.stdin, &msg.text, batch),
+        None => write_user_frame(&shared.stdin, &msg.text, &msg.images),
+    };
     if result.is_err() {
         shared.login.forget_written();
     }
@@ -386,6 +425,21 @@ pub(super) fn on_turn_started(shared: &Shared) -> TurnAuthor {
     drop(cell);
     commit_note(note);
     author
+}
+
+/// The parts (as typed) of the merged frame the turn that just started was
+/// bound to, if it was one. Read from the daemon's own record of what it wrote,
+/// never from the prompt's text.
+pub(super) fn bound_batch_parts(shared: &Shared) -> Option<Vec<String>> {
+    let cell = lock_recover(&shared.login.cell);
+    let batch = cell.bound.as_ref()?.batch.as_ref()?;
+    Some(
+        batch
+            .parts
+            .iter()
+            .map(|p| p.original_text().to_owned())
+            .collect(),
+    )
 }
 
 /// A turn the transcript read as a wake (`task_wake` origin) started. It is

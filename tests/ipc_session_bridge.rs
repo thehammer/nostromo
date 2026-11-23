@@ -592,6 +592,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) {
     send(
         stream,
         &ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "session-bridge-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: Some(MAC_APP_CLIENT_KIND.into()),

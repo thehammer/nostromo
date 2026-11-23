@@ -352,8 +352,10 @@ final class TurnPayloadStore {
         // scroll document.
         out.truncatedLengths = ChatTurn.TruncatedLengths(
             userInput: turn.userInput.count,
-            blocks: turn.blocks.map { $0.contentCharCount })
+            blocks: turn.blocks.map { $0.contentCharCount },
+            userParts: turn.userParts.map(\.count))
         out.userInput = String(turn.userInput.prefix(prefixLength))
+        out.userParts = turn.userParts.map { String($0.prefix(prefixLength)) }
         out.blocks = turn.blocks.map { block in
             switch block {
             case .text(let s):
@@ -389,6 +391,7 @@ final class TurnPayloadStore {
     static func encodePayload(_ turn: ChatTurn) -> Data? {
         var out = Data()
         append(&out, turn.userInput)
+        for part in turn.userParts { append(&out, part) }
         for block in turn.blocks {
             switch block {
             case .text(let s):        append(&out, s)
@@ -407,6 +410,13 @@ final class TurnPayloadStore {
         guard let userInput = next(data, &cursor) else { return nil }
         var out = turn
         out.userInput = userInput
+        // A merged turn's skeleton keeps its part count, so the payload says how many to read.
+        var parts: [String] = []
+        for _ in turn.userParts {
+            guard let part = next(data, &cursor) else { return nil }
+            parts.append(part)
+        }
+        out.userParts = parts
         var blocks: [TurnBlock] = []
         blocks.reserveCapacity(turn.blocks.count)
         for block in turn.blocks {

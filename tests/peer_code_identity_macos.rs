@@ -1007,6 +1007,7 @@ async fn an_answer_buffered_before_execing_the_pinned_app_is_refused_for_lacking
     // Everything an app would say, written by the unpinned image before the
     // daemon has verified anyone, so it cannot carry a nonce.
     let mut bytes = frame(&ClientMsg::Hello {
+        capabilities: Vec::new(),
         client_id: "buffered-attack".into(),
         protocol_version: PROTOCOL_VERSION,
         client_kind: Some("mac_app".into()),

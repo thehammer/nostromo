@@ -74,7 +74,7 @@ final class SessionQueueWireTests: XCTestCase {
     // MARK: Server frames: every golden frame is understood
 
     private static let snapshotFixtures = [
-        "snapshot_empty", "snapshot_held", "snapshot_typed_app_command",
+        "snapshot_empty", "snapshot_held", "snapshot_typed_app_command", "snapshot_merge_group",
         "change_queued", "change_delivered", "change_taken_back", "change_removed", "change_stopped",
         "change_session_stopped",
     ]
@@ -114,6 +114,12 @@ final class SessionQueueWireTests: XCTestCase {
             guard case .sessionQueueReturned(let wire) = decode(f) else { XCTFail("\(name): not .sessionQueueReturned"); continue }
             XCTAssertEqual(wire.tag, "cody-1", name)
         }
+    }
+
+    func testTheMergeGroupSnapshotCarriesTheGroupOnlyOnTheEntriesThatWillMerge() throws {
+        let wire = try snapshot("snapshot_merge_group")
+        XCTAssertEqual(wire.entries.map(\.mergeGroup), [1, 1, nil, 2, 2])
+        XCTAssertEqual(wire.entries.map(QueuedMessage.init).map(\.mergeGroup), [1, 1, nil, 2, 2])
     }
 
     func testTheTypedAppAndCommandSnapshotKeepsItsOrderAndEveryField() throws {

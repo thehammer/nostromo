@@ -12,6 +12,7 @@
 //! `ipc::session_manager`, which owns the session processes.
 
 pub mod activity;
+pub mod batches;
 pub mod catalog;
 pub mod cost;
 pub mod hub;
@@ -92,6 +93,8 @@ pub struct ModelPaths {
     pub focus_models: PathBuf,
     pub defaults: PathBuf,
     pub notes_dir: PathBuf,
+    /// Which turns of a session were merged frames (see [`batches`]).
+    pub batches_dir: PathBuf,
     pub catalog: PathBuf,
 }
 
@@ -106,6 +109,7 @@ impl ModelPaths {
             focus_models: dir.join("focus-models.json"),
             defaults: dir.join("model-defaults.json"),
             notes_dir: dir.join("session-notes"),
+            batches_dir: dir.join("session-batches"),
             catalog: dir.join("model-catalog.json"),
         }
     }

@@ -328,6 +328,37 @@ class ChatSession: ObservableObject {
         }
     }
 
+    /// A turn that answers several messages the daemon merged into one frame. Each message may
+    /// have an unbound local echo (the idle-echo race: a coalesced snapshot never showed it as
+    /// queued, so it was not retired). Remove the echo of each part, at most one per part, newest
+    /// first, then show the merged turn. The turn is never adopted into an echo: its text is
+    /// not any one message's.
+    private func applyMergedTurnStarted(_ turn: DaemonTurn) {
+        let searchFloor = max(0, turns.count - TurnReconciler.echoAdoptionWindow)
+        var wanted = turn.userParts
+        var removed: [Int] = []
+        for i in stride(from: turns.count - 1, through: searchFloor, by: -1) {
+            guard turns[i].daemonId == nil, turns[i].marker == nil, !turns[i].pendingCommand,
+                  let j = wanted.firstIndex(of: turns[i].userInput) else { continue }
+            wanted.remove(at: j)
+            removed.append(i)
+        }
+        for i in removed {   // newest first: earlier indices stay valid
+            payloadStore.drop(turns[i].id)
+            turns.remove(at: i)
+        }
+        var mapped = Self.mapTurn(turn, epoch: currentEpoch)
+        dropLeadingNotesShownStandalone(from: &mapped)
+        turns.append(mapped)
+        if let first = removed.last {
+            changes.send(.spliced(replacedFrom: first))
+        } else {
+            changes.send(.appended(index: turns.count - 1))
+        }
+        enforceRetentionCap()
+        compactColdTurns()
+    }
+
     private func removeLocalTurn(at i: Int) {
         payloadStore.drop(turns[i].id)
         turns.remove(at: i)
@@ -605,6 +636,10 @@ class ChatSession: ObservableObject {
             // A turn the CLI injected (a peer's message, a skill) never adopts an
             // echo: its `userInput` is the daemon's stand-in line, and a human
             // message that happens to read the same is still the human's.
+            if turn.userParts.count >= 2 {
+                applyMergedTurnStarted(turn)
+                break
+            }
             let searchFloor = max(0, turns.count - TurnReconciler.echoAdoptionWindow)
             let injected: Bool = {
                 switch turn.origin {
@@ -875,7 +910,8 @@ class ChatSession: ObservableObject {
                         daemonId:     t.id,
                         epoch:        epoch,
                         subagentTextParents: textParents,
-                        origin:       t.origin)
+                        origin:       t.origin,
+                        userParts:    t.userParts.count >= 2 ? t.userParts : [])
     }
 
     /// A turn's wire blocks as GUI blocks, plus which subagent said each `.text`. Every

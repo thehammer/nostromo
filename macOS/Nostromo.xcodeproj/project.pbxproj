@@ -387,6 +387,10 @@
 		ZZ0000000000000000CH4B02 /* FocusSensitivity.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4B00 /* FocusSensitivity.swift */; };
 		ZZ0000000000000000CH4C01 /* ComposerHistoryNavigator.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4C00 /* ComposerHistoryNavigator.swift */; };
 		ZZ0000000000000000MQ2B01 /* QueuedMessagesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000MQ2B00 /* QueuedMessagesView.swift */; };
+		ZZ0000000000000000MG3B01 /* MergedUserBubblesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000MG3B00 /* MergedUserBubblesView.swift */; };
+		ZZ0000000000000000MG3B02 /* MergedUserBubblesView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000MG3B00 /* MergedUserBubblesView.swift */; };
+		ZZ0000000000000000MG3T11 /* MergedUserBubblesViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000MG3T10 /* MergedUserBubblesViewTests.swift */; };
+		ZZ0000000000000000MG3T21 /* ChatSessionMergedTurnTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000MG3T20 /* ChatSessionMergedTurnTests.swift */; };
 		ZZ0000000000000000CH4C02 /* ComposerHistoryNavigator.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4C00 /* ComposerHistoryNavigator.swift */; };
 		ZZ0000000000000000MQ2B02 /* QueuedMessagesView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000MQ2B00 /* QueuedMessagesView.swift */; };
 		ZZ0000000000000000CH4D01 /* ComposerHistoryStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH4D00 /* ComposerHistoryStoreTests.swift */; };
@@ -1160,6 +1164,9 @@
 		ZZ0000000000000000CH4B00 /* FocusSensitivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusSensitivity.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH4C00 /* ComposerHistoryNavigator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerHistoryNavigator.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000MQ2B00 /* QueuedMessagesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueuedMessagesView.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000MG3B00 /* MergedUserBubblesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MergedUserBubblesView.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000MG3T10 /* MergedUserBubblesViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MergedUserBubblesViewTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000MG3T20 /* ChatSessionMergedTurnTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSessionMergedTurnTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH4D00 /* ComposerHistoryStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerHistoryStoreTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH4G00 /* ComposerHistoryRelaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerHistoryRelaunchTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH4E00 /* ComposerHistoryNavigatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerHistoryNavigatorTests.swift; sourceTree = "<group>"; };
@@ -1808,6 +1815,7 @@
 				ZZ0000000000000000M20160 /* ReplInputBar.swift */,
 				ZZ0000000000000000CH4C00 /* ComposerHistoryNavigator.swift */,
 				ZZ0000000000000000MQ2B00 /* QueuedMessagesView.swift */,
+				ZZ0000000000000000MG3B00 /* MergedUserBubblesView.swift */,
 				FT0000000000000000000002 /* JumpToLatestOverlay.swift */,
 				FT0000000000000000000006 /* FollowTailController.swift */,
 				II000000000000000000020 /* AskQuestionView.swift */,
@@ -1915,6 +1923,8 @@
 				ZZ0000000000000000CH4F00 /* ReplInputBarHistoryTests.swift */,
 				ZZ0000000000000000MQ2T40 /* ReplInputBarTakeBackTests.swift */,
 				ZZ0000000000000000MQ2T30 /* QueuedMessagesViewTests.swift */,
+				ZZ0000000000000000MG3T10 /* MergedUserBubblesViewTests.swift */,
+				ZZ0000000000000000MG3T20 /* ChatSessionMergedTurnTests.swift */,
 				ZZ0000000000000000MQ2T20 /* ChatSessionQueueTests.swift */,
 				ZZ0000000000000000MQ2T10 /* SessionQueueModelTests.swift */,
 				ZZ0000000000000000MQ2T00 /* SessionQueueWireTests.swift */,
@@ -2440,6 +2450,7 @@
 				ZZ0000000000000000M20161 /* ReplInputBar.swift in Sources */,
 				ZZ0000000000000000CH4C01 /* ComposerHistoryNavigator.swift in Sources */,
 				ZZ0000000000000000MQ2B01 /* QueuedMessagesView.swift in Sources */,
+				ZZ0000000000000000MG3B01 /* MergedUserBubblesView.swift in Sources */,
 				WK0000000000000000000002 /* WorkModels.swift in Sources */,
 				WK0000000000000000000005 /* WorkStore.swift in Sources */,
 				WK0000000000000000000096 /* WorkScheduler.swift in Sources */,
@@ -2751,6 +2762,7 @@
 				ZZ0000000000000000M20162 /* ReplInputBar.swift in TestSources */,
 				ZZ0000000000000000CH4C02 /* ComposerHistoryNavigator.swift in TestSources */,
 				ZZ0000000000000000MQ2B02 /* QueuedMessagesView.swift in TestSources */,
+				ZZ0000000000000000MG3B02 /* MergedUserBubblesView.swift in TestSources */,
 				ZZ0000000000000000M20171 /* ModelPresentationTests.swift in Sources */,
 				ZZ0000000000000000M20181 /* ModelChipAppearanceTests.swift in Sources */,
 				ZZ0000000000000000M20191 /* ModelPopoverTests.swift in Sources */,
@@ -2982,6 +2994,8 @@
 				ZZ0000000000000000CH4F01 /* ReplInputBarHistoryTests.swift in Sources */,
 				ZZ0000000000000000MQ2T41 /* ReplInputBarTakeBackTests.swift in Sources */,
 				ZZ0000000000000000MQ2T31 /* QueuedMessagesViewTests.swift in Sources */,
+				ZZ0000000000000000MG3T11 /* MergedUserBubblesViewTests.swift in Sources */,
+				ZZ0000000000000000MG3T21 /* ChatSessionMergedTurnTests.swift in Sources */,
 				ZZ0000000000000000MQ2T21 /* ChatSessionQueueTests.swift in Sources */,
 				ZZ0000000000000000MQ2T11 /* SessionQueueModelTests.swift in Sources */,
 				ZZ0000000000000000MQ2T01 /* SessionQueueWireTests.swift in Sources */,

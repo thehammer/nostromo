@@ -401,6 +401,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Client<S> {
     ) -> Self {
         let mut c = Self::new(stream, wait);
         c.send(&ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "remote-shell-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: claim.map(str::to_string),

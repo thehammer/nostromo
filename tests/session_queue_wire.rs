@@ -405,6 +405,7 @@ impl Conn {
     /// Hello, Welcome, Subscribe, then a Ping/Pong so the subscription is registered.
     async fn handshake(mut self, client_kind: Option<&str>, subscribe: Value) -> Self {
         self.send(&ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "claude-login-wire-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: client_kind.map(str::to_owned),

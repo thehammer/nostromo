@@ -217,10 +217,11 @@ impl PendingMessage {
             images: images.to_vec(),
             origin: PendingOrigin::User,
             on_delivered: None,
+            batch: None,
         }
     }
 
-    fn injected(key: String, text: &str) -> Self {
+    pub(super) fn injected(key: String, text: &str) -> Self {
         let injected = Injected::new(key, text.to_string());
         Self {
             id: queue::next_entry_id(),
@@ -230,6 +231,7 @@ impl PendingMessage {
             images: Vec::new(),
             origin: PendingOrigin::Injected(injected),
             on_delivered: None,
+            batch: None,
         }
     }
 }

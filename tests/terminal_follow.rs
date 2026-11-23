@@ -261,6 +261,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Client<S> {
     async fn handshake(stream: S, claim: Option<&str>, topics: Vec<Topic>, caps: &[&str]) -> Self {
         let mut c = Self::new(stream);
         c.send(&ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "terminal-follow-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: claim.map(str::to_string),

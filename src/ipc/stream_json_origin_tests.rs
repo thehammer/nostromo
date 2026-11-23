@@ -383,6 +383,7 @@ fn turn_with(origin: Option<TurnOrigin>) -> Turn {
         timestamp: None,
         blocks: vec![],
         is_complete: false,
+        user_parts: Vec::new(),
         origin,
     }
 }

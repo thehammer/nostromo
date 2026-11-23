@@ -2012,6 +2012,7 @@ mod tests {
     fn every_client_msg() -> Vec<ClientMsg> {
         vec![
             ClientMsg::Hello {
+                capabilities: Vec::new(),
                 client_id: "c".into(),
                 protocol_version: 4,
                 client_kind: None,

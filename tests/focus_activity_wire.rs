@@ -285,6 +285,7 @@ fn the_welcome_a_local_peer_receives_advertises_focus_activity_and_the_protocol_
         let stream = UnixStream::connect(&socket).await.expect("connect");
         let (mut r, mut w) = stream.into_split();
         let hello = ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "focus-activity-wire-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: Some("mac_app".into()),

@@ -44,9 +44,10 @@ use super::{
         QueueReturnedEntry, ServerMsg, SessionAction, Topic, TrackerEditError,
         FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_MERGE, FEATURE_AUTHORED_PRS_MERGE_QUEUE,
         FEATURE_AUTHORED_PRS_NOTIFY, FEATURE_AUTHORED_PRS_PERRI, FEATURE_CONVERSATION_HISTORY,
-        FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_SESSION_QUEUE, FEATURE_SLASH_COMMANDS,
-        FEATURE_TERMINAL_STAGING_ONLY, FEATURE_TRACKER_ACK_DROPPED, FEATURE_TRACKER_CONFLICT_IDS,
-        FEATURE_TRACKER_EDIT, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
+        FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_MERGED_TURNS, FEATURE_SESSION_QUEUE,
+        FEATURE_SLASH_COMMANDS, FEATURE_TERMINAL_STAGING_ONLY, FEATURE_TRACKER_ACK_DROPPED,
+        FEATURE_TRACKER_CONFLICT_IDS, FEATURE_TRACKER_EDIT, MAX_FRAME_LEN, MIN_CLIENT_VERSION,
+        PROTOCOL_VERSION,
     },
     session_manager::{
         AppLabel, ModelRequestOutcome, QueueVerb, ResendTrigger, SessionManager, SwitchRequest,
@@ -576,6 +577,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
         FEATURE_SLASH_COMMANDS.to_string(),
         FEATURE_CONVERSATION_HISTORY.to_string(),
         FEATURE_SESSION_QUEUE.to_string(),
+        FEATURE_MERGED_TURNS.to_string(),
         FEATURE_TRACKER_EDIT.to_string(),
         FEATURE_TRACKER_CONFLICT_IDS.to_string(),
         FEATURE_TRACKER_ACK_DROPPED.to_string(),
@@ -637,11 +639,12 @@ where
     // `conn_key` is a server-minted UUID used as the registry routing key so
     // that a malicious client cannot hijack another connection's targeted
     // channel by sending a pre-known client_id.
-    let (claimed_id, conn_key, client_kind) = match hello {
+    let (claimed_id, conn_key, client_kind, merge_capable) = match hello {
         ClientMsg::Hello {
             ref client_id,
             protocol_version,
             ref client_kind,
+            ref capabilities,
         } => {
             if protocol_version < MIN_CLIENT_VERSION {
                 let err = ServerMsg::Error {
@@ -658,6 +661,7 @@ where
                 client_id.clone(),
                 Uuid::new_v4().to_string(),
                 client_kind.clone(),
+                capabilities.iter().any(|c| c == FEATURE_MERGED_TURNS),
             )
         }
         _ => {
@@ -820,6 +824,10 @@ where
             .lock()
             .unwrap()
             .insert(conn_key.clone(), targeted_tx.clone());
+        session_mgr
+            .lock()
+            .unwrap()
+            .set_client_merge_capable(&conn_key, merge_capable);
         // Only the verified Mac app hears that the conversation history changed.
         if trust == PeerTrust::OperatorApp {
             session_mgr.lock().unwrap().mark_operator_conn(&conn_key);
@@ -5177,6 +5185,7 @@ mod tests {
                 crate::ipc::stream_json::TurnBlock::text("hello"),
             ],
             is_complete: true,
+            user_parts: Vec::new(),
             origin: None,
         }
     }

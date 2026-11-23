@@ -50,6 +50,8 @@ use serde_json::Value;
 
 use super::control_scan::scan_control_request;
 use super::tasks::{parse_task_event, TaskEvent};
+use crate::ipc::session_manager::merge;
+use crate::model::batches::BatchRecord;
 use crate::model::notes::{LedgerNote, NoteKind};
 
 /// How many turns a fresh attach or resume is served. Do not change this
@@ -204,6 +206,12 @@ pub struct Turn {
     /// not write as a notice ([`SessionTranscript::disown_notice_origin`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<TurnOrigin>,
+    /// Two or more entries: the turn answers a merged frame, and these are the
+    /// messages as typed, in order (`user_input` is them joined by a blank
+    /// line). Set only where the daemon knows the split (see
+    /// [`SessionTranscript::adopt_batch`]), never read from text alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_parts: Vec<String>,
 }
 
 /// Where a turn's prompt came from when the daemon wrote it (see
@@ -2416,6 +2424,7 @@ impl SessionTranscript {
                     blocks: std::mem::take(&mut self.orphan_notes),
                     is_complete: false,
                     origin,
+                    user_parts: Vec::new(),
                 };
                 self.retained_bytes += turn_bytes(&turn);
                 self.turns.push(turn.clone());
@@ -2561,6 +2570,7 @@ impl SessionTranscript {
             blocks: std::mem::take(&mut self.orphan_notes),
             is_complete: false,
             origin: Some(origin),
+            user_parts: Vec::new(),
         };
         self.retained_bytes += turn_bytes(&turn);
         self.turns.push(turn.clone());
@@ -2605,6 +2615,52 @@ impl SessionTranscript {
             self.first_user_input = Some(turn.user_input.clone());
         }
         Some(turn.clone())
+    }
+
+    /// Turn `turn_id` answers a merged frame the daemon wrote: its
+    /// `user_input` becomes the messages `parts` joined by a blank line (no
+    /// framing), `user_parts` the parts themselves, and the session's title
+    /// follows. Returns the turn as it now is, or `None` if it is gone.
+    pub fn adopt_batch(&mut self, turn_id: &str, parts: Vec<String>) -> Option<Turn> {
+        if parts.len() < 2 {
+            return None;
+        }
+        let idx = self.turns.iter().position(|t| t.id == turn_id)?;
+        let turn = &mut self.turns[idx];
+        let before = turn_bytes(turn);
+        let old_input = std::mem::replace(&mut turn.user_input, parts.join("\n\n"));
+        turn.user_parts = parts;
+        self.retained_bytes = self
+            .retained_bytes
+            .saturating_sub(before)
+            .saturating_add(turn_bytes(turn));
+        if turn.origin.is_none() && self.first_user_input.as_deref() == Some(old_input.as_str()) {
+            self.first_user_input = Some(turn.user_input.clone());
+        }
+        Some(turn.clone())
+    }
+
+    /// After a rebuild from the CLI's JSONL: split each turn whose prompt is a
+    /// merged frame (it parses strictly) AND whose boundary and count the
+    /// batch ledger recorded. Any other turn, a lone typed message that
+    /// imitates an envelope included, shows verbatim.
+    pub fn apply_batch_ledger(&mut self, records: &[BatchRecord]) {
+        for idx in 0..self.turns.len() {
+            let turn = &self.turns[idx];
+            if turn.origin.is_some() || !turn.user_parts.is_empty() {
+                continue;
+            }
+            let Some(parsed) = merge::parse(&turn.user_input) else {
+                continue;
+            };
+            let recorded = records
+                .iter()
+                .any(|r| r.boundary == parsed.boundary && r.count as usize == parsed.parts.len());
+            if recorded {
+                let id = turn.id.clone();
+                self.adopt_batch(&id, parsed.parts);
+            }
+        }
     }
 
     /// A `<task-notification>` event. Two in a row with no reply between
@@ -2659,6 +2715,7 @@ impl SessionTranscript {
             blocks: std::mem::take(&mut self.orphan_notes),
             is_complete: false,
             origin: Some(TurnOrigin::TaskWake { items, omitted }),
+            user_parts: Vec::new(),
         };
         self.retained_bytes += turn_bytes(&turn);
         self.turns.push(turn.clone());
@@ -2733,6 +2790,7 @@ impl SessionTranscript {
             blocks: std::mem::take(&mut self.orphan_notes),
             is_complete: false,
             origin: Some(origin),
+            user_parts: Vec::new(),
         };
         self.retained_bytes += turn_bytes(&turn);
         self.turns.push(turn.clone());
@@ -3211,6 +3269,7 @@ fn turn_bytes(t: &Turn) -> usize {
         + t.id.len()
         + t.user_input.len()
         + t.timestamp.as_deref().map(str::len).unwrap_or(0)
+        + t.user_parts.iter().map(String::len).sum::<usize>()
         + t.blocks.iter().map(block_bytes).sum::<usize>()
 }
 
@@ -3340,6 +3399,10 @@ mod origin_tests;
 #[cfg(test)]
 #[path = "stream_json_mother_tests.rs"]
 mod mother_tests;
+
+#[cfg(test)]
+#[path = "stream_json_batch_tests.rs"]
+mod batch_tests;
 
 #[cfg(test)]
 #[path = "stream_json_wake_tests.rs"]
@@ -4067,6 +4130,7 @@ mod tests {
                     timestamp: None,
                     blocks: vec![],
                     is_complete: false,
+                    user_parts: Vec::new(),
                     origin: None,
                 },
             },

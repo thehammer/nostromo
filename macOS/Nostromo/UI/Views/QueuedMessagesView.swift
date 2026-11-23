@@ -17,9 +17,12 @@ enum QueuedMessageText {
     /// Longest first line a chip shows before the ellipsis.
     static let maxFirstLine = 80
 
-    static func header(displayName: String, count: Int, waitingForSignIn: Bool) -> String {
+    /// `sentTogether`: two or more of the entries will be written as one turn (they have a
+    /// `merge_group`), so the header says so. Spoken by VoiceOver too, as the label is this text.
+    static func header(displayName: String, count: Int, waitingForSignIn: Bool,
+                       sentTogether: Bool = false) -> String {
         let who = waitingForSignIn ? "Waiting for sign-in" : "Waiting for \(displayName) to finish"
-        return "\(who) · \(count) queued"
+        return "\(who) · \(count) queued" + (sentTogether ? " · sent together" : "")
     }
 
     /// `From Mother overview`, `From work item`, `From an agent`; empty for a typed message.
@@ -306,8 +309,10 @@ final class QueuedMessagesView: NSView {
         entries = newEntries
         if entries.count <= Self.collapsedLimit { isExpanded = false }
         headerText = QueuedMessageText.header(displayName: displayName, count: entries.count,
-                                              waitingForSignIn: waitingForSignIn)
+                                              waitingForSignIn: waitingForSignIn,
+                                              sentTogether: entries.contains { $0.mergeGroup != nil })
         headerLabel.stringValue = headerText
+        headerLabel.setAccessibilityLabel(headerText)
         rebuildChips()
         updateGroupAccessibility()
         finishChange(heightBefore: before)

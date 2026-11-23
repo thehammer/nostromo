@@ -255,6 +255,7 @@ async fn handshake_with_nonce<S: AsyncRead + AsyncWrite + Unpin>(
     send(
         stream,
         &ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "peer-gating-it".into(),
             protocol_version: PROTOCOL_VERSION,
             // Claimed over TCP too: the claim never lifts a network peer.
@@ -2129,6 +2130,7 @@ async fn session_transcript_frames_for_a_sensitive_tag_are_never_broadcast_to_a_
         timestamp: None,
         blocks: vec![],
         is_complete: false,
+        user_parts: Vec::new(),
         origin: None,
     };
     for tag in ["fred", "teri", W] {
@@ -8082,6 +8084,7 @@ mod background_tasks {
                 parsed: 0,
             };
             tap.send(&ClientMsg::Hello {
+                capabilities: Vec::new(),
                 client_id: "tasks-it".into(),
                 protocol_version: PROTOCOL_VERSION,
                 client_kind,
