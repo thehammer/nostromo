@@ -594,7 +594,7 @@ Visibility and retention:
 - **Trust erosion from stale notifications.** If withdrawal lags, the operator
   will answer something already answered, find nothing, and start ignoring
   pushes. This is why withdrawal is fought for rather than deferred, and why
-  the design is an honest "no longer needs you", not best-effort removal.
+  the design is an honest "no longer needs you", not a reliance on best-effort removal.
 
 ## Open questions
 
