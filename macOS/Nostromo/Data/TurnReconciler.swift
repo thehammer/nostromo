@@ -84,12 +84,16 @@ enum TurnReconciler {
         guard !outcome.didReplaceAll else { return outcome }   // a different conversation: the notice is stale
         var merged = outcome.turns
         var replacedFrom = outcome.replacedFrom
+        var placedAfter: [UUID: Int] = [:]
+        var placedFirst = 0   // notices already put after the same anchor keep their order
         for (anchor, notice) in notices {
             var at = merged.count
             if let anchor {
-                if let i = merged.firstIndex(where: { $0.id == anchor.id }) { at = i + 1 }
+                if let i = merged.firstIndex(where: { $0.id == anchor.id }) { at = i + 1 + placedAfter[anchor.id, default: 0]
+                    placedAfter[anchor.id, default: 0] += 1 }
             } else {
-                at = merged.firstIndex(where: { $0.marker != .historyUnavailable }) ?? 0
+                at = (merged.firstIndex(where: { $0.marker != .historyUnavailable }) ?? 0) + placedFirst
+                placedFirst += 1
             }
             merged.insert(notice, at: at)
             // Views before the first replaced turn are kept; a notice inserted before it shifts that index.

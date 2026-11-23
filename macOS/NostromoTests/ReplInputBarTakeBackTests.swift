@@ -931,6 +931,130 @@ final class ReplInputBarTakeBackTests: XCTestCase {
         XCTAssertEqual(text(rig), "")
     }
 
+    // MARK: A message that comes back after the composer stopped waiting
+
+    private static let lateStatus = "A queued message came back late. Press ↑ to recall it"
+
+    func testATakeBackAnsweredAfterTheTimeoutIsKeptInHistoryAndTheComposerIsNotTouched() {
+        let queue = FakeQueue()
+        let rig = makeRig(queue: queue)
+        queue.queued([typedEntry("q-1", "fix the picker")])
+        up(rig)
+        queue.fireTimers()
+        XCTAssertEqual(rig.bar.lastStatus, "Couldn't reach Nostromo")
+        queue.queued([])                           // the daemon's queue no longer lists it
+
+        queue.answer("taken_back", text: "the only copy", images: [])
+
+        XCTAssertEqual(text(rig), "", "a composer that moved on is not filled")
+        XCTAssertEqual(store.entries(tag: tag), ["the only copy"])
+        XCTAssertEqual(rig.bar.lastStatus, Self.lateStatus)
+        XCTAssertEqual(rig.statuses.value.last, Self.lateStatus)
+        up(rig)
+        XCTAssertEqual(text(rig), "the only copy", "Up finds it")
+    }
+
+    func testALateTakeBackNeverOverwritesWhatThePersonTypedMeanwhile() {
+        let queue = FakeQueue()
+        let rig = makeRig(queue: queue)
+        queue.queued([typedEntry("q-1", "fix the picker")])
+        up(rig)
+        queue.fireTimers()
+        type(rig, "my new draft")
+
+        queue.answer("taken_back", text: "the only copy", images: [])
+
+        XCTAssertEqual(text(rig), "my new draft")
+        XCTAssertTrue(store.entries(tag: tag).contains("the only copy"))
+        XCTAssertEqual(caret(rig), ("my new draft" as NSString).length)
+    }
+
+    func testAnAnswerInTimeShowsNoLateStatusAndAddsNothingExtraToHistory() {
+        let queue = FakeQueue()
+        let rig = makeRig(queue: queue)
+        queue.queued([typedEntry("q-1", "fix the picker")])
+        up(rig)
+
+        queue.answer("taken_back", text: "fix the picker", images: [])
+
+        XCTAssertNotEqual(rig.bar.lastStatus, Self.lateStatus)
+        XCTAssertTrue(rig.statuses.value.isEmpty)
+        XCTAssertEqual(store.entries(tag: tag), [], "it is in the composer, not in history")
+    }
+
+    func testALateStopFrameIsKeptInHistoryNewestDroppedFirstAndTheComposerIsNotTouched() {
+        let queue = FakeQueue()
+        let rig = makeRig(queue: queue)
+        queue.model.noteStop(requester: ObjectIdentifier(rig.bar))
+        queue.date = queue.date.addingTimeInterval(6)
+
+        queue.returned([("dropped one", []), ("dropped two", [])])
+
+        XCTAssertEqual(text(rig), "")
+        XCTAssertEqual(store.entries(tag: tag), ["dropped two", "dropped one"])
+        XCTAssertEqual(rig.bar.lastStatus, Self.lateStatus)
+        XCTAssertTrue(rig.queueSpoken.value.isEmpty, "this is a status, not a Stop-restore announcement")
+        up(rig)
+        XCTAssertEqual(text(rig), "dropped two")
+        up(rig)
+        XCTAssertEqual(text(rig), "dropped one")
+    }
+
+    func testAStopFrameInsideTheWindowIsNotAlsoKeptAsLate() {
+        let queue = FakeQueue()
+        let rig = makeRig(queue: queue)
+        queue.model.noteStop(requester: ObjectIdentifier(rig.bar))
+        queue.date = queue.date.addingTimeInterval(1)
+
+        queue.returned([("dropped", [])])
+
+        XCTAssertEqual(text(rig), "dropped")
+        XCTAssertNotEqual(rig.bar.lastStatus, Self.lateStatus)
+        XCTAssertEqual(store.entries(tag: tag), [])
+    }
+
+    func testBindingTheQueueTwiceKeepsEachLateMessageOnce() {
+        let queue = FakeQueue()
+        let rig = makeRig(queue: queue)
+        rig.bar.bindQueue(model: queue.model)
+        queue.model.noteStop(requester: ObjectIdentifier(rig.bar))
+        queue.date = queue.date.addingTimeInterval(6)
+
+        queue.returned([("dropped one", []), ("dropped two", [])])
+
+        XCTAssertEqual(store.entries(tag: tag), ["dropped two", "dropped one"])
+    }
+
+    func testALateComposerWithoutHistoryJustStaysQuiet() {
+        let queue = FakeQueue()
+        let window = windows.make(width: 600, height: 60)
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 60))
+        window.contentView = content
+        let bar = ReplInputBar(frame: content.bounds)
+        content.addSubview(bar)
+        bars.append(bar)
+        bar.bindQueue(model: queue.model)
+        queue.model.noteStop(requester: ObjectIdentifier(bar))
+        queue.date = queue.date.addingTimeInterval(6)
+
+        queue.returned([("dropped", [])])
+
+        XCTAssertEqual(bar.textView.string, "")
+    }
+
+    func testTwoWindowsOnOneFocusKeepALateStopFrameInHistoryOnceEach() {
+        let queue = FakeQueue()
+        let a = makeRig(queue: queue)
+        _ = makeRig(queue: queue)
+        queue.model.noteStop(requester: ObjectIdentifier(a.bar))
+        queue.date = queue.date.addingTimeInterval(6)
+
+        queue.returned([("dropped one", []), ("dropped two", [])])
+
+        XCTAssertEqual(store.entries(tag: tag), ["dropped two", "dropped one"],
+                       "the history is shared: two windows must not record the same messages twice")
+    }
+
     // MARK: A send the daemon refused for a full sign-in queue
 
     func testARefusedSendComesBackIntoAnEmptyComposerWithTheReason() {

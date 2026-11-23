@@ -224,7 +224,12 @@ final class QueuedMessagesView: NSView {
 
     /// The tallest this area may be: the host sets a third of the pane. The composer must stay visible.
     var maxHeight: CGFloat = .greatestFiniteMagnitude {
-        didSet { if maxHeight != oldValue { needsLayout = true; onHeightChange?() } }
+        didSet {
+            guard maxHeight != oldValue else { return }
+            isHidden = preferredHeight == 0
+            needsLayout = true
+            onHeightChange?()
+        }
     }
 
     private(set) var entries: [QueuedMessage] = []

@@ -704,6 +704,16 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
                 self.restoreStopped(returned.entries)
             }
             .store(in: &queueBindings)
+        model.recoveredLate
+            .sink { [weak self] texts in
+                guard let self, let store = self.historyStore, let tag = self.historyTag else { return }
+                // Another window of this focus may have recorded these already (one shared store).
+                if Array(store.entries(tag: tag).prefix(texts.count)) != texts.reversed() {
+                    for text in texts { store.record(tag: tag, text: text, agentName: self.historyAgentName) }
+                }
+                self.showStatus("A queued message came back late. Press ↑ to recall it")
+            }
+            .store(in: &queueBindings)
     }
 
     /// Tells VoiceOver what a take-back or Stop restore did. A seam for tests.

@@ -571,6 +571,70 @@ final class ChatSessionQueueTests: XCTestCase {
         XCTAssertEqual(texts(), ["an old send"])
     }
 
+    /// Two focuses of one process share the one client, so an `error` frame reaches both of their sessions.
+    private func twoSessionsOnOneClient() -> (a: ChatSession, b: ChatSession, refusalsA: () -> [String], refusalsB: () -> [String]) {
+        client = NostromodClient(socketPath: "/dev/null")
+        client.setAdvertisedFeaturesForTesting(queueDaemon)
+        let a = ChatSession(tag: "focus-a", agentName: "cody", displayName: "Cody", workingDirectory: nil, client: client)
+        let b = ChatSession(tag: "focus-b", agentName: "cody", displayName: "Cody", workingDirectory: nil, client: client)
+        var gotA: [String] = [], gotB: [String] = []
+        a.sendRefused.sink { gotA.append($0.text) }.store(in: &bag)
+        b.sendRefused.sink { gotB.append($0.text) }.store(in: &bag)
+        return (a, b, { gotA }, { gotB })
+    }
+
+    private func userTexts(_ session: ChatSession) -> [String] { session.turns.filter { $0.marker == nil }.map(\.userInput) }
+
+    func testOnlyTheFocusThatSentLastClaimsAFullQueueError() throws {
+        let rig = twoSessionsOnOneClient()
+        rig.a.send("from A")
+        rig.b.send("from B")
+
+        deliver(.error(Self.queueFull))
+
+        XCTAssertEqual(rig.refusalsB(), ["from B"], "B sent last: the refusal is B's")
+        XCTAssertTrue(rig.refusalsA().isEmpty, "A must not restore its own message for B's refusal")
+        XCTAssertEqual(userTexts(rig.a), ["from A"], "A's echo stays")
+        XCTAssertEqual(userTexts(rig.b), [], "B's echo goes")
+    }
+
+    func testTheOtherOrderGivesTheOtherFocusTheRefusal() throws {
+        let rig = twoSessionsOnOneClient()
+        rig.b.send("from B")
+        rig.a.send("from A")
+
+        deliver(.error(Self.queueFull))
+
+        XCTAssertEqual(rig.refusalsA(), ["from A"])
+        XCTAssertTrue(rig.refusalsB().isEmpty)
+        XCTAssertEqual(userTexts(rig.b), ["from B"])
+        XCTAssertEqual(userTexts(rig.a), [])
+    }
+
+    func testAFocusThatSendsAgainTakesTheClaimBack() throws {
+        let rig = twoSessionsOnOneClient()
+        rig.a.send("A one")
+        rig.b.send("B one")
+        rig.a.send("A two")
+
+        deliver(.error(Self.queueFull))
+
+        XCTAssertEqual(rig.refusalsA(), ["A two"])
+        XCTAssertTrue(rig.refusalsB().isEmpty)
+    }
+
+    func testAClaimedRefusalIsNotClaimedAgainByTheOtherFocusOnARepeat() throws {
+        let rig = twoSessionsOnOneClient()
+        rig.a.send("from A")
+        rig.b.send("from B")
+
+        deliver(.error(Self.queueFull))
+        deliver(.error(Self.queueFull))
+
+        XCTAssertEqual(rig.refusalsB(), ["from B"])
+        XCTAssertTrue(rig.refusalsA().isEmpty, "the repeat is not A's either: it did not send last")
+    }
+
     func testAnOldDaemonsErrorIsNeverTreatedAsARefusal() throws {
         try connect(features: ["work"])
         let refusals = collectRefusals()

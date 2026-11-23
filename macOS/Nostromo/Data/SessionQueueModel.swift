@@ -197,6 +197,9 @@ final class SessionQueueModel: ObservableObject {
     let events = PassthroughSubject<SessionQueueEvent, Never>()
     /// Stop's dropped messages, for the composer that pressed Stop (others ignore it).
     let returned = PassthroughSubject<SessionQueueReturn, Never>()
+    /// Text that left the queue after its composer had stopped waiting (a take-back answered after the
+    /// timeout, or Stop's frame arriving after the window). Composers keep it in history so it is not lost.
+    let recoveredLate = PassthroughSubject<[String], Never>()
 
     private(set) var epoch: String?
     private(set) var rev = -1
@@ -217,6 +220,8 @@ final class SessionQueueModel: ObservableObject {
     /// Entry ids with a request in flight, so two windows of this process cannot both act on one entry.
     private var inFlight: [String: String] = [:]
     private var stopRequester: (who: ObjectIdentifier, at: Date)?
+    /// Request ids that timed out, so a late `taken_back` can still be recovered.
+    private var timedOutRequests: Set<String> = []
 
     init(tag: String,
          sendTakeBack: @escaping (String, String) -> Bool,
@@ -306,8 +311,15 @@ final class SessionQueueModel: ObservableObject {
     }
 
     func handle(_ result: SessionQueueResultWire) {
-        // A late answer (after the timeout) finds nothing: the text it carries is in composer history.
-        guard let request = requests.removeValue(forKey: result.requestId) else { return }
+        // A late answer (after the timeout) never fills a composer that moved on, but a late `taken_back`
+        // carries the only copy of a message the daemon no longer holds: keep it in history.
+        guard let request = requests.removeValue(forKey: result.requestId) else {
+            if timedOutRequests.remove(result.requestId) != nil, result.code == "taken_back",
+               let text = result.text, !text.isEmpty {
+                recoveredLate.send([text])
+            }
+            return
+        }
         if inFlight[request.entryId] == result.requestId { inFlight[request.entryId] = nil }
         guard let completion = request.completion else { return }
         switch result.code {
@@ -321,6 +333,7 @@ final class SessionQueueModel: ObservableObject {
     private func timedOut(requestId: String) {
         guard let request = requests.removeValue(forKey: requestId) else { return }
         if inFlight[request.entryId] == requestId { inFlight[request.entryId] = nil }
+        if request.completion != nil { timedOutRequests.insert(requestId) }
         request.completion?(.noAnswer)
     }
 
@@ -334,7 +347,11 @@ final class SessionQueueModel: ObservableObject {
     func handle(_ wire: SessionQueueReturnedWire) {
         guard let stop = stopRequester else { return }
         stopRequester = nil
-        guard now().timeIntervalSince(stop.at) <= Self.stopWindow, !wire.entries.isEmpty else { return }
+        guard !wire.entries.isEmpty else { return }
+        guard now().timeIntervalSince(stop.at) <= Self.stopWindow else {
+            recoveredLate.send(wire.entries.map { $0.text })
+            return
+        }
         returned.send(SessionQueueReturn(
             requester: stop.who,
             entries: wire.entries.map { .init(text: $0.text, images: $0.images ?? []) }))

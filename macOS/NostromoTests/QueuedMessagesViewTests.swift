@@ -282,6 +282,62 @@ final class QueuedMessagesViewTests: MouseQueueTestCase {
         XCTAssertGreaterThan(calls, afterTwo, "back to nothing")
     }
 
+    func testRaisingTheMaximumShowsAViewThatWasHiddenForWantOfRoom() {
+        let rig = makeRig(entries: [])
+        rig.view.maxHeight = 0
+
+        rig.view.setContent(entries: typed(2), displayName: "Cody", waitingForSignIn: false)
+        XCTAssertEqual(rig.view.preferredHeight, 0, "no room at all")
+        XCTAssertTrue(rig.view.isHidden)
+
+        rig.view.maxHeight = 200
+
+        XCTAssertGreaterThan(rig.view.preferredHeight, 0)
+        XCTAssertFalse(rig.view.isHidden, "the chips must show as soon as there is room for them")
+    }
+
+    func testLoweringTheMaximumToNothingHidesTheViewAndRaisingItAgainShowsIt() {
+        let rig = makeRig(entries: typed(2))
+        XCTAssertFalse(rig.view.isHidden)
+
+        rig.view.maxHeight = 0
+        XCTAssertTrue(rig.view.isHidden)
+        XCTAssertEqual(rig.view.preferredHeight, 0)
+
+        rig.view.maxHeight = 150
+        XCTAssertFalse(rig.view.isHidden)
+        XCTAssertGreaterThan(rig.view.preferredHeight, 0)
+    }
+
+    func testRaisingTheMaximumShowsAStatusLineThatWasHiddenForWantOfRoom() {
+        let rig = makeRig(entries: [])
+        rig.view.maxHeight = 0
+        rig.view.setStatus("Already sent")
+        XCTAssertTrue(rig.view.isHidden)
+
+        rig.view.maxHeight = 100
+
+        XCTAssertFalse(rig.view.isHidden)
+        XCTAssertGreaterThan(rig.view.preferredHeight, 0)
+    }
+
+    func testChangingTheMaximumWithNothingToShowKeepsTheViewHidden() {
+        let rig = makeRig(entries: [])
+        rig.view.maxHeight = 50
+        rig.view.maxHeight = 300
+        XCTAssertTrue(rig.view.isHidden)
+        XCTAssertEqual(rig.view.preferredHeight, 0)
+    }
+
+    func testChangingTheMaximumKeepsTheViewVisibleWhileThereIsRoom() {
+        let rig = makeRig(entries: typed(2))
+        for max in [400, 120, 90, 500] as [CGFloat] {
+            rig.view.maxHeight = max
+            XCTAssertFalse(rig.view.isHidden, "max \(max)")
+            XCTAssertLessThanOrEqual(rig.view.preferredHeight, max)
+        }
+    }
+
     func testAStatusLineTakesRoomAndGoesAwayAgain() {
         let rig = makeRig(entries: typed(1))
         let without = rig.view.preferredHeight

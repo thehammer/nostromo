@@ -550,6 +550,165 @@ final class SessionQueueModelTests: XCTestCase {
         XCTAssertEqual(rig.returns.map(\.requester), [ObjectIdentifier(second)])
     }
 
+    // MARK: Text that comes back after its composer stopped waiting
+
+    private final class Late {
+        var batches: [[String]] = []
+        var bag = Set<AnyCancellable>()
+    }
+
+    private func collectLate(_ rig: Rig) -> Late {
+        let late = Late()
+        rig.model.recoveredLate.sink { late.batches.append($0) }.store(in: &late.bag)
+        return late
+    }
+
+    func testATakenBackAnswerAfterTheTimeoutIsRecoveredAndTheCompletionStaysNoAnswer() {
+        let rig = Rig()
+        let late = collectLate(rig)
+        var outcomes: [TakeBackOutcome] = []
+        _ = rig.model.takeBack(id: "q-1") { outcomes.append($0) }
+        rig.fireTimers()
+        XCTAssertTrue(late.batches.isEmpty, "nothing yet: the daemon has not answered")
+
+        rig.model.handle(result("req-1", id: "q-1", code: "taken_back", text: "the only copy", images: []))
+
+        XCTAssertEqual(late.batches, [["the only copy"]])
+        XCTAssertEqual(outcomes, [.noAnswer], "the composer already moved on and is not filled")
+    }
+
+    func testALateTakenBackAnswerIsRecoveredOnceEvenIfRepeated() {
+        let rig = Rig()
+        let late = collectLate(rig)
+        _ = rig.model.takeBack(id: "q-1") { _ in }
+        rig.fireTimers()
+
+        rig.model.handle(result("req-1", id: "q-1", code: "taken_back", text: "x", images: []))
+        rig.model.handle(result("req-1", id: "q-1", code: "taken_back", text: "x", images: []))
+
+        XCTAssertEqual(late.batches, [["x"]])
+    }
+
+    func testALateAnswerThatCarriesNoTextIsNotRecovered() {
+        for code in ["already_delivered", "not_found", "not_allowed", "removed", "from_the_future"] {
+            let rig = Rig()
+            let late = collectLate(rig)
+            _ = rig.model.takeBack(id: "q-1") { _ in }
+            rig.fireTimers()
+
+            rig.model.handle(result("req-1", id: "q-1", code: code))
+
+            XCTAssertTrue(late.batches.isEmpty, code)
+        }
+        let rig = Rig()
+        let late = collectLate(rig)
+        _ = rig.model.takeBack(id: "q-1") { _ in }
+        rig.fireTimers()
+        rig.model.handle(result("req-1", id: "q-1", code: "taken_back"))
+        XCTAssertTrue(late.batches.isEmpty, "a taken_back with no text has nothing to keep")
+        let rig2 = Rig()
+        let late2 = collectLate(rig2)
+        _ = rig2.model.takeBack(id: "q-1") { _ in }
+        rig2.fireTimers()
+        rig2.model.handle(result("req-1", id: "q-1", code: "taken_back", text: "", images: []))
+        XCTAssertTrue(late2.batches.isEmpty, "nor does an empty one")
+    }
+
+    func testALateAnswerThatIsNotATakeBackIsNotRecoveredEvenIfItCarriesText() {
+        for code in ["already_delivered", "not_found", "not_allowed", "removed", "from_the_future"] {
+            let rig = Rig()
+            let late = collectLate(rig)
+            _ = rig.model.takeBack(id: "q-1") { _ in }
+            rig.fireTimers()
+
+            rig.model.handle(result("req-1", id: "q-1", code: code, text: "text that must not be kept", images: []))
+
+            XCTAssertTrue(late.batches.isEmpty, code)
+        }
+    }
+
+    func testATakenBackAnswerInTimeIsNotRecoveredLate() {
+        let rig = Rig()
+        let late = collectLate(rig)
+        _ = rig.model.takeBack(id: "q-1") { _ in }
+
+        rig.model.handle(result("req-1", id: "q-1", code: "taken_back", text: "in time", images: []))
+        rig.fireTimers()
+
+        XCTAssertTrue(late.batches.isEmpty, "the composer got it")
+    }
+
+    func testAnAnswerForARequestThatWasNeverMadeIsNotRecovered() {
+        let rig = Rig()
+        let late = collectLate(rig)
+        rig.model.handle(result("never-sent", id: "q-1", code: "taken_back", text: "stranger", images: []))
+        XCTAssertTrue(late.batches.isEmpty)
+    }
+
+    func testALateAnswerToATimedOutRemoveIsNotRecovered() {
+        let rig = Rig()
+        let late = collectLate(rig)
+        XCTAssertEqual(rig.model.remove(id: "q-1"), .sent)
+        rig.fireTimers()
+
+        rig.model.handle(result("req-1", id: "q-1", code: "removed"))
+        rig.model.handle(result("req-1", id: "q-1", code: "taken_back", text: "x", images: []))
+
+        XCTAssertTrue(late.batches.isEmpty, "a remove asked for no text")
+    }
+
+    func testAStopFrameAfterTheWindowIsRecoveredAsTextInOrderAndNotHandedToTheComposer() {
+        let rig = Rig()
+        let late = collectLate(rig)
+        rig.model.noteStop(requester: ObjectIdentifier(Marker()))
+        rig.date = rig.date.addingTimeInterval(5.1)
+
+        rig.model.handle(returned([("held message", nil), ("fix the picker", ["/tmp/a.png"])]))
+
+        XCTAssertEqual(late.batches, [["held message", "fix the picker"]])
+        XCTAssertTrue(rig.returns.isEmpty, "the person has moved on: nothing is put in a composer")
+    }
+
+    func testAStopFrameInsideTheWindowIsHandedBackAndNotRecoveredLate() {
+        let rig = Rig()
+        let late = collectLate(rig)
+        rig.model.noteStop(requester: ObjectIdentifier(Marker()))
+        rig.date = rig.date.addingTimeInterval(4.9)
+
+        rig.model.handle(returned([("a", nil)]))
+
+        XCTAssertEqual(rig.returns.count, 1)
+        XCTAssertTrue(late.batches.isEmpty)
+    }
+
+    func testAStopFrameThatThisWindowDidNotAskForIsNotRecovered() {
+        let rig = Rig()
+        let late = collectLate(rig)
+        rig.date = rig.date.addingTimeInterval(60)
+        rig.model.handle(returned([("someone else's stop", nil)]))
+        XCTAssertTrue(late.batches.isEmpty)
+    }
+
+    func testAnEmptyLateStopFrameRecoversNothingAndASecondLateFrameIsNotRecovered() {
+        let rig = Rig()
+        let late = collectLate(rig)
+        rig.model.noteStop(requester: ObjectIdentifier(Marker()))
+        rig.date = rig.date.addingTimeInterval(6)
+
+        rig.model.handle(returned([]))
+        rig.model.handle(returned([("after", nil)]))
+
+        XCTAssertTrue(late.batches.isEmpty)
+
+        let again = Rig()
+        let lateAgain = collectLate(again)
+        again.model.noteStop(requester: ObjectIdentifier(Marker()))
+        again.date = again.date.addingTimeInterval(6)
+        again.model.handle(returned([("first", nil)]))
+        again.model.handle(returned([("second", nil)]))
+        XCTAssertEqual(lateAgain.batches, [["first"]], "one Stop, one recovery")
+    }
+
     // MARK: The notice words
 
     func testTheNotSentNoticeNamesTheCountAndTellsThePersonHowToRecall() {

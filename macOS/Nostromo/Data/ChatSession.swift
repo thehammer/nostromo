@@ -150,6 +150,8 @@ class ChatSession: ObservableObject {
     static let refusalWindow: TimeInterval = 3
     static let signInQueueFullMarker = "waiting_for_sign_in: queue full"
     private var lastSend: (text: String, images: [URL], at: Date)?
+    /// The focus that sent last, in this process: an `error` frame names no session, so only that one claims it.
+    private static var lastSenderTag: String?
     /// Idle-time echoes by `client_ref`: the daemon queued the message anyway, so its snapshot retires them.
     private var echoesByClientRef: [String: UUID] = [:]
 
@@ -309,6 +311,7 @@ class ChatSession: ObservableObject {
         }
         isRunning = true
         lastSend = (trimmed, images, Date())
+        Self.lastSenderTag = tag
         client.sessionSend(tag: tag, text: trimmed, imagePaths: images.map { $0.path }, clientRef: clientRef)
         FocusStore.shared.clearResumed(tag: tag)
     }
@@ -332,7 +335,7 @@ class ChatSession: ObservableObject {
     /// The daemon refused a send for a full sign-in queue. Only the send just made is meant: the
     /// refusal frame names no session.
     private func handleSendRefusal(_ message: String) {
-        guard message.contains(Self.signInQueueFullMarker),
+        guard message.contains(Self.signInQueueFullMarker), Self.lastSenderTag == tag,
               let sent = lastSend,
               Date().timeIntervalSince(sent.at) <= Self.refusalWindow else { return }
         lastSend = nil
