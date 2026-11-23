@@ -238,6 +238,39 @@ async fn status_asked_again_within_a_second_comes_from_the_last_list() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_status_requests_at_once_reach_the_cli_once() {
+    let f = fixture(true);
+    let (a, b) = tokio::join!(
+        f.mcp(McpAction::Status, None, None),
+        f.mcp(McpAction::Status, None, None)
+    );
+    assert_eq!(a.outcome, McpOutcome::Ok);
+    assert_eq!(b.outcome, McpOutcome::Ok);
+    assert_eq!(a.servers, b.servers, "the second reuses the first's fetch");
+    assert_eq!(f.subtypes(), ["mcp_status"], "one status sent");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_reconnect_does_not_leave_the_server_running_forever() {
+    let f = fixture(true);
+    f.set_mode("silent");
+    // The CLI never answers; give up on the request (the future is dropped mid-flight).
+    let gave_up = tokio::time::timeout(
+        Duration::from_millis(100),
+        f.mcp(McpAction::Reconnect, Some("odd"), None),
+    )
+    .await;
+    assert!(gave_up.is_err(), "the request was still waiting");
+    let again = f.mcp(McpAction::Reconnect, Some("odd"), None).await;
+    assert_eq!(again.outcome, McpOutcome::RateLimited);
+    let why = again.message.unwrap();
+    assert!(
+        !why.contains("already running"),
+        "the dropped request's slot was released, got: {why}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconnect_sends_one_request_then_a_fresh_status() {
     let f = fixture(true);
     let reply = f.mcp(McpAction::Reconnect, Some("odd"), None).await;

@@ -33,6 +33,8 @@ use crate::mcp::socket::MCP_SERVER_NAME;
 pub const ACTION_GAP: Duration = Duration::from_secs(5);
 /// Least time between two real `mcp_status` calls for one session.
 pub const STATUS_GAP: Duration = Duration::from_secs(1);
+/// How long a session's limiter entry is kept once nothing is running and nothing is recent.
+pub const LIMITER_TTL: Duration = Duration::from_secs(60);
 
 const NAME_CHARS: usize = 128;
 const WORD_CHARS: usize = 32;
@@ -65,6 +67,35 @@ struct TagLimits {
     status_at: Option<Instant>,
     last_list: Option<Vec<McpServerView>>,
     actions: HashMap<String, ActionSlot>,
+    /// Held for the length of a real `status` fetch: a second caller waits here
+    /// and then reuses the list the first one stored.
+    fetch: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl TagLimits {
+    /// Nothing here is running or recent: the entry can go.
+    fn is_idle(&self, ttl: Duration) -> bool {
+        self.status_at.is_none_or(|at| at.elapsed() >= ttl)
+            && self
+                .actions
+                .values()
+                .all(|a| !a.in_flight && a.started.elapsed() >= ttl)
+            && Arc::strong_count(&self.fetch) == 1
+    }
+}
+
+/// Holds one (session, server) in-flight slot and gives it back when dropped,
+/// so a request whose future is dropped never leaves the server "already running".
+pub struct ActionGuard {
+    panel: McpPanelState,
+    tag: String,
+    server: String,
+}
+
+impl Drop for ActionGuard {
+    fn drop(&mut self) {
+        self.panel.release_action(&self.tag, &self.server);
+    }
 }
 
 struct ActionSlot {
@@ -78,6 +109,7 @@ pub struct McpPanelState {
     tags: Arc<Mutex<HashMap<String, TagLimits>>>,
     control_timeout: Duration,
     reconnect_timeout: Duration,
+    ttl: Duration,
 }
 
 impl Default for McpPanelState {
@@ -86,6 +118,7 @@ impl Default for McpPanelState {
             tags: Arc::default(),
             control_timeout: CONTROL_TIMEOUT,
             reconnect_timeout: TOOLS_RECONNECT_TIMEOUT,
+            ttl: LIMITER_TTL,
         }
     }
 }
@@ -98,13 +131,28 @@ impl McpPanelState {
         self
     }
 
+    /// Shorten how long an idle session's entry is kept (a test hook).
+    pub fn with_limiter_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = ttl;
+        self
+    }
+
+    /// How many sessions have limiter state (a test hook).
+    pub fn tracked_sessions(&self) -> usize {
+        self.tags.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
     fn limits<R>(&self, tag: &str, f: impl FnOnce(&mut TagLimits) -> R) -> R {
         let mut tags = self.tags.lock().unwrap_or_else(|e| e.into_inner());
+        // Entries of sessions that went quiet are dropped here, on the next request of any session.
+        let ttl = self.ttl;
+        tags.retain(|name, t| name == tag || !t.is_idle(ttl));
         f(tags.entry(tag.to_owned()).or_default())
     }
 
     /// Reserve the one in-flight slot of (`tag`, `server`), or say how long to wait.
-    fn reserve_action(&self, tag: &str, server: &str) -> Result<(), String> {
+    /// The slot is released when the guard drops.
+    fn reserve_action(&self, tag: &str, server: &str) -> Result<ActionGuard, String> {
         self.limits(tag, |t| {
             if let Some(slot) = t.actions.get(server) {
                 if slot.in_flight {
@@ -130,6 +178,11 @@ impl McpPanelState {
                 },
             );
             Ok(())
+        })?;
+        Ok(ActionGuard {
+            panel: self.clone(),
+            tag: tag.to_owned(),
+            server: server.to_owned(),
         })
     }
 
@@ -147,6 +200,11 @@ impl McpPanelState {
             (Some(at), Some(list)) if at.elapsed() < STATUS_GAP => Some(list.clone()),
             _ => None,
         })
+    }
+
+    /// The lock a real `status` fetch holds, so concurrent callers share one fetch.
+    fn fetch_lock(&self, tag: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.limits(tag, |t| Arc::clone(&t.fetch))
     }
 
     fn keep_list(&self, tag: &str, list: &[McpServerView]) {
@@ -244,6 +302,8 @@ enum Step {
 }
 
 struct Job {
+    /// The in-flight slot of a reconnect or toggle; released when the job ends or is dropped.
+    guard: Option<ActionGuard>,
     panel: McpPanelState,
     shared: Shared,
     bridges: Option<Arc<crate::mcp::BridgeRegistry>>,
@@ -319,12 +379,15 @@ fn decide(
         (McpAction::Toggle, Some(_), None) => return invalid("toggle needs enabled or disabled"),
         (McpAction::Unknown, ..) => return invalid("unknown MCP action"),
     };
+    let mut guard = None;
     if let JobKind::Reconnect { server } | JobKind::Toggle { server, .. } = &kind {
-        if let Err(wait) = panel.reserve_action(tag, server) {
-            return Step::Done(McpReply::plain(McpOutcome::RateLimited, wait));
+        match panel.reserve_action(tag, server) {
+            Ok(g) => guard = Some(g),
+            Err(wait) => return Step::Done(McpReply::plain(McpOutcome::RateLimited, wait)),
         }
     }
     Step::Run(Box::new(Job {
+        guard,
         panel,
         shared,
         bridges,
@@ -345,12 +408,22 @@ fn mark_bridge(
 }
 
 impl Job {
-    async fn run(self) -> McpReply {
+    async fn run(mut self) -> McpReply {
         match &self.kind {
-            JobKind::Status => match self.fetch_list().await {
-                Ok(list) => ok(Some(list), None),
-                Err(failure) => classify(failure),
-            },
+            JobKind::Status => {
+                // One real fetch at a time per session: a caller that waited reuses the list the
+                // first one stored, so two requests at once reach the CLI once.
+                let lock = self.panel.fetch_lock(&self.tag);
+                let _fetching = lock.lock().await;
+                if let Some(mut list) = self.panel.fresh_list(&self.tag) {
+                    mark_bridge(&mut list, self.bridges.as_deref(), &self.tag);
+                    return ok(Some(list), None);
+                }
+                match self.fetch_list().await {
+                    Ok(list) => ok(Some(list), None),
+                    Err(failure) => classify(failure),
+                }
+            }
             JobKind::Reconnect { server } => {
                 let result = self
                     .call(
@@ -358,7 +431,7 @@ impl Job {
                         self.panel.reconnect_timeout,
                     )
                     .await;
-                self.panel.release_action(&self.tag, server);
+                self.guard.take();
                 match result {
                     Ok(()) => self.then_list(None).await,
                     Err(failure) => classify(failure),
@@ -371,7 +444,7 @@ impl Job {
                         self.panel.control_timeout,
                     )
                     .await;
-                self.panel.release_action(&self.tag, server);
+                self.guard.take();
                 match result {
                     Ok(()) => self.then_list(None).await,
                     // Enabling a server that cannot connect answers an error,
@@ -494,6 +567,42 @@ mod tests {
         assert!(!wire.contains("SECRET"));
         assert_eq!(v.tool_count, Some(2));
         assert_eq!(v.status, "weird");
+    }
+
+    #[test]
+    fn a_dropped_guard_frees_the_slot_but_a_held_one_blocks() {
+        let panel = McpPanelState::default();
+        let guard = panel.reserve_action("t", "s").unwrap();
+        assert!(panel
+            .reserve_action("t", "s")
+            .err()
+            .unwrap()
+            .contains("already running"));
+        drop(guard);
+        assert!(!panel
+            .reserve_action("t", "s")
+            .err()
+            .unwrap()
+            .contains("already running"));
+    }
+
+    #[test]
+    fn idle_sessions_are_pruned_and_busy_ones_are_not() {
+        let panel = McpPanelState::default().with_limiter_ttl(Duration::ZERO);
+        let busy = panel.reserve_action("busy", "s").unwrap();
+        let done = panel.reserve_action("done", "s").unwrap();
+        drop(done);
+        assert_eq!(panel.tracked_sessions(), 2);
+        // The next request, for any session, drops the idle "done" and keeps the busy one.
+        panel.fetch_lock("other");
+        assert_eq!(panel.tracked_sessions(), 2, "busy and other; done is gone");
+        drop(busy);
+        panel.fetch_lock("other");
+        assert_eq!(
+            panel.tracked_sessions(),
+            1,
+            "only the one being asked about"
+        );
     }
 
     #[test]
