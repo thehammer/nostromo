@@ -263,6 +263,10 @@ async fn run_pairing_only(mut ws: WebSocketStream<TcpStream>, hub: Arc<DeviceHub
                 let _ = ws.send(close_msg(1000, "pairing window over")).await;
                 return Ok(());
             }
+            Ok(Some(Err(WsError::Capacity(_)))) => {
+                let _ = ws.send(close_msg(1009, "frame too large")).await;
+                return Ok(());
+            }
             Ok(None) | Ok(Some(Err(_))) => return Ok(()),
             Ok(Some(Ok(frame))) => frame,
         };
