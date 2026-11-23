@@ -529,8 +529,10 @@ start at 38.
 **Mail and todos**
 
 34. **(amended 2026-11-23)** On every paired device, from every host, the
-    Fred and Teri tabs show "Mail, calendar and todos stay on your Mac in this version." and never show mail, todo or ticket content, a spinner, or an
-    empty list. No surface (Mac window, terminal, device confirmation,
+    Fred and Teri tabs show "Mail, calendar and todos stay on your Mac in
+    this version." and never show mail, calendar, todo or ticket content, a
+    spinner, or an empty list. (Calendar is the v1 default pending open
+    question 5.) No surface (Mac window, terminal, device confirmation,
     success screen, device Settings, Devices list) offers a mail-and-todos
     checkbox, flag or toggle. *(later, when opened up: a device paired with
     mail and todos on shows Fred and Teri content; one paired with it off
