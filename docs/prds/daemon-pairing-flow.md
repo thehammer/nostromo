@@ -163,12 +163,25 @@ the success screen and the device list both show.
 can open the app at this step (system Camera), so the confirmation says what
 will happen to the current pairing:
 
+**What counts as the same server (v1).** The device treats the code's server
+as "the same server" only if that server shows it already knows this
+device's pairing, and the device never hands over its credential, or
+anything that could be replayed as it, to find out. A server that cannot
+show this, whatever address or name it claims, is a **different server** and
+gets the loud warning below. A malicious QR therefore cannot harvest the
+device's credential, and cannot pass itself off as the operator's server to
+get the quieter "replaces" line. One pairing code can answer "does this
+server know this device?" at most once: a second attempt with the same code
+reveals nothing new.
+
 - **Same server.** The confirmation adds: **"This replaces this iPhone's
   current pairing. The old one will be revoked."** After **Pair**, the old
   entry moves to the Revoked group with the note **"Replaced by
   re-pairing"**. Because a revoked name does not block reuse, the device
   keeps its name ("iPhone", not "iPhone 2").
-- **Different server** (the code names another address): the confirmation
+- **Different server** (any server that does not show it knows this
+  device's pairing, including a real server move that did not carry the
+  device list across): the confirmation
   leads with a warning line in the alert style: **"This iPhone is paired with
   Nostromo at 10.0.0.5. Pairing with 10.0.0.9 disconnects it from 10.0.0.5
   and removes its Nostromo content."** **Pair** wipes local content (as on
@@ -206,8 +219,8 @@ Mac it applies to):
 
 | Level | Can see the list | Can revoke | Can turn mail and todos **off** | Can pair, or turn anything **on** |
 |---|---|---|---|---|
-| **full** (Sendai) | yes | yes | yes | yes |
-| **revoke-only** (Kobe; new) | yes | yes | yes, once mail and todos can be on at all (later) | **no** |
+| **full** (Sendai) | yes | yes | not in v1 (later: yes) | pair: yes; turn anything on: nothing to turn on in v1 |
+| **revoke-only** (Kobe; new) | yes | yes | not in v1: nothing can be on, so no such control exists (later, when opened up: yes) | **no** |
 | read-only | yes | no | no | no |
 | off | no | no | no | no |
 
@@ -337,18 +350,38 @@ reads, or chooses to open it up.
 
 What the operator sees in v1:
 
-- The pairing window and the terminal say **"Mail, calendar and todos aren't shared from your Macs in this version."**, with no checkbox and no flag.
+- **There is no way to turn sharing on in v1, anywhere.** No checkbox, no
+  terminal command or flag, and no setting or configuration key on any Mac
+  or on the server lets mail, calendar or todos reach the server or a
+  device. "Off" is the only state. That also means there is nothing to turn
+  off: no "mail and todos" control exists on any surface in v1, including on
+  a revoke-only Mac.
+- The pairing window and the terminal say **"Mail, calendar and todos aren't shared from your Macs in this version."**
 - The device's success screen and confirmation say nothing about mail and
   todos, because there is no choice to report.
 - On every device, the Fred and Teri tabs say **"Mail, calendar and todos stay on your Mac in this version."** They never show a spinner, an empty list that
   looks like "no mail", or a "turned off for this iPad" line that implies a
   switch someone could flip.
-- Device Settings shows the same sentence where the scope would be.
+- Device Settings shows the same sentence as the tabs where the scope would
+  be.
+
+**Final v1 copy** (exact strings; any other wording, including "Mail and
+todos…" without calendar or without "in this version", is wrong):
+
+| Where | Exact text |
+|---|---|
+| Mac **Pair a Device…** window (Sendai), and `nostromo device pair` output | `Mail, calendar and todos aren't shared from your Macs in this version.` |
+| Device: Fred tab, Teri tab, and device Settings (where the scope would be) | `Mail, calendar and todos stay on your Mac in this version.` |
+
+Nothing else in v1 mentions mail, calendar or todos: not the device
+confirmation, the success screen, `nostromo device list`, or the Mac Devices
+list.
 
 **(later, when opened up)** The per-device permission below is the
 experience we expect once the operator chooses to let mail and todos onto
-devices. It is not a v1 criterion. Whether any of its plumbing is built ahead
-of time is Archie's call; no v1 surface may show it.
+devices. It is not a v1 criterion. Whether any internal plumbing is built
+ahead of time is Archie's call, but no v1 build may contain a reachable way
+to turn sharing on: no control, command, flag or configuration key.
 
 Deferred design: **a per-device permission. It is granted at pairing time by
 whoever issues the code, it is on by default, and it can be changed later
@@ -645,6 +678,22 @@ start at 38.
     message into a session. A decision or approval the device can show is
     shown read-only with "Answer it on your Mac".
 
+*No way to turn sharing on (Q2), and re-pairing safety (D6), added after review*
+
+56. No Mac window, device screen, terminal command or flag, and no setting
+    or configuration key on any Mac or the server, turns on sharing of mail,
+    calendar or todos with the server or a device. With every documented
+    setting at any value, no mail, calendar, todo or ticket content reaches
+    a device.
+57. A device already paired with the operator's server opens a pairing code
+    from a server that does not know this device (a test server, even one
+    claiming the same name and address). That server receives nothing during
+    the check or the pairing that lets it connect to the operator's server
+    as this device, and the device shows the "different server" warning,
+    not the "replaces" line.
+58. Repeating the check with the same pairing code reveals nothing beyond
+    the first answer about whether the server knows this device.
+
 ## In scope
 
 - The device first-launch pairing screen, scan and typed paths, the check
@@ -763,9 +812,10 @@ things.
    **Answered: mail and todos stay on the Macs in v1, for every host** (so
    there is no default to choose yet). Revisit when opening up.
 2. ~~**Should Kobe be allowed to pair and revoke personal devices, or only
-   see the list?**~~ **Answered: Kobe is revoke-only.** It can list, revoke
-   and (once there is anything to turn off) turn mail and todos off. It
-   cannot pair or turn anything on.
+   see the list?**~~ **Answered: Kobe is revoke-only.** In v1 it can list
+   and revoke. (Turning mail and todos off is part of the level, but v1 has
+   no such control, because nothing can be on. It applies later, when opened
+   up.) It cannot pair or turn anything on.
 3. **Open: which accounts (Microsoft 365 and/or Google) does Fred read on
    Sendai?** Fred can merge several accounts into one mailbox and calendar,
    from Microsoft 365 (through the `m365` CLI's sign-in) and from Google. If
@@ -987,8 +1037,8 @@ The push PRD's log uses the same numbering.
 
 | # | Decision (v1) | What it reverses or narrows | Later, when opened up |
 |---|---|---|---|
-| Q1 | **Kobe is `revoke-only`**, a new device-admin level: list, revoke, turn mail and todos off. It cannot pair or turn anything on. (That an unset Mac is revoke-only, and that Sendai becomes full only when set on the server, is Ada's choice, recorded below.) | Narrows AC12's bet from "pair from Kobe" to "manage from Kobe". Reverses the draft's "Kobe does everything" (draft open question 2). | Raise Kobe's level on the server if employer policy and the remote-management question are ever settled. |
-| Q2 | **Mail and todos stay on the Macs for every host.** No checkbox, flag or toggle on any surface. The pairing window says "Mail, calendar and todos aren't shared from your Macs in this version."; the Fred and Teri tabs say "Mail, calendar and todos stay on your Mac in this version." (exact text per AC11 and AC34; "calendar" is Ada's default pending open question 5). Fred's mail is probably Carefeed's Microsoft 365 tenant (unconfirmed; open question 3 asks which Microsoft 365 and/or Google accounts Fred reads), so even Sendai's mail and todos count as work-sensitive. Calendar stays home by default (open question 5, not yet decided). | Reverses the draft's "on by default" grant (draft open question 1). AC34 rewritten; AC35 deferred; AC10, AC11, AC13, AC14, AC23 drop the scope wording. | The per-device permission, its default and the live toggle (AC35's bet), once the operator confirms whose mail Fred reads. |
+| Q1 | **Kobe is `revoke-only`**, a new device-admin level: list, revoke, turn mail and todos off. It cannot pair or turn anything on. In v1 the "turn off" part has no control, because nothing can be on (Q2). (That an unset Mac is revoke-only, and that Sendai becomes full only when set on the server, is Ada's choice, recorded below.) | Narrows AC12's bet from "pair from Kobe" to "manage from Kobe". Reverses the draft's "Kobe does everything" (draft open question 2). | Raise Kobe's level on the server if employer policy and the remote-management question are ever settled. |
+| Q2 | **Mail and todos stay on the Macs for every host.** No checkbox, flag, toggle, terminal command or configuration key on any surface or machine can turn sharing on. The pairing window says "Mail, calendar and todos aren't shared from your Macs in this version."; the Fred and Teri tabs and device Settings say "Mail, calendar and todos stay on your Mac in this version." (exact text per AC11, AC34 and the "Final v1 copy" table; "calendar" is Ada's default pending open question 5). Fred's mail is probably Carefeed's Microsoft 365 tenant (unconfirmed; open question 3 asks which Microsoft 365 and/or Google accounts Fred reads), so even Sendai's mail and todos count as work-sensitive. Calendar stays home by default (open question 5, not yet decided). | Reverses the draft's "on by default" grant (draft open question 1). AC34 rewritten; AC35 deferred; AC10, AC11, AC13, AC14, AC23 drop the scope wording. | The per-device permission, its default and the live toggle (AC35's bet), once the operator confirms whose mail Fred reads. |
 | Q8 (multi-Mac list) | **One merged list**, "needs you" first, host badge whenever the list holds rows from more than one Mac. Kobe rows use push's fixed vocabulary; the tap card says "Details stay on kobe." | Nothing (new). | Sections or a host switcher, if the merged list proves confusing. |
 | Q4 | **The device answers nothing in this sequence**: no decisions, approvals, Mother questions, PR actions, enqueue or sending. | Narrows `docs/visions/iphone.md` and `docs/visions/ipad.md` (amended in the same change). | A device-trust PRD (Face ID-bound keys, per-action confirmation) and its own security review. |
 | Q7 (= D7) | **Nothing from the message queue on a device**: no text, count or take-back. | Nothing; this is today's behaviour. | A count, "2 messages waiting", on the session row. |
@@ -1025,7 +1075,11 @@ The push PRD's log uses the same numbering.
 - **D6, pairing link on an already-paired device: accepted, with a change.**
   The old entry is revoked automatically ("Replaced by re-pairing"), so the
   name is kept. A code for a different server gets a loud warning first and
-  wipes local content.
+  wipes local content. *Added after review (Ada, 2026-11-23):* "same server"
+  means a server that shows it knows this device's pairing without the
+  device revealing its credential, and one code can test that at most once
+  (criteria 57–58). A malicious QR must not be able to harvest the
+  credential.
 - **D7: signed as the operator's Q7 answer above.**
 
 ### Code facts checked on `origin/main` (d191dd4d) for this sign-off

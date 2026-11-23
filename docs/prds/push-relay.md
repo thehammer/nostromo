@@ -158,9 +158,8 @@ answer buttons (see "Lock-screen actions on decisions", withdrawn).
 - **(v1)** Size unknown (GitHub never returned the line counts during the
   grace delay): the size phrase is omitted, never guessed — `PR #4821 · 3 waiting`.
 
-**Withdrawn item** — **(v1)** when an item stops needing the operator and its
-notification cannot be silently removed (see "Answered elsewhere means
-gone"), the notification is replaced in place, passively and without sound,
+**Withdrawn item** — **(v1)** when an item stops needing the operator (see
+"Answered elsewhere means gone"), its notification is replaced in place, passively and without sound,
 by `<Kind> · <host>` / `<ref> no longer needs you` (for example
 `Mother · kobe` / `Job 3f9a1c2e no longer needs you`). *no longer needs you*
 is part of the closed vocabulary.
@@ -248,16 +247,17 @@ without paying for it in relay or Apple exposure.
     still arrives, once, as a new passive entry with no sound. It uses the
     same collapse identifier, so a later removal or the app opening clears
     it. The phone never shows two entries for one item.
-  - **Best-effort silent removal, where iOS allows it.** A silent update may
-    also clear the entry from the lock screen. iOS rations these and never
-    delivers them to an app the operator has force-quit, so this is a bonus,
-    never the promise. Apple does not keep alert pushes and silent pushes in
-    order, so the rule is the ordering Nostromo controls: a silent removal
-    for an item is sent only after Apple has accepted that item's
-    replacement, never before and never instead.
+  - **No silent removal in v1.** Nostromo sends no background push to
+    remove a delivered notification. iOS rations those, never delivers them
+    to a force-quit app, and does not keep them in order with alert pushes,
+    so combined with a replacement they could put back a notification for a
+    resolved item. Replace-in-place plus removal on app open is the whole v1
+    design.
 
-  **(later, when opened up)** Silent removal with no "no longer needs you"
-  line at all needs Apple's notification-filtering entitlement. That is an
+  **(later, when opened up)** Best-effort silent removal, and silent removal
+  with no "no longer needs you" line at all, are optional later
+  enhancements. The second needs Apple's notification-filtering
+  entitlement. That is an
   optional enhancement, pursued only if Apple's eligible categories ever
   truthfully fit Nostromo. It was investigated on 2026-11-23 and not
   requested (see the decision log).
@@ -325,9 +325,9 @@ tap-through is the experience.
   decision is the one kind where minutes matter.
 - **Quiet hours.** Default 22:00–07:00 in the phone's local time, editable in
   the app. During quiet hours **nothing that alerts is pushed, of any kind.**
-  Items that arise and resolve overnight never appear. Silent updates
-  (removing or replacing a resolved notification, correcting the badge) make
-  no sound, show nothing new, and still happen.
+  Items that arise and resolve overnight never appear. Replacing a
+  resolved notification with "no longer needs you" and correcting the badge
+  make no sound and still happen.
 - **The morning digest replaces the daily reminder.** At the end of quiet
   hours, if anything is still waiting, the operator gets one Summary push.
   The phone does **not** mirror Mother's 24-hour and daily Mac reminders; the
@@ -354,8 +354,7 @@ The app has a **Sent notifications** screen listing every notification
 attempted for this device in the last 7 days: time, kind, host, the exact
 title and body as sent, and the outcome — *delivered to Apple*, *rejected by
 Apple*, *relay unreachable*, *held for quiet hours*, *coalesced into a
-summary*, *withdrawn* (the "no longer needs you" replacement was sent),
-*silently removed* (a best-effort silent removal was sent), *skipped:
+summary*, *withdrawn* (the "no longer needs you" replacement was sent), *skipped:
 resolved during grace delay*. This record is
 kept on the operator's own machines, not in the relay, and is deleted after 7
 days.
@@ -461,12 +460,12 @@ Lock screen and lifecycle:
   passive level, by `<Kind> · <host>` / `<ref> no longer needs you`,
   including when the app has been force-quit. It is never left unchanged.
   If the operator dismissed the original, the replacement arrives once as a
-  passive entry with no sound, and the item never has two entries. A silent
-  removal for an item leaves the operator's machines only after Apple has
-  accepted that item's replacement (checkable in Sent notifications: a
-  *silently removed* line never comes before that item's *withdrawn*
-  line). (Test
+  passive entry with no sound, and the item never has two entries. (Test
   with the app force-quit as well as suspended.)
+- **(new 2026-11-23)** In v1 the operator's machines never send a
+  background (silent) push to remove a notification. Checkable at the
+  boundary where pushes leave the operator's machines: no push of that kind
+  is ever sent.
 - **(amended 2026-11-23)** Opening the app, or bringing it to the
   foreground, removes every notification whose item is no longer waiting,
   including "no longer needs you" replacements, once the app reaches the
@@ -534,7 +533,8 @@ Frequency:
   count toward the four.
 - **(amended 2026-11-23)** No notification that alerts (sound, banner, new
   lock-screen entry) is delivered between the start and end of quiet hours;
-  silent removals, replacements and badge corrections still happen. At the
+  "no longer needs you" replacements and badge corrections still happen,
+  with no sound. At the
   end of quiet hours exactly one Summary is delivered if, and only if, at
   least one enabled item is still waiting.
 - **(new 2026-11-23)** An evening Summary is delivered at the device's
@@ -575,8 +575,8 @@ Visibility and retention:
 - The closed-vocabulary payload contract above, the work/personal host
   classification and the work-owners list it depends on.
 - Lock-screen grouping by host, badge, withdrawal of resolved items
-  (replace-in-place, removal on app open or foreground, best-effort silent
-  removal), expiry, interruption levels.
+  (replace-in-place and removal on app open or foreground; no silent
+  removal in v1), expiry, interruption levels.
 - On-phone enrichment for personal hosts (bet), including read-only decision
   prompts.
 - Grace delay, decision timing, coalescing, quiet hours, morning and evening
@@ -966,9 +966,14 @@ replace-in-place is the v1 design, not a fallback. The entitlement stays a
 - **S1, withdrawal: accepted, with a change.** Replace in place (same
   notification slot, passive, no sound) with `<ref> no longer needs you` is
   the primary design from day one. Removal on app open or foreground is the
-  floor. Best-effort silent removal is allowed only after the replacement,
-  never before (sent only after Apple accepted the replacement). A
-  dismissed original still gets its replacement, once, as a passive entry.
+  floor. **No silent (background) removal in v1**, as Ada's memo signed:
+  removal and replacement are not combined, because Apple does not order
+  them and a replacement after a removal would put back a resolved item.
+  Best-effort silent removal is a later, optional enhancement. A dismissed
+  original still gets its replacement, once, as a passive entry. (Settled
+  2026-11-23 after review. An earlier revision of this PR allowed silent
+  removal after the replacement; that is withdrawn, along with its ordering
+  criterion and the *silently removed* outcome, which could not be tested.)
   *no longer needs you* joins the vocabulary. Archie: if you
   have evidence that replacement is unreliable for a force-quit app, or that
   it lights the screen at the passive level, bring it back to Ada.
