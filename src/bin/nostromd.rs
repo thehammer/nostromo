@@ -307,6 +307,7 @@ async fn main() -> Result<()> {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join(nostromo::ipc::peer_verify::PIN_FILE_NAME);
+    #[cfg(target_os = "macos")]
     match nostromo::ipc::peer_verify::OperatorPin::load(&pin_path) {
         Ok(pin) => info!(
             pin = %pin_path.display(),
@@ -320,6 +321,8 @@ async fn main() -> Result<()> {
             "operator-app pin unusable: no app can answer decisions; run make mac-install (installs, signs and pins the app)"
         ),
     }
+    #[cfg(not(target_os = "macos"))]
+    info!("operator app verification unavailable on this platform: decisions and approvals cannot be answered here");
     // The operator app must run from the installed path, not just match the
     // pin (the pin file is user-writable). `NOSTROMO_OPERATOR_APP_PATH`, read
     // from THIS process's environment only, overrides it for a dev install.
@@ -920,6 +923,11 @@ async fn run_statusline_watcher(tx: broadcast::Sender<ServerMsg>) {
     }
 }
 
+/// How often the job poller lists Mother's jobs.
+const MOTHER_POLL_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(2);
+/// The poll interval once `mother` is known to be missing from `PATH`.
+const MOTHER_UNAVAILABLE_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(60);
+
 async fn run_job_poller(
     tx: broadcast::Sender<ServerMsg>,
     jobs_feed: nostromo::mother::JobsFeed,
@@ -928,8 +936,11 @@ async fn run_job_poller(
     let mut seen_awaiting: HashSet<String> = HashSet::new();
     let mut last_states: HashMap<String, String> = HashMap::new();
 
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
+    let mut interval = tokio::time::interval(MOTHER_POLL_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Set once `mother` is found missing from PATH: we warn a single time and
+    // poll at `MOTHER_UNAVAILABLE_INTERVAL` until it shows up.
+    let mut mother_unavailable = false;
 
     loop {
         interval.tick().await;
@@ -939,6 +950,12 @@ async fn run_job_poller(
         let ticket = jobs_feed.begin();
         match mother::list_jobs_counted().await {
             Ok((jobs, skipped)) => {
+                if mother_unavailable {
+                    tracing::info!("mother CLI is available again; polling every 2 s");
+                    mother_unavailable = false;
+                    interval = tokio::time::interval(MOTHER_POLL_INTERVAL);
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                }
                 tracing::debug!(count = jobs.len(), skipped, "mother poll ok");
                 // A job queued from a work item is registered work-derived
                 // before anything about it is published or broadcast.
@@ -985,7 +1002,26 @@ async fn run_job_poller(
                 }
             }
             Err(e) => {
-                tracing::warn!("mother list_jobs error: {e:#}");
+                let unavailable = matches!(
+                    e.downcast_ref::<mother::MotherCliError>(),
+                    Some(mother::MotherCliError::MotherUnavailable)
+                );
+                if unavailable {
+                    if !mother_unavailable {
+                        tracing::warn!(
+                            "mother CLI not found on PATH; Mother polling backs off to every {} s",
+                            MOTHER_UNAVAILABLE_INTERVAL.as_secs()
+                        );
+                        mother_unavailable = true;
+                        interval = tokio::time::interval_at(
+                            tokio::time::Instant::now() + MOTHER_UNAVAILABLE_INTERVAL,
+                            MOTHER_UNAVAILABLE_INTERVAL,
+                        );
+                        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    }
+                } else {
+                    tracing::warn!("mother list_jobs error: {e:#}");
+                }
                 jobs_feed.publish_failure_at(ticket, format!("{e:#}"));
             }
         }
