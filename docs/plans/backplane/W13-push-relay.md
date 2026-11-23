@@ -4,9 +4,10 @@
 
 Versus the 2026-10-18 version (read the memo's "What changed since
 2026-10-18"):
-- **Ordinals.** The four push verbs take **107–110** after W9 (98–106), not
-  50–53, and S7a's `OperatorPresence` takes **111** (added with the
-  2026-11-23 sign-offs below); `CLIENT_MSG_VARIANTS` 107 → 112. Re-derive on
+- **Ordinals.** The four push verbs take **105–108** after W9 (98–104, since
+  Q2 removed two W9 verbs), not 50–53, and S7a's `OperatorPresence` takes
+  **109** (added with the 2026-11-23 sign-offs below); `CLIENT_MSG_VARIANTS`
+  105 → 110. Re-derive on
   the base.
 - **MC4 is merged.** Kit's `NeedsYouAggregator` and `MotherNeedsYouProducer`
   exist (`Shared/NostromoKit/Sources/NostromoKit/NeedsYou/NeedsYou.swift:142`,
@@ -48,16 +49,21 @@ operator's deploy step after merge.
   every device, when an item that had its own notification leaves the waiting
   set, the publisher sends **one alert push with the same `collapse_id`**
   (the item's `item_ref`), `interruption_level: passive`, no sound, priority
-  10, the corrected `badge`, title `<Kind> · <host>` and body `<ref> no
-  longer needs you`, where `<ref>` is `Job 3f9a1c2e`, `PR #4821`, or the
+  10, the corrected `badge`, title `Kind · host` and body `ref no longer
+  needs you` (for example `Mother · kobe` / `Job 3f9a1c2e no longer needs
+  you`), where the ref is `Job 3f9a1c2e`, `PR #4821`, or the
   decision's agent from the fixed set (`Claudia`, `A session`). The phrase
   *no longer needs you* joins `vocab.rs`. Items that never had their own
   notification (coalesced, held for quiet hours, kind off) get a badge-only
-  push, as before. **No background removal push is sent** (Ada S1: do not
-  combine removal with replacement, because a replacement that lands after a
-  successful removal would bring back a notification for a resolved item).
-  The app still removes stale notifications itself whenever it runs
-  (foreground connect, launch), which is reliable because the app is running.
+  push, as before. **No background push is ever sent to remove a
+  notification in v1.** Ada's sign-off memo (S1) chose replace in place over
+  best-effort removal, and the push PRD's v1 withdrawal is replace in place
+  plus removal of delivered notifications when the app opens or comes to the
+  foreground; silent removal is listed there only as a later, optional
+  enhancement. The app removes stale notifications itself whenever it runs
+  (foreground connect, launch). If the operator already dismissed the
+  original, the replacement still arrives once, as a passive entry with the
+  same collapse id (so the item never has two entries).
   - *APNs facts relied on (documented by Apple):* `apns-collapse-id` merges
     notifications with the same identifier into one for the user, and must be
     at most 64 bytes (`item_ref` is 16 hex characters); the passive
@@ -68,13 +74,28 @@ operator's deploy step after merge.
     W13-26:* that a passive replacement of a delivered active notification
     updates it in place without lighting the screen, and whether iOS moves it
     in the list. If the device check shows the screen lights, report it to
-    Ada (her S1 asks for that evidence) rather than changing the design.
+    Ada (her S1 sign-off asks for that evidence) rather than changing the
+    design.
 - **S2.** Decisions are never coalesced and never count toward the burst
   threshold (a Summary cannot carry a timeout). **S3.** Unknown PR size
   omits the size phrase. **S6.** *times out in under 1 min* below 60 s.
   Already in the plan; tests W13-3, W13-4, W13-13 keep them.
-- **S5.** Repository names for reviews are gated on the owner as well as the
-  host class. `push.work_owners` (default `["Carefeed"]`) can only grow:
+- **S5, extended by Ada's PRD to every kind.** A repository name appears in a
+  notification of **any** kind only if the host is personal **and** the
+  repository's owner is known and not a work owner; an unknown owner counts as
+  a work owner. An item's owner is the owner of its repository's remote:
+  - **Review:** the PR's `owner/repo` (`PrQueueItem`), always known.
+  - **Mother job:** `MotherJob.repo` is a bare name (`src/mother/mod.rs:178`;
+    the golden fixture has `"repo": "admin-portal"`), so Mother jobs **do not
+    carry their owner**. The owner is taken from `pr_url`
+    (`https://github.com/OWNER/REPO/pull/N`) when the job has one, else it is
+    unknown, so no name is shown.
+  - **Decision:** the originating daemon resolves the focus's project path's
+    `origin` remote (`git -C <path> remote get-url origin`, parsed for a
+    `github.com` owner; local only, no network) and stamps
+    `DecisionRequest.repo_owner: Option<String>` beside the repo name; W10's
+    metadata arm drops both. No remote or another host → unknown.
+  `push.work_owners` (default `["Carefeed"]`) can only grow:
   the default cannot be removed, and additions are made only on the
   operator's machines (`nostromo push work-owner add <owner>` on the primary,
   or `config.toml`). `PushStatus` carries `work_owners` and the phone shows
@@ -96,7 +117,7 @@ operator's deploy step after merge.
   which needs no extra permission and already runs on both Macs). W15 adds an
   `OperatorPresenceReporter` that sends `operator_presence` to the local
   daemon; this wedge adds the daemon side:
-  - `ClientMsg::OperatorPresence { state: active | away }` (ordinal 111).
+  - `ClientMsg::OperatorPresence { state: active | away }` (ordinal 109).
     Accepted only from `PeerTrust::OperatorApp`; ignored from `LocalOther`;
     `Refused` for every network trust (it is not in `NETWORK_ALLOWED` nor
     `paired_extra_allowed`). No reply. `"presence"` is added to
@@ -111,7 +132,8 @@ operator's deploy step after merge.
     engine treats it as the same item (one notification per lifetime still
     holds) and sends at once if it has not sent yet.
   - W10's metadata arm for `DecisionRequest` keeps `operator_presence` (an
-    enum, safe for `work`).
+    enum, safe for `work`), and the satellite's personal-profile uplink keeps
+    it too (an explicit exception, like `host`).
   - Engine: a decision is due at `raised` when `operator_presence == away`,
     else at `raised + decision_grace_secs` (default 30, config for tests). A
     decision resolved before it is due is skipped and logged.
@@ -120,15 +142,24 @@ operator's deploy step after merge.
     with `no_operator` otherwise, `src/mcp/tools/ask_decision.rs:90`), so
     that field would always be true and no decision would ever push.
   - Privacy: presence leaves the satellite only as this field on an open
-    decision, and only to the primary; it is never in a relay request.
+    decision, and only to the primary. The primary **strips** it from
+    `DecisionRequest` before delivering the frame to any `Paired` or `Tcp`
+    peer (in its per-downstream filter), so phones never see it, and it is
+    never in a relay request.
+  - Sleep is best effort: a sleeping Mac's daemon sleeps too, so an `away`
+    sent at sleep may never arrive; the 30-second rule covers it.
   - If W15 has not merged when this wedge runs, `operator_presence` is always
     `None` and the 30-second rule alone applies, which Ada accepted.
   Criterion W13-31 replaces the old W13-9 timing.
-- **Operator Q5: what a work-host (Kobe) notification may say.** Kind, host,
-  short ref and the fixed reason, nothing else: `Mother · kobe` / `Job
-  3f9a1c2e asked a question`; `Decision · kobe` / `Claudia is waiting on you ·
-  3 choices · times out in 4 min`; `Review · kobe` / `PR #4821 · small change ·
-  3 waiting`. That is the plan's vocabulary; W13-1 and W13-3 assert it.
+- **Operator Q5: what a work-host (Kobe) notification may say.** The
+  operator's answer: kind, host, short ref and fixed reason. The per-kind
+  fixed fields beyond that (a decision's agent from the fixed set, choice
+  count and timeout; a review's size phrase and waiting count) are Ada's
+  payload contract in the push PRD, covered by the operator's blanket
+  acceptance of her recommendations, not part of his Q5 answer. Examples:
+  `Mother · kobe` / `Job 3f9a1c2e asked a question`; `Decision · kobe` /
+  `Claudia is waiting on you · 3 choices · times out in 4 min`; `Review ·
+  kobe` / `PR #4821 · small change · 3 waiting`. W13-1 and W13-3 assert it.
 - **Operator Q6: the relay's AWS account.** A **new dedicated personal AWS
   account, or a member account in the operator's personal AWS
   Organization**; never a Carefeed account, and not the operator's existing
@@ -143,7 +174,8 @@ operator's deploy step after merge.
   the lock screen say the same thing.
 - **Operator Q3 / S8.** Work-host and PHI-repo notifications never carry extra
   detail on the phone; `PushDetail` is W16's and returns no text for them.
-  The settings screen lists work hosts with "Details stay on <host>".
+  The settings screen lists each work host with "Details stay on" and its
+  name ("Details stay on kobe").
 
 ## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
@@ -182,7 +214,7 @@ design-loop notes **turn 2** (S7, S8). Versus the 2026-10-10 draft:
   (below) keeps Rust and Kit from drifting. Acknowledgement semantics are in
   "Acknowledgement and withdrawal".
 - No `PROTOCOL_VERSION` bump; the primary advertises `"push"`. New
-  `ClientMsg` ordinals per the memo's wire inventory (107–110 since 2026-11-23), `Paired`-only
+  `ClientMsg` ordinals per the memo's wire inventory (105–108 since 2026-11-23), `Paired`-only
   and self-scoped.
 - Tests run in CI: Rust (daemon and the `infra/push-relay` crate) in the RWX
   sandbox, Kit/iOS on GitHub Actions. Hermetic: `wiremock` stands in for the
@@ -197,7 +229,7 @@ After W9–W12, a phone sees the primary daemon's state whenever the app is
 open and the VPN is up. When iOS suspends the app (commute, meeting), the
 operator does not learn that a Mother job is waiting on an answer, that an
 agent session raised a decision (default timeout 5 min,
-`src/mcp/tools/ask_decision.rs:38`), or that a PR entered their review queue.
+`src/mcp/tools/ask_decision.rs:37`), or that a PR entered their review queue.
 The only way to reach a suspended app is Apple Push (APNs). APNs needs a
 provider holding a `.p8` signing key, so this wedge adds a small relay in a
 **dedicated personal AWS account** (a new account, or a member account in the
@@ -207,7 +239,7 @@ relay carries only notification text.
 
 The product contract is `docs/prds/push-relay.md` (Ada's PRD). Read the whole
 file, including **"Design-loop notes for Ada"** at the end: it records the
-operator's answers to the two open questions, sign-offs S1–S6, and
+operator's answers to the two open questions, sign-offs S1–S8, and
 clarifications C1–C8 that this plan implements. In short:
 
 - Every notification is built only from a **closed vocabulary**: kind, host
@@ -220,7 +252,8 @@ clarifications C1–C8 that this plan implements. In short:
   end of quiet hours, and an **evening summary at 17:30** (operator answer to
   open question 1; configurable per device).
 - A **2-minute grace delay** for Mother and review items (skipped if
-  resolved). Decisions go out immediately. Also: quiet hours
+  resolved). Decisions push at once when their Mac is away, otherwise 30 s
+  after being raised if still unanswered (S7a). Also: quiet hours
   (default 22:00–07:00, phone-local), per-kind switches per device, and one
   notification per item over its lifetime.
 - **Withdrawal** of a resolved item's notification (replaced in place with
@@ -258,8 +291,8 @@ Where things live:
 Daemon wire and data (additive; every new field is `#[serde(default)]` and
 skipped when `None`, so W9–W12 fixtures still decode):
 
-- `src/ipc/protocol.rs:1808-1818` (`ServerMsg::DecisionRequest`). Add three
-  fields:
+- `src/ipc/protocol.rs:3286-3296` (`ServerMsg::DecisionRequest`). Add these
+  fields (plus `repo` and `repo_owner` for S5, above):
   - `deadline: Option<DateTime<Utc>>`.
   - `agent_class: Option<AgentClass>`: the session's agent mapped to the
     fixed set (`mother | perri | fred | teri | claudia | other`) on the
@@ -319,7 +352,7 @@ Daemon push engine (new module):
 - `src/push/mod.rs`: `PushEngine::spawn(config, server)`. It is primary-only
   and is a no-op without `[push]`. It subscribes to the broadcast channel,
   and it also reconciles every 30 s against the retained-frame cache
-  (`retain_broadcasts`, `src/ipc/server.rs:1950`) so that a lagged receiver or
+  (`retain_broadcasts`, `src/ipc/server.rs:4483`) so that a lagged receiver or
   a W12 `Gap` cannot strand an item.
 - `src/push/items.rs`: the **item model**. `ItemKey` is one of:
   - `Mother{host, job_id}`
@@ -339,13 +372,9 @@ Daemon push engine (new module):
       `burn_ahead` or `gates_incomplete`. It leaves the set when the entry
       disappears, or when Mother reports it `acked: true`. A reason that
       lapses and returns carries a new `since`, so it is a new item.
-    - Whether attention items are pushed **individually** or only counted in
-      the badge and summaries is not covered by S1–S8. Recommendation:
-      individual push for `gates_incomplete` only (a presented PR whose gates
-      did not all run); `progress_stalled` and `burn_ahead` are Mother's
-      observe-only flags and only count toward the badge and the next summary.
-      Treat as an open question for the operator; the default until answered
-      is count-only for all three.
+    - Attention items are **count-only** for all three reasons (Ada's
+      decision, 2026-11-23): they count toward the badge and the next Summary
+      and never push individually (criterion W13-34).
     - Works on both full and
     metadata-shaped `MotherJobs` (W10 keeps state, `paused_reason`,
     `activity`, `paused_at`, attention reasons and the 8-hex id suffix).
@@ -378,16 +407,19 @@ Daemon push engine (new module):
     `A job <reason>`.
   - **Host label:** must match `^[a-z][a-z0-9-]{0,15}$`, else the literal
     `host` (C6).
-  - **Repository name:** only when `hosts[host] == personal` (and for reviews
-    also owner ∉ `work_owners`), rendered as the bare repo name without the
-    owner, and must match `^[A-Za-z0-9._-]{1,40}$`, else omitted.
+  - **Repository name (every kind):** only when `hosts[host] == personal`
+    **and** the item's owner is known and ∉ `work_owners` (unknown = work;
+    owner sources in "Sign-offs folded in", S5), rendered as the bare repo
+    name without the owner, and must match `^[A-Za-z0-9._-]{1,40}$`, else
+    omitted.
   - **`conforms(text, &VocabContext) -> Result<(), Offending>`:** the
     allow-list grammar checker the tests use.
 - `src/push/schedule.rs`: a pure state machine driven by an injected clock
   (`now` passed in; no `Instant::now()` inside) so tests run on paused time.
   - **Grace delay:** `due = start + grace_secs`, where `start` is Mother's
     `paused_at` or first-seen time, and a review's first-seen-in-`requested`
-    time (C1). Decisions are due at once.
+    time (C1). Decisions follow S7a: due at `raised` when
+    `operator_presence == away`, else at `raised + decision_grace_secs`.
   - **Skip-if-resolved:** logs `skipped_resolved_in_grace`.
   - **Coalescing with exact lookahead (S2):** when a grace-delayed item comes
     due, count pending unresolved grace-delayed items due in `[now, now+120 s)`
@@ -453,10 +485,10 @@ Daemon push engine (new module):
     failing_since }`: targeted reply to the device. Host classes and work
     owners are **read-only**; there is no `ClientMsg` that changes them (S5).
   - A network peer may only read or write its *own* device's push record.
-  - `ClientMsg::OperatorPresence { state }` (ordinal 111, `OperatorApp`
+  - `ClientMsg::OperatorPresence { state }` (ordinal 109, `OperatorApp`
     only; S7a). `"presence"` added to `Welcome.features`.
-  - FND-1: the four push `ClientMsg`s take ordinals 107–110 (or the next free
-    ones; bump `CLIENT_MSG_VARIANTS` to 112 with `OperatorPresence`) and are `Refused` in `network_policy`
+  - FND-1: the four push `ClientMsg`s take ordinals 105–108 (or the next free
+    ones; bump `CLIENT_MSG_VARIANTS` to 110 with `OperatorPresence`) and are `Refused` in `network_policy`
     and allowed by W9's `paired_extra_allowed` for `Paired` peers only; the
     three new `ServerMsg`s are `Open` and only ever sent targeted.
 - `src/bin/nostromd.rs:196-260`: in `Primary` mode with `[push]`, call
@@ -542,7 +574,7 @@ iOS app (contract-text notifications, no extension; W16 adds the extension):
   - a link to iOS Settings when authorization is denied;
   - the "Show Previews: When Unlocked" recommendation (one sentence; W16
     shows it next to its personal-host enrichment toggles; work hosts read
-    "Details stay on <host>" with no toggle, operator Q3);
+    "Details stay on" plus the host name, with no toggle, operator Q3);
   - work owners shown read-only (S5);
   - the "Sent notifications" entry.
 - `iOS/Nostromo/Views/SentNotificationsView.swift` (new): lists
@@ -663,9 +695,11 @@ Payload contract (tests):
 
 - [ ] **W13-1** `tests/push_vocab.rs` passes. For a work-host Mother job with marker strings
   in question, title, plan, branch and repo, the full relay request body
-  contains none of them, and title/body are exactly `Mother · <host>` /
-  `Job <8-hex> <reason phrase>`. A personal host gives
-  `Mother · <host> · <repo>`. An unclassified host is identical to work.
+  contains none of them, and title/body are exactly `Mother · kobe` /
+  `Job 3f9a1c2e asked a question`. A personal-host Mother job shows
+  `Mother · sendai · bishop` only when its owner is known (from `pr_url`) and
+  not a work owner; with a bare repo name and no `pr_url` it shows `Mother ·
+  sendai` (owner unknown = work). An unclassified host is identical to work.
 - [ ] **W13-2** Each Mother reason maps to its phrase. An unknown reason gives *needs you*.
   A `quota_*` pause produces no item.
 - [ ] **W13-3** A decision with markers in prompt, detail, choice labels and details, and
@@ -675,7 +709,8 @@ Payload contract (tests):
 - [ ] **W13-4** A review renders `PR #<n> · <size> · <k> waiting`, with 49 → small,
   50 → medium, 400 → medium, 401 → large, and the size omitted when
   `changed_lines` is `None`. The repo appears only for a personal host whose
-  owner is not in `work_owners`.
+  owner is known and not in `work_owners`; the same owner rule is asserted
+  for Mother and decision items.
 - [ ] **W13-5** A Summary never contains a repository name.
 - [ ] **W13-6** `vocab::conforms` accepts every rendered string and rejects any string
   containing a token outside the vocabulary. The test asserts rejection, not
@@ -785,6 +820,19 @@ iOS:
 - [ ] **W13-33** `vocab.rs`'s Mother reason table equals
   `tests/fixtures/push-vocab/reason_phrases.json` (W11's fixture), and *no
   longer needs you* passes `vocab::conforms`.
+- [ ] **W13-34** Attention items (`progress_stalled`, `burn_ahead`,
+  `gates_incomplete`) never produce an individual POST; they are counted in
+  the badge and the next Summary (paused-clock test).
+- [ ] **W13-35** No code path on the operator's machines sends a background
+  (content-available) push to remove a notification; a notification the
+  operator dismissed still gets its replacement exactly once (engine test:
+  the publisher never emits `push_type: background`; the replacement is sent
+  regardless of client state). `operator_presence` never reaches a `Paired`
+  or `Tcp` peer (gating test).
+- [ ] **W13-36** S5 owner sources: a Mother job with a bare `repo` and no `pr_url`
+  renders no repository name on a personal host; with a personal-owner
+  `pr_url` it does; a decision whose focus remote is a work owner, or has no
+  remote, renders none.
 
 ### Acknowledgement and withdrawal
 
@@ -837,7 +885,7 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   merged since this was first written); the repo default is all four lenses
   (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
 - **Review depth:** **Manual Perri pass is still required** (the `perri` entry below at xhigh, then the operator's review). Lens findings are input to it, not a substitute: a lens sees only the diff (patch input is capped at 120 KB, so a large wedge will report `coverage_gap` findings), and Mother's `phi-security` checklist is written for care data, so it does not know this repo's trust tiers (B9, B10). First data to leave the operator's machines, plus a Lambda and its SAM template.
-- **Checklist:** the acceptance items above carry ids (`W13-1` to `W13-33`) so
+- **Checklist:** the acceptance items above carry ids (`W13-1` to `W13-36`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The
   worker ticks each with `mother check <job> --done --evidence <short ref>` only
   when its test or check has passed.
@@ -852,7 +900,9 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   Lock-screen decision actions are withdrawn (S7, S4). NSE-based silent
   withdrawal is not planned (the filtering entitlement is not requested);
   `capabilities.nse_withdraw` stays `false` everywhere.
-- A background-push removal path (S1: never combined with replacement).
+- Any background-push removal (v1 is replace in place plus removal when the
+  app runs; Ada's memo S1 and the push PRD list silent removal only as a
+  later, optional enhancement).
 - Any worker-, agent- or third-party-authored text in a relay request, for
   any kind or host, including as a setting.
 - Answering anything from the phone: decisions, approvals, Mother
