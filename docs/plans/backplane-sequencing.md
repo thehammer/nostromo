@@ -1,11 +1,14 @@
 # Backplane Sequencing — universal access to Nostromo state from every device
 
 **Author:** Archie. Drafted 2026-10-10 from an operator brief; revised
-2026-10-10 after Ada's pairing PRD answered Q1; **refreshed 2026-10-18 against
-`origin/main` `d61c62d`** (see the first section).
-**Status:** Draft. W14 can be dispatched now. W9 and W10 wait only on queue
-slots (see "Dispatch order"). W11 and W15 wait on Ada's sign-off of D1–D6
-(pairing PRD). W13 and W16 wait on Ada's sign-off of S1–S8 (push PRD).
+2026-10-10 after Ada's pairing PRD answered Q1; refreshed 2026-10-18 against
+`origin/main` `d61c62d`; **refreshed 2026-11-23 against `origin/main`
+`8f0328b9`** (237 commits later; see "Readiness" and "What changed since
+2026-10-18" below; both win over any older text in this file).
+**Status:** Draft. W14 and W9 can be dispatched now (the approvals and crew
+chains they waited for are merged). W10 follows W9. W11 and W15 wait on Ada's
+sign-off of D1–D7 (pairing PRD; D7 is new). W13 and W16 wait on Ada's sign-off
+of S1–S8 (push PRD).
 **Inputs:** `docs/plans/platform-evolution-sequencing.md` (bets B1–B6),
 `docs/visions/iphone.md`, `docs/visions/ipad.md`,
 `docs/prds/daemon-pairing-flow.md` (Ada, answers Q1), `docs/prds/push-relay.md`
@@ -13,8 +16,193 @@ slots (see "Dispatch order"). W11 and W15 wait on Ada's sign-off of D1–D6
 machine only): `.claude/plans/permission-approval-prompts*.md`,
 `.claude/plans/mother-crew-client*.md`, `.claude/plans/terminal-pane-*.md`,
 `.claude/plans/remove-rust-tui*.md`, `.claude/plans/offload-tests-index.md`.
+The 2026-11-23 refresh also read the operator's local tracker
+(`.claude/wip/nostromo-work/index.md`) and `git log c9c9b1f4..8f0328b9`; nothing
+from either is needed to execute a wedge.
+
+## Readiness (2026-11-23, `origin/main` `8f0328b9`)
+
+**Plain answer: yes, the plans needed updates, and they are made in this PR.**
+None of the 237 merged commits changes the architecture (B7–B10 hold), but the
+wire grew from 41 to 98 client verbs, a new handshake capability gates queue
+merging, `.mother/crew.yml` now exists, and every dispatch blocker the memo
+named has merged. Two new rules come out of it: **B11** (only connections that
+can send user messages count against the merge gate) and a product decision on
+the **queue view for phones** (Ada D7, recommendation: local-only in v1).
+
+**Can start now**
+
+| Wedge | Ready? | Why |
+|---|---|---|
+| W14 linux-primary | **Yes** | Independent packaging. Gated in observe mode (crew.yml is on main). |
+| W9 ws-transport | **Yes**, after this docs PR merges | AP2a (#278/#287), AP3 (#310), MC4 (#299) and CL1/CL2 (#311/#314) are all merged, so the 2026-10-18 exclusion is moot. Only rule left: no other job editing `src/ipc/{protocol,server,peer}.rs` at the same time. Nothing like that is queued today. W9 now also carries B11 (a few lines in `src/ipc/session_manager/mod.rs`). |
+| W10 satellite-uplink | After W9 merges | Same wire files as W9. |
+| W11 ios-ws-client | Blocked | W9 + W10 merged, **Ada D1–D7**, and (recommended) the iOS test target prerequisite below. |
+| W15 mac-device-admin | Blocked | W10 merged, **Ada D1–D7**; not beside another job that edits `macOS/Nostromo.xcodeproj` (PR #518 does today). |
+| W12 seq-resume | Blocked | W10 + W11 merged. |
+| W13 push-relay | Blocked | W12 merged, **Ada S1–S8**, operator's AWS account ready for the relay. |
+| W16 ios-push-enrichment | Blocked | W13 merged. Request **Apple's notification-filtering entitlement** now (W16 ships without it, but withdrawal then stays best effort, S1). |
+
+**Prerequisites outside the plan, in the order to do them** (costs use the
+calibration in "Estimate"; none of them is a Mother job you must run before
+W14):
+
+1. **Merge this docs PR.** No cost. Every wedge cites it.
+2. **Crew config follow-up** (`.mother/crew.yml`, config only). PR #519 (open)
+   raises the `python-test` (900 → 1800 s) and `swift-ci` (1800 → 2400 s)
+   timeouts. Still open after it: raise `gates.budget_minutes` from 45 to about
+   **90**, because Mother runs the checks one after another
+   (`plugins/mother/lib/gates.sh`, the `while read check` loop, Mother
+   `origin/main` `0a38549`) and a Rust + Swift wedge measures about 25 (Rust) +
+   20 (python) + 24 (swift) = ~69 min; and narrow `python-test`'s `when` so a
+   Rust-only wedge's `tests/*.rs` does not trigger the 20 min Python run
+   (`tests/**` matches them today, `.mother/crew.yml:30`). Without this the
+   gate rows of every Rust wedge come back `incomplete` (observe mode: data
+   lost, nothing held). Cost: an operator edit, or a $5 cap job (≈ $2).
+   **Do before W9 is added**; W14 does not need it.
+3. **Ada sign-offs** D1–D7 (pairing) and S1–S8 (push): one Ada session over
+   both PRDs' design-loop notes. Blocks W11/W15 and W13/W16 respectively;
+   needed by the time W10 merges to keep the Swift wedges from idling. Cost: an
+   interactive Ada session (≈ $3–8), plus your reading time. Exact asks in
+   "Open questions for the operator", item 1.
+4. **Apple notification-filtering entitlement** (`com.apple.developer.
+   usernotifications.filtering`) for the extension's bundle id. Operator, on
+   the Apple Developer site, now: lead time is Apple's. Blocks only the
+   filtering half of W16 (S1); W16 ships without it.
+5. **cargo-nextest in CI and the RWX sandbox** (recommended, not blocking).
+   The Rust tests job measures 14.5–17 min green, 20 min slow, with the test
+   binaries running one after another for 12–14 min (`.github/workflows/
+   ci.yml:143-155`; step limit 35, job 45 since #517). There are 169 test
+   binaries in `tests/` and W9–W13 add about eight more. nextest runs binaries
+   in parallel; expect the test step to drop to roughly 5–8 min. Caveats the
+   job must handle: nextest does not run doctests (keep a `cargo test --doc`
+   step), and each test runs in its own process (no test here uses
+   `serial_test`, but any test relying on in-process global state must be
+   found). Cap $15, expected ≈ $6, ≈ 55 min. Run it beside W14; it saves about
+   10 min per hop on every Rust wedge (6 hops) and shortens the `rust-test`
+   gate the same way.
+6. **iOS test target and simulator test job** (recommended before W11). See
+   "CI prerequisites" below. Cap $20, expected ≈ $8, ≈ 65 min; can run beside
+   W9/W10 (it edits `iOS/Nostromo.xcodeproj` and `.github/workflows/ci.yml`,
+   which neither touches).
+
+**Decisions only the operator can make** (details and recommendations in
+"Open questions for the operator"): the queue view for phones (D7, recommend
+local-only in v1); whether to raise the gate budget (recommend 90); whether to
+add nextest and the iOS test target first (recommend both, neither blocks W9);
+whether to split W13 (recommend no unless the iOS project is contended).
+
+## What changed since 2026-10-18 (refresh of 2026-11-23)
+
+Read against `origin/main` `8f0328b9`. Line numbers below are from that commit.
+
+1. **The wire grew from 41 to 98 client verbs and from 50 to 92 server
+   frames, and every one is already classified.** `CLIENT_MSG_VARIANTS = 98`
+   (`src/ipc/peer.rs:2491`, asserted `:2639-2640`); the ordinal table is
+   `:2494-2595`. The network allow-list is **unchanged at 13 verbs**
+   (`network_policy`, `peer.rs:1054-1068`, pinned by `NETWORK_ALLOWED`
+   `:2461` and the exactness test `:2644`): all 57 new verbs are `Refused`
+   (`:1070-1181`). Of the 42 new server frames, 39 are `ServerClass::LocalOnly`
+   and three are `Focus(tag)`: `SessionTurnOrigin`, `SessionBridge` and
+   `TrackerSummary` (`classify_server_msg`, `peer.rs:717-888`). The new verbs
+   and frames, by family, with what the backplane does about each, are in
+   "Wire inventory" below. So the backplane's next free ordinal is **98**, and
+   W9's nine verbs make it 107 (W13 → 111, W16 → 112), re-derived on each
+   wedge's base.
+2. **`.mother/crew.yml` exists** (MC5 #290, then #292): version 1, observe
+   mode, `max_attempts: 2`, `budget_minutes: 45`, checks `rust-fmt`,
+   `rust-clippy`, `rust-test` (sandbox), `python-test`, `swift-ci`,
+   `shellcheck`, `actionlint`, `mother-contract` (host), lens default all four.
+   The memo's crew deltas 3 and 4 are applied; 2 is withdrawn (`python-test`
+   on the host is correct); 5 is still open. See "Crew config deltas" below.
+   PR #519 (open) changes two timeouts.
+3. **There is still no `nostromo` CLI binary.** `Cargo.toml:13-39` has seven
+   bins (`nostromd`, `nostromo-mcp-bridge`, `nostromo-activity-hook`,
+   `nostromo-google-auth`, `nostromo-huey-eval`, `nostromo-guard`,
+   `sensitive-text-scan`). W9 still adds `src/bin/nostromo_cli.rs`. **The
+   install path changed:** `make install-daemon` (`Makefile:136-193`) builds
+   with `make daemon` (`:129-130`, `--bin nostromd --bin nostromo-guard --bin
+   nostromo-mcp-bridge`), copies from `$(NOSTROMO_TARGET_DIR)/release` (`:14`,
+   honours `CARGO_TARGET_DIR`, #500), stages and ad-hoc signs **three**
+   binaries to new inodes, moves bridge, then guard, then `nostromd`, and runs
+   the restart guard `bin/nostromo-restart-guard` first (`:123-126`, refuses
+   while remote shells are open; `FORCE=1` overrides). W9 and W14 now say how
+   the CLI fits that recipe.
+4. **New handshake capability and merge gate** (#514, message queue S3).
+   `Hello.capabilities` (`src/ipc/protocol.rs:1648-1651`) carries
+   `merged_turns_v1` (`FEATURE_MERGED_TURNS`, `protocol.rs:1228-1232`); the
+   daemon advertises it in `Welcome.features` (`src/ipc/server.rs:581`) and
+   records per connection whether the Hello declared it (`server.rs:643-666`,
+   `:831`). The session manager merges queued typed messages into one turn
+   only while **every attached connection** declared it:
+   `refresh_merge_gate` (`src/ipc/session_manager/mod.rs:3846-3855`) counts
+   every attached connection not in `merge_capable` (`:724-726`) as legacy,
+   including network peers (`network_clients`, `:720-723`, filled by
+   `attach_network` `:2059-2060`). The Rust `DaemonClient` declares nothing
+   (`src/ipc/client.rs:196-201`). The iOS app, through NostromoKit, **already
+   declares it** (`ClientHello` default, `Shared/NostromoKit/Sources/
+   NostromoKit/Wire/ClientMsg.swift:20`, sent at `Transport/NetworkClient.
+   swift:232`) and renders `user_parts` (`iOS/Nostromo/Views/TranscriptView.
+   swift:224-243`), but iOS builds older than #514 do not. A W10 routed attach
+   would join a satellite's sessions as an undeclared network connection and
+   close the gate for as long as a phone watches. New bet **B11** fixes the
+   rule; W9, W10 and W11 carry it.
+5. **The message queue is local-only** (S1 #506, S2 #513, S3 #514;
+   `docs/message-queue.md`). `session_queue_watch`, `session_queue_take_back`,
+   `session_queue_remove` are `Refused` for network peers (`peer.rs:1103-1105`),
+   and `SessionQueue`, `SessionQueueResult`, `SessionQueueReturned` are
+   `LocalOnly` (`peer.rs:798-800`). Take-back and remove need the verified Mac
+   app with its `operator_nonce`. Stop (`session_interrupt`) empties the queue
+   and returns the typed texts only to the operator connection that pressed it
+   and watches the tag ("Stop", `docs/message-queue.md`). So a phone sees no
+   chips and cannot take back. Recorded as product question **D7** (pairing
+   PRD) with a recommendation: keep it local-only in v1.
+6. **New content-bearing topics** (tracker T0b–T6 with staged commands; the
+   authored-PR daemon with Perri's verdict and the guarded Merge verb, #461,
+   #486, #493, #495, #508; composer history #509/#511; conversation history
+   #464–#475; `/mcp` panel #515; slash commands #458; Huey H1–H8; Fred's
+   Google sources; terminals 1a–3e and remote shells; approvals AP4–AP7; Claude
+   sign-in CL1/CL2; Mother notices MF1–MF6). Each is classified in the
+   per-topic publish table below. Short version: every one of them is
+   `LocalOnly` or `Sensitive` on main and therefore **never leaves its host on
+   any uplink**, except `TrackerSummary` (counts), `SessionBridge` (a boolean)
+   and `SessionTurnOrigin` (transcript family).
+7. **CI.** The Rust tests job takes 14.5–20 min (above); W9–W13 add tests, so
+   nextest (prerequisite 5) is worth doing first but does not block. Linux
+   runners are pinned to `ubuntu-24.04` (#474) and the Rust jobs are split
+   into `rust-fmt`, `rust-clippy`, `rust-test` behind the aggregate
+   `Build & Lint` check (`ci.yml:94-192`). Mac tests run in three shards
+   (`ci.yml:298-465`, step 35 / job 45 min). **The iOS app has no test
+   target**: `iOS/Nostromo.xcodeproj` has one target (an application,
+   `project.pbxproj:174`), and CI only builds it for `generic/platform=iOS
+   Simulator` (`ci.yml:510-545`). See "CI prerequisites".
+8. **Dispatch blockers merged.** AP2a/AP2b/AP2c/AP3–AP7, MC3–MC6, CL1/CL2,
+   terminal panes 1a–3e, tracker T0b–T6/T1w, BA0–BA6d, FV4 and message queue
+   S1–S5 are merged. The "Dispatch order" table is rewritten to today.
+9. **Mother.** The lens wave (Mother #75) merged, so lenses run automatically
+   in parallel with adherence on the gated commit; `mother review-lens` is no
+   longer needed by hand. Mother's crew blob carries `phi_sensitive`
+   (`plugins/mother/lib/crew_config.py:254-259`), but the daemon still keeps
+   only `crew_opt_in` (`src/mother/mod.rs:262-270`), so the PHI override stays
+   a repo-name match. `client.surfaces` is still not built.
+10. **Smaller drifts fixed in the wedges:** `PeerTrust`/`Transport` are at
+    `peer.rs:36-55`; `handle_client` is `server.rs:617`, `handle_client_msg`
+    `:1430`, `bind_tcp` `:280`, `welcome_msg` `:568-600`, `retain_broadcasts`
+    `:4483`; the TCP listener and mDNS are bound in `src/bin/nostromd.rs:353-398`;
+    `PROTOCOL_VERSION` is still 4 (`protocol.rs:34`); `Topic` gained `Terminal`
+    and `AuthoredPrs` (`protocol.rs:73-89`); the Mother poller is
+    `run_mother_pollers` (`nostromd.rs:864`, 2 s interval `:402`);
+    `src/mother/mod.rs` `list_jobs` `:431`, `run_mother` `:606`; the
+    macOS-only verifier arms are `src/ipc/peer_verify.rs:344-386`, `:657-677`,
+    `:730-740`; `sha2` is already a direct dependency (`Cargo.toml:92`, the ECS
+    pin). The calibration is redone with recent job costs ("Estimate").
 
 ## Mother features adopted (2026-10-18, Mother `origin/main` `e597389`)
+
+*2026-11-23 updates (Mother `origin/main` `0a38549`):* the lens wave (#75) is
+merged; gates run serially; the checklist parser accepts `- **ID-n** text`
+with or without `[ ]` (`plugins/mother/lib/criteria.sh`); `.mother/crew.yml`
+exists on Nostromo's main. Statements below that say otherwise are history.
 
 Mother's headless-crew work landed after the first draft. Read from Mother's
 git only (`docs/design.md` "Headless crew contract (Phase 1)", `lib/gates.sh`,
