@@ -1,6 +1,41 @@
 # W11 — iOS/iPadOS client over WebSocket with device pairing
 
-## Refreshed 2026-10-18 against `origin/main` `d61c62d`
+## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
+
+Read the memo's "Readiness", bet **B11**, "CI prerequisites" and open
+question 10 (Ada **D7**) first. Versus the 2026-10-18 version:
+- **Merged turns (B11).** The iOS app already declares `merged_turns_v1`
+  (NostromoKit's `ClientHello` default, `Shared/NostromoKit/Sources/
+  NostromoKit/Wire/ClientMsg.swift:20`, sent from `Transport/NetworkClient.
+  swift:232`) and draws a merged turn as stacked bubbles
+  (`iOS/Nostromo/Views/TranscriptView.swift:224-243`, from #514). The new
+  WebSocket client must send the same `Hello` (capability included) and keep
+  that rendering. With B11 the daemon no longer needs the phone's
+  declaration to merge, but declaring it keeps the phone honest if a later
+  bet lets devices send. New criterion W11-15.
+- **No queue view on the phone (D7, recommended local-only).** The queue
+  frames are `LocalOnly` and the queue verbs `Refused` for every network
+  trust, so the app shows no queued chips, no "sent together" header and no
+  take-back. If Ada chooses option (c) (a count), it is a later additive
+  field, not this wedge. New criterion W11-16 (nothing in the iOS target sends
+  a `session_queue_*` verb).
+- **MC4 is merged.** Kit's `NeedsYouAggregator` (`Shared/NostromoKit/Sources/
+  NostromoKit/NeedsYou/NeedsYou.swift:142`) and `MotherNeedsYouProducer`
+  (`:186`) exist; use them. The "if MC4 has not merged" fallback below is
+  dead.
+- **Tests.** If the iOS-T prerequisite (memo, "CI prerequisites") has merged,
+  add hosted simulator tests for what Kit cannot run: the Keychain credential
+  store (access group, delete on revoke), the `nostromo://pair` URL handler
+  (`onOpenURL` routes to the confirmation step) and the content cache's file
+  protection class. If it has not, keep the Kit-only tests and say so in the
+  PR body (criterion W11-1 is unchanged either way).
+- **Dispatch.** The AP/MC/terminal exclusions are gone (all merged); only
+  "no other job editing `iOS/Nostromo.xcodeproj`" remains. The iOS app is 24
+  Swift files (~5,200 lines); `NostromoApp.swift` is 261 lines and creates the
+  `NetworkClient` at `:17` (the old `:15-46` range still brackets the
+  `@main` scene). Re-derive other iOS line numbers on the base.
+
+## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
 Read `docs/plans/backplane-sequencing.md` first ("What changed since
 2026-10-10", bets B9 and B10, "Install coordination"). Versus the
@@ -131,8 +166,7 @@ side).
   `Shared/NostromoKit/.../NeedsYou/`, built for iOS reuse) with a Mother
   producer (awaiting or held jobs plus unacked attention reasons) and an
   approvals producer (`ApprovalPending`), and read the per-host count from its
-  snapshot. If MC4 has not merged, keep the count local and name it in the PR
-  as the one place to swap. The phone shows the count and the reason only: no
+  snapshot (MC4 is merged; 2026-11-23). The phone shows the count and the reason only: no
   `ack`, no answer, no resume control (B10).
 - `.../Wire/ClientMsg.swift` — add `pairCheck`, `pair`, `deviceUnpairSelf`
   and the optional `host` on `sessionAttach`/`sessionDetach`/
@@ -324,15 +358,22 @@ Technical criteria:
   - Revoke from the terminal while connected → the no-longer-paired screen
     within 5 s; relaunch shows no content (PRD-AC25, AC27).
 - [ ] **W11-14** PR body references the sequencing memo (W11) and the PRD.
+- [ ] **W11-15** The WebSocket client's `Hello` carries `capabilities:
+  ["merged_turns_v1"]` (a Kit encoding test), and a `SessionTurns` frame with
+  two or more `user_parts` still renders as separate bubbles over the new
+  transport (Kit decode test plus the existing iOS view path).
+- [ ] **W11-16** No iOS or Kit code path used by the iOS target sends
+  `session_queue_watch`, `session_queue_take_back` or `session_queue_remove`
+  (an `ios_policy` source-scan case), per Ada D7.
 
 ## Mother crew: gates, lenses, checklist and calibration
 
 Adopts the Mother features summarised in the memo's "Mother features adopted"
-(read from Mother `origin/main` `e597389`). Assumes the repo's
-`.mother/crew.yml` is merged before this job is added (it is read from the job's
-base ref, so a worker can neither add nor loosen a gate).
+(read from Mother `origin/main` `e597389`; rechecked at `0a38549` on
+2026-11-23). The repo's `.mother/crew.yml` is on main since MC5 (#290): it is
+read from the job's base ref, so a worker can neither add nor loosen a gate.
 
-- **Gates that apply:** `swift-ci` (`make ci-remote ONLY=swift`, `where: any`), `python-test` (always on; sandbox). The Rust gates are skipped (no Rust paths).
+- **Gates that apply:** `swift-ci` (`make ci-remote ONLY=swift`, `where: any`), `python-test` (`where: any`, on the host, when its `when` paths match; `tests/**` and `Makefile` are among them). The Rust gates are skipped (no Rust paths).
   Mother runs them on the pushed head after the worker exits: sandbox gates
   through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
   from the job worktree. Gate commands never go through the worker's Bash tool,
@@ -341,13 +382,13 @@ base ref, so a worker can neither add nor loosen a gate).
   `make ci-remote ...`) and never runs `cargo` or `xcodebuild` locally. In
   observe mode a red gate is recorded, not enforced, so the criteria above remain
   the contract; if the repo has been promoted to enforce by dispatch time, the
-  same worker session gets up to three fix attempts, then a `gate_hold`.
+  same worker session gets up to two fix attempts (`max_attempts: 2`), then a `gate_hold`.
 - **Reviewer lenses:** the plan's yaml block adds `correctness`, `tests`, `phi-security`. Lenses run
-  in parallel with adherence on the gated commit once Mother PR #75 merges
-  (open at the time of writing); until then run
-  `mother review-lens <id> --lens <name>` on the PR's job, one lens at a time.
+  automatically in parallel with adherence on the gated commit (Mother #75,
+  merged since this was first written); the repo default is all four lenses
+  (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
 - **Review depth:** Manual Perri pass: the normal `perri` entry below; the lenses add a second read on the wire/credential paths. Device credential storage and the cache wipe on scope loss.
-- **Checklist:** the acceptance items above carry ids (`W11-1` to `W11-14`) so
+- **Checklist:** the acceptance items above carry ids (`W11-1` to `W11-16`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The
   worker ticks each with `mother check <job> --done --evidence <short ref>` only
   when its test or check has passed.

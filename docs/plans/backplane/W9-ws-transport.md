@@ -496,9 +496,9 @@ Technical criteria:
 ## Mother crew: gates, lenses, checklist and calibration
 
 Adopts the Mother features summarised in the memo's "Mother features adopted"
-(read from Mother `origin/main` `e597389`). Assumes the repo's
-`.mother/crew.yml` is merged before this job is added (it is read from the job's
-base ref, so a worker can neither add nor loosen a gate).
+(read from Mother `origin/main` `e597389`; rechecked at `0a38549` on
+2026-11-23). The repo's `.mother/crew.yml` is on main since MC5 (#290): it is
+read from the job's base ref, so a worker can neither add nor loosen a gate.
 
 - **Gates that apply (2026-11-23, `.mother/crew.yml` on main):** `rust-fmt`
   (non-blocking), `rust-clippy`, `rust-test` (`where: sandbox`), `python-test`
@@ -515,7 +515,7 @@ base ref, so a worker can neither add nor loosen a gate).
   `make ci-remote ...`) and never runs `cargo` or `xcodebuild` locally. In
   observe mode a red gate is recorded, not enforced, so the criteria above remain
   the contract; if the repo has been promoted to enforce by dispatch time, the
-  same worker session gets up to three fix attempts, then a `gate_hold`.
+  same worker session gets up to two fix attempts (`max_attempts: 2`), then a `gate_hold`.
 - **Reviewer lenses:** all four are the repo default (`.mother/crew.yml:61`);
   the yaml block below keeps its `add` list for readability. They run
   automatically in parallel with adherence on the gated commit (Mother #75,
