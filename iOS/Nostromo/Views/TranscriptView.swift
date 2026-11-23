@@ -221,6 +221,26 @@ private struct TurnCard: View {
             // daemon's stand-in `userInput` for it is not drawn.
             if let injected = WakeMarkerText.injectedTurnMarker(for: turn.origin) {
                 InjectedMarkerRow(marker: injected)
+            } else if turn.userParts.count >= 2 {
+                // Several messages the daemon merged into one turn: one bubble each, in the
+                // order typed, then a muted caption.
+                VStack(alignment: .trailing, spacing: 6) {
+                    ForEach(Array(turn.userParts.enumerated()), id: \.offset) { _, part in
+                        HStack {
+                            Spacer()
+                            Text(part)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.accentColor.opacity(0.15))
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
+                    Text("sent together")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel("Sent together, \(turn.userParts.count) messages")
             } else if !turn.userInput.isEmpty {
                 // User message
                 HStack {
