@@ -50,35 +50,49 @@ Memo, "Decision log 2026-11-23". What changes here:
     both take `full | revoke_only | read_only | off`, ordered in that sequence;
     the effective level is the lower of the two.
   - Per verb on the primary, for a satellite whose effective level is
-    `revoke_only`: `DeviceList`, `DeviceRevoke`, `DevicePairCancel` and
-    `DeviceSetScope { sensitive: false }` run; `DevicePairStart`,
-    `DevicePairUpdate` and `DeviceSetScope { sensitive: true }` get
+    `revoke_only` (v1: list and revoke only): `DeviceList` and `DeviceRevoke`
+    run (and `DevicePairCancel`, which can only concern a pairing that
+    satellite owns, so it never applies in practice); `DevicePairStart` gets
     `DeviceAdminError { not_permitted_on_this_mac }` with no side effect.
-    Admin frames (`Devices`) are delivered as for `read_only`.
-  - The default level follows the enrolment egress: `work` → `revoke_only`
-    (Kobe), `personal` → `full` (Sendai). An explicit `--admin` wins.
-  - New `ServerMsg::DeviceAdminLevel { level, pair_from: Vec<String> }`
-    (class `Admin`, targeted, never broadcast; no ordinal, which only
-    `ClientMsg` has; an arm in `classify_server_msg` and in
-    `redact_for_uplink_metadata`). The primary sends it on a satellite's uplink
-    admission and whenever that record's level changes; `pair_from` lists the
-    hosts whose level is `full`. The satellite lowers `level` by its local
-    narrowing, retains it, and sends it to each local client that subscribes to
-    `devices`. A primary sends `{ level: full, pair_from: [] }` to its own
-    local subscribers. W15 uses it to disable controls up front and to name
-    the Mac to pair from.
-- **Q2: mail and todos stay home in v1, on every host.** `publish_sensitive`
-  stays default `false`, and the README says to leave it off on Sendai too:
-  Fred's mailbox is Microsoft 365 Graph (`src/data/fred_mailbox_native.rs`,
-  `src/data/graph_client.rs`), very likely the employer tenant, so v1 treats
-  even Sendai's mail as work-sensitive. The machinery (the flag, W10-8's
-  `true` case) stays built and tested. W9's primary switch `[devices]
-  share_mail_and_todos = false` is the second lock: even if a satellite
-  published, no `Paired` peer would receive the frames.
+    Admin frames (`Devices`) are delivered as for `read_only`. (There is no
+    mail-and-todos verb in v1, Q2.)
+  - An unset level is `revoke_only` for every enrolment, whatever its egress
+    (Ada's rule). Sendai becomes `full` only when enrolled or set with an
+    explicit `--admin full`.
+  - New `ServerMsg::DeviceAdminLevel { level, pair_from: Vec<String> }` (no
+    ordinal, which only `ClientMsg` has; arms in `classify_server_msg` and
+    `redact_for_uplink_metadata`). Delivery is its own rule, not the `Admin`
+    class filter: the primary writes it **targeted to that satellite's own
+    uplink connection, whatever the level, `off` included** (otherwise an
+    `off` satellite would never learn it is off), on uplink admission and
+    whenever that record's level changes. It is never broadcast and never sent
+    to a `Paired`, `Tcp` or `Routed` peer, or to another satellite. `pair_from`
+    lists the hosts whose level is `full`. The satellite lowers `level` by its
+    local narrowing, retains it, and sends it to each local (non-network)
+    client that subscribes to `devices`. A primary sends `{ level: full,
+    pair_from: [] }` to its own local subscribers. W15 uses it to disable
+    controls up front and to name the Mac to pair from.
+- **Q2: mail, calendar and todos stay home in v1, on every host, with no
+  way to turn sharing on** (PRD AC56). This wedge **does not build**
+  `uplink.publish_sensitive`: no satellite ever publishes `TeriState`,
+  `FredState`, `Work*` or `TeriPicks` upstream, on either profile, so they
+  never reach Tokyo's memory or retained cache either. Reason recorded in the
+  decision log: Fred's mailbox is Microsoft 365 Graph
+  (`src/data/fred_mailbox_native.rs`, `src/data/graph_client.rs`), probably
+  the employer tenant, so v1 treats even Sendai's mail and todos as
+  work-sensitive. Opening it up is a later wedge.
 - **Q3, Q5 (work-host text)**: unchanged; the metadata function already sends
   only kind-level enums, the host, the 8-hex ref and counts. **Q7**: the queue
   frames are `LocalOnly` and dropped at step 1 of the forward filter; a test
   row asserts `SessionQueue*` never reaches the primary on either profile.
+- **PRD open question 4 gates this wedge's release.** Whether the
+  employer's policy allows Kobe's job states, short refs and host name to
+  leave Kobe is open, with a permissive v1 default that **must be confirmed
+  by the operator before W10 ships** (is merged and installed). If the answer
+  is no, Kobe is not enrolled as a satellite at all: no Kobe rows or pushes,
+  and Kobe's revoke-only administration lapses (PRD criteria 12, 24's "works
+  from Kobe", 50, and the lost-phone-at-work path); revoking then happens
+  from Sendai or the server's terminal. The code is the same either way.
 - **S7a** adds one field later: W13 puts `operator_presence` on
   `DecisionRequest`, and adds it to this wedge's metadata arm for that frame.
   Nothing to build here.
@@ -168,14 +182,13 @@ the operator's own host.
   Option<String>` (default: `gethostname()` lower-cased, first label),
   and an `uplink: Option<UplinkConfig>` table: `{ url: String,
   token_path: PathBuf (default ~/.nostromo/uplink-token, mode 0600),
-  egress: Egress (`work` default | `personal`), publish_sensitive: bool
-  (default **false**; honoured only under `personal`), phi_repos:
+  egress: Egress (`work` default | `personal`), phi_repos:
   Vec<String> (default `["admin-portal", "referral-monitor"]`; config may
   add, the two defaults cannot be removed), publish_topics:
   Option<Vec<Topic>> (default: all the profile allows), device_admin:
   DeviceAdmin (`full` default, `revoke_only`, `read_only` or `off`; a local
-  *narrowing* of what the primary grants) }`. Keep `publish_sensitive`
-  `false` in v1 on every host (Q2). Env overrides `NOSTROMD_MODE`,
+  *narrowing* of what the primary grants) }`. (No `publish_sensitive`: Q2.)
+  Env overrides `NOSTROMD_MODE`,
   `NOSTROMD_UPLINK_URL`. Validation: `Satellite` requires `uplink`; a
   `work` satellite requires an explicit `host_name` matching
   `^[a-z][a-z0-9-]{0,15}$` (an MDM may set the OS hostname to a person's
@@ -257,8 +270,8 @@ the operator's own host.
   `MotherPeek`, `MotherAwaitDetected`, `Welcome`, `Pong`, `Error`, a
   targeted reply, or not in `publish_topics`; (2) if `egress == work` or
   `is_phi_scoped`, pass it through `redact_for_uplink_metadata`; else
-  `peer::outbound(PeerTrust::Tcp, …)`, except that Teri/Fred/work state
-  frames pass when `publish_sensitive`; (3) stamp `host`; send. On
+  `peer::outbound(PeerTrust::Tcp, …)` (which already withholds
+  Teri/Fred/work state frames; there is no exception in v1); (3) stamp `host`; send. On
   (re)connect, replay the retained cache through the same filter first.
   **Inbound:** a frame from the primary is accepted only if it is a routable
   read verb (`SessionAttach`, `SessionDetach`, `ActivitySnapshotRequest`,
@@ -330,8 +343,7 @@ the operator's own host.
   metadata shapes; anything else is dropped and counted), and
   `Hello.role.egress` must match the egress recorded at enrolment (`nostromo
   device pair --satellite <host> --egress work|personal`, default `work`;
-  the `--admin` default follows it: `work` → `revoke_only`, `personal` →
-  `full`). A
+  an unset `--admin` is `revoke_only` on either egress). A
   satellite's token never appears in the phone/iPad device list.
 - `src/bin/nostromd.rs:196-260` — in `Satellite` mode: force
   `tcp_listen_addr`/`ws_listen_addr` to loopback (log if the config asked
@@ -392,27 +404,25 @@ the operator's own host.
    `server_url`. A WS device redeems the code against the primary, and the
    satellite's Unix client receives `DevicePairOutcome::paired` within 2 s.
    A second Unix client on the satellite does not see that outcome. Then:
-   `DeviceRevoke` and `DeviceSetScope` from the satellite take effect on the
-   primary; with the record at `read_only`, `DeviceList` works and
+   `DeviceRevoke` from the satellite takes effect on the primary; with the record at `read_only`, `DeviceList` works and
    `DeviceRevoke` gets `not_permitted_on_this_mac`; with the uplink down,
    `DevicePairStart` gets `server_unreachable` at once; closing the
    satellite's Unix client cancels its pairing on the primary (a later
    redeem gets `invalid`); and `Devices` updates reach the satellite's Unix
-   client. With the record at `revoke_only` (Q1): `DeviceList`, `DeviceRevoke`,
-   `DevicePairCancel` and `DeviceSetScope { sensitive: false }` take effect;
-   `DevicePairStart`, `DevicePairUpdate` and `DeviceSetScope { sensitive:
-   true }` get `not_permitted_on_this_mac` and change nothing; the satellite's
-   Unix client receives `DeviceAdminLevel { level: revoke_only, pair_from:
-   [<full hosts>] }` on subscribe, and again after `nostromo device admin` on
-   the primary changes the level; a local `device_admin = "read_only"`
-   narrowing lowers what the client is told and enforced.
-7. **Egress gates.** `personal` with `publish_sensitive = false`: a
-   `TeriState` broadcast never reaches the primary; with `true` it does and
-   the primary still withholds it from `Paired { sensitive: false }` and
-   `Tcp` peers. `work`: no `TeriState`, `FredState`, transcript, pane,
-   activity or approval-content frame ever reaches the primary, whatever
-   `publish_sensitive` says; `ApprovalPending` arrives with a pseudonymous
-   tag and the count.
+   client. With the record at `revoke_only` (Q1): `DeviceList` and
+   `DeviceRevoke` take effect; `DevicePairStart` gets
+   `not_permitted_on_this_mac` and changes nothing; the satellite's Unix
+   client receives `DeviceAdminLevel { level: revoke_only, pair_from: [the
+   full hosts] }` on subscribe, and again after `nostromo device admin` on the
+   primary changes the level; with the record at `off` it still receives
+   `DeviceAdminLevel { level: off }`; a local `device_admin = "read_only"`
+   narrowing lowers what the client is told and enforced; an enrolment
+   without `--admin` on a `personal` satellite is `revoke_only`.
+7. **Egress gates.** `personal`: a `TeriState`, `FredState`, `Work*` or
+   `TeriPicks` broadcast never reaches the primary (Q2). `work`: no
+   `TeriState`, `FredState`, transcript, pane, activity or approval-content
+   frame ever reaches the primary; `ApprovalPending` arrives with a
+   pseudonymous tag and the count.
 
 ## Acceptance criteria
 
@@ -438,11 +448,10 @@ the operator's own host.
   satellite from its uplink.
 - [ ] **W10-7** Retained frames are keyed per host: two satellites' `MotherJobs` coexist
   and a reconnecting client receives both.
-- [ ] **W10-8** `personal` with `publish_sensitive = false` withholds exactly the frames
-  `peer::may_receive(PeerTrust::Tcp, …)` would withhold; `true` adds only
-  the Teri/Fred/work state frames, and the primary still withholds them
-  from `Paired { sensitive: false }` clients. `work` and PHI-scoped frames
-  follow `redact_for_uplink_metadata`.
+- [ ] **W10-8** `personal` withholds exactly the frames
+  `peer::may_receive(PeerTrust::Tcp, …)` would withhold, which includes every
+  Teri, Fred and work frame, and no config key changes that (Q2, PRD AC56).
+  `work` and PHI-scoped frames follow `redact_for_uplink_metadata`.
 - [ ] **W10-9** With the uplink unreachable, the satellite's Unix-socket clients see no
   behaviour change other than a `Hosts`-style status frame indicating
   `uplink: disconnected`; reconnect uses exponential backoff capped at 60 s.
@@ -477,12 +486,13 @@ the operator's own host.
   `CrewProgress` cannot decode that shape (its `signals.cost` is a scalar today),
   the test records which keys degrade instead of failing the wedge, and the PR
   body says so for MC6.
-- [ ] **W10-19** Q1: the primary enforces `revoke_only` per the verb table (allowed:
-  list, revoke, cancel, scope off; refused with no side effect: pair start,
-  pair update, scope on); the default level is `revoke_only` for a `work`
-  enrolment and `full` for `personal`; `DeviceAdminLevel` reaches a
-  satellite's local `devices` subscriber with the effective (narrowed) level
-  and `pair_from`, and is never broadcast or sent to a `Paired` or `Tcp` peer.
+- [ ] **W10-19** Q1: the primary enforces `revoke_only` as list and revoke only
+  (`DevicePairStart` refused with no side effect); an unset level is
+  `revoke_only` on either egress; `DeviceAdminLevel` always reaches its own
+  satellite, at every level including `off`, and that satellite's local
+  `devices` subscribers with the effective (narrowed) level and `pair_from`;
+  it is never broadcast or sent to a `Paired`, `Tcp`, `Routed` peer or another
+  satellite.
 
 ## Mother crew: gates, lenses, checklist and calibration
 
