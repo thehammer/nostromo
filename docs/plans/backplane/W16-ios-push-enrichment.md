@@ -1,6 +1,24 @@
 # W16 — iOS push enrichment: Notification Service Extension, on-phone enrichment for personal hosts, on-phone withdrawal
 
-## Refreshed 2026-10-18 against `origin/main` `d61c62d`
+## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
+
+Versus the 2026-10-18 version (read the memo's "What changed since
+2026-10-18" and "CI prerequisites"):
+- **Ordinal.** `ClientMsg::PushDetail` takes **111** (after W9's 98–106 and
+  W13's 107–110), not 54; `CLIENT_MSG_VARIANTS` 111 → 112. Re-derive on the
+  base.
+- **Entitlement.** Still not requested as of this refresh. The operator step
+  is spelled out in the memo, open question 6 (request for
+  `com.hammer.nostromo.ios`, `iOS/Nostromo.xcodeproj/project.pbxproj:404`;
+  this wedge creates the extension's bundle id).
+- **Tests.** If the iOS-T prerequisite has merged, add the extension target to
+  the shared scheme and cover the App Group and shared-keychain wiring with a
+  hosted simulator test; the pure pieces stay in Kit as planned. If not, say
+  so in the PR body.
+- **Dispatch.** Only "no other job editing `iOS/Nostromo.xcodeproj`" remains
+  of the old exclusions.
+
+## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
 Read `docs/plans/backplane-sequencing.md` first ("What changed since
 2026-10-10", bets B9 and B10) and the push PRD's design-loop notes **turn 2**.
@@ -19,8 +37,8 @@ Versus the 2026-10-10 draft of this file:
   PHI-repo items are metadata-only from any host. Work-host enrichment
   toggles are therefore not built.
 - No `PROTOCOL_VERSION` bump; the primary advertises `"push_detail"`.
-  `ClientMsg::PushDetail` takes the next free ordinal (54 in the memo's
-  inventory) and is `Paired`-only, self-scoped.
+  `ClientMsg::PushDetail` takes the next free ordinal (111 in the memo's
+  2026-11-23 inventory) and is `Paired`-only, self-scoped.
 - Tests run in CI (Rust in the RWX sandbox; Kit and the iOS build with the
   embedded extension on GitHub Actions). Hermetic: fake transports, no APNs,
   no VPN, no device.
@@ -205,7 +223,7 @@ Tests:
 
 Tests (Cody gates):
 
-- [ ] **W16-1** CI is green: Rust in the RWX sandbox and the `ubuntu-latest` job; Kit
+- [ ] **W16-1** CI is green: Rust in the RWX sandbox and the `ubuntu-24.04` Rust jobs; Kit
   tests and the iOS build (extension embedded) on GitHub Actions. No
   existing test is modified except W13's engine test, which is extended.
 - [ ] **W16-2** `PushDetail` never returns text for a decision, a `work`-host item, a
@@ -241,11 +259,11 @@ gates):
 ## Mother crew: gates, lenses, checklist and calibration
 
 Adopts the Mother features summarised in the memo's "Mother features adopted"
-(read from Mother `origin/main` `e597389`). Assumes the repo's
-`.mother/crew.yml` is merged before this job is added (it is read from the job's
-base ref, so a worker can neither add nor loosen a gate).
+(read from Mother `origin/main` `e597389`; rechecked at `0a38549` on
+2026-11-23). The repo's `.mother/crew.yml` is on main since MC5 (#290): it is
+read from the job's base ref, so a worker can neither add nor loosen a gate.
 
-- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `swift-ci` (`make ci-remote ONLY=swift`, `where: any`), `python-test` (always on; sandbox). 
+- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `swift-ci` (`make ci-remote ONLY=swift`, `where: any`), `python-test` (`where: any`, on the host, when its `when` paths match; `tests/**` and `Makefile` are among them). 
   Mother runs them on the pushed head after the worker exits: sandbox gates
   through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
   from the job worktree. Gate commands never go through the worker's Bash tool,
@@ -254,11 +272,11 @@ base ref, so a worker can neither add nor loosen a gate).
   `make ci-remote ...`) and never runs `cargo` or `xcodebuild` locally. In
   observe mode a red gate is recorded, not enforced, so the criteria above remain
   the contract; if the repo has been promoted to enforce by dispatch time, the
-  same worker session gets up to three fix attempts, then a `gate_hold`.
+  same worker session gets up to two fix attempts (`max_attempts: 2`), then a `gate_hold`.
 - **Reviewer lenses:** the plan's yaml block adds `correctness`, `tests`, `phi-security`, `ops-infra`. Lenses run
-  in parallel with adherence on the gated commit once Mother PR #75 merges
-  (open at the time of writing); until then run
-  `mother review-lens <id> --lens <name>` on the PR's job, one lens at a time.
+  automatically in parallel with adherence on the gated commit (Mother #75,
+  merged since this was first written); the repo default is all four lenses
+  (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
 - **Review depth:** Manual Perri pass: the normal `perri` entry below; the lenses add a second read on the wire/credential paths. New extension target, on-phone enrichment, a credential shared with the extension.
 - **Checklist:** the acceptance items above carry ids (`W16-1` to `W16-10`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The

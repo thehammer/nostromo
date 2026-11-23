@@ -1,6 +1,28 @@
 # W15 — Pair a Device and Devices in the Mac app
 
-## Refreshed 2026-10-18 against `origin/main` `d61c62d`
+## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
+
+Versus the 2026-10-18 version:
+- **Line references re-derived** (`macOS/Nostromo/Data/NostromodClient.swift`):
+  `enum ServerMsg` `:167`, `sendHello` `:992-995` (still `protocolVersion: 4`;
+  its `ClientHello` now also sends `capabilities: [merged_turns_v1]`, `:18-27`),
+  `featureTopics` `:1089`, `send(_:type:tag:)` `:1892`, `decode` `:2030`;
+  `AppDelegate.setupMenu` `macOS/Nostromo/AppDelegate.swift:492`.
+  `HumanGesture` is still `macOS/Nostromo/Security/HumanGesture.swift`.
+- **Collisions now.** AP3, BA3, FV4, AP2a, T1 and terminal 1d are merged.
+  Today the Mac Xcode project is edited by PR #518 (open); do not run this
+  wedge while any job edits `macOS/Nostromo.xcodeproj` or
+  `NostromodClient.swift`. Newer menu owners to avoid: slash commands, session
+  history (⌘N New Focus…, ⇧⌘N Resume Conversation…, #475) and the Mother
+  Overview; pick a key equivalent for **Pair a Device…** only after checking
+  `setupMenu` on the base (or none).
+- **Cap $45** (was $35): the comparable Mac UI slice, message queue S2, spent
+  $39.
+- **Gates.** `swift-ci` (≈ 24 min, measured 2026-11-23 per #519; #519 raises its
+  timeout to 2400 s) and `python-test` (≈ 20 min; its `when` includes
+  `macOS/**`): ≈ 44 min per pass.
+
+## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
 Versus the 2026-10-10 draft (read the memo's "What changed" and "Install
 coordination"):
@@ -72,7 +94,7 @@ hosted in AppKit elsewhere (`macOS/Nostromo/UI/MainLayout.swift`).
 - **Repo:** nostromo
 - **Branch:** `feat/backplane-mac-device-admin`
 - **Base:** `origin/main` (W9 and W10 merged)
-- **Max cost:** $35 (expected ≈ $14; see the memo's Estimate)
+- **Max cost:** $45 (expected ≈ $18; see the memo's Estimate; raised 2026-11-23)
 
 ## Files to change
 
@@ -211,11 +233,11 @@ Technical criteria:
 ## Mother crew: gates, lenses, checklist and calibration
 
 Adopts the Mother features summarised in the memo's "Mother features adopted"
-(read from Mother `origin/main` `e597389`). Assumes the repo's
-`.mother/crew.yml` is merged before this job is added (it is read from the job's
-base ref, so a worker can neither add nor loosen a gate).
+(read from Mother `origin/main` `e597389`; rechecked at `0a38549` on
+2026-11-23). The repo's `.mother/crew.yml` is on main since MC5 (#290): it is
+read from the job's base ref, so a worker can neither add nor loosen a gate.
 
-- **Gates that apply:** `swift-ci` (`make ci-remote ONLY=swift`, `where: any`), `python-test` (always on; sandbox). The Rust gates are skipped (no Rust paths).
+- **Gates that apply:** `swift-ci` (`make ci-remote ONLY=swift`, `where: any`), `python-test` (`where: any`, on the host, when its `when` paths match; `tests/**` and `Makefile` are among them). The Rust gates are skipped (no Rust paths).
   Mother runs them on the pushed head after the worker exits: sandbox gates
   through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
   from the job worktree. Gate commands never go through the worker's Bash tool,
@@ -224,11 +246,11 @@ base ref, so a worker can neither add nor loosen a gate).
   `make ci-remote ...`) and never runs `cargo` or `xcodebuild` locally. In
   observe mode a red gate is recorded, not enforced, so the criteria above remain
   the contract; if the repo has been promoted to enforce by dispatch time, the
-  same worker session gets up to three fix attempts, then a `gate_hold`.
+  same worker session gets up to two fix attempts (`max_attempts: 2`), then a `gate_hold`.
 - **Reviewer lenses:** the plan's yaml block adds `correctness`, `tests`. `phi-security` is removed for this plan to save a lens run: it is not mandatory in this repo and this wedge adds no wire or trust. Lenses run
-  in parallel with adherence on the gated commit once Mother PR #75 merges
-  (open at the time of writing); until then run
-  `mother review-lens <id> --lens <name>` on the PR's job, one lens at a time.
+  automatically in parallel with adherence on the gated commit (Mother #75,
+  merged since this was first written); the repo default is all four lenses
+  (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
 - **Review depth:** Lenses plus Mother's adherence review are enough here; no extra manual Perri pass beyond the `perri` entry below. Mac UI over W9/W10 verbs; no new wire, no new trust.
 - **Checklist:** the acceptance items above carry ids (`W15-1` to `W15-8`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The

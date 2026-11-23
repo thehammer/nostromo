@@ -1,6 +1,28 @@
 # W12 — Per-topic sequence numbers, replay on resume, heartbeats and bounded client queues
 
-## Refreshed 2026-10-18 against `origin/main` `d61c62d`
+## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
+
+Versus the 2026-10-18 version (read the memo's "What changed since
+2026-10-18"):
+- **Line references re-derived:** `handle_client` `src/ipc/server.rs:617`;
+  `retain_broadcasts` `:4483`; topic matching is `message_matches_topics`
+  (`:4616`) and `deliver_broadcast` (`:4597`), which are the natural home for
+  the explicit `ServerMsg::topic()` (not `peer.rs:613`, which is now inside
+  the sensitive-tag code); `Topic` is `src/ipc/protocol.rs:73-89` and gained
+  `Terminal` and `AuthoredPrs`; `ActivityEvent.seq` is `src/agent_bus.rs:53`.
+- **Topics with no ring.** `Topic::Terminal` and `Topic::AuthoredPrs` carry
+  only `LocalOnly` frames, as do the targeted queue frames (`SessionQueue*`,
+  delivered only to a watching connection). Give them no `seq` and no replay
+  ring: a network peer can never receive them, and local clients re-request on
+  reconnect as today. The replay path still runs `peer::outbound` per peer.
+- **Merged turns.** A `SessionTurns`/`SessionTurnDelta` frame may carry
+  `Turn.user_parts` (#514); replay must carry it byte-for-byte (a Kit decode
+  test with a merged turn in the replayed window).
+- **Gates.** Rust and Swift both change, so all of `rust-*`, `python-test` and
+  `swift-ci` run, one after another (Mother's code): measured ≈ 5 + 20 + 24 ≈
+  49 min per pass, inside #519's `budget_minutes: 75` (memo, "Estimate").
+
+## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
 Read `docs/plans/backplane-sequencing.md` ("What changed", "Install
 coordination"). Versus the 2026-10-10 draft: no `PROTOCOL_VERSION` bump
@@ -111,7 +133,7 @@ channel — the behaviour Mother's broker already has
 
 ## Acceptance criteria
 
-- [ ] **W12-1** CI is green: Rust in the RWX sandbox and the `ubuntu-latest` job;
+- [ ] **W12-1** CI is green: Rust in the RWX sandbox and the `ubuntu-24.04` Rust jobs;
   `swift-tests-kit` on GitHub Actions (`make ci-remote ONLY=kit`). No local
   `cargo`/`swift`. No existing fixture modified; tests are hermetic
   (loopback, paused tokio time).
@@ -140,11 +162,11 @@ channel — the behaviour Mother's broker already has
 ## Mother crew: gates, lenses, checklist and calibration
 
 Adopts the Mother features summarised in the memo's "Mother features adopted"
-(read from Mother `origin/main` `e597389`). Assumes the repo's
-`.mother/crew.yml` is merged before this job is added (it is read from the job's
-base ref, so a worker can neither add nor loosen a gate).
+(read from Mother `origin/main` `e597389`; rechecked at `0a38549` on
+2026-11-23). The repo's `.mother/crew.yml` is on main since MC5 (#290): it is
+read from the job's base ref, so a worker can neither add nor loosen a gate.
 
-- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `swift-ci` (`make ci-remote ONLY=swift`, `where: any`), `python-test` (always on; sandbox). 
+- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `swift-ci` (`make ci-remote ONLY=swift`, `where: any`), `python-test` (`where: any`, on the host, when its `when` paths match; `tests/**` and `Makefile` are among them). 
   Mother runs them on the pushed head after the worker exits: sandbox gates
   through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
   from the job worktree. Gate commands never go through the worker's Bash tool,
@@ -153,11 +175,11 @@ base ref, so a worker can neither add nor loosen a gate).
   `make ci-remote ...`) and never runs `cargo` or `xcodebuild` locally. In
   observe mode a red gate is recorded, not enforced, so the criteria above remain
   the contract; if the repo has been promoted to enforce by dispatch time, the
-  same worker session gets up to three fix attempts, then a `gate_hold`.
+  same worker session gets up to two fix attempts (`max_attempts: 2`), then a `gate_hold`.
 - **Reviewer lenses:** the plan's yaml block adds `correctness`, `tests`, `phi-security`. Lenses run
-  in parallel with adherence on the gated commit once Mother PR #75 merges
-  (open at the time of writing); until then run
-  `mother review-lens <id> --lens <name>` on the PR's job, one lens at a time.
+  automatically in parallel with adherence on the gated commit (Mother #75,
+  merged since this was first written); the repo default is all four lenses
+  (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
 - **Review depth:** Manual Perri pass: the normal `perri` entry below; the lenses add a second read on the wire/credential paths. Replay rings hold published frames; a `work` host's ring must hold metadata only.
 - **Checklist:** the acceptance items above carry ids (`W12-1` to `W12-11`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The

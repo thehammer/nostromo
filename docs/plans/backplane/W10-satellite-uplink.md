@@ -1,6 +1,43 @@
 # W10 — Satellite mode: a nostromd that publishes upstream and accepts routed actions
 
-## Refreshed 2026-10-18 against `origin/main` `d61c62d`
+## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
+
+Read the memo's "Readiness", "What changed since 2026-10-18", bet **B11** and
+the per-topic publish table first; they win over older text here. Versus the
+2026-10-18 version:
+- **B11 (merge gate).** Frames the primary routes down are injected under a
+  synthetic connection key. Register that key through the session manager's
+  `attach_network` (`src/ipc/session_manager/mod.rs:2059-2060`), never
+  `attach`, so it lands in `network_clients` and, after W9's B11 change, never
+  closes a satellite session's merge gate while a phone watches. The uplink's
+  own `Hello { role: Satellite }` declares no `capabilities`: it attaches to
+  nothing on the primary (which hosts no sessions), and the primary's gate is
+  irrelevant. New criterion W10-17.
+- **`Hello` already has two optional fields** (`client_kind`,
+  `capabilities`; `src/ipc/protocol.rs:1638-1652`). `role` is a third,
+  additive one; do not reuse `client_kind` for it (on Unix that claim feeds
+  operator verification; a WebSocket peer is never verified).
+- **The metadata function covers 92 `ServerMsg` variants** (was 50). The 39
+  new `LocalOnly` frames are dropped before it (step 1 of the forward filter)
+  but still need an arm returning `None`, since the match has no `_`. The
+  three new `Focus` frames: `TrackerSummary` → `{pseudonymous tag,
+  has_tracker, counts}`; `SessionBridge` → `{pseudonymous tag, connected}`;
+  `SessionTurnOrigin` → `None` (transcript family). `Topic::Terminal` and
+  `Topic::AuthoredPrs` are never in `publish_topics`, on any profile.
+- **Line references re-derived:** `handle_client_msg` `src/ipc/server.rs:1430`;
+  `retain_broadcasts` `:4483`; `ServerMsg::MotherJobs` `protocol.rs:3077`,
+  `MotherStatusline` `:3080` (struct `MotherStatus`, `src/mother/mod.rs:74`),
+  `PerriState` `:3111`, `SessionListResp` `:3210`, `FocusListResp` `:3223`,
+  `DecisionRequest` `:3286`, `DecisionResolved` `:3306`, `ApprovalPending`
+  `:3367`; `ActivityEvent` `src/agent_bus.rs:19`; the activity tailer
+  `src/bin/nostromd.rs:720-751`, the Mother poller `run_mother_pollers`
+  `:864` (2 s, `:931`); the TCP listener and mDNS `:353-398`; `Config`
+  `src/config.rs:51`. The old numbers in the body are superseded by these.
+- **Gates.** As W9 (memo, crew deltas); Kit runs only as the worker-run
+  `make ci-remote ONLY=kit` check because `swift-ci`'s `when` excludes this
+  wedge's paths.
+
+## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
 Read `docs/plans/backplane-sequencing.md` first: "What changed since
 2026-10-10", bets **B9** (egress profiles) and **B10** (approvals and
@@ -178,8 +215,9 @@ open question 2) on the operator's own host.
   read verb (`SessionAttach`, `SessionDetach`, `ActivitySnapshotRequest`,
   `SessionModelGet`, `SessionList`, `FocusList`) and the satellite is
   `personal`; it is then injected into the local `handle_client_msg` under
-  `PeerTrust::Routed` with a synthetic `conn_key` `uplink:<primary-conn-id>`,
-  and targeted replies go back up through the same egress filter. Anything
+  `PeerTrust::Routed` with a synthetic `conn_key` `uplink:<primary-conn-id>`
+  (attached through `attach_network`, so B11 keeps the merge gate open), and
+  targeted replies go back up through the same egress filter. Anything
   else from the primary (in particular `DecisionAnswer`, `ApprovalAnswer`,
   `ApprovalRefusalReport`, `MotherResume`, `MotherAction`, `PerriAction`,
   `Session{Spawn,Send,Interrupt,Control}`) is dropped with one WARN per
@@ -318,7 +356,7 @@ open question 2) on the operator's own host.
 
 ## Acceptance criteria
 
-- [ ] **W10-1** CI is green: Rust in the RWX sandbox and the `ubuntu-latest` job,
+- [ ] **W10-1** CI is green: Rust in the RWX sandbox and the `ubuntu-24.04` Rust jobs,
   `swift-tests-kit` on GitHub Actions (`make ci-remote ONLY=kit` to
   re-run). **No local `cargo` or `swift`** (toolchain guard). No existing
   test is modified except to add fixtures with `host` present;
@@ -362,6 +400,15 @@ open question 2) on the operator's own host.
 - [ ] **W10-14** `nostromo uplink pair` writes the token file with mode 0600 and never
   prints the token.
 - [ ] **W10-15** No clippy warnings. PR body references the sequencing memo (W10).
+- [ ] **W10-17** B11: a routed `SessionAttach` on a `personal` satellite registers its
+  synthetic key as a network client; with a local client that declared
+  `merged_turns_v1` attached (no verified app exists in a Linux test) and a
+  routed attach present, queued typed messages on that session still merge
+  (two-server harness).
+- [ ] **W10-18** `redact_for_uplink_metadata` has an explicit arm for every one of the
+  92 `ServerMsg` variants on the wedge's base (no `_`), and the egress test's
+  constructor list includes `TrackerSummary`, `SessionBridge`,
+  `SessionTurnOrigin` and every `LocalOnly` frame added since 2026-10-18.
 - [ ] **W10-16** A `work` satellite's `MotherJobs` built from a job in Mother's real
   HC-09 shape (`progress.signals.cost` as an object, `stage` one of
   `build|rework|gates|review|present|done`, `eta.n`, `attention_reasons` with
@@ -374,11 +421,11 @@ open question 2) on the operator's own host.
 ## Mother crew: gates, lenses, checklist and calibration
 
 Adopts the Mother features summarised in the memo's "Mother features adopted"
-(read from Mother `origin/main` `e597389`). Assumes the repo's
-`.mother/crew.yml` is merged before this job is added (it is read from the job's
-base ref, so a worker can neither add nor loosen a gate).
+(read from Mother `origin/main` `e597389`; rechecked at `0a38549` on
+2026-11-23). The repo's `.mother/crew.yml` is on main since MC5 (#290): it is
+read from the job's base ref, so a worker can neither add nor loosen a gate.
 
-- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `python-test` (always on; sandbox). `swift-ci` is skipped (this wedge touches no Swift paths); the Kit run named in the criteria stays a worker-run check (`make ci-remote ONLY=kit`).
+- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `python-test` (`where: any`, on the host, when its `when` paths match; `tests/**` and `Makefile` are among them). `swift-ci` is skipped (this wedge touches no Swift paths); the Kit run named in the criteria stays a worker-run check (`make ci-remote ONLY=kit`).
   Mother runs them on the pushed head after the worker exits: sandbox gates
   through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
   from the job worktree. Gate commands never go through the worker's Bash tool,
@@ -387,13 +434,13 @@ base ref, so a worker can neither add nor loosen a gate).
   `make ci-remote ...`) and never runs `cargo` or `xcodebuild` locally. In
   observe mode a red gate is recorded, not enforced, so the criteria above remain
   the contract; if the repo has been promoted to enforce by dispatch time, the
-  same worker session gets up to three fix attempts, then a `gate_hold`.
+  same worker session gets up to two fix attempts (`max_attempts: 2`), then a `gate_hold`.
 - **Reviewer lenses:** the plan's yaml block adds `correctness`, `tests`, `phi-security`. Lenses run
-  in parallel with adherence on the gated commit once Mother PR #75 merges
-  (open at the time of writing); until then run
-  `mother review-lens <id> --lens <name>` on the PR's job, one lens at a time.
+  automatically in parallel with adherence on the gated commit (Mother #75,
+  merged since this was first written); the repo default is all four lenses
+  (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
 - **Review depth:** **Manual Perri pass is still required** (the `perri` entry below at xhigh, then the operator's review). Lens findings are input to it, not a substitute: a lens sees only the diff (patch input is capped at 120 KB, so a large wedge will report `coverage_gap` findings), and Mother's `phi-security` checklist is written for care data, so it does not know this repo's trust tiers (B9, B10). Egress filter on a managed laptop; routed frames into a satellite.
-- **Checklist:** the acceptance items above carry ids (`W10-1` to `W10-16`) so
+- **Checklist:** the acceptance items above carry ids (`W10-1` to `W10-18`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The
   worker ticks each with `mother check <job> --done --evidence <short ref>` only
   when its test or check has passed.

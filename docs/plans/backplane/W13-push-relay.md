@@ -1,6 +1,34 @@
 # W13 — Push notifications: closed-vocabulary push engine on the primary, a stateless AWS relay, and iOS registration
 
-## Refreshed 2026-10-18 against `origin/main` `d61c62d`
+## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
+
+Versus the 2026-10-18 version (read the memo's "What changed since
+2026-10-18"):
+- **Ordinals.** The four new verbs take **107–110** after W9 (98–106), not
+  50–53; `CLIENT_MSG_VARIANTS` 107 → 111. Re-derive on the base.
+- **MC4 is merged.** Kit's `NeedsYouAggregator` and `MotherNeedsYouProducer`
+  exist (`Shared/NostromoKit/Sources/NostromoKit/NeedsYou/NeedsYou.swift:142`,
+  `:186`); share the rules table with them as planned (the "if MC4 has not
+  landed" fallback is dead).
+- **Line references re-derived:** `MotherJob` `src/mother/mod.rs:174`
+  (`crew_opt_in` `:262-270`); `DecisionRequest` `src/ipc/protocol.rs:3286`;
+  `ApprovalPending` `:3367`; `PrQueueItem` `src/data/perri_queue.rs:105`;
+  `PrDetail` `src/data/perri_queue_native.rs:244`, `get_pr_head_sha` `:1989`;
+  the Perri queue still searches only `org:Carefeed`
+  (`perri_queue_native.rs:1037-1038`), so S5 stands; `ask_decision`'s
+  `no_operator` is `src/mcp/tools/ask_decision.rs:90`; the Mother poller is
+  `run_mother_pollers` (`src/bin/nostromd.rs:864`, 2 s at `:931`); retained
+  frames `src/ipc/server.rs:4483`.
+- **New push sources stay out.** Authored-PR events (CI state, Perri verdicts,
+  merge results) are `LocalOnly` and never reach the primary; tracker
+  `TrackerSummary` counts reach it but are not a push kind in the PRD. No new
+  push kind is added without Ada.
+- **Relay gate.** After merge, add the `relay-test` gate (memo, crew delta 5).
+- **Gates.** Rust, Python and Swift all run, one after another (Mother's
+  code): measured ≈ 5 + 20 + 24 ≈ 49 min per pass (memo, "Estimate"), plus
+  `relay-test` once crew delta 5 lands.
+
+## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
 Read `docs/plans/backplane-sequencing.md` first ("What changed", bets B9
 and B10, "Wire inventory", "Install coordination") and the push PRD's
@@ -37,7 +65,7 @@ design-loop notes **turn 2** (S7, S8). Versus the 2026-10-10 draft:
   (below) keeps Rust and Kit from drifting. Acknowledgement semantics are in
   "Acknowledgement and withdrawal".
 - No `PROTOCOL_VERSION` bump; the primary advertises `"push"`. New
-  `ClientMsg` ordinals per the memo's wire inventory (50–53), `Paired`-only
+  `ClientMsg` ordinals per the memo's wire inventory (107–110 since 2026-11-23), `Paired`-only
   and self-scoped.
 - Tests run in CI: Rust (daemon and the `infra/push-relay` crate) in the RWX
   sandbox, Kit/iOS on GitHub Actions. Hermetic: `wiremock` stands in for the
@@ -299,7 +327,7 @@ Daemon push engine (new module):
     failing_since }`: targeted reply to the device. Host classes are
     **read-only**; there is no `ClientMsg` that changes them.
   - A network peer may only read or write its *own* device's push record.
-  - FND-1: the four new `ClientMsg`s take ordinals 50–53 (or the next free
+  - FND-1: the four new `ClientMsg`s take ordinals 107–110 (or the next free
     ones; bump `CLIENT_MSG_VARIANTS`) and are `Refused` in `network_policy`
     and allowed by W9's `paired_extra_allowed` for `Paired` peers only; the
     three new `ServerMsg`s are `Open` and only ever sent targeted.
@@ -633,11 +661,11 @@ host; Mother refuses it from a worker (`MOTHER_JOB_ID` set). The daemon's
 ## Mother crew: gates, lenses, checklist and calibration
 
 Adopts the Mother features summarised in the memo's "Mother features adopted"
-(read from Mother `origin/main` `e597389`). Assumes the repo's
-`.mother/crew.yml` is merged before this job is added (it is read from the job's
-base ref, so a worker can neither add nor loosen a gate).
+(read from Mother `origin/main` `e597389`; rechecked at `0a38549` on
+2026-11-23). The repo's `.mother/crew.yml` is on main since MC5 (#290): it is
+read from the job's base ref, so a worker can neither add nor loosen a gate.
 
-- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `swift-ci` (`make ci-remote ONLY=swift`, `where: any`), `python-test` (always on; sandbox). The relay crate (`infra/push-relay/`) is a standalone crate, not a workspace member, so `rust-test` does not run it. Until the crew config gains a `relay-test` gate (memo, "Crew config deltas"), the worker runs `rwx sandbox exec -- cargo test --manifest-path infra/push-relay/Cargo.toml` itself and pastes the result into the PR body.
+- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `swift-ci` (`make ci-remote ONLY=swift`, `where: any`), `python-test` (`where: any`, on the host, when its `when` paths match; `tests/**` and `Makefile` are among them). The relay crate (`infra/push-relay/`) is a standalone crate, not a workspace member, so `rust-test` does not run it. Until the crew config gains a `relay-test` gate (memo, "Crew config deltas"), the worker runs `rwx sandbox exec -- cargo test --manifest-path infra/push-relay/Cargo.toml` itself and pastes the result into the PR body.
   Mother runs them on the pushed head after the worker exits: sandbox gates
   through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
   from the job worktree. Gate commands never go through the worker's Bash tool,
@@ -646,11 +674,11 @@ base ref, so a worker can neither add nor loosen a gate).
   `make ci-remote ...`) and never runs `cargo` or `xcodebuild` locally. In
   observe mode a red gate is recorded, not enforced, so the criteria above remain
   the contract; if the repo has been promoted to enforce by dispatch time, the
-  same worker session gets up to three fix attempts, then a `gate_hold`.
+  same worker session gets up to two fix attempts (`max_attempts: 2`), then a `gate_hold`.
 - **Reviewer lenses:** the plan's yaml block adds `correctness`, `tests`, `phi-security`, `ops-infra`. Lenses run
-  in parallel with adherence on the gated commit once Mother PR #75 merges
-  (open at the time of writing); until then run
-  `mother review-lens <id> --lens <name>` on the PR's job, one lens at a time.
+  automatically in parallel with adherence on the gated commit (Mother #75,
+  merged since this was first written); the repo default is all four lenses
+  (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
 - **Review depth:** **Manual Perri pass is still required** (the `perri` entry below at xhigh, then the operator's review). Lens findings are input to it, not a substitute: a lens sees only the diff (patch input is capped at 120 KB, so a large wedge will report `coverage_gap` findings), and Mother's `phi-security` checklist is written for care data, so it does not know this repo's trust tiers (B9, B10). First data to leave the operator's machines, plus a Lambda and its SAM template.
 - **Checklist:** the acceptance items above carry ids (`W13-1` to `W13-30`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The
