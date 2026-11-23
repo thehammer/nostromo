@@ -114,15 +114,54 @@ processes, so sessions survive the app closing and reopening. Stopping
 newline boundaries, whichever is reached first).  On reattach the ring is
 replayed in full before live output begins.
 
+### WebSocket endpoint and device pairing
+
+Besides the Unix socket, `nostromd` serves a **WebSocket** listener for paired
+phones, iPads and satellite Macs. It carries the same JSON messages, one per
+text frame, and every connection presents a per-device bearer token
+(`Authorization: Bearer <token>`) at the upgrade. The token is the device's
+identity: it can be revoked on its own.
+
+| Setting | Meaning |
+| --- | --- |
+| `ws_addr` in `config.toml` / `NOSTROMD_WS_ADDR` | Where to listen. Default `127.0.0.1:47101` (loopback). The primary opts in with `0.0.0.0:47101` or its VPN/LAN address; `off` disables the listener. |
+| `pair_host` | The host devices are told to use (it goes in the pairing QR). Default: the bound address if specific, otherwise this host's first non-loopback IPv4 address. Logged at start. |
+
+Pair and manage devices with the `nostromo` command (installed with the daemon;
+it talks to the local daemon over the Unix socket):
+
+```bash
+nostromo device pair "Kitchen iPad"   # shows the server, a code like 123 456 and a QR; waits
+nostromo device list                  # paired devices, last seen; revoked ones in their own group
+nostromo device revoke "Kitchen iPad" # by name or id; closes its connection at once
+nostromo device pair --satellite Tokyo --admin revoke-only   # enrol a satellite Mac
+nostromo device list --all            # include satellite Macs and their device-admin level
+nostromo device admin Tokyo full      # change a satellite's device-admin level
+```
+
+Walkthrough: run `nostromo device pair`; on the phone choose "Add a server" and
+scan the QR (or type the code). The command stays running and prints
+`Paired: <name>.` when the phone redeems the code. A code lasts five minutes
+and works once; it is cancelled if you press Ctrl-C or the command's connection
+drops, and five wrong attempts lock it out. The daemon stores only a hash of
+each device token, in `~/.nostromo/devices.json` (mode 0600); the token itself
+appears only in the phone's pairing reply. Mail, calendar and todos aren't
+shared from your Macs in this version.
+
+The raw TCP listener (`tcp_addr`, port 47100, plus Bonjour) is **deprecated**:
+it has no authentication and is read-only. New clients use the WebSocket
+endpoint.
+
 ### Install
 
 ```bash
 make install-daemon
 ```
 
-This builds `nostromd` in release mode, copies it to `~/.local/bin/nostromd`,
-writes a launchd plist to `~/Library/LaunchAgents/com.hammer.nostromd.plist`,
-and bootstraps it so it starts at login.
+This builds `nostromd` and the `nostromo` CLI in release mode, copies them to
+`~/.local/bin`, writes a launchd plist to
+`~/Library/LaunchAgents/com.hammer.nostromd.plist`, and bootstraps it so it
+starts at login.
 
 ### Inspect logs
 

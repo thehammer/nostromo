@@ -1967,7 +1967,7 @@ impl SessionManager {
                 &session.attached_clients,
                 &self.network_clients,
             ));
-            refresh_merge_gate(session, &self.merge_capable);
+            refresh_merge_gate(session, &self.merge_capable, &self.network_clients);
             ensure_poller(&session.shared);
             // Cap what a freshly-attaching client receives to the last
             // SCROLLBACK_TURNS turns — mirrors the cap already applied when
@@ -2073,7 +2073,7 @@ impl SessionManager {
                 h.abort();
             }
             session.shared.queue.forget_client(client_id);
-            refresh_merge_gate(session, &self.merge_capable);
+            refresh_merge_gate(session, &self.merge_capable, &self.network_clients);
         }
     }
 
@@ -3226,7 +3226,7 @@ impl SessionManager {
                 h.abort();
             }
             session.shared.queue.forget_client(client_id);
-            refresh_merge_gate(session, &self.merge_capable);
+            refresh_merge_gate(session, &self.merge_capable, &self.network_clients);
         }
         self.network_clients.remove(client_id);
         self.client_senders.lock().unwrap().remove(client_id);
@@ -3843,11 +3843,20 @@ fn deny_unless_exited(
 /// Recount the connections attached to `session` that did not declare
 /// `merged_turns_v1`, and tell the watchers when that opens or closes merging
 /// (the queue view's `merge_group` follows the gate).
-fn refresh_merge_gate(session: &ManagedSession, capable: &HashSet<String>) {
+///
+/// Only connections that can send a user message count. A network peer (a
+/// legacy TCP client or a paired device) is refused `SessionSend`, so it never
+/// echoes a turn and cannot be confused by a merged one: it never closes the
+/// gate, whatever it declared.
+fn refresh_merge_gate(
+    session: &ManagedSession,
+    capable: &HashSet<String>,
+    network: &HashSet<String>,
+) {
     let legacy = session
         .attached_clients
         .iter()
-        .filter(|c| !capable.contains(*c))
+        .filter(|c| !capable.contains(*c) && !network.contains(*c))
         .count();
     if session.shared.queue.set_legacy_clients(legacy) {
         session.shared.publish_queue(None);

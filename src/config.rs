@@ -13,6 +13,14 @@ use serde::{Deserialize, Serialize};
 /// Environment variable that overrides the TCP listen address.
 pub const TCP_ADDR_ENV: &str = "NOSTROMD_TCP_ADDR";
 
+/// Environment variable that overrides the WebSocket listen address (`off` disables).
+pub const WS_ADDR_ENV: &str = "NOSTROMD_WS_ADDR";
+
+/// Where the WebSocket listener binds unless configured: loopback, like the TCP
+/// listener. The primary opts in to a reachable address with
+/// `ws_addr = "0.0.0.0:47101"` (or its WireGuard/LAN address).
+pub const DEFAULT_WS_ADDR: &str = "127.0.0.1:47101";
+
 /// Connect timeout for every GitHub HTTP request (raw `reqwest` and
 /// `octocrab` alike), in seconds.
 ///
@@ -55,6 +63,16 @@ pub struct Config {
     /// `null` in `config.toml` to use the default.  Plaintext only (Phase 0);
     /// TLS is added in Phase 5.
     pub tcp_addr: Option<SocketAddr>,
+
+    /// WebSocket listen address, or `"off"` (default: `127.0.0.1:47101`).
+    /// Overridden by `NOSTROMD_WS_ADDR`. The device-token transport that phones
+    /// and satellite Macs connect to; see `docs/prds/daemon-pairing-flow.md`.
+    pub ws_addr: Option<String>,
+
+    /// The address devices are told to use when pairing (the host in the QR
+    /// code). Default: the bound WebSocket address if it is specific, otherwise
+    /// the host's first non-loopback, non-link-local IPv4 address.
+    pub pair_host: Option<String>,
 
     /// Folder whose children are your code repos (default: `~/Code`).
     ///
@@ -202,6 +220,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             tcp_addr: None,
+            ws_addr: None,
+            pair_host: None,
             code_root: None,
             agents: None,
             fred_accounts: None,
@@ -487,6 +507,41 @@ impl Config {
         }
         self.tcp_addr
             .unwrap_or_else(|| DEFAULT_TCP_ADDR.parse().expect("valid default TCP addr"))
+    }
+
+    /// Resolved WebSocket listen address, or `None` when it is switched off.
+    ///
+    /// Resolution order: `NOSTROMD_WS_ADDR` → `config.toml ws_addr` →
+    /// `DEFAULT_WS_ADDR`. The value `off` disables the listener.
+    pub fn ws_listen_addr(&self) -> Option<SocketAddr> {
+        let raw = std::env::var(WS_ADDR_ENV)
+            .ok()
+            .or_else(|| self.ws_addr.clone());
+        match raw.as_deref().map(str::trim) {
+            Some(v) if v.eq_ignore_ascii_case("off") => None,
+            Some(v) => Some(
+                v.parse()
+                    .unwrap_or_else(|_| DEFAULT_WS_ADDR.parse().expect("valid default WS addr")),
+            ),
+            None => Some(DEFAULT_WS_ADDR.parse().expect("valid default WS addr")),
+        }
+    }
+
+    /// The host devices are told to connect to: `pair_host`, else the bound
+    /// address when it is specific, else the first non-loopback, non-link-local
+    /// IPv4 address of this host.
+    pub fn resolve_pair_host(&self, bound: SocketAddr) -> String {
+        if let Some(host) = self.pair_host.as_deref().map(str::trim) {
+            if !host.is_empty() {
+                return host.to_string();
+            }
+        }
+        if !bound.ip().is_unspecified() {
+            return bound.ip().to_string();
+        }
+        outbound_ipv4()
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| bound.ip().to_string())
     }
 
     pub fn mailbox_poll_interval(&self) -> Duration {
@@ -900,5 +955,52 @@ mod authored_prs_exclude_orgs_tests {
             assert_eq!(w.len(), 1, "{src}");
             assert!(!w[0].contains("carefeed"), "{src}");
         }
+    }
+}
+
+/// This host's outward-facing IPv4 address: the source address the OS would use
+/// to reach a public address. A UDP `connect` sends no packet.
+fn outbound_ipv4() -> Option<std::net::Ipv4Addr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("192.0.2.1:9").ok()?;
+    match sock.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_link_local() => Some(ip),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod ws_addr_tests {
+    use super::*;
+
+    fn parse(s: &str) -> Config {
+        toml::from_str(s).expect("config parses")
+    }
+
+    #[test]
+    fn the_websocket_listener_defaults_to_loopback() {
+        assert_eq!(
+            parse("").ws_listen_addr(),
+            Some("127.0.0.1:47101".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn ws_addr_opts_in_to_a_wider_bind_and_off_disables_it() {
+        assert_eq!(
+            parse("ws_addr = \"0.0.0.0:47101\"").ws_listen_addr(),
+            Some("0.0.0.0:47101".parse().unwrap())
+        );
+        assert_eq!(parse("ws_addr = \"off\"").ws_listen_addr(), None);
+    }
+
+    #[test]
+    fn the_pair_host_is_configured_or_the_specific_bound_address() {
+        let bound: SocketAddr = "10.1.2.3:47101".parse().unwrap();
+        assert_eq!(parse("").resolve_pair_host(bound), "10.1.2.3");
+        assert_eq!(
+            parse("pair_host = \"mac.vpn\"").resolve_pair_host(bound),
+            "mac.vpn"
+        );
     }
 }

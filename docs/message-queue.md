@@ -226,9 +226,11 @@ candidate is the first message's own text and survives a batch delivery.
 
 **Gate (`merged_turns_v1`).** Older Macs and every iOS build echo what they send, which would draw a merged turn
 twice. `welcome.features` names `merged_turns_v1`; a client that renders merged turns says so in
-`hello.capabilities`. Merging is allowed for a session only while EVERY connection attached to it declared it (a
-session with no client attached merges; a connection that sent no Hello capability, a test client included, counts as
-legacy). While the gate is closed delivery is one frame per message, as before. The gate is a count of legacy
+`hello.capabilities`. Merging is allowed for a session only while EVERY attached connection that can send a user message declared it (a
+session with no client attached merges; a local connection that sent no Hello capability, a test client included,
+counts as legacy). Network peers (the legacy TCP listener and paired WebSocket devices) never count, declared or not:
+they are refused `session_send`, so they cannot send a message to echo, and a phone that renders turns must not hold
+back the Mac app's merging. While the gate is closed delivery is one frame per message, as before. The gate is a count of legacy
 attached connections kept per tag, recounted on attach, detach and connection drop (a client that disconnects
 without detaching reopens it), and every change rebroadcasts the queue snapshot because `merge_group` follows it.
 

@@ -8,6 +8,7 @@ pub mod approvals;
 pub mod config;
 pub mod conversations;
 pub mod data;
+pub mod device_cli;
 pub mod huey;
 pub mod ipc;
 pub mod markdown_blocks;

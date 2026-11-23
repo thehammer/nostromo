@@ -115,6 +115,9 @@ pub enum Topic {
     /// to a client that names it (the empty "everything" list does not include
     /// it) and never to a network peer.
     AuthoredPrs,
+    /// The paired-device list: `ServerMsg::Devices`. Delivered only to a local
+    /// client that names it, never to a network peer (`ServerClass::Admin`).
+    Devices,
     /// A topic this build does not know (a newer client's). Decoded rather
     /// than rejected so a future topic never makes an older daemon drop the
     /// whole `Subscribe`; it matches no message, and, because it keeps the
@@ -2584,6 +2587,58 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_via: Option<crate::data::authored_prs::snapshot::MergeVia>,
     },
+
+    // ── device pairing (device side) ──────────────────────────────────────────
+    /// A device asks whether a code is live (and, with `proof`, whether this
+    /// server already knows it: D6). Accepted only on a token-less pairing
+    /// socket. Never uses the code up. `proof` is never logged.
+    PairCheck {
+        code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proof: Option<String>,
+    },
+    /// A device redeems a code for a token. `replace` asks the server to
+    /// replace the record the earlier proof matched (D6).
+    Pair {
+        code: String,
+        name: String,
+        kind: crate::ipc::devices::DeviceKind,
+        #[serde(default)]
+        replace: bool,
+    },
+    /// An authenticated device removes its own pairing.
+    DeviceUnpairSelf,
+
+    // ── device administration (local clients only) ────────────────────────────
+    /// Start a pairing; the reply is `DevicePairing`, the end is
+    /// `DevicePairOutcome`. `satellite` names the host for an enrolment code.
+    DevicePairStart {
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_hint: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        satellite: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        admin: Option<crate::ipc::devices::SatelliteAdmin>,
+    },
+    DevicePairCancel {
+        request_id: String,
+        pairing_id: String,
+    },
+    DeviceList {
+        request_id: String,
+    },
+    /// Revoke by id, or by the exact name of an active device.
+    DeviceRevoke {
+        request_id: String,
+        device: String,
+    },
+    /// Change a satellite's device-admin level.
+    DeviceSetAdmin {
+        request_id: String,
+        host: String,
+        admin: crate::ipc::devices::SatelliteAdmin,
+    },
 }
 
 // ── background tasks ──────────────────────────────────────────────────────────
@@ -3941,6 +3996,72 @@ pub enum ServerMsg {
     /// to a client that names the topic). Sent on change and after Subscribe.
     AuthoredPrs {
         snapshot: crate::data::authored_prs::AuthoredPrsSnapshot,
+    },
+
+    // ── device pairing (daemon → device) ──────────────────────────────────────
+    PairOffer {
+        #[serde(default)]
+        name_hint: Option<String>,
+        server_id: String,
+        challenge: String,
+        /// Only in the answer to the first proof on a code.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        knows_device: Option<bool>,
+    },
+    Paired {
+        device_id: String,
+        /// The token's only appearance.
+        token: String,
+        name: String,
+        server_id: String,
+        #[serde(default)]
+        replaced: bool,
+    },
+    PairRefused {
+        reason: crate::ipc::devices::PairRefusedReason,
+    },
+    /// This connection is not (or no longer) allowed. `reason`: `revoked`,
+    /// `unknown` or `not_paired`. Followed by a close with code 4001.
+    Unauthorized {
+        reason: String,
+    },
+    DeviceUnpaired,
+
+    // ── device administration (daemon → local admin client) ───────────────────
+    DevicePairing {
+        request_id: String,
+        pairing_id: String,
+        /// Digits only.
+        code: String,
+        /// `nostromo://pair?v=1&host=<h>&port=<p>&code=<c>`.
+        server_url: String,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    },
+    DevicePairOutcome {
+        pairing_id: String,
+        outcome: crate::ipc::devices::PairOutcomeKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<crate::ipc::devices::DeviceKind>,
+        #[serde(default)]
+        replaced: bool,
+    },
+    /// Phones and iPads in `devices`, satellite Macs in `hosts`.
+    Devices {
+        #[serde(default)]
+        devices: Vec<crate::ipc::devices::DeviceSummary>,
+        #[serde(default)]
+        hosts: Vec<crate::ipc::devices::DeviceSummary>,
+    },
+    DeviceRevoked {
+        request_id: String,
+        device_id: String,
+        was_connected: bool,
+    },
+    DeviceAdminError {
+        request_id: String,
+        reason: String,
     },
 }
 
