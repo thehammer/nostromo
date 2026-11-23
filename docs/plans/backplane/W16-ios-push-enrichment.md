@@ -1,22 +1,82 @@
-# W16 — iOS push enrichment: Notification Service Extension, on-phone enrichment for personal hosts, on-phone withdrawal
+# W16 — iOS push enrichment: Notification Service Extension and on-phone enrichment for personal hosts
 
 ## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
 
 Versus the 2026-10-18 version (read the memo's "What changed since
 2026-10-18" and "CI prerequisites"):
-- **Ordinal.** `ClientMsg::PushDetail` takes **111** (after W9's 98–106 and
-  W13's 107–110), not 54; `CLIENT_MSG_VARIANTS` 111 → 112. Re-derive on the
-  base.
-- **Entitlement.** Still not requested as of this refresh. The operator step
-  is spelled out in the memo, open question 6 (request for
-  `com.hammer.nostromo.ios`, `iOS/Nostromo.xcodeproj/project.pbxproj:404`;
-  this wedge creates the extension's bundle id).
+- **Ordinal.** `ClientMsg::PushDetail` takes **112** (after W9's 98–106 and
+  W13's 107–111, which since the 2026-11-23 sign-offs include
+  `OperatorPresence` at 111), not 54; `CLIENT_MSG_VARIANTS` 112 → 113.
+  Re-derive on the base.
+- **Entitlement: not requested** (2026-11-23; see "Sign-offs folded in"). No
+  Apple action gates this wedge.
 - **Tests.** If the iOS-T prerequisite has merged, add the extension target to
   the shared scheme and cover the App Group and shared-keychain wiring with a
   hosted simulator test; the pure pieces stay in Kit as planned. If not, say
   so in the PR body.
 - **Dispatch.** Only "no other job editing `iOS/Nostromo.xcodeproj`" remains
   of the old exclusions.
+
+## Sign-offs folded in (2026-11-23: Ada's memo, the operator's decisions, the entitlement finding)
+
+Memo, "Decision log 2026-11-23". Ada is rewriting `docs/prds/push-relay.md`
+in parallel; decisions are cited by id. **This section wins over older text
+below.** W16 waits for nothing but W13.
+
+- **S1, withdrawal: the v1 mechanism is W13's, and it is the design, not a
+  fallback.** Apple's Notification Service Extension Filtering entitlement
+  (`com.apple.developer.usernotifications.filtering`) was investigated on
+  2026-11-23 and is **not being requested**: the request form
+  (developer.apple.com/contact/request/notification-service) needs the App
+  Store URL and numeric Apple ID of a published app and one of four use cases
+  (end-to-end encrypted messaging; earthquake warnings; education platforms
+  retracting urgent alerts; healthcare professionals' patient-care alerts
+  being retracted; location sharing is ineligible). Nostromo is a personal
+  tool, not on the App Store, and none of those truthfully applies, so it
+  must not be requested under one of them. Withdrawal therefore is:
+  1. **Replace in place** (W13): the primary sends a passive alert with the
+     same APNs collapse identifier, `<Kind> · <host>` / `<ref> no longer needs
+     you`, and the corrected badge. Apple documents that notifications sharing
+     a collapse identifier are shown to the user as one; that the passive
+     replacement updates in place without lighting the screen is
+     **unverified** until W13-26's device check.
+  2. **Removal when the app runs** (W13): on launch and every foreground
+     connect the app removes delivered notifications whose items are no longer
+     waiting (including the "no longer needs you" ones) and sets the badge.
+  3. **No silent (background) removal push.** Ada's S1 sign-off forbids
+     combining background removal with replacement: if a removal succeeded and
+     the replacement landed afterwards, it would put back a notification for a
+     resolved item. Background pushes are also throttled and not delivered to
+     a force-quit app, so they would be best effort at most. (Best-effort silent
+     removal "where the OS permits" was considered on 2026-11-23 and left out
+     for this reason; changing that needs Ada to revisit S1.)
+  W16 adds nothing to withdrawal except that the NSE must pass a
+  replacement push (`data.resolved: true`) through **unenriched** and
+  byte-identical (criterion W16-12).
+- **The Filtering path is an optional later enhancement, off by default.**
+  The `nse_withdraw` capability (W13, always `false`) and the NSE's
+  withdrawal branch are cheap and stay, behind the flag, unit-tested in Kit.
+  The `Filtering` build configuration and its entitlements file are kept only
+  if they are a small `project.pbxproj` delta; if not, drop them and say so in
+  the PR body. No shipped build sets `nse_withdraw = true`. Revisit only if
+  Apple's categories ever fit.
+- **S4: withdrawn** (moot under S7). No action-limit work.
+- **S7 / operator Q4.** Open is the only action on every category; nothing
+  answers from the phone (W16-3).
+- **S8 as amended: personal-host decisions are enriched read-only.** For a
+  decision from a `personal`, non-PHI host on a non-sensitive tag (or a
+  device with `sensitive: true`), `PushDetail.text` is the first line of the
+  prompt (≤ 140 chars) and the composer shows it as the body ending
+  **" · answer on your Mac"**, with no choice buttons (the Open-only
+  category). Ada's AC: with the VPN up, a decision from a personal, non-PHI
+  host displays the first line of its prompt within 5 s, and the notification
+  offers no choice actions. Criterion W16-11.
+- **Operator Q3: work-host and PHI notifications never carry extra detail on
+  the phone.** This reverses the operator's 2026-10-10 answer. `PushDetail`
+  returns no text for them, and the settings screen lists work hosts with
+  "Details stay on <host>" and no toggle. (Ada's caveat for the operator:
+  keep Carefeed checkouts other than the two PHI repositories off Sendai, or
+  classify Sendai as work.)
 
 ## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
@@ -62,28 +122,21 @@ remaining phone-side bets that survive B9/B10:
    with a per-host off switch per device. If the fetch does not finish in
    time, the contract text is shown unchanged. Never a spinner, blank or
    error. Work hosts and PHI-repo items always show contract text.
-2. **Withdrawal without opening the app** within 2 minutes (S1), when Apple
-   grants the filtering entitlement.
-   It fires for every reason W13 removes an item, including an `ack` at the
-   Mac (`attention_reasons[].acked` flipping on the primary, see W13
-   "Acknowledgement and withdrawal"). W16 adds no phone-side ack or answer.
+2. *(2026-11-23: withdrawn from this wedge.)* Silent withdrawal needed
+   Apple's filtering entitlement, which is not being requested; W13's
+   replace-in-place is the v1 withdrawal (see "Sign-offs folded in").
 
-Decision prompts are not enriched on the lock screen: a decision's prompt and
-choices are focus content that FND-1 classifies `Focus(tag)`, and showing them
-invites answering from the phone, which B10 rules out. (If Ada wants
-personal-host decision prompts enriched read-only, it is a one-line policy
-change in `EnrichmentPolicy`; noted in S8.)
+Decision prompts on personal, non-PHI hosts **are** enriched, read-only,
+ending "· answer on your Mac" (S8 as amended); choices are never shown and
+there are no answer actions (B10).
 
 The mechanism is a **Notification Service Extension (NSE)**: a separate iOS
 target that iOS runs for every alert push with `mutable-content: 1`, before
 display, with about 30 s of wall time, a small memory budget and network
 access through the WireGuard tunnel when it is up (it cannot bring the tunnel
-up). It runs even after the app is force-quit and is not subject to the
-background-push budget that makes W13's withdrawal best-effort. To hide its
-own notification after a withdrawal, the NSE needs
-`com.apple.developer.usernotifications.filtering`, which Apple grants on
-request. The app reports per device whether the build has it, and the daemon
-uses NSE withdrawal only for devices that do.
+up). It runs even after the app is force-quit. (Hiding its own notification
+would need the filtering entitlement, which is not being requested; see
+"Sign-offs folded in".)
 
 The iOS app has a single application target in
 `iOS/Nostromo.xcodeproj/project.pbxproj` (hand-maintained, ids prefixed
@@ -107,7 +160,8 @@ Daemon (Rust):
   `ServerMsg::PushDetail { item_ref, waiting: bool, text: Option<String>,
   host }`.
   - `text` is the first line, at most 140 chars, of the Mother job's
-    `question` or the PR's `title`. Decisions always get `text: None`.
+    `question`, the PR's `title`, or (S8 as amended) the decision's
+    `prompt`; never `detail` or choice labels.
   - `text` is `None` unless **all** hold: the item's host egress is
     `personal` (W10 `Hosts.egress`, or the primary itself); the item is not
     PHI-scoped (W10 `is_phi_scoped`); the item is not on a sensitive tag
@@ -119,14 +173,15 @@ Daemon (Rust):
     `paired_extra_allowed` for `Paired` only; the reply is `Open`, targeted
     only. Add `"push_detail"` to `Welcome.features`.
 - `src/push/mod.rs` (W13): serve `PushDetail` from the item map plus the
-  retained snapshots. For devices with `capabilities.nse_withdraw == true`,
-  `src/push/publisher.rs` sends:
+  retained snapshots. **Optional, off by default** (see "Sign-offs folded
+  in"): for devices with `capabilities.nse_withdraw == true`, which no shipped
+  build sets, `src/push/publisher.rs` sends:
   - every alert push with `mutable_content: true`;
   - each withdrawal as **one** `mutable-content` alert push at priority 10,
     title/body `Nostromo` / `Updated` (add both to `vocab.rs` and its
     allow-list test), with `data.withdraw`, `badge`, and
     `interruption_level: passive`.
-  This replaces W13's badge-only + background pair for those devices.
+  This replaces W13's replace-in-place push for those devices only.
 - `src/push/devices.rs` (W13): `RegisterPush` gains `capabilities {
   nse_withdraw }`. Prefs gain `enrich: BTreeMap<host, bool>` for display
   only (enforcement is on the phone).
@@ -146,14 +201,16 @@ iOS:
      `userInfo["item"]` is listed, set the badge, deliver an empty
      `UNNotificationContent()` (filtered: nothing shown).
   3. **Enrich?** `EnrichmentPolicy.shouldEnrich(kind, host, hostEgress,
-     devicePrefs)`: decision → never; `work` or unknown egress → never;
-     `personal` → default on, per-host toggle overrides.
+     devicePrefs)`: `data.resolved` (a W13 replacement) → never; `work` or
+     unknown egress → never; `personal` → default on (decisions included,
+     read-only, S8), per-host toggle overrides.
   4. Fetch with a hard **4.0 s total budget** via
      `PushDetailFetcher.fetch(itemRef, deadline:)`: a one-shot
      `URLSessionWebSocketTask` to the primary URL from the app group, the W11
      token from the shared keychain, `PushDetail`, close.
   5. On `waiting == false`: deliver the contract content and also remove it.
-     On `text`: set `body`, moving the original body to `subtitle`.
+     On `text`: set `body`, moving the original body to `subtitle`; for a
+     decision the body is `<text> · answer on your Mac`.
   6. On budget expiry or any error, deliver the original contract content
      unchanged; `serviceExtensionTimeWillExpire` does the same.
   The NSE must not log notification text. Register the static categories
@@ -175,7 +232,8 @@ iOS:
   `NostromoNotificationService` app-extension target (ids prefixed
   `BP16…`), embed it in `Nostromo` (Embed App Extensions), link
   `NostromoKit`; add a `Filtering` build configuration that differs from
-  `Release` only by the filtering entitlement; app-group and keychain-group
+  `Release` only by the filtering entitlement (optional, see "Sign-offs
+  folded in"); app-group and keychain-group
   entitlements on both targets.
 - `iOS/Nostromo/Info.plist`: `NostromoPushFiltering` = `$(PUSH_FILTERING)`
   (YES only in `Filtering`); the app reads it to set
@@ -184,31 +242,32 @@ iOS:
 Tests:
 
 - `Shared/NostromoKit/Tests/NostromoKitTests/EnrichmentPolicyTests.swift`:
-  every kind × egress × toggle; decision never enriches; unknown egress =
-  work.
+  every kind × egress × toggle; a personal-host decision enriches; a
+  replacement (`resolved`) never does; unknown egress = work.
 - `.../PushDetailFetcherTests.swift` (fake transport): reply at 3.9 s →
   enriched; stall to 4.1 s → `nil` with the call returning by 4.05 s;
   connection refused → `nil` immediately; `waiting: false` surfaced.
 - `.../NotificationContentComposerTests.swift`: contract + detail →
   expected title/subtitle/body; contract + `nil` → byte-identical contract.
   No code path produces placeholder or error text.
-- `tests/push_detail.rs` (Rust): a `work`-host item, a PHI-repo item on a
-  `personal` host, a decision, and a sensitive-tag item for a non-sensitive
-  device all return `text: None`; a resolved item → `waiting: false`; an
+- `tests/push_detail.rs` (Rust): a `work`-host item (decision included), a
+  PHI-repo item on a `personal` host, and a sensitive-tag item for a
+  non-sensitive device all return `text: None`; a personal, non-PHI decision
+  returns the prompt's first line and never `detail` or a choice label; a resolved item → `waiting: false`; an
   unknown `item_ref` → `waiting: false`, no text; `PushDetail` from a `Tcp`
   or `Satellite` peer is refused.
-- `tests/push_engine.rs` (W13, extend): a device with `nse_withdraw`
-  receives exactly one mutable-content withdrawal push (no background push),
-  its strings passing `vocab::conforms`.
+- `tests/push_engine.rs` (W13, extend): a device with `nse_withdraw` (test
+  only; optional path) receives exactly one mutable-content withdrawal push,
+  its strings passing `vocab::conforms`; a default device still gets W13's
+  replacement push.
 
 ## Approach
 
 1. **Spike on a physical device** (operator-assisted, throwaway; record the
    answer in the PR body): does NSE network traffic reach the primary through
    the WireGuard on-demand tunnel? If not, enrichment ships disabled behind
-   its toggle and the PR says so. **Operator step, in parallel:** request
-   `com.apple.developer.usernotifications.filtering` for the extension's
-   bundle id. Until it is granted, ship `Release` (`nse_withdraw = false`).
+   its toggle and the PR says so. Ship `Release` (`nse_withdraw = false`);
+   the filtering entitlement is not requested ("Sign-offs folded in").
 2. Daemon: `PushDetail`, device capabilities, the mutable-content publisher
    path, tests.
 3. NostromoKit pure pieces, TDD: policy, fetcher with deadline, composer.
@@ -226,18 +285,20 @@ Tests (Cody gates):
 - [ ] **W16-1** CI is green: Rust in the RWX sandbox and the `ubuntu-24.04` Rust jobs; Kit
   tests and the iOS build (extension embedded) on GitHub Actions. No
   existing test is modified except W13's engine test, which is extended.
-- [ ] **W16-2** `PushDetail` never returns text for a decision, a `work`-host item, a
-  PHI-scoped item, or a sensitive-tag item to a device without `sensitive:
-  true`.
+- [ ] **W16-2** `PushDetail` never returns text for a `work`-host item, a PHI-scoped
+  item, or a sensitive-tag item to a device without `sensitive: true`, and
+  never returns a decision's `detail` or choice labels.
 - [ ] **W16-3** No code in the app or the extension sends `DecisionAnswer`,
   `ApprovalAnswer`, `MotherResume` or `MotherAction` (a Kit source-policy
   test greps the extension and push sources; B10). Decision notifications use
   the static Open-only category.
 - [ ] **W16-4** The fetcher returns within 4.05 s in every case, and a `nil` fetch yields
   contract content byte-identical to the push.
-- [ ] **W16-5** A device registered with `nse_withdraw: true` receives withdrawals as a
-  single mutable-content push whose visible strings pass the W13 vocabulary
-  allow-list; a device without it keeps W13's badge-only + background pair.
+- [ ] **W16-5** (Optional path, test only.) A device registered with
+  `nse_withdraw: true` receives withdrawals as a single mutable-content push
+  whose visible strings pass the W13 vocabulary allow-list; every shipped
+  configuration registers `nse_withdraw: false` and keeps W13's
+  replace-in-place push.
 
 `[device]` (operator-verified on a physical iPhone with the VPN up, after
 merge and after installing the new build and Tokyo's daemon; not Cody
@@ -246,15 +307,23 @@ gates):
 - [ ] **W16-6** A Sendai (personal) Mother item shows the real question's first line
   within 5 s of arrival; the relay record and the W13 sent log show only the
   contract text.
-- [ ] **W16-7** A Kobe (work) item and a decision always show contract text.
+- [ ] **W16-7** A Kobe (work) item, including a Kobe decision, always shows contract
+  text.
 - [ ] **W16-8** With the VPN down, every notification shows exact contract text, with no
   intermediate state.
-- [ ] **W16-9** Filtering build: answering a Mother question at the Mac removes the
-  phone's notification and drops the badge within 2 minutes without opening
-  the app, including after a force-quit.
+- [ ] **W16-9** With the NSE embedded, answering a Mother question at the Mac still
+  replaces the phone's notification with "… no longer needs you" and drops
+  the badge within 2 minutes without opening the app, including after a
+  force-quit (the NSE passes the replacement through unchanged).
 - [ ] **W16-10** PR body records the NSE-over-WireGuard spike result and whether the
-  filtering entitlement has been granted, and references
+  optional `Filtering` configuration was kept or dropped, and references
   `docs/prds/push-relay.md` and the sequencing memo (W16).
+- [ ] **W16-11** S8 as amended: with the VPN up, a decision from a personal, non-PHI
+  host shows the first line of its prompt ending " · answer on your Mac"
+  within 5 s, and the notification offers no choice actions (Kit composer
+  test; `[device]` check on a physical iPhone).
+- [ ] **W16-12** The NSE delivers a W13 replacement push (`data.resolved: true`)
+  byte-identical and unenriched (Kit composer test).
 
 ## Mother crew: gates, lenses, checklist and calibration
 
@@ -278,7 +347,7 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   merged since this was first written); the repo default is all four lenses
   (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
 - **Review depth:** Manual Perri pass: the normal `perri` entry below; the lenses add a second read on the wire/credential paths. New extension target, on-phone enrichment, a credential shared with the extension.
-- **Checklist:** the acceptance items above carry ids (`W16-1` to `W16-10`) so
+- **Checklist:** the acceptance items above carry ids (`W16-1` to `W16-12`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The
   worker ticks each with `mother check <job> --done --evidence <short ref>` only
   when its test or check has passed.
@@ -290,9 +359,11 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
 ## Out of scope
 
 - Any action that answers anything from the phone (B10; S7).
-- Enrichment for work hosts, PHI repos or decisions (B9; S8).
-- Any change to what goes through the relay beyond the `Nostromo`/`Updated`
-  withdrawal placeholder.
+- Enrichment for work hosts or PHI repos (B9; S8; operator Q3).
+- Requesting the filtering entitlement, or any silent (background) removal
+  push (S1).
+- Any change to what goes through the relay beyond the optional
+  `Nostromo`/`Updated` withdrawal placeholder.
 - Enrichment of Summary notifications; Live Activities; widgets; a
   Notification Content Extension.
 - macOS notifications (Mother's and AP3's are unchanged).
