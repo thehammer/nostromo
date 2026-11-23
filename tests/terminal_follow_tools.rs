@@ -519,6 +519,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Client<S> {
     ) -> Self {
         let mut c = Self::new(stream);
         c.send(&ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "terminal-follow-tools-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: claim.map(str::to_string),

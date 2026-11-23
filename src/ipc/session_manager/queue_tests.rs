@@ -817,7 +817,7 @@ async fn a_stuck_write_makes_only_its_own_id_already_delivered_others_stay_not_f
     // A write of `writing_id` that never finishes (the limit is five seconds).
     let shared = shared_of(&mgr, "t");
     lock_recover(&shared.pending).retain(|m| m.id != writing_id);
-    *lock_recover(&shared.writing_id) = Some(writing_id.clone());
+    *lock_recover(&shared.writing_ids) = vec![writing_id.clone()];
     shared.writing.store(true, Ordering::SeqCst);
 
     let answers = tokio::task::spawn_blocking(move || {

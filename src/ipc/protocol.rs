@@ -1221,6 +1221,12 @@ pub const FEATURE_CONVERSATION_HISTORY: &str = "conversation_history_v1";
 /// `session_queue_take_back` and `session_queue_remove` (see `docs/message-queue.md`).
 pub const FEATURE_SESSION_QUEUE: &str = "session_queue_v1";
 
+/// A turn may answer several queued messages merged into one frame
+/// (`Turn.user_parts`). The daemon advertises it in `welcome.features`; a client
+/// that renders such a turn declares the same string in `Hello.capabilities`.
+/// Merging happens only while every client attached to a session declared it.
+pub const FEATURE_MERGED_TURNS: &str = "merged_turns_v1";
+
 // ── message queue (session_queue_v1) ──────────────────────────────────────────
 
 /// What a queued entry is, on the wire. Daemon-injected items are never shown.
@@ -1250,6 +1256,10 @@ pub struct QueueEntryWire {
     pub client_ref: Option<String>,
     /// True only for a typed entry.
     pub can_take_back: bool,
+    /// Present, and equal, on the entries that will be written together as one
+    /// frame (two or more typed messages merging); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_group: Option<u32>,
 }
 
 /// The typed message held for a Claude sign-in. It carries no text: the sign-in
@@ -1631,6 +1641,10 @@ pub enum ClientMsg {
         /// clients, which connect as ordinary local peers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_kind: Option<String>,
+        /// What the client can render beyond the base protocol, by feature
+        /// string (see [`FEATURE_MERGED_TURNS`]). Absent from older clients.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
     },
     Subscribe {
         #[serde(deserialize_with = "lenient_topics")]
@@ -3980,6 +3994,7 @@ mod tests {
                 timestamp: None,
                 blocks: vec![],
                 is_complete: false,
+                user_parts: Vec::new(),
                 origin: None,
             }],
         });
@@ -3992,6 +4007,7 @@ mod tests {
                     timestamp: None,
                     blocks: vec![],
                     is_complete: false,
+                    user_parts: Vec::new(),
                     origin: None,
                 },
             },
@@ -4214,10 +4230,12 @@ mod tests {
                 client_id,
                 protocol_version,
                 client_kind,
+                capabilities,
             } => {
                 assert_eq!(client_id, "old-app");
                 assert_eq!(protocol_version, 4);
                 assert_eq!(client_kind, None);
+                assert!(capabilities.is_empty());
             }
             other => panic!("expected Hello, got {other:?}"),
         }
@@ -4238,6 +4256,7 @@ mod tests {
     #[test]
     fn a_hello_without_client_kind_is_encoded_without_the_key() {
         let v = serde_json::to_value(ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "c".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: None,
@@ -4252,11 +4271,13 @@ mod tests {
     #[test]
     fn a_hello_with_client_kind_round_trips() {
         round_trip_client(ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "app".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: Some("mac_app".into()),
         });
         let v = serde_json::to_value(ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "app".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: Some("mac_app".into()),
@@ -9698,6 +9719,7 @@ mod slash_commands_wire_tests {
             timestamp: None,
             blocks: vec![],
             is_complete: true,
+            user_parts: Vec::new(),
             origin: Some(TurnOrigin::LocalCommand {
                 command: "context".into(),
                 args: String::new(),

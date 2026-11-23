@@ -133,6 +133,7 @@ async fn raw_handshake(stream: &mut UnixStream, client_id: &str) {
     raw_send(
         stream,
         &ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: client_id.into(),
             protocol_version: 4,
             client_kind: None,

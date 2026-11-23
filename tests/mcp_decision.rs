@@ -634,6 +634,7 @@ async fn raw_handshake(
     raw_send(
         stream,
         &ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: client_id.into(),
             protocol_version: 4,
             client_kind: Some("mac_app".into()),
@@ -1226,6 +1227,7 @@ async fn a_connection_whose_second_frame_is_ping_instead_of_subscribe_does_not_c
     raw_send(
         &mut stream,
         &ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "ping-only".into(),
             protocol_version: 4,
             client_kind: Some("mac_app".into()),

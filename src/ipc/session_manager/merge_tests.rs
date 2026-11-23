@@ -118,7 +118,10 @@ fn the_first_line_states_the_count() {
 
 #[test]
 fn a_built_envelope_parses_back_to_its_parts() {
-    let env = build_envelope(B, &["oh and backfill", "use the new column", "skip the tests"]);
+    let env = build_envelope(
+        B,
+        &["oh and backfill", "use the new column", "skip the tests"],
+    );
     let parsed = parse(&env).expect("parses");
     assert_eq!(parsed.boundary, B);
     assert_eq!(
@@ -178,7 +181,11 @@ fn a_boundary_that_occurs_in_an_input_is_regenerated() {
 fn a_foreign_boundary_is_rejected() {
     let env = build_envelope(B, &["a", "b"]);
     let other = "fedcba9876543210fedcba9876543210";
-    let swapped = env.replacen(&format!("<<<MESSAGE-{B}-2>>>"), &format!("<<<MESSAGE-{other}-2>>>"), 1);
+    let swapped = env.replacen(
+        &format!("<<<MESSAGE-{B}-2>>>"),
+        &format!("<<<MESSAGE-{other}-2>>>"),
+        1,
+    );
     assert!(parse(&swapped).is_none());
     let end_swapped = env.replacen(
         &format!("<<<END-MESSAGE-{B}-1>>>"),

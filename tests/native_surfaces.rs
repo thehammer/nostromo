@@ -130,6 +130,7 @@ async fn connect(d: &Daemon) -> UnixStream {
     send(
         &mut s,
         &ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "native-surfaces-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: None,
@@ -474,6 +475,7 @@ async fn replayed_layout(d: &Daemon, tag: &str) -> Option<PaneTree> {
     send(
         &mut s,
         &ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "replay-probe".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: None,
@@ -654,6 +656,7 @@ async fn a_fresh_spawn_of_teri_or_fred_does_not_announce_its_layout_to_a_network
     write_frame(
         &mut tcp,
         &serde_json::to_vec(&ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "native-surfaces-tcp".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: None,

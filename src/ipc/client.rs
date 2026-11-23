@@ -194,6 +194,7 @@ async fn do_connect(path: &Path) -> Result<(SplitReader, SplitWriter, u32)> {
     );
 
     let hello = ClientMsg::Hello {
+        capabilities: Vec::new(),
         client_id: client_id.clone(),
         protocol_version: PROTOCOL_VERSION,
         client_kind: None,

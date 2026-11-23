@@ -75,6 +75,7 @@ async fn session_round_trip_drives_real_claude() {
     send(
         &mut stream,
         &ClientMsg::Hello {
+            capabilities: Vec::new(),
             client_id: "it-client".into(),
             protocol_version: 3,
             client_kind: None,

@@ -15,8 +15,10 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 
+use super::inject::PendingOrigin;
 use super::queue::EntryKind;
-use super::{local_command, PendingMessage};
+use super::{local_command, PendingMessage, Shared};
+use crate::model::batches::{self, BatchRecord};
 
 /// Most messages in one batch (equal to the sign-in queue cap).
 pub(super) const MERGE_MAX_MESSAGES: usize = 20;
@@ -122,6 +124,59 @@ pub(super) fn merge_groups(
     groups
 }
 
+/// Take the next frame's worth off the front of `pending`: one message, or a
+/// merged run of typed ones (see [`plan_batches`]). The caller holds the locks
+/// `step` does.
+pub(super) fn take_front(
+    pending: &mut VecDeque<PendingMessage>,
+    merge_allowed: bool,
+) -> Option<PendingMessage> {
+    let run = plan_batches(pending, merge_allowed).into_iter().next()?;
+    if run.len() < 2 {
+        return pending.pop_front();
+    }
+    let parts: Vec<PendingMessage> = pending.drain(run).collect();
+    Some(PendingMessage::batch_of(parts))
+}
+
+impl PendingMessage {
+    /// One frame for `parts` (two or more typed messages): its id and kind are
+    /// the first part's, its text the envelope, its images all the parts'.
+    fn batch_of(parts: Vec<PendingMessage>) -> Self {
+        let texts: Vec<&str> = parts.iter().map(|p| p.text.as_str()).collect();
+        let boundary = fresh_boundary(&texts);
+        let text = build_envelope(&boundary, &texts);
+        let images = parts.iter().flat_map(|p| p.images.clone()).collect();
+        Self {
+            id: parts[0].id.clone(),
+            kind: parts[0].kind.clone(),
+            original_text: None,
+            text,
+            images,
+            origin: PendingOrigin::User,
+            on_delivered: None,
+            batch: Some(Box::new(Batch { boundary, parts })),
+        }
+    }
+}
+
+/// Append the batch's ledger line. Logs the error class only.
+pub(super) fn record_batch(shared: &Shared, batch: &Batch) {
+    let record = BatchRecord {
+        boundary: batch.boundary.clone(),
+        count: batch.parts.len() as u32,
+        ts: chrono::Utc::now(),
+    };
+    let hub = &shared.ctx.hub;
+    if let Err(e) = batches::append(&hub.paths.batches_dir, &shared.ctx.session_id, &record) {
+        let class = e
+            .downcast_ref::<std::io::Error>()
+            .map(|io| format!("{:?}", io.kind()))
+            .unwrap_or_else(|| "other".to_owned());
+        tracing::warn!(tag = %shared.ctx.tag, error_class = %class, "batch ledger append failed");
+    }
+}
+
 /// A fresh boundary that occurs in none of `texts`.
 pub(super) fn fresh_boundary(texts: &[&str]) -> String {
     loop {
@@ -190,7 +245,7 @@ pub(crate) fn parse(text: &str) -> Option<Parsed> {
         return None;
     }
     let rest = rest.strip_prefix(" boundary=\"")?;
-    let (boundary, rest) = rest.split_once('"')?;
+    let (boundary, _) = rest.split_once('"')?;
     if boundary.len() != 32 || !boundary.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }

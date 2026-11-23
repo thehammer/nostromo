@@ -4493,6 +4493,7 @@ async fn the_sweep_at_start_covers_the_directory_of_each_store_file() {
         focus_models: a.join("focus-models.json"),
         defaults: b.join("model-defaults.json"),
         notes_dir: root.join("notes"),
+        batches_dir: root.join("batches"),
         catalog: c.join("model-catalog.json"),
     };
     let leftovers = [
