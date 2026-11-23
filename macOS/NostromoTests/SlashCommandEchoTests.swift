@@ -198,6 +198,7 @@ final class SlashCommandEchoTests: XCTestCase {
 
         XCTAssertTrue(session.turns[0].hasLocalCommandOrigin, "the record stays a record")
         XCTAssertNil(session.turns[0].markerContent)
+        XCTAssertNil(session.turns[0].pendingCommandEnd, "an answered command is never marked as unanswered")
     }
 
     func testALateAnswerStillAdoptsACommandMarkedNoAnswer() {
