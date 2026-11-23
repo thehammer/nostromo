@@ -1065,7 +1065,7 @@ Driving Mother, sessions or Perri from a phone needs a new bet and PRD.
 ## Questions for Ada
 
 - **Q1 — Pairing UX — ANSWERED** (`docs/prds/daemon-pairing-flow.md`).
-  D1–D6 still pending Ada's sign-off (unchanged by this refresh; see the
+  D1–D6 (and, since 2026-11-23, D7) still pending Ada's sign-off (see the
   PRD's "Design-loop notes"). The refresh adds one information note there:
   the CLI is a new `nostromo` binary (the old TUI binary of that name is
   gone), so the PRD's `nostromo device …` copy stands.
