@@ -33,9 +33,70 @@ the per-topic publish table first; they win over older text here. Versus the
   `src/bin/nostromd.rs:720-751`, the Mother poller `run_mother_pollers`
   `:864` (2 s, `:931`); the TCP listener and mDNS `:353-398`; `Config`
   `src/config.rs:51`. The old numbers in the body are superseded by these.
-- **Gates.** As W9 (memo, crew deltas); Kit runs only as the worker-run
+- **Gates.** Rust ≈ 5 min plus `python-test` ≈ 20 today (its `tests/**`
+  matches the new Rust test files). This is the one wedge that crew delta 7
+  helps: W10 edits no `Makefile` and no Swift path, so once `tests/**` is
+  narrowed only the Rust gates fire (≈ 5 min). Kit runs only as the worker-run
   `make ci-remote ONLY=kit` check because `swift-ci`'s `when` excludes this
   wedge's paths.
+
+## Sign-offs folded in (2026-11-23: Ada's memo and the operator's decisions)
+
+Memo, "Decision log 2026-11-23". What changes here:
+- **Q1, the `revoke_only` admin level, is enforced here.** W15 defines it
+  ("Revoke-only device-admin level (Q1)"); this wedge implements the primary's
+  policy and the level signal:
+  - `PeerTrust::Satellite { admin }` and the local narrowing `device_admin`
+    both take `full | revoke_only | read_only | off`, ordered in that sequence;
+    the effective level is the lower of the two.
+  - Per verb on the primary, for a satellite whose effective level is
+    `revoke_only` (v1: list and revoke only): `DeviceList` and `DeviceRevoke`
+    run (and `DevicePairCancel`, which can only concern a pairing that
+    satellite owns, so it never applies in practice); `DevicePairStart` gets
+    `DeviceAdminError { not_permitted_on_this_mac }` with no side effect.
+    Admin frames (`Devices`) are delivered as for `read_only`. (There is no
+    mail-and-todos verb in v1, Q2.)
+  - An unset level is `revoke_only` for every enrolment, whatever its egress
+    (Ada's rule). Sendai becomes `full` only when enrolled or set with an
+    explicit `--admin full`.
+  - New `ServerMsg::DeviceAdminLevel { level, pair_from: Vec<String> }` (no
+    ordinal, which only `ClientMsg` has; arms in `classify_server_msg` and
+    `redact_for_uplink_metadata`). Delivery is its own rule, not the `Admin`
+    class filter: the primary writes it **targeted to that satellite's own
+    uplink connection, whatever the level, `off` included** (otherwise an
+    `off` satellite would never learn it is off), on uplink admission and
+    whenever that record's level changes. It is never broadcast and never sent
+    to a `Paired`, `Tcp` or `Routed` peer, or to another satellite. `pair_from`
+    lists the hosts whose level is `full`. The satellite lowers `level` by its
+    local narrowing, retains it, and sends it to each local (non-network)
+    client that subscribes to `devices`. A primary sends `{ level: full,
+    pair_from: [] }` to its own local subscribers. W15 uses it to disable
+    controls up front and to name the Mac to pair from.
+- **Q2: mail, calendar and todos stay home in v1, on every host, with no
+  way to turn sharing on** (PRD AC56). This wedge **does not build**
+  `uplink.publish_sensitive`: no satellite ever publishes `TeriState`,
+  `FredState`, `Work*` or `TeriPicks` upstream, on either profile, so they
+  never reach Tokyo's memory or retained cache either. Reason recorded in the
+  decision log: Fred's mailbox is Microsoft 365 Graph
+  (`src/data/fred_mailbox_native.rs`, `src/data/graph_client.rs`), probably
+  the employer tenant, so v1 treats even Sendai's mail and todos as
+  work-sensitive. Opening it up is a later wedge.
+- **Q3, Q5 (work-host text)**: unchanged; the metadata function already sends
+  only kind-level enums, the host, the 8-hex ref and counts. **Q7**: the queue
+  frames are `LocalOnly` and dropped at step 1 of the forward filter; a test
+  row asserts `SessionQueue*` never reaches the primary on either profile.
+- **PRD open question 4 gates this wedge's release.** Whether the
+  employer's policy allows Kobe's job states, short refs and host name to
+  leave Kobe is open, with a permissive v1 default that **must be confirmed
+  by the operator before W10 ships** (is merged and installed). If the answer
+  is no, Kobe is not enrolled as a satellite at all: no Kobe rows or pushes,
+  and Kobe's revoke-only administration lapses (PRD criteria 12, 24's "works
+  from Kobe", 50, and the lost-phone-at-work path); revoking then happens
+  from Sendai or the server's terminal. The code is the same either way.
+- **S7a** adds one field later: W13 puts `operator_presence` on
+  `DecisionRequest`, and adds it to this wedge's metadata arm for that frame.
+  Nothing to build here.
+- New criterion W10-19 (revoke-only and the level signal).
 
 ## Refreshed 2026-10-18 against `origin/main` `d61c62d` (history)
 
@@ -96,16 +157,17 @@ can answer an approval, a decision or a Mother hold (B10).
 It also carries **device administration upward** for Ada's pairing PRD
 (`docs/prds/daemon-pairing-flow.md`, cited as PRD-ACn). The operator pairs,
 lists, revokes and re-scopes phones and iPads from the Mac app on Sendai or
-Kobe (PRD-AC11–13, AC18, AC23–25, AC35), and both are satellites. W9 put the
+Kobe (PRD-AC11–13, AC18, AC23–25, AC50), and both are satellites. W9 put the
 device registry and every pairing on the primary, and made the admin verbs
 work for local Unix clients there. This wedge lets a satellite forward those
 verbs from **its own local clients** up its existing outbound uplink, and
 relay the answers back. Nothing ever connects *toward* the satellite, so this
 works from Kobe (PRD-AC12, AC24). How much a satellite may do is held on the
 **primary**, in the satellite's own registry record (`admin: full |
-read_only | off`, from W9). A satellite's local config can narrow it but
-never widen it. That keeps the decision about a managed laptop (the PRD's
-open question 2) on the operator's own host.
+revoke_only | read_only | off`, from W9). A satellite's local config can
+narrow it but never widen it. That keeps the decision about a managed laptop
+(the PRD's open question 2, answered 2026-11-23: Kobe is `revoke_only`, Q1) on
+the operator's own host.
 
 ## Target
 - **Repo:** nostromo
@@ -120,13 +182,13 @@ open question 2) on the operator's own host.
   Option<String>` (default: `gethostname()` lower-cased, first label),
   and an `uplink: Option<UplinkConfig>` table: `{ url: String,
   token_path: PathBuf (default ~/.nostromo/uplink-token, mode 0600),
-  egress: Egress (`work` default | `personal`), publish_sensitive: bool
-  (default **false**; honoured only under `personal`), phi_repos:
+  egress: Egress (`work` default | `personal`), phi_repos:
   Vec<String> (default `["admin-portal", "referral-monitor"]`; config may
   add, the two defaults cannot be removed), publish_topics:
   Option<Vec<Topic>> (default: all the profile allows), device_admin:
-  DeviceAdmin (`full` default, `read_only` or `off`; a local *narrowing* of
-  what the primary grants) }`. Env overrides `NOSTROMD_MODE`,
+  DeviceAdmin (`full` default, `revoke_only`, `read_only` or `off`; a local
+  *narrowing* of what the primary grants) }`. (No `publish_sensitive`: Q2.)
+  Env overrides `NOSTROMD_MODE`,
   `NOSTROMD_UPLINK_URL`. Validation: `Satellite` requires `uplink`; a
   `work` satellite requires an explicit `host_name` matching
   `^[a-z][a-z0-9-]{0,15}$` (an MDM may set the OS hostname to a person's
@@ -208,8 +270,8 @@ open question 2) on the operator's own host.
   `MotherPeek`, `MotherAwaitDetected`, `Welcome`, `Pong`, `Error`, a
   targeted reply, or not in `publish_topics`; (2) if `egress == work` or
   `is_phi_scoped`, pass it through `redact_for_uplink_metadata`; else
-  `peer::outbound(PeerTrust::Tcp, …)`, except that Teri/Fred/work state
-  frames pass when `publish_sensitive`; (3) stamp `host`; send. On
+  `peer::outbound(PeerTrust::Tcp, …)` (which already withholds
+  Teri/Fred/work state frames; there is no exception in v1); (3) stamp `host`; send. On
   (re)connect, replay the retained cache through the same filter first.
   **Inbound:** a frame from the primary is accepted only if it is a routable
   read verb (`SessionAttach`, `SessionDetach`, `ActivitySnapshotRequest`,
@@ -263,7 +325,9 @@ open question 2) on the operator's own host.
   the satellite sent. **Satellite admin
   authorisation (primary side):** a W9 admin verb arriving on a satellite's
   uplink connection is executed only if that satellite's registry record
-  has `admin: full`. With `read_only`, only `DeviceList` is executed and the
+  has `admin: full`. With `revoke_only`, the verb table under "Sign-offs
+  folded in" applies (list, revoke, cancel, turn mail-and-todos off). With
+  `read_only`, only `DeviceList` is executed and the
   rest get `DeviceAdminError { not_permitted_on_this_mac }`. With `off`,
   everything gets that error. `DevicePairStart { satellite: Some(_) }`
   (satellite enrolment) is always refused over an uplink. Pairings started
@@ -278,7 +342,8 @@ open question 2) on the operator's own host.
   allowed for its declared egress (a `work` satellite may only publish the
   metadata shapes; anything else is dropped and counted), and
   `Hello.role.egress` must match the egress recorded at enrolment (`nostromo
-  device pair --satellite <host> --egress work|personal`, default `work`). A
+  device pair --satellite <host> --egress work|personal`, default `work`;
+  an unset `--admin` is `revoke_only` on either egress). A
   satellite's token never appears in the phone/iPad device list.
 - `src/bin/nostromd.rs:196-260` — in `Satellite` mode: force
   `tcp_listen_addr`/`ws_listen_addr` to loopback (log if the config asked
@@ -339,20 +404,25 @@ open question 2) on the operator's own host.
    `server_url`. A WS device redeems the code against the primary, and the
    satellite's Unix client receives `DevicePairOutcome::paired` within 2 s.
    A second Unix client on the satellite does not see that outcome. Then:
-   `DeviceRevoke` and `DeviceSetScope` from the satellite take effect on the
-   primary; with the record at `read_only`, `DeviceList` works and
+   `DeviceRevoke` from the satellite takes effect on the primary; with the record at `read_only`, `DeviceList` works and
    `DeviceRevoke` gets `not_permitted_on_this_mac`; with the uplink down,
    `DevicePairStart` gets `server_unreachable` at once; closing the
    satellite's Unix client cancels its pairing on the primary (a later
    redeem gets `invalid`); and `Devices` updates reach the satellite's Unix
-   client.
-7. **Egress gates.** `personal` with `publish_sensitive = false`: a
-   `TeriState` broadcast never reaches the primary; with `true` it does and
-   the primary still withholds it from `Paired { sensitive: false }` and
-   `Tcp` peers. `work`: no `TeriState`, `FredState`, transcript, pane,
-   activity or approval-content frame ever reaches the primary, whatever
-   `publish_sensitive` says; `ApprovalPending` arrives with a pseudonymous
-   tag and the count.
+   client. With the record at `revoke_only` (Q1): `DeviceList` and
+   `DeviceRevoke` take effect; `DevicePairStart` gets
+   `not_permitted_on_this_mac` and changes nothing; the satellite's Unix
+   client receives `DeviceAdminLevel { level: revoke_only, pair_from: [the
+   full hosts] }` on subscribe, and again after `nostromo device admin` on the
+   primary changes the level; with the record at `off` it still receives
+   `DeviceAdminLevel { level: off }`; a local `device_admin = "read_only"`
+   narrowing lowers what the client is told and enforced; an enrolment
+   without `--admin` on a `personal` satellite is `revoke_only`.
+7. **Egress gates.** `personal`: a `TeriState`, `FredState`, `Work*` or
+   `TeriPicks` broadcast never reaches the primary (Q2). `work`: no
+   `TeriState`, `FredState`, transcript, pane, activity or approval-content
+   frame ever reaches the primary; `ApprovalPending` arrives with a
+   pseudonymous tag and the count.
 
 ## Acceptance criteria
 
@@ -378,11 +448,10 @@ open question 2) on the operator's own host.
   satellite from its uplink.
 - [ ] **W10-7** Retained frames are keyed per host: two satellites' `MotherJobs` coexist
   and a reconnecting client receives both.
-- [ ] **W10-8** `personal` with `publish_sensitive = false` withholds exactly the frames
-  `peer::may_receive(PeerTrust::Tcp, …)` would withhold; `true` adds only
-  the Teri/Fred/work state frames, and the primary still withholds them
-  from `Paired { sensitive: false }` clients. `work` and PHI-scoped frames
-  follow `redact_for_uplink_metadata`.
+- [ ] **W10-8** `personal` withholds exactly the frames
+  `peer::may_receive(PeerTrust::Tcp, …)` would withhold, which includes every
+  Teri, Fred and work frame, and no config key changes that (Q2, PRD AC56).
+  `work` and PHI-scoped frames follow `redact_for_uplink_metadata`.
 - [ ] **W10-9** With the uplink unreachable, the satellite's Unix-socket clients see no
   behaviour change other than a `Hosts`-style status frame indicating
   `uplink: disconnected`; reconnect uses exponential backoff capped at 60 s.
@@ -417,6 +486,13 @@ open question 2) on the operator's own host.
   `CrewProgress` cannot decode that shape (its `signals.cost` is a scalar today),
   the test records which keys degrade instead of failing the wedge, and the PR
   body says so for MC6.
+- [ ] **W10-19** Q1: the primary enforces `revoke_only` as list and revoke only
+  (`DevicePairStart` refused with no side effect); an unset level is
+  `revoke_only` on either egress; `DeviceAdminLevel` always reaches its own
+  satellite, at every level including `off`, and that satellite's local
+  `devices` subscribers with the effective (narrowed) level and `pair_from`;
+  it is never broadcast or sent to a `Paired`, `Tcp`, `Routed` peer or another
+  satellite.
 
 ## Mother crew: gates, lenses, checklist and calibration
 
@@ -425,7 +501,7 @@ Adopts the Mother features summarised in the memo's "Mother features adopted"
 2026-11-23). The repo's `.mother/crew.yml` is on main since MC5 (#290): it is
 read from the job's base ref, so a worker can neither add nor loosen a gate.
 
-- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `python-test` (`where: any`, on the host, when its `when` paths match; `tests/**` and `Makefile` are among them). `swift-ci` is skipped (this wedge touches no Swift paths); the Kit run named in the criteria stays a worker-run check (`make ci-remote ONLY=kit`).
+- **Gates that apply:** `rust-clippy` and `rust-test` (`where: sandbox`), `python-test` (`where: any`, on the host, when its `when` paths match; today `tests/**` matches the new Rust tests; after crew delta 7 it no longer fires here, since this wedge edits no `Makefile` and no Swift path). `swift-ci` is skipped (this wedge touches no Swift paths); the Kit run named in the criteria stays a worker-run check (`make ci-remote ONLY=kit`).
   Mother runs them on the pushed head after the worker exits: sandbox gates
   through `rwx sandbox reset` / `exec` / `stop`, `swift-ci` as a plain command
   from the job worktree. Gate commands never go through the worker's Bash tool,
@@ -440,7 +516,7 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   merged since this was first written); the repo default is all four lenses
   (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
 - **Review depth:** **Manual Perri pass is still required** (the `perri` entry below at xhigh, then the operator's review). Lens findings are input to it, not a substitute: a lens sees only the diff (patch input is capped at 120 KB, so a large wedge will report `coverage_gap` findings), and Mother's `phi-security` checklist is written for care data, so it does not know this repo's trust tiers (B9, B10). Egress filter on a managed laptop; routed frames into a satellite.
-- **Checklist:** the acceptance items above carry ids (`W10-1` to `W10-18`) so
+- **Checklist:** the acceptance items above carry ids (`W10-1` to `W10-19`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The
   worker ticks each with `mother check <job> --done --evidence <short ref>` only
   when its test or check has passed.

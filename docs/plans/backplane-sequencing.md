@@ -4,11 +4,14 @@
 2026-10-10 after Ada's pairing PRD answered Q1; refreshed 2026-10-18 against
 `origin/main` `d61c62d`; **refreshed 2026-11-23 against `origin/main`
 `8f0328b9`** (237 commits later; see "Readiness" and "What changed since
-2026-10-18" below; both win over any older text in this file).
-**Status:** Draft. W14 and W9 can be dispatched now (the approvals and crew
-chains they waited for are merged). W10 follows W9. W11 and W15 wait on Ada's
-sign-off of D1–D7 (pairing PRD; D7 is new). W13 and W16 wait on Ada's sign-off
-of S1–S8 (push PRD).
+2026-10-18" below; both win over any older text in this file); **updated
+2026-11-23 against `d191dd4d`** with Ada's sign-offs and the operator's
+decisions ("Decision log 2026-11-23").
+**Status:** Draft. All product sign-offs are in. W14 and W9 can be dispatched
+now; W10 follows W9; W11, W15, W12, W13 and W16 follow their dependencies
+only. No wedge waits on Ada or Apple; **W10 must not ship until the operator
+confirms the pairing PRD's open question 4** (employer policy on Kobe's
+metadata).
 **Inputs:** `docs/plans/platform-evolution-sequencing.md` (bets B1–B6),
 `docs/visions/iphone.md`, `docs/visions/ipad.md`,
 `docs/prds/daemon-pairing-flow.md` (Ada, answers Q1), `docs/prds/push-relay.md`
@@ -20,54 +23,50 @@ The 2026-11-23 refresh also read the operator's local tracker
 (`.claude/wip/nostromo-work/index.md`) and `git log c9c9b1f4..8f0328b9`; nothing
 from either is needed to execute a wedge.
 
-## Readiness (2026-11-23, `origin/main` `8f0328b9`)
+## Readiness (updated 2026-11-23 after Ada's sign-offs and the operator's decisions)
 
-**Plain answer: yes, the plans needed updates, and they are made in this PR.**
-None of the 237 merged commits changes the architecture (B7–B10 hold), but the
-wire grew from 41 to 98 client verbs, a new handshake capability gates queue
-merging, `.mother/crew.yml` now exists, and every dispatch blocker the memo
-named has merged. Two new rules come out of it: **B11** (only connections that
-can send user messages count against the merge gate) and a product decision on
-the **queue view for phones** (Ada D7, recommendation: local-only in v1).
+**Plain answer: every product sign-off is in, nothing waits on Apple, and one
+operator answer gates W10's release** (pairing PRD open question 4).
+Ada signed off D1–D7 (pairing) and S1–S8 (push) on 2026-11-23, and the
+operator answered all eight questions the same day ("Decision log
+2026-11-23" below). The wedge plans now carry those decisions; each has a
+"Sign-offs folded in (2026-11-23)" section that wins over its older text. Two
+of them change a wedge beyond copy: **D6** (re-pairing revokes the old entry)
+is now W9 work, and **S7a** (when a decision pushes) adds one verb to W13 and a
+reporter to W15. Apple's notification-filtering entitlement was investigated
+and will **not** be requested (decision log), so W13's replace-in-place
+withdrawal is the v1 design and W16 no longer depends on Apple.
+Architecture is unchanged (B7–B11 hold). Ada is rewriting the PRDs in
+parallel; the wedges cite decisions by id, not by PRD line.
 
-**Can start now**
+**What can start, and what each wedge still waits for**
 
-| Wedge | Ready? | Why |
+| Wedge | Ready? | Waits for (sign-offs pending: none for any wedge) |
 |---|---|---|
-| W14 linux-primary | **Yes** | Independent packaging. Gated in observe mode (crew.yml is on main). |
-| W9 ws-transport | **Yes**, after this docs PR merges | AP2a (#278/#287), AP3 (#310), MC4 (#299) and CL1/CL2 (#311/#314) are all merged, so the 2026-10-18 exclusion is moot. Only rule left: no other job editing `src/ipc/{protocol,server,peer}.rs` or `src/ipc/session_manager/` at the same time. Run `mother list` before adding W9: the tracker still shows job 0848d0c0 (tracker title+fold, daemon + Mac; its PR #473 merged) and chore job b7caf0f1 as queued or in progress, and those rows look stale. W9 now also carries B11 (a few lines in `src/ipc/session_manager/mod.rs`). |
-| W10 satellite-uplink | After W9 merges | Same wire files as W9. |
-| W11 ios-ws-client | Blocked | W9 + W10 merged, **Ada D1–D7**, and (recommended) the iOS test target prerequisite below. |
-| W15 mac-device-admin | Blocked | W10 merged, **Ada D1–D7**; not beside another job that edits `macOS/Nostromo.xcodeproj` (PR #518 does today). |
-| W12 seq-resume | Blocked | W10 + W11 merged. |
-| W13 push-relay | Blocked | W12 merged, **Ada S1–S8**, operator's AWS account ready for the relay. |
-| W16 ios-push-enrichment | Blocked | W13 merged. Request **Apple's notification-filtering entitlement** now (W16 ships without it, but withdrawal then stays best effort, S1). |
+| W14 linux-primary | **Yes, now** | Nothing. Independent packaging. |
+| W9 ws-transport | **Yes**, once this docs PR merges | Only the rule "no other job editing `src/ipc/{protocol,server,peer}.rs` or `src/ipc/session_manager/` at the same time". Run `mother list` first (the tracker showed stale rows for jobs 0848d0c0 and b7caf0f1). Crew delta 7 is **not** needed before W9: W9 edits the `Makefile`, so it pays `python-test` either way. |
+| W10 satellite-uplink | After W9 merges (can be built) | W9 merged. **Must not ship (merge and install) until the operator confirms the pairing PRD's open question 4**: may Kobe's job states, short refs and host name leave Kobe for the personal server, the relay, Apple and a personal phone? The v1 default is yes; if the answer is no, Kobe is simply never enrolled (no Kobe rows or pushes, no Kobe device admin; PRD criteria 12, 24's "works from Kobe" part, 50 and the lost-phone-at-work path lapse). Because W11, W12, W13, W15 and W16 build on W10, the answer gates their release too (they may be planned and queued, but nothing ships past W10 before it). Crew delta 7 merged first saves ≈ 20 min of gates (W10 is the only wedge it helps). |
+| W11 ios-ws-client | After W9 + W10 merge | W9, W10; iOS-T merged or knowingly skipped (operator's call, open question 12); no other job editing `iOS/Nostromo.xcodeproj`. **No sign-off pending.** |
+| W15 mac-device-admin | After W10 merges (and W11, as queued) | W10 (W11 only because the dispatch serialises the two Swift wedges); no other job editing `macOS/Nostromo.xcodeproj` (PR #518 has merged). **No sign-off pending.** |
+| W12 seq-resume | After W10 + W11 merge | Those two. |
+| W13 push-relay | After W12 merges | W12. **No sign-off pending.** The dedicated personal AWS account (Q6) is needed only for the operator's deploy step after merge, not to run the job. W15 merged makes S7a's "locked or idle" path live; without it W13 uses the 30-second rule, which Ada accepted. |
+| W16 ios-push-enrichment | After W13 merges | W13 only. **No Apple action** (the entitlement is not being requested). |
 
-**Prerequisites outside the plan, in the order to do them** (costs use the
-calibration in "Estimate"; none of them is a Mother job you must run before
-W14):
+**Prerequisites outside the plan, in order** (costs use "Estimate"):
 
 1. **Merge this docs PR.** No cost. Every wedge cites it.
-2. **Crew config follow-up** (`.mother/crew.yml`, config only). PR #519 (open;
-   approved in review, merge pending) raises the `python-test` (900 → 1800 s)
-   and `swift-ci` (1800 → 2400 s) timeouts and `gates.budget_minutes` from 45
-   to **75**. Keep 75: Mother runs the checks serially, and the measured serial
-   sum for a Rust + Python + Swift wedge is ≈ 5 + 20 + 24 ≈ 49 min (sources in
-   "Estimate"), so 75 is ≈ 1.5×; at 45 such a wedge's gates end `incomplete`
-   (observe mode: data lost, nothing held). Also narrow `python-test`'s `when`
-   (crew delta 7): `tests/**` (`.mother/crew.yml:30`) matches every Rust test
-   file, so Rust-only wedges pay the ~20 min Python run for nothing. Cost: an
-   operator edit, or a $5 cap job (≈ $2). **Do before W9 is added**; W14 does
-   not need it.
-3. **Ada sign-offs** D1–D7 (pairing) and S1–S8 (push): one Ada session over
-   both PRDs' design-loop notes. Blocks W11/W15 and W13/W16 respectively;
-   needed by the time W10 merges to keep the Swift wedges from idling. Cost: an
-   interactive Ada session (≈ $3–8), plus your reading time. Exact asks in
-   "Open questions for the operator", item 1.
-4. **Apple notification-filtering entitlement**
-   (`com.apple.developer.usernotifications.filtering`) for the iOS app. Operator, on
-   the Apple Developer site, now: lead time is Apple's. Blocks only the
-   filtering half of W16 (S1); W16 ships without it.
+2. **Crew delta 7** (`.mother/crew.yml`, config only): narrow `python-test`'s
+   `when` from `tests/**` to the Python suite directories plus
+   `tests/**/*.py`. PR #519 (timeouts 1800/2400 s, `budget_minutes: 75`) has
+   merged (`d191dd4d`). Delta 7 saves ≈ 20 min only for **W10**: W9 and W14
+   edit the `Makefile`, which must stay in that list (`tests/restart_guard`
+   and `tests/gates/test_python_test_split.py` read its recipe), and every
+   other wedge touches Swift paths, which also trigger it. Cost: an operator
+   edit, or a $5 cap job (≈ $2). **Do before W10 is added.** Delta 8 (the CLI
+   in the `phi-security` scope) can ride along.
+3. ~~Ada sign-offs~~: **done 2026-11-23.**
+4. ~~Apple notification-filtering entitlement~~: **investigated 2026-11-23,
+   not to be requested** (decision log). No action.
 5. **cargo-nextest in GitHub CI** (optional; not before W9). The GitHub Rust
    tests job measures 14.5–17 min green, 20 min slow, with the test binaries
    running one after another for 12–14 min (`.github/workflows/ci.yml:143-150`;
@@ -79,21 +78,26 @@ W14):
    wall time, not the Rust job. So it does not shorten a backplane hop until
    the Mac shards get faster than the Rust job. Caveats if done: nextest skips
    doctests (keep `cargo test --doc`), and each test runs in its own process.
-   Cap $15, expected ≈ $6, ≈ 56 min plus gates.
+   Cap $15, expected ≈ $6, ≈ 81 min with gates.
 6. **iOS test target and simulator test job** (recommended before W11; it
    reverses the committed policy in `docs/ios-verification.md:131`,
    `:688-717`). See "CI prerequisites" below. Cap $20, expected ≈ $8, ≈ 106 min
-   with gates; can run beside
-   W9/W10 (it edits `iOS/Nostromo.xcodeproj` and `.github/workflows/ci.yml`,
-   which neither touches).
+   with gates; can run beside W9/W10 (it edits `iOS/Nostromo.xcodeproj` and
+   `.github/workflows/ci.yml`, which neither touches).
 
-**Decisions only the operator can make** (details and recommendations in
-"Open questions for the operator"): the queue view for phones (D7, recommend
-local-only in v1); the gate budget (recommend #519's 75 and the `python-test` path filter); whether to
-add the iOS test target first (recommend yes, but it reverses a committed
-policy in `docs/ios-verification.md`; see "CI prerequisites"); nextest
-(optional, little effect on this plan);
-whether to split W13 (recommend no unless the iOS project is contended).
+**Still with the operator.** One gates a release: **pairing PRD open
+question 4** (employer policy on Kobe's metadata) must be answered before W10
+ships. Two have conservative v1 defaults that need no action to proceed: open
+question 3 (which Microsoft 365 and/or Google accounts Fred reads) and open
+question 5 (does calendar stay home too; default yes, hence "Mail, calendar
+and todos"). None of the rest blocks a wedge: whether to add the iOS
+test target first (recommend yes; it reverses a committed policy); crew
+delta 7 (recommend yes, before W10); nextest (optional); whether to split W13
+(recommend no); creating the dedicated AWS account before deploying W13's
+relay; and two notes from Ada's memo: keep Carefeed checkouts other than the
+two PHI repositories off Sendai, or classify Sendai as work (S8 caveat), and,
+optionally, put Tokyo on its own VLAN to remove the iOS Local Network alert
+(D1).
 
 ## What changed since 2026-10-18 (refresh of 2026-11-23)
 
@@ -110,15 +114,17 @@ Read against `origin/main` `8f0328b9`. Line numbers below are from that commit.
    `TrackerSummary` (`classify_server_msg`, `peer.rs:717-888`). The new verbs
    and frames, by family, with what the backplane does about each, are in
    "Wire inventory" below. So the backplane's next free ordinal is **98**, and
-   W9's nine verbs make it 107 (W13 → 111, W16 → 112), re-derived on each
-   wedge's base.
+   W9's verbs make it 105 (seven since Q2 removed `DevicePairUpdate` and
+   `DeviceSetScope`), W13 → 110 (with `OperatorPresence`) and W16 → 111, as
+   revised with the 2026-11-23 sign-offs; re-derived on each wedge's base.
 2. **`.mother/crew.yml` exists** (MC5 #290, then #292): version 1, observe
    mode, `max_attempts: 2`, `budget_minutes: 45`, checks `rust-fmt`,
    `rust-clippy`, `rust-test` (sandbox), `python-test`, `swift-ci`,
    `shellcheck`, `actionlint`, `mother-contract` (host), lens default all four.
    The memo's crew deltas 3 and 4 are applied; 2 is withdrawn (`python-test`
    on the host is correct); 5 is still open. See "Crew config deltas" below.
-   PR #519 (open) changes two timeouts.
+   PR #519 (merged 2026-11-23, `d191dd4d`) raised two timeouts and the
+   budget to 75 min.
 3. **There is still no `nostromo` CLI binary.** `Cargo.toml:13-39` has seven
    bins (`nostromd`, `nostromo-mcp-bridge`, `nostromo-activity-hook`,
    `nostromo-google-auth`, `nostromo-huey-eval`, `nostromo-guard`,
@@ -313,8 +319,8 @@ current content, by the 2026-10-18 delta numbers:
 | 3 | `gates.budget_minutes: 45` | **Applied** (`:6`), but now too small: see 6 below. |
 | 4 | Lens scopes for push, relay, transport, extension, `dist/**` | **Applied** (`:63-65`): `phi-security` lists `src/ipc/**`, `src/push/**`, `infra/**`, `template.yaml`, Kit `Wire/**`, `Transport/**`, `Push/**` and `iOS/NostromoNotificationService/**`; `ops-infra` lists `dist/**`, `infra/**`, `template.yaml` and both Xcode projects. The lens default is all four lenses (`:61`), so a wedge's `lenses.add` is now a no-op and only `remove` changes anything. |
 | 5 | `relay-test` gate after W13 | **Open.** Add after W13 merges: `cargo test --manifest-path infra/push-relay/Cargo.toml`, `where: sandbox`, `when: { paths: ["infra/push-relay/**"] }`, `timeout_s: 900`. The standalone crate is not covered by the root `cargo test`. |
-| 6 | Timeouts and the total gate budget | **In PR #519** (open; approved in review, merge pending): `python-test` 1800 s, `swift-ci` 2400 s, `budget_minutes` 75. Checks run serially per Mother's code (`gates.sh:246-249` in Mother's git). Measured per pass: Rust ≈ 5, `python-test` ≈ 20, `swift-ci` ≈ 24 min (#519's `docs/mother-crew.md`; #502), so a mixed wedge is ≈ 49 min and 75 is ≈ 1.5×. |
-| 7 | `python-test` path filter | **Open.** `when` includes `tests/**` (`:30`), which matches every Rust test file, so a Rust-only wedge pays the Python run (~20 min per #502, as quoted in #519). Replace `tests/**` with the Python suite directories (the `PY_FAST_SUITES`/`PY_SLOW_SUITES` lists, `Makefile:71-72`, name them) plus `tests/**/*.py`. |
+| 6 | Timeouts and the total gate budget | **Applied** (PR #519, merged `d191dd4d`): `python-test` 1800 s, `swift-ci` 2400 s, `budget_minutes` 75. Checks run serially per Mother's code (`gates.sh:246-249` in Mother's git). Measured per pass: Rust ≈ 5, `python-test` ≈ 20, `swift-ci` ≈ 24 min (#519's `docs/mother-crew.md`; #502), so a mixed wedge is ≈ 49 min and 75 is ≈ 1.5×. |
+| 7 | `python-test` path filter | **Open.** `when` includes `tests/**` (`:30`), which matches every Rust test file, so a wedge whose only Python trigger is a Rust test pays the Python run (~20 min per #502, as quoted in #519). Replace `tests/**` with the Python suite directories (the `PY_FAST_SUITES`/`PY_SLOW_SUITES` lists, `Makefile:71-72`, name them) plus `tests/**/*.py`. Keep `Makefile` in the list: `tests/restart_guard` and `tests/gates/test_python_test_split.py` read its recipe. **In this plan only W10 saves the run**: W9 and W14 edit the `Makefile`, and W11, W12, W13, W15 and W16 touch Swift paths. |
 | 8 | `phi-security` scope for the new CLI | **Open, small.** Add `src/bin/nostromo_cli.rs` (W10's `nostromo uplink pair` writes the satellite token). |
 
 Also new on main and used by the wedges: `rust-fmt` (non-blocking),
@@ -496,8 +502,9 @@ Two facts drive everything:
 Reachability already exists: a **WireGuard VPN on the operator's UDM Pro**.
 Phone, iPad and Kobe join the home network over it and reach the primary at a
 stable private address. No hosted hub. The one cloud component left is the
-APNs push relay (W13), a one-shot HTTPS POST, in the operator's personal AWS
-account.
+APNs push relay (W13), a one-shot HTTPS POST, in a dedicated personal AWS
+account (a new account or a member account of the operator's personal AWS
+Organization; never Carefeed's; operator Q6, 2026-11-23).
 
 ## Bets
 
@@ -525,8 +532,12 @@ Every satellite has an `uplink.egress` profile, and the primary applies a
 second filter per downstream peer:
 
 - **`personal`** (Sendai): publish what FND-1 lets a network peer see today
-  (`peer::outbound` with network trust), plus Teri/Fred/work frames only if
-  `uplink.publish_sensitive = true` (default **false**).
+  (`peer::outbound` with network trust). *v1 (operator Q2, 2026-11-23; PRD
+  AC56):* Teri, Fred and work frames are never published, on any profile,
+  and there is no flag or config key to change that (the 2026-10-10
+  `publish_sensitive` switch is not built): Fred reads Microsoft 365 mail
+  that is probably the employer's, so even Sendai's mail and todos stay home.
+  Opening it up is a later wedge.
 - **`work`** (Kobe, and the default for any satellite whose config does not
   say `personal`): publish **metadata only**, through an exhaustive
   per-variant function `peer::redact_for_uplink_metadata` (W10). It sends
@@ -645,26 +656,29 @@ for all four.
 
 | Message (direction) | Wedge | FND-1 class / policy | Notes |
 |---|---|---|---|
-| `PairCheck`, `Pair` (c→d) | W9 | `Refused` in `network_policy`; accepted only on a token-less pairing socket, enforced in `ws.rs` before dispatch | ordinals 98, 99 |
+| `PairCheck`, `Pair` (c→d) | W9 | `Refused` in `network_policy`; accepted only on a token-less pairing socket, enforced in `ws.rs` before dispatch | ordinals 98, 99; `PairCheck.proof` (D6: HMAC over the per-code challenge, never the token or its hash; answered once per code), `Pair.replace` |
 | `DeviceUnpairSelf` (c→d) | W9 | `Allowed` for `Paired` only; `Refused` for `Tcp`, `Satellite`, `Routed` | ordinal 100 |
-| `DevicePairStart`, `DevicePairUpdate`, `DevicePairCancel`, `DeviceList`, `DeviceRevoke`, `DeviceSetScope` (c→d) | W9 | `Refused` for every network trust; on the primary, `Satellite` gets a W10 exception gated by the satellite's registry `admin` level | ordinals 101–106 |
-| `PairOffer`, `Paired`, `PairRefused`, `Unauthorized`, `DeviceUnpaired` (d→c) | W9 | `Open`, **targeted only** (never broadcast; `Paired` carries the token) | a test asserts none enters the broadcast channel |
-| `DevicePairing`, `DevicePairOutcome`, `Devices`, `DeviceRevoked`, `DeviceAdminError` (d→c) | W9 | new `ServerClass::Admin`: local peers yes; `Satellite` only per its `admin` level (W10); `Paired`, `Tcp` never | |
+| `DevicePairStart`, `DevicePairCancel`, `DeviceList`, `DeviceRevoke` (c→d) | W9 | `Refused` for every network trust; on the primary, `Satellite` gets a W10 exception gated by the satellite's registry `admin` level | ordinals 101–104 (`DevicePairUpdate`, `DeviceSetScope` dropped by Q2) |
+| `PairOffer`, `Paired`, `PairRefused`, `Unauthorized`, `DeviceUnpaired` (d→c) | W9 | `Open`, **targeted only** (never broadcast; `Paired` carries the token) | a test asserts none enters the broadcast channel; `PairOffer.challenge`, `PairOffer.knows_device` and `Paired.replaced` (D6); no `sensitive` or mail field (Q2) |
+| `DevicePairing`, `DevicePairOutcome`, `Devices`, `DeviceRevoked`, `DeviceAdminError` (d→c) | W9 | new `ServerClass::Admin`: local peers yes; `Satellite` only per its `admin` level (W10); `Paired`, `Tcp` never | satellite `admin` levels `full \| revoke_only \| read_only \| off` (Q1; defined in W15) |
+| `DeviceAdminLevel` (d→c) | W10 | own rule: always written to its own satellite's uplink, at every level including `off`, then by the satellite to its local `devices` subscribers; never to `Paired`, `Tcp`, `Routed` or another satellite | `{level, pair_from}`; no ordinal (server frame) |
 | `Hosts`, `HostUnavailable` (d→c) | W10 | `Open` | host names and timestamps only |
 | `MotherJobs.host`, `MotherStatusline.host`, `MotherAwaitDetected.host`, `Activity.host`, `FocusListResp.host`, `SessionListResp.host`, `ApprovalPending.host`, `PerriState.host`, `DecisionRequest.host`, `DecisionResolved.host` (fields) | W10 | class unchanged | `#[serde(default, skip_serializing_if = "Option::is_none")]` |
 | `Hello.role`, `Subscribe.resume` (fields) | W10, W12 | — | additive; `Hello` already has `client_kind` and `capabilities` (`protocol.rs:1638-1652`) |
 | `Hello.capabilities` on WebSocket (existing field) | W9, W10, W11 | — | parsed by the shared handshake; B11: network peers never count against the merge gate; iOS declares `merged_turns_v1`, the uplink declares nothing |
 | `Gap` (d→c) | W12 | `Open` | topic, host, seq bounds, reason enum |
-| `RegisterPush`, `SetPushPrefs`, `PushSentLog`, `PushWaiting` (c→d) | W13 | `Allowed` for `Paired` only, self-scoped to the connection's own device id; `Refused` for `Tcp`, `Satellite`, `Routed` | ordinals 107–110 |
+| `RegisterPush`, `SetPushPrefs`, `PushSentLog`, `PushWaiting` (c→d) | W13 | `Allowed` for `Paired` only, self-scoped to the connection's own device id; `Refused` for `Tcp`, `Satellite`, `Routed` | ordinals 105–108 |
+| `OperatorPresence` (c→d) | W13 (sender in W15) | accepted from `OperatorApp` only; `Refused` for every network trust | ordinal 109; S7a |
+| `DecisionRequest.operator_presence`, `.repo_owner` (fields) | W13 | class unchanged | presence `active \| away`: kept on the uplink, stripped by the primary before any `Paired`/`Tcp` peer; `repo_owner` for S5, dropped by the metadata arm |
 | `PushSentLog`, `PushWaiting`, `PushStatus` (d→c) | W13 | `Open`, targeted only | closed vocabulary text |
 | `PushAvailability` | — | **dropped** (B10; S7) | |
-| `PushDetail` (c→d) | W16 | `Allowed` for `Paired`, self-scoped; reply follows B9 and the device's `sensitive` scope | ordinal 111 |
-| `PushDetail` (d→c) | W16 | `Open`, targeted only | text present only for `personal`-profile, non-PHI items |
+| `PushDetail` (c→d) | W16 | `Allowed` for `Paired`, self-scoped; reply follows B9, sensitive tags and the owner gate | ordinal 110 |
+| `PushDetail` (d→c) | W16 | `Open`, targeted only | text present only for `personal`-profile, non-PHI items whose owner is known and not a work owner (decisions included, read-only, S8 as amended) |
 | `DecisionAnswer.host`, `DecisionAnswerResult` | — | **dropped** (B10; S7) | |
 
 Every new `ClientMsg` adds an arm to `network_policy`, `targets_sensitive_session`
-and the ordinal table, and bumps `CLIENT_MSG_VARIANTS` (98 on `8f0328b9` → 107 after W9 → 111
-after W13 → 112 after W16; if another plan lands a verb first, the next free
+and the ordinal table, and bumps `CLIENT_MSG_VARIANTS` (98 on `8f0328b9` → 105 after W9 → 110
+after W13 → 111 after W16; if another plan lands a verb first, the next free
 ordinal is used and the count re-derived on the wedge's base). It also adds the
 variant to `every_client_msg()` and, for an allowed verb, to `NETWORK_ALLOWED`
 (`peer.rs:2461`); a `Paired`-only verb stays out of that list (it is `Refused`
@@ -710,9 +724,9 @@ Composer history (#509, #511) has **no wire form**: it is a Mac-local store
 | `Activity` | tool and file names | `Activity` class as today | never |
 | `FocusListResp`, `SessionListResp`, `FocusCreated`, `FocusRegistryUpdated` | titles, labels | redacted as today (`redact_for_network`) | pseudonymous tag, agent name from the fixed set, state |
 | `ApprovalPending` | count | yes (non-sensitive tags) | yes, pseudonymous tag |
-| `DecisionRequest` / `DecisionResolved` | prompt, choices | `Focus` class as today | `{request_id, pseudonymous tag, deadline, choice count, agent from fixed set}` / `{request_id, outcome}` |
+| `DecisionRequest` / `DecisionResolved` | prompt, choices | `Focus` class as today | `{request_id, pseudonymous tag, deadline, choice count, agent from fixed set, operator_presence}` / `{request_id, outcome}` |
 | `PerriState` | PR titles, repos | `Focus` class as today | `{requested count, per PR: number, changed_lines}`; no repo, title or author |
-| `TeriState`, `FredState`, `Work*`, `TeriPicks` | mail, todos, tickets | only if `publish_sensitive = true` (default false) | never |
+| `TeriState`, `FredState`, `Work*`, `TeriPicks` | mail, todos, tickets | **never in v1** (Q2; no switch) | never |
 | `ModelCatalog`, `ModelDefaults`, `ActivityHealth` | no | yes | yes |
 | `TrackerSummary` (2026-11-23) | counts only | `Focus` class as today (non-sensitive tags only) | `{pseudonymous tag, has_tracker, counts}` |
 | `TrackerBoard`, `TrackerEditResult` (staged commands, notes, links) | yes | never (`LocalOnly`) | never |
@@ -743,9 +757,9 @@ form). W15 touches only `macOS/` and needs W10's relay.
 **What the 2026-10-18 rule waited for is merged.** AP2a (#278, #287), AP2b
 (#308), AP2c (#301), AP3 (#310), MC3 (#297), MC4 (#299), MC5 (#290), MC6
 (#381), CL1 (#311), CL2 (#314), terminal 1a–3e (#319–#373), tracker T1 (#312)
-and T0b–T6/T1w, and message queue S1–S5 (#505–#514) are all on main. Open on
-2026-11-23: PR #518 (Mac leftovers; edits `macOS/Nostromo.xcodeproj` and
-`NostromodClient.swift`) and PR #519 (crew timeouts). Parked or unplanned, so
+and T0b–T6/T1w, and message queue S1–S5 (#505–#514) are all on main, and so
+are PR #518 (Mac leftovers) and PR #519 (crew timeouts), both merged later on
+2026-11-23. Parked or unplanned, so
 not in the way: model switching M4–M7, browser pane BP1–BP6, QA fixture mode,
 message queue S6 (steer; it will edit the session wire when planned).
 
@@ -758,43 +772,46 @@ practice: hold S6 and M4–M7 until W10 merges, or slot them between wedges.
 | Step | Wedge | Start when | Touches |
 |---|---|---|---|
 | 0 | this docs PR | merge first | docs |
-| 0′ | crew follow-up (prerequisite 2) | before W9 is added | `.mother/crew.yml` |
+| 0′ | crew delta 7 (prerequisite 2) | before W10 is added (W9 does not benefit) | `.mother/crew.yml` |
 | 1 | **W14** | now; runs beside anything (disjoint files except `src/bin/nostromd.rs` startup and `src/mother/mod.rs`, which no queued job edits) | Makefile, `dist/systemd/`, `src/mother/mod.rs`, `nostromd.rs` startup, `ci.yml` |
 | 1′ | nextest (prerequisite 5, optional) | any time; never blocks a wedge | `.github/workflows/ci.yml`, `docs/ci.md` |
-| 2 | **W9** | after steps 0 and 0′; no other session-wire job running. Beside W14 is fine, but W14 and W9 both edit `nostromd.rs` startup and the Makefile: merge W14 first or expect a small conflict | session wire, `session_manager/mod.rs` (B11), Makefile, new CLI |
+| 2 | **W9** | after step 0; no other session-wire job running. Beside W14 is fine, but W14 and W9 both edit `nostromd.rs` startup and the Makefile: merge W14 first or expect a small conflict | session wire, `session_manager/mod.rs` (B11), Makefile, new CLI |
 | 2′ | iOS test target (prerequisite 6, recommended) | any time before W11; beside W9/W10 | `iOS/Nostromo.xcodeproj`, `ci.yml`, `Makefile`, `docs/ios-verification.md` |
 | 3 | **W10** | W9 merged; same exclusion | session wire |
-| 4 | **W11** | W9 + W10 merged, Ada D1–D7 signed off, prerequisite 6 merged (or knowingly skipped), no other job editing `iOS/Nostromo.xcodeproj` | NostromoKit, `iOS/Nostromo.xcodeproj` |
-| 4′ | **W15** | W10 merged, Ada D1–D7 signed off, no other job editing `macOS/Nostromo.xcodeproj` (PR #518 today); not beside W11 (both add Kit wire types) | `macOS/`, `macOS/Nostromo.xcodeproj` |
+| 4 | **W11** | W9 + W10 merged, prerequisite 6 merged (or knowingly skipped), no other job editing `iOS/Nostromo.xcodeproj` | NostromoKit, `iOS/Nostromo.xcodeproj`, `tests/fixtures/push-vocab/` |
+| 4′ | **W15** | W10 merged, no other job editing `macOS/Nostromo.xcodeproj`; not beside W11 (both add Kit wire types) | `macOS/`, `macOS/Nostromo.xcodeproj` |
 | 5 | **W12** | W10 + W11 merged | session wire, Kit |
-| 6 | **W13** | W12 merged, Ada S1–S8 signed off, AWS account ready; same exclusions (session wire and the iOS project) | session wire, `src/push/`, `infra/push-relay/`, iOS |
+| 6 | **W13** | W12 merged; same exclusions (session wire and the iOS project). The dedicated AWS account is needed only to deploy after merge | session wire, `src/push/`, `infra/push-relay/`, iOS |
 | 6′ | relay-test gate (crew delta 5) | right after W13 merges | `.mother/crew.yml` |
-| 7 | **W16** | W13 merged; entitlement requested (granted is not required) | iOS project (new extension target), daemon |
+| 7 | **W16** | W13 merged (no Apple action; the filtering entitlement is not requested) | iOS project (new extension target), daemon |
 
 Gates and lenses: every wedge added after this PR merges is gated in observe
 mode by the `.mother/crew.yml` on its base. Run `mother gates check` once after
-the crew follow-up merges. Lenses now run automatically (Mother #75), and the
+crew delta 7 merges. Lenses now run automatically (Mother #75), and the
 repo's lens default is all four, so the wedges' `lenses` blocks matter only for
 `remove`.
 
 ```bash
 cd ~/Code/nostromo
 W14=$(mother add --plan-file docs/plans/backplane/W14-linux-primary.md    --repo nostromo --branch feat/backplane-linux-primary    --max-cost 20)
-# after this docs PR and the crew follow-up merge:
-W9=$( mother add --plan-file docs/plans/backplane/W9-ws-transport.md      --repo nostromo --branch feat/backplane-ws-transport      --max-cost 60)
+# after this docs PR merges:
+W9=$( mother add --plan-file docs/plans/backplane/W9-ws-transport.md      --repo nostromo --branch feat/backplane-ws-transport      --max-cost 65)
+# crew delta 7 merged before this line saves ~20 min of W10's gates:
 W10=$(mother add --plan-file docs/plans/backplane/W10-satellite-uplink.md --repo nostromo --branch feat/backplane-satellite-uplink --max-cost 55 --depends-on "$W9")
-# after Ada signs D1-D7 (and the iOS test target merges):
-W11=$(mother add --plan-file docs/plans/backplane/W11-ios-ws-client.md    --repo nostromo --branch feat/backplane-ios-ws-client    --max-cost 60 --depends-on "$W9,$W10")
-W15=$(mother add --plan-file docs/plans/backplane/W15-mac-device-admin.md --repo nostromo --branch feat/backplane-mac-device-admin --max-cost 45 --depends-on "$W10,$W11")
+# once the iOS test target merges (or is knowingly skipped):
+W11=$(mother add --plan-file docs/plans/backplane/W11-ios-ws-client.md    --repo nostromo --branch feat/backplane-ios-ws-client    --max-cost 65 --depends-on "$W9,$W10")
+W15=$(mother add --plan-file docs/plans/backplane/W15-mac-device-admin.md --repo nostromo --branch feat/backplane-mac-device-admin --max-cost 50 --depends-on "$W10,$W11")
 W12=$(mother add --plan-file docs/plans/backplane/W12-seq-resume.md       --repo nostromo --branch feat/backplane-seq-resume       --max-cost 50 --depends-on "$W10,$W11")
-# after Ada signs S1-S8:
-W13=$(mother add --plan-file docs/plans/backplane/W13-push-relay.md       --repo nostromo --branch feat/backplane-push-relay       --max-cost 75 --depends-on "$W12")
+W13=$(mother add --plan-file docs/plans/backplane/W13-push-relay.md       --repo nostromo --branch feat/backplane-push-relay       --max-cost 80 --depends-on "$W12")
 W16=$(mother add --plan-file docs/plans/backplane/W16-ios-push-enrichment.md --repo nostromo --branch feat/backplane-ios-push-enrichment --max-cost 50 --depends-on "$W13")
 ```
 
 (`--depends-on "$W10,$W11"` on W15 serialises the two Swift wedges; drop
-`$W11` if the operator prefers W15 first. W15's cap is raised from $35 to $45:
-the comparable Mac UI slice, message queue S2, spent $39.)
+`$W11` if the operator prefers W15 first. W15's cap is $50: raised from $35
+to $45 because the comparable Mac UI slice, message queue S2, spent $39, and
+to $50 on 2026-11-23 for the revoke-only UI and the S7a presence reporter.
+W9 is $65 (D6, revoke-only, the mail-and-todos switch), W11 $65 (D1, D6, Q8),
+W13 $80 (S7a, replace-in-place).)
 
 ## CI prerequisites (new, 2026-11-23)
 
@@ -876,44 +893,51 @@ Nostromo's docs do not state it): Rust ≈ 5 min (clippy ≈ 0.5, `cargo test`
 was seen timing out at ~1266 s); `swift-ci` ≈ 24 min (#519; #502 saw a
 1421 s gate). The 2026-10-18 figures of `python-test` under 1 min and
 `swift-ci` ≈ 7.5 min are superseded by those. Gate results have been
-recorded for months (the tracker counts 52 python-test failures in 106
-gate failures), so these are real runs, not guesses. A wedge touching Rust,
-Python and Swift paths therefore costs ≈ 5 + 20 + 24 ≈ **49 min** of gates
-before any retry (#519's own sum), and `budget_minutes: 75` is ≈ 1.5× that.
+recorded for about a month, since MC5 (#290) merged on 2026-10-21 (the
+tracker counts 52 python-test failures in 106 gate failures), so these are
+real runs, not guesses. A wedge touching Rust, Python and Swift paths
+therefore costs ≈ 5 + 20 + 24 ≈ **49 min** of gates before any retry (#519's
+own sum), and `budget_minutes: 75` (#519, merged) is ≈ 1.5× that.
 Which checks fire follows each check's `when` paths (`.mother/crew.yml`):
 `python-test` fires for `tests/**`, `Makefile`, `.github/**`, `macOS/**`,
 `iOS/**`, `Shared/**` and `src/mother/**`, so today every backplane wedge
-pays it; with crew delta 7 the Rust-only wedges drop to ≈ 5 min.
+pays it. With crew delta 7 only **W10** drops to ≈ 5 min: W9 and W14 edit the
+`Makefile`, which stays in that list (`tests/restart_guard` and `tests/gates`
+read its recipe), and every other wedge touches Swift paths.
 
-The job times below add one gate pass, with today's `when` paths.
+The job times below add one gate pass, with today's `when` paths. Caps and
+expected spend are as revised on 2026-11-23 for the sign-offs (W9 $60 → $65,
+W11 $60 → $65, W15 $45 → $50, W13 $75 → $80).
 
 | Wedge | Cap | Expected spend | Job time (base + gates) | Gates that fire (today's `when`) | Starts after |
 |---|---|---|---|---|---|
-| W14 linux-primary | $20 | ≈ $8 | ≈ 62 + 25 ≈ 87 min | Rust 5, python 20 | now |
-| W9 ws-transport | $60 | ≈ $24 | ≈ 110 + 25 ≈ 135 min | Rust 5, python 20 | this PR, crew follow-up |
-| W10 satellite-uplink | $55 | ≈ $22 | ≈ 104 + 25 ≈ 129 min | Rust 5, python 20 | W9 |
-| W11 ios-ws-client | $60 | ≈ $24 | ≈ 110 + 44 ≈ 154 min | python 20, swift 24 | W9, W10, Ada D1–D7, iOS-T |
-| W15 mac-device-admin | $45 | ≈ $18 | ≈ 92 + 44 ≈ 136 min | python 20, swift 24 | W10, W11, Ada D1–D7 |
+| W14 linux-primary | $20 | ≈ $8 | ≈ 62 + 25 ≈ 87 min | Rust 5, python 20 (unchanged by delta 7: `Makefile`) | now |
+| W9 ws-transport | $65 | ≈ $26 | ≈ 116 + 25 ≈ 141 min | Rust 5, python 20 (unchanged by delta 7: `Makefile`) | this PR |
+| W10 satellite-uplink | $55 | ≈ $22 | ≈ 104 + 25 ≈ 129 min (≈ 109 with delta 7) | Rust 5, python 20 (Rust 5 only with delta 7) | W9 |
+| W11 ios-ws-client | $65 | ≈ $26 | ≈ 116 + 44 ≈ 160 min | python 20, swift 24 | W9, W10, iOS-T |
+| W15 mac-device-admin | $50 | ≈ $20 | ≈ 98 + 44 ≈ 142 min | python 20, swift 24 | W10, W11 |
 | W12 seq-resume | $50 | ≈ $20 | ≈ 98 + 49 ≈ 147 min | Rust 5, python 20, swift 24 | W10, W11 |
-| W13 push-relay | $75 | ≈ $30 | ≈ 128 + 49 ≈ 177 min | Rust 5, python 20, swift 24 | W12, Ada S1–S8 |
+| W13 push-relay | $80 | ≈ $32 | ≈ 134 + 49 ≈ 183 min | Rust 5, python 20, swift 24 | W12 |
 | W16 ios-push-enrichment | $50 | ≈ $20 | ≈ 98 + 49 ≈ 147 min | Rust 5, python 20, swift 24 | W13 |
-| *Prereq: crew follow-up* | $5 | ≈ $2 | ≈ 44 min | none (`.mother/**` matches no check) | now |
+| *Prereq: crew delta 7* | $5 | ≈ $2 | ≈ 44 min | none (`.mother/**` matches no check) | now |
 | *Prereq: iOS-T* | $20 | ≈ $8 | ≈ 62 + 44 ≈ 106 min | python 20, swift 24 | now |
 | *Optional: nextest* | $15 | ≈ $6 | ≈ 56 + 25 ≈ 81 min | Rust 5 (`.rwx/**`), python 20 (`.github/**`) | any time |
 
-Critical path: W9 → W10 → W11 → W12 → W13 → W16 ≈ 135 + 129 + 154 + 147 +
-177 + 147 = 889 min of jobs plus 6 hops × 50 min ≈ **20 h end to end** (range
-16–24 h), counted from W9's start and assuming the Ada sign-offs land before
-W10 merges. With crew delta 7 (Rust-only wedges skip `python-test`), W9 and
-W10 save ≈ 20 min each (≈ 19 h). W14, W15 and the prerequisites run off the
-critical path. Fastest finish with concurrency 3 is the same ≈ 20 h: the
-chain is serial.
-**Total cap $415; expected spend ≈ $166** (range $120–$250, the high end if
-the Swift wedges behave like S2). With the crew follow-up and iOS-T: cap $440,
-expected ≈ $176 (nextest, if done, adds $15 / ≈ $6).
-Quota: unknown. W14, the prerequisites and W9 (≈ $42 expected) can land in one
-week; the rest spans at least one weekly reset. Ada's sign-offs, not compute,
-remain the likely long pole for W11/W15/W13/W16.
+Critical path: W9 → W10 → W11 → W12 → W13 → W16 ≈ 141 + 129 + 160 + 147 +
+183 + 147 = 907 min of jobs plus 6 hops × 50 min = 1207 min ≈ **20.1 h end to
+end** (range 16–24 h), counted from W9's start. With crew delta 7 merged
+before W10, only W10 saves ≈ 20 min: ≈ **19.8 h**. (Before the 2026-11-23 cap
+revisions the same arithmetic gave 19.8 h, and ≈ 19.5 h with delta 7; the
+earlier "W9 and W10 save ≈ 20 min each (≈ 19 h)" was wrong, since W9 keeps
+`python-test`.) W14, W15 and the prerequisites run off the critical path.
+Fastest finish with concurrency 3 is the same ≈ 20 h: the chain is serial.
+No sign-off or Apple action sits on it any more.
+**Total cap $435; expected spend ≈ $174** (range $125–$260, the high end if
+the Swift wedges behave like S2). With crew delta 7 as a job and iOS-T: cap
+$460, expected ≈ $184 (nextest, if done, adds $15 / ≈ $6).
+Quota: unknown. W14, the prerequisites and W9 (≈ $44 expected) can land in one
+week; the rest spans at least one weekly reset. Compute and CI, not product
+decisions, now set the calendar.
 
 **Where the 2026-10-18 gate paragraph went.** Its measured Rust pass (≈ 5 min)
 is kept above. Its `swift-ci` ≈ 7.5 and `python-test` under 1 min figures were
@@ -979,12 +1003,12 @@ flagged, not made (open question 8).
 |---|---|---|---|---|---|
 | W14 | first install: `make install-daemon-linux`, then `loginctl enable-linger $USER` once | — | — | — | none (no wire change) |
 | W9 | install; set `ws_addr = "0.0.0.0:47101"` (or its WireGuard/LAN address) and `pair_host` in `config.toml`; restart | optional, any time between jobs (listener stays loopback) | optional, between jobs (loopback; never listens off-box) | — (W11) | old Mac/iOS clients ignore the new features; legacy TCP unchanged |
-| W10 | install first; restart | install between jobs; set `mode = "satellite"`, `uplink.url`, `uplink.egress = "personal"`, `host_name`; run `nostromo device pair --satellite sendai` on Tokyo and `nostromo uplink pair --url … <code>` on Sendai | same, with `uplink.egress = "work"` (the default); WireGuard split tunnel | — | satellite before primary → satellite stays local-only and retries |
+| W10 | install first; restart | install between jobs; set `mode = "satellite"`, `uplink.url`, `uplink.egress = "personal"`, `host_name`; run `nostromo device pair --satellite sendai --egress personal --admin full` on Tokyo (`--admin full` must be explicit: unset means revoke-only) and `nostromo uplink pair --url … CODE` on Sendai | only after the operator confirms PRD open question 4 (employer policy): the same, with `uplink.egress = "work"` (the default) and `nostromo device pair --satellite kobe` (unset admin = revoke-only, Q1); WireGuard split tunnel | — | satellite before primary → satellite stays local-only and retries |
 | W11 | — | — | — | install from Xcode (operator); pair | needs Tokyo ≥ W9 (pairing) and ≥ W10 (host badge; absent host renders as one list) |
 | W15 | — | `make mac-install` | `make mac-install` | — | needs the local daemon ≥ W10 and Tokyo ≥ W10; against an older daemon the menu items show "Can't reach" |
 | W12 | install first | install between jobs | install between jobs | new iOS build | old clients ignore `seq`/`Gap`; a satellite resumes only if the primary advertises `"seq"` |
-| W13 | deploy the relay (AWS, operator, README), write `[push]` and the relay token, install | install (new `MotherJob`/`DecisionRequest` fields) | install | new iOS build with push entitlement | an older satellite lacks `deadline`/`paused_at`: push omits the timeout phrase and falls back to first-seen time |
-| W16 | install | — | — | new iOS build with the extension (Filtering configuration only after Apple grants it) | a device without `nse_withdraw` keeps W13's withdrawal |
+| W13 | deploy the relay (operator, README; into a dedicated personal AWS account or personal-Organization member account, Q6), write `[push]` and the relay token, install | install (new `MotherJob`/`DecisionRequest` fields) | install | new iOS build with push entitlement | an older satellite lacks `deadline`/`paused_at`: push omits the timeout phrase and falls back to first-seen time |
+| W16 | install | — | — | new iOS build with the extension (`Release`; the optional `Filtering` configuration is never shipped) | every device keeps W13's replace-in-place withdrawal |
 
 ## What this sequence deliberately does not do
 
@@ -1009,20 +1033,19 @@ flagged, not made (open question 8).
   satellites and validates `^[a-z][a-z0-9-]{0,15}$`. Focus tags are
   pseudonymised for `work`.
 - **Sensitive data on the primary.** With B9 defaults, nothing from Kobe
-  beyond metadata reaches Tokyo, and Sendai's Teri/Fred stay home unless
-  `publish_sensitive` is turned on.
+  beyond metadata reaches Tokyo, and no host's Teri/Fred leave it in v1 (Q2;
+  there is no switch).
 - **Queue contention.** *2026-11-23:* the approvals and crew chains are
   merged. The remaining risk is new session-wire work started beside a wedge
   (message queue S6, model switching M4–M7) and Mac Xcode-project edits beside
-  W15. The calendar is now set by Ada's sign-offs, not by other chains.
+  W15. Ada's sign-offs are in, so the calendar is now set by compute and CI.
 - **Merge gate regressions (new).** Without B11, attaching any phone or a
   satellite route silently stops merging on that session; with B11 wrong, a
   local legacy client could see a merged turn drawn twice. W9's tests pin
   both directions.
-- **Gate data lost (new).** At `budget_minutes: 45`, a Rust + Python + Swift
-  wedge (measured ≈ 49 min of serial gates) overruns and records `incomplete`;
-  observe mode loses the data without holding the job. #519's 75 and crew
-  delta 7 address it.
+- **Gate data lost.** At the old `budget_minutes: 45`, a Rust + Python + Swift
+  wedge (measured ≈ 49 min of serial gates) overran and recorded
+  `incomplete`. #519 (merged) set 75, which covers it.
 
 ## Open technical item — RESOLVED 2026-10-18
 
@@ -1037,28 +1060,26 @@ Driving Mother, sessions or Perri from a phone needs a new bet and PRD.
 
 ## Open questions for the operator (with recommendations)
 
-1. **Ada sign-offs D1–D7 (pairing) and S1–S8 (push).** *Refreshed
-   2026-11-23.* Nothing has been signed since 2026-10-18. What to do: start one
-   Ada session (`ada` agent) pointed at `docs/prds/daemon-pairing-flow.md`
-   "Design-loop notes for Ada" (turns 1–3) and `docs/prds/push-relay.md`
-   "Design-loop notes for Ada" (turns 1–3), and ask her to sign off or
-   rewrite each item in place. When: before W10 merges (about a day after W9
-   starts), so W11/W15 are not idle. What each blocks:
-   - **D1** (Local Network permission on home Wi-Fi; new failure state and its
-     copy), **D2** (camera alert not counted), **D3** (pairing dies with its
-     window; "lost the connection" copy), **D4** (server check before the
-     confirmation step), **D5** (lockout across two open codes), **D6**
-     (re-pairing an already-paired phone; copy), **D7** (new: queue view on
-     the phone): block **W11** (D1, D2, D4, D6, D7) and **W15** (D3, D5); W9
-     and W10 already build the daemon side as proposed.
-   - **S1** (withdrawal depends on Apple's entitlement), **S2** (decisions
-     never coalesced), **S3** (unknown PR size omitted), **S4** (now moot
-     after S7, sign as withdrawn), **S5** (repo names gated on owner),
-     **S6** ("under 1 min"), **S7** (no lock-screen decision buttons; a phone
-     is not an operator), **S8** (no enrichment for work hosts, PHI repos or
-     decisions): block **W13** (S1–S3, S5–S7) and **W16** (S1, S7, S8).
-   - The operator's own answers needed in the same pass: open question 9
-     below (mail-and-todos default; Kobe's device-admin level).
+*Updated 2026-11-23.* Items 1, 5, 6, 9 and 10 are resolved (see "Decision log
+2026-11-23"); nothing in this list blocks a wedge. The pairing PRD's own
+open questions 3–5 are listed under "Readiness" (question 4 gates W10's
+release).
+
+1. **Ada sign-offs D1–D7 (pairing) and S1–S8 (push). RESOLVED 2026-11-23.**
+   Ada signed every item: D1 accepted with a change (a fifth failure message
+   and a banner variant; the attempt does not use up the code), D2 accepted
+   (the Local Network alert is not counted either), D3 accepted with copy, D4
+   accepted with two rules, D5 accepted, D6 accepted with a change
+   (re-pairing revokes the old entry; a loud warning for a different server),
+   D7 (b) nothing in v1; S1 accepted with a change (replace in place, not
+   best-effort removal), S2, S3, S6 accepted, S4 withdrawn, S5 accepted (the
+   work-owners list grows only from the operator's machines), S7 accepted plus
+   the new S7a (decision push timing), S8 accepted for work hosts and PHI repos
+   and amended (personal-host decisions enriched read-only). Where each lands:
+   W9 (D3 terminal copy, D4 rules, D5, D6 revoke-on-re-pair), W10 (Q1
+   enforcement, Q2 egress default), W11 (D1, D2, D4, D6, D7, Q2 copy, Q8), W13
+   (S1–S3, S5–S7, S7a, Q5, Q6), W15 (D3, D5, D6 row, Q1 level, S7a reporter),
+   W16 (S1, S4, S7, S8 as amended, Q3).
 2. **Routed actions from devices.** *Recommend:* none that mutate in this
    sequence (resolved item above). Revisit only with a device-trust PRD.
 3. **Approvals on the phone.** *Recommend:* counts only (B10); a count-only
@@ -1066,74 +1087,79 @@ Driving Mother, sessions or Perri from a phone needs a new bet and PRD.
 4. **PTY/terminal on the backplane at all?** *Recommend:* no. Terminals are
    Mac-local by design (`LocalOnly`, production-shell rules); the phone shows
    the terminal-pane 1e placeholder.
-5. **Kobe's egress profile, and Teri/Fred from Kobe.** *Recommend:* `work`
-   (metadata only), Teri/Fred never leave Kobe; Sendai `personal` with
-   `publish_sensitive = false` until you choose otherwise.
-6. **Apple's notification-filtering entitlement.** *Recommend:* request it
-   now (still not requested as of 2026-11-23, per the tracker). What to do: in
-   the Apple Developer account, request
-   `com.apple.developer.usernotifications.filtering` (Apple's request form for
-   the notification-filtering entitlement) for the iOS app,
-   `com.hammer.nostromo.ios` (`iOS/Nostromo.xcodeproj/project.pbxproj:404`),
-   whose Notification Service Extension W16 adds (its bundle id is not created
-   yet; W16 picks it, conventionally
-   `com.hammer.nostromo.ios.NotificationService`), stating that the extension removes notifications
-   that are no longer relevant. If the form needs the extension's id, request
-   it when W16 creates the target. When: now; lead time is Apple's.
-   What it blocks: only W16's silent-withdrawal path (S1). W16 ships without
-   it; until it is granted, withdrawal is badge-reliable and
-   notification-removal best effort.
+5. **Kobe's egress profile, and Teri/Fred from Kobe. RESOLVED:** `work`
+   (metadata only); Teri and Fred never leave Kobe; and, by Q2, they stay home
+   on Sendai too in v1, with no switch (Q2).
+6. **Apple's notification-filtering entitlement. RESOLVED 2026-11-23: do not
+   request it.** The operator opened Apple's request form
+   (developer.apple.com/contact/request/notification-service). It requires the
+   App Store URL and numeric Apple ID of a published app, and one of four use
+   cases: end-to-end encrypted messaging, earthquake warnings, education
+   platforms retracting urgent alerts, or healthcare professionals'
+   patient-care alerts being retracted (location sharing is ineligible), plus
+   four written justifications. Nostromo is a personal operations tool, not on
+   the App Store, and fits none of the four; it must not be requested under a
+   category that does not truthfully apply. Consequence: W13's replace-in-place
+   withdrawal (same APNs collapse identifier, *no longer needs you*, badge
+   corrected; plus removal whenever the app runs) is the v1 design, and W16
+   keeps a `Filtering` configuration only as an optional, off-by-default
+   enhancement in case Apple's categories ever fit.
 7. **Tokyo vs Sendai as primary.** *Recommend:* Tokyo. The primary needs no
    Mac app, answers nothing (B10) and hosts no sessions; Sendai stays a
    satellite, with `mode = primary` as the fallback if W14 finds a blocker.
 8. **Split W13** into W13a (daemon + relay, Rust) and W13b (iOS)?
-   *Recommend (2026-11-23):* no, keep one job, unless another job is editing
-   `iOS/Nostromo.xcodeproj` when W12 merges (the approvals chain this used to
-   wait on has merged).
-9. **PRD open questions (operator):** mail-and-todos default for a new
-   device, *recommend* on (it only covers Sendai's under B9); Kobe's device
-   admin level, *recommend* `full` (the lost-phone moment can happen at
-   work; pairing and widening need a real click in the Mac app).
-10. **Queue view on the phone (new, 2026-11-23; Ada D7).** Message queue S1
-    made the queue view, take-back and remove local-only (`peer.rs:798-800`,
-    `:1103-1105`), and Stop returns dropped texts only to the Mac that pressed
-    it. Options: (a) parity: publish `SessionQueue` to paired devices for
-    non-sensitive personal focuses and let a phone take back; (b) local-only
-    (today); (c) local-only plus a count. *Recommend (b) for v1, (c) as a
-    follow-up.* A phone cannot send (`SessionSend` is refused for every
-    network trust), so it has nothing of its own to take back; take-back is a
-    session-driving verb behind the operator nonce and stays B10-adjacent; and
-    queued text is unsent user input that need not reach Tokyo's disk. A
-    count ("2 waiting") would be a new metadata field on `SessionInfo`, safe
-    for `work` hosts too, and is cheap to add later. Parity needs the
-    device-trust bet.
-11. **Gate budget.** *Recommend* merging #519 as is (`budget_minutes: 75`)
-    plus the `python-test` path filter (crew delta 7) before W9 is added.
-    Gate durations are unknown; raise the budget only if a real run comes
-    back `incomplete`.
+   *Recommend:* no, keep one job, unless another job is editing
+   `iOS/Nostromo.xcodeproj` when W12 merges.
+9. **PRD open questions. RESOLVED 2026-11-23** (reversing this memo's earlier
+   recommendations of "on" and `full`): mail and todos stay home in v1 for
+   every host (Q2), and Kobe's device-admin level is the new `revoke-only`
+   (Q1, defined in W15).
+10. **Queue view on the phone (Ada D7). RESOLVED: (b)**, the phone shows
+    nothing from the message queue in v1 (Q7). A count stays a later additive
+    option.
+11. **Gate budget.** #519 merged (`budget_minutes: 75`; gate durations are
+    measured, see "Estimate"). *Recommend* crew delta 7 before W10 is added;
+    it saves ≈ 20 min on W10 only.
 12. **iOS test target first, and nextest?** *Recommend* iOS-T before W11,
     knowing it reverses the committed "no simulator, anywhere" policy in
     `docs/ios-verification.md` and must rewrite it. nextest is optional (no
     effect on a backplane hop while the Mac shards are slower). Neither blocks
     W9 ("CI prerequisites").
 
+**The operator action that was pending is closed:** the entitlement
+investigation (item 6) ended in "do not request". What remains is optional or
+deploy-time: crew delta 7, the iOS-T call, and creating the dedicated AWS
+account before deploying W13's relay.
+
 ## Questions for Ada
 
 - **Q1 — Pairing UX — ANSWERED** (`docs/prds/daemon-pairing-flow.md`).
-  D1–D6 (and, since 2026-11-23, D7) still pending Ada's sign-off (see the
-  PRD's "Design-loop notes"). The refresh adds one information note there:
-  the CLI is a new `nostromo` binary (the old TUI binary of that name is
-  gone), so the PRD's `nostromo device …` copy stands.
-- **Q2 — Push — ANSWERED** (`docs/prds/push-relay.md`). S1–S6 pending; the
-  refresh adds **S7** (no lock-screen decision buttons and no phone-as-
-  operator: answers come only from the verified Mac app) and **S8** (no
-  enrichment for work hosts or PHI repos: the primary never holds that
-  text), in the PRD's design-loop notes, turn 2.
-- **Q3 — Multi-host presentation.** Unchanged: W11 defaults to one merged
-  list with a host badge. New wrinkle: Kobe's rows are metadata-only
-  (state, ref, reason), so they look different from Sendai's.
-- **2026-11-23 (turn 3 in both PRDs).** Pairing PRD: new **D7** (queue view on
-  the phone, recommend local-only), and an information note that merged turns
-  (several queued messages answered in one turn) show on the phone as the
-  Mac shows them. Push PRD: no new sign-off; S4 becomes moot under S7 and the
-  entitlement request is still outstanding.
+  D1–D7 **signed off 2026-11-23** (Ada is writing them into the PRD in place).
+- **Q2 — Push — ANSWERED** (`docs/prds/push-relay.md`). S1–S8 **signed off
+  2026-11-23**, with S4 withdrawn and S7a added; the attention items are
+  count-only (Ada's call).
+- **Q3 — Multi-host presentation — ANSWERED 2026-11-23:** one merged list,
+  needs-you first, host badge on every row whenever the list holds rows
+  (live or last-known) from more than one Mac, work rows in the push
+  vocabulary with "Details stay on kobe" (operator Q8, PRD AC52/AC53; W11).
+- **Open with Ada, not blocking:** if W13's device check shows a passive
+  collapse-id replacement lights the screen or is unreliable for a force-quit
+  app, Ada asked for that evidence to revisit S1.
+
+## Decision log 2026-11-23
+
+The operator's eight answers (each takes Ada's recommendation; a conservative
+first step, to be opened up later), and the entitlement finding.
+
+| # | Question | Answer | Lands in |
+|---|---|---|---|
+| Q1 | What may Kobe (the employer-managed Mac) do with personal devices? | New `revoke-only` level: list, revoke (and turn mail-and-todos off, once that exists; there is no such control in v1); cannot pair or widen anything. Ada's addition: an unset level means revoke-only, and Sendai becomes `full` only when set explicitly. | W9 (enum, CLI), W10 (enforcement, `DeviceAdminLevel`), W15 (definition, UI) |
+| Q2 | Should mail and todos reach the phone in v1? | No, for every host, with no checkbox, flag, command or config key anywhere that turns sharing on (PRD AC56). Fred's mail is probably the employer's Microsoft 365, so even Sendai's mail is treated as work-sensitive. Copy: "Mail, calendar and todos aren't shared from your Macs in this version." (Mac pair window, `nostromo device pair`) and "Mail, calendar and todos stay on your Mac in this version." (device Fred, Teri, Settings). | W9 (no scope verbs or fields, `not_shared`), W10 (no `publish_sensitive`), W11, W15 (copy) |
+| Q3 | Do you accept that work-host notifications are never enriched? | Yes: Kobe, work and PHI notifications never carry extra detail on the phone (reverses the 2026-10-10 answer). | W16 |
+| Q4 | Does the phone answer nothing in this sequence? | Yes: no decisions, approvals, Mother questions or PRs from the phone; the iPhone vision is narrowed (Ada amends it). | all (B10) |
+| Q5 | What may a work-host notification say? | Kind, host, short ref, fixed reason. | W13 |
+| Q6 | Which AWS account hosts the relay? | A new dedicated personal account, or a member account in the operator's personal AWS Organization; never Carefeed. | W13 |
+| Q7 | Should the phone see a busy session's queued messages (D7)? | No, nothing from the message queue in v1. | W11 |
+| Q8 | How should the phone show work from several Macs? | One merged list, what needs you first; host badge whenever the list holds rows (live or last-known) from more than one Mac (PRD AC52). | W11 |
+| — | Apple notification-filtering entitlement | Investigated 2026-11-23, **not requested**: the form needs a published App Store app and one of four use cases (encrypted messaging, earthquake warnings, education alert retraction, healthcare patient-care alert retraction), none of which Nostromo truthfully fits. W13's replace-in-place is the v1 withdrawal. | W13, W16 |
+| — | S7a "locked or idle" signal (Ada's rule; Archie's mechanism; not an operator answer) | Observable: the verified Mac app already watches screen lock, sleep and idle time (`AuthoredPrsDemandReporter`). Chosen: push at once when the presenting Mac is locked, asleep or idle ≥ 2 min, else 30 s after raise if unanswered; falls back to the 30-second rule when no presence has been reported. | W13 (daemon), W15 (reporter) |
