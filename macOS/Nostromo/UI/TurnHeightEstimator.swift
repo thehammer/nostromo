@@ -92,6 +92,9 @@ enum TurnHeightEstimator {
     static let wakeMarkerHeight: CGFloat    = 22
     /// The gap between the user slot and the blocks under it (`ChatTurnView.bubbleGap`).
     static let userSlotGap: CGFloat         = 8
+    /// Between merged bubbles, and before the "sent together" caption (see `MergedUserBubblesView`).
+    static let mergedBubbleGap: CGFloat     = 6
+    static let mergedCaptionHeight: CGFloat = 12
 
     // MARK: - Estimation
 
@@ -146,7 +149,16 @@ enum TurnHeightEstimator {
             if !turn.imageURLs.isEmpty {
                 height += CGFloat(turn.imageURLs.count) * (UserBubbleView.imageSize.height + 6)
             }
-            if turn.userInputLength > 0 {
+            if turn.userParts.count >= 2 {
+                // One bubble per message, a gap between them, then the muted caption.
+                let lengths = turn.userPartLengths
+                for length in lengths {
+                    height += bubbleChrome
+                        + wrappedHeight(characters: length, width: bubbleWidth,
+                                        glyphWidth: systemGlyphWidth, lineHeight: bodyLineHeight)
+                }
+                height += CGFloat(lengths.count) * mergedBubbleGap + mergedCaptionHeight
+            } else if turn.userInputLength > 0 {
                 height += bubbleChrome
                     + wrappedHeight(characters: turn.userInputLength,
                                     width: bubbleWidth,

@@ -240,6 +240,8 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     private var needsFullRemeasure = true
 
     private var bubble: UserBubbleView?
+    /// The bubbles of a turn that answers several merged messages, in place of `bubble`.
+    private var mergedBubbles: MergedUserBubblesView?
     /// The muted marker a Mother job notice turn shows in the user slot, in place of `bubble`.
     private var wakeMarker: WakeMarkerView?
     /// A local slash command's record, in the user slot in place of `bubble`.
@@ -452,6 +454,13 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
                                                               : WakeMarkerView.copyMenuTitle)
             wakeMarker = marker
             bubbleWidthConstraint = attachIsland(marker, width: slotWidth())
+        // Several messages the daemon merged into one turn: one bubble each, then "sent together".
+        // (No origin, so it is never a terminal delivery or a marker; the confirm sentinel never
+        // reaches here because a confirm reply is one message.)
+        } else if turn.userParts.count >= 2, !turn.userInput.contains(Self.confirmReplySentinel) {
+            let merged = MergedUserBubblesView(parts: turn.userParts)
+            mergedBubbles = merged
+            bubbleWidthConstraint = attachIsland(merged, width: slotWidth())
         // The sentinel only ever marks a confirm-card reply, which has no terminal origin: on a
         // terminal-origin turn it is just text, and hiding it would hide what the agent received.
         } else if let bubbleText, turn.hasTerminalOrigin || !turn.userInput.contains(Self.confirmReplySentinel) {
@@ -504,7 +513,10 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     var wakeMarkerView: WakeMarkerView? { wakeMarker }
 
     /// What fills the user slot: the bubble, or a notice turn's marker.
-    private var userSlot: NSView? { bubble ?? wakeMarker ?? localRecord }
+    private var userSlot: NSView? { bubble ?? mergedBubbles ?? wakeMarker ?? localRecord }
+
+    /// The bubbles of a merged turn (nil for any other turn).
+    var mergedBubblesView: MergedUserBubblesView? { mergedBubbles }
 
     /// A local command's record in the user slot (nil for any other turn).
     var localCommandRecordView: LocalCommandRecordView? { localRecord }
