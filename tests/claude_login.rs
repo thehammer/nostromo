@@ -127,6 +127,9 @@ struct FakeWatch {
     gate: (Mutex<bool>, Condvar),
     /// Looks currently blocked on the gate.
     blocked: AtomicUsize,
+    /// Looks the daemon made to note the credential as of a failure (the
+    /// `claude-login-stamp` thread), counted once they have read it.
+    capture_reads: AtomicUsize,
 }
 
 impl FakeWatch {
@@ -136,7 +139,16 @@ impl FakeWatch {
             calls: AtomicUsize::new(0),
             gate: (Mutex::new(true), Condvar::new()),
             blocked: AtomicUsize::new(0),
+            capture_reads: AtomicUsize::new(0),
         }
+    }
+
+    fn looks_are_open(&self) -> bool {
+        *self.gate.0.lock().unwrap()
+    }
+
+    fn capture_reads(&self) -> usize {
+        self.capture_reads.load(Ordering::SeqCst)
     }
 
     /// Make every look at the credential block until `open_looks`.
@@ -182,6 +194,9 @@ impl CredentialWatch for FakeWatch {
         self.blocked.fetch_sub(1, Ordering::SeqCst);
         // Read last: a look that was stuck reports the credential as it is when it returns.
         let stamp = self.stamp.lock().unwrap().clone();
+        if std::thread::current().name() == Some("claude-login-stamp") {
+            self.capture_reads.fetch_add(1, Ordering::SeqCst);
+        }
         stamp
     }
 }
@@ -252,6 +267,8 @@ struct World {
     tmp: tempfile::TempDir,
     auth_file: PathBuf,
     spawns: usize,
+    /// The ids of the holds a test has waited for (see `baseline_captured`).
+    holds_seen: Mutex<std::collections::HashSet<String>>,
 }
 
 /// What one fake process leaves behind (all respawns of a session share the directory).
@@ -312,6 +329,7 @@ impl World {
             tmp,
             auth_file,
             spawns: 0,
+            holds_seen: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -504,15 +522,36 @@ impl World {
         .await;
     }
 
-    /// The session's entry once it holds a message.
+    /// The session's entry once it holds a message, and the daemon has noted
+    /// the credential as it was at the failure.
     async fn wait_hold(&self, tag: &str) -> ClaudeLoginSession {
-        wait_until(&format!("a hold for {tag}"), || {
+        let entry = wait_until(&format!("a hold for {tag}"), || {
             self.pic()
                 .entry(tag)
                 .filter(|e| e.hold_id.is_some())
                 .cloned()
         })
-        .await
+        .await;
+        self.baseline_captured(&entry).await;
+        entry
+    }
+
+    /// The hold is in the picture before the daemon has looked at the credential
+    /// for it (that look runs on a thread of its own, and the poller adopts the
+    /// first stamp it sees when there is none). A test that then changes the
+    /// credential must change it after that look, or the change is the
+    /// baseline and is never seen. Waits for the look of every hold the test has
+    /// waited for, unless looks are being held back on purpose.
+    async fn baseline_captured(&self, entry: &ClaudeLoginSession) {
+        let seen = {
+            let mut ids = self.holds_seen.lock().unwrap();
+            ids.extend(entry.hold_id.clone());
+            ids.len()
+        };
+        wait_until("the daemon to note the credential for the hold", || {
+            (!self.watch.looks_are_open() || self.watch.capture_reads() >= seen).then_some(())
+        })
+        .await;
     }
 
     /// A hold for `tag` whose id is not `old`, in `phase`.
@@ -522,13 +561,18 @@ impl World {
         old: &str,
         phase: ClaudeLoginPhase,
     ) -> ClaudeLoginSession {
-        self.drive_until(&format!("a new hold for {tag}"), || {
-            self.pic()
-                .entry(tag)
-                .filter(|e| e.hold_id.as_deref().is_some_and(|id| id != old) && e.phase == phase)
-                .cloned()
-        })
-        .await
+        let entry = self
+            .drive_until(&format!("a new hold for {tag}"), || {
+                self.pic()
+                    .entry(tag)
+                    .filter(|e| {
+                        e.hold_id.as_deref().is_some_and(|id| id != old) && e.phase == phase
+                    })
+                    .cloned()
+            })
+            .await;
+        self.baseline_captured(&entry).await;
+        entry
     }
 
     /// One poll interval of paused time, then enough real time for the poller and the
@@ -1643,6 +1687,13 @@ fn with_an_unavailable_watch_nothing_is_resent_by_itself_but_a_manual_retry_work
         w.say(tag, "HELD-NOWATCH");
         let id = w.wait_hold(tag).await.hold_id.unwrap();
         w.wait_idle(tag).await;
+        // The picture says `Keychain` until the poller's first look at the
+        // credential, one poll interval of paused time after the hold. Drive
+        // that look instead of assuming it has happened by now.
+        w.drive_until("the poller to report the watch unavailable", || {
+            (w.pic().watch == ClaudeLoginWatch::Unavailable).then_some(())
+        })
+        .await;
         assert_eq!(w.pic().watch, ClaudeLoginWatch::Unavailable);
 
         w.set_login("ok");

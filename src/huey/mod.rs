@@ -95,8 +95,10 @@ struct Inner {
     /// Set once the scheduler has finished its first look (see
     /// [`HueyHandle::first_tick_done`]).
     first_tick_tx: watch::Sender<bool>,
-    /// Held for the whole of a run: one run at a time (T7).
-    run_lock: tokio::sync::Mutex<()>,
+    /// True for the whole of a run: one run at a time (T7). A flag rather than
+    /// a lock, so that looking at it ([`HueyHandle::is_running`]) can never
+    /// make a run that is starting at that moment see "already running".
+    running: std::sync::atomic::AtomicBool,
     last_run_end: std::sync::Mutex<Option<DateTime<Utc>>>,
     /// Attempts the scheduler has started, for one date (in memory only).
     scheduled_attempts: std::sync::Mutex<(NaiveDate, u32)>,
@@ -109,6 +111,26 @@ struct Inner {
     scan_timed_out: std::sync::atomic::AtomicBool,
     /// The curating run in progress, for the `huey.*` tools it calls.
     bridge: CurateBridge,
+}
+
+/// Owns the right to run until dropped.
+struct RunGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl<'a> RunGuard<'a> {
+    /// `None` when a run already holds it.
+    fn take(running: &'a std::sync::atomic::AtomicBool) -> Option<Self> {
+        use std::sync::atomic::Ordering::SeqCst;
+        running
+            .compare_exchange(false, true, SeqCst, SeqCst)
+            .ok()
+            .map(|_| Self(running))
+    }
+}
+
+impl Drop for RunGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Cheap clone handed to MCP and IPC.
@@ -158,7 +180,7 @@ impl HueyHandle {
     }
 
     pub fn is_running(&self) -> bool {
-        self.inner.run_lock.try_lock().is_err()
+        self.inner.running.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The curating run in progress (what `huey.check_project` and
@@ -237,7 +259,7 @@ impl HueyHandle {
         late_reason: Option<String>,
         now: DateTime<Utc>,
     ) -> Result<RunOutcome, TriggerRefused> {
-        let Ok(_guard) = self.inner.run_lock.try_lock() else {
+        let Some(_guard) = RunGuard::take(&self.inner.running) else {
             return Err(TriggerRefused::AlreadyRunning);
         };
         if trigger == Trigger::Regenerate {
@@ -514,7 +536,7 @@ impl HueyEngine {
                 },
                 view_tx,
                 first_tick_tx: watch::channel(false).0,
-                run_lock: tokio::sync::Mutex::new(()),
+                running: std::sync::atomic::AtomicBool::new(false),
                 last_run_end: std::sync::Mutex::new(None),
                 scheduled_attempts: std::sync::Mutex::new((NaiveDate::MIN, 0)),
                 scan: std::sync::Mutex::new(None),
@@ -667,5 +689,52 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(3600)).await;
         assert_eq!(src.handle.setup_state(), SetupState::NotSetUp);
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    /// Regression for the `h6_9_a_run_finishing_repaints_the_report_pane_with_the_new_report`
+    /// flake: `is_running` used to take the run lock to look at it, so a pane
+    /// repaint asking "is Huey running?" at the instant a run started made that
+    /// run see "already running" and end without bumping the view.
+    #[test]
+    fn looking_at_whether_a_run_is_going_never_makes_a_starting_run_lose() {
+        let root = tempfile::tempdir().unwrap();
+        let context = ContextEnv::for_home(
+            root.path(),
+            root.path().join("code"),
+            root.path().to_path_buf(),
+            "test".into(),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = rt.block_on(async {
+            HueyEngine::spawn(HueyDeps::new(
+                root.path().to_path_buf(),
+                HueyConfig::default(),
+                context,
+            ))
+            .handle
+        });
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let looker = {
+            let (handle, stop) = (handle.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    handle.is_running();
+                }
+            })
+        };
+        for _ in 0..200_000 {
+            assert!(
+                RunGuard::take(&handle.inner.running).is_some(),
+                "a run that starts while someone looks is refused"
+            );
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        looker.join().unwrap();
+        let _held = RunGuard::take(&handle.inner.running).unwrap();
+        assert!(handle.is_running());
+        assert!(RunGuard::take(&handle.inner.running).is_none());
     }
 }
