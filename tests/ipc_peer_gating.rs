@@ -1768,13 +1768,27 @@ async fn a_tcp_client_cannot_attach_to_the_fred_session_and_never_receives_its_t
     spawn_fake_session(&mut unix, "fred", "fred", "v-attach-fred").await;
     let (mut tcp, _) = h.tcp(vec![]).await;
 
-    let mut seen = attack(&mut tcp, ClientMsg::SessionAttach { tag: "fred".into(), host: None }).await;
+    let mut seen = attack(
+        &mut tcp,
+        ClientMsg::SessionAttach {
+            tag: "fred".into(),
+            host: None,
+        },
+    )
+    .await;
     assert_refused(&seen, "session_attach fred");
 
     // Control: a Unix peer attaches and does see the transcript (so the test
     // cannot pass because there was nothing to leak), and a later turn streams
     // to it — anything wrongly registered for the TCP peer would stream too.
-    send(&mut unix, &ClientMsg::SessionAttach { tag: "fred".into(), host: None }).await;
+    send(
+        &mut unix,
+        &ClientMsg::SessionAttach {
+            tag: "fred".into(),
+            host: None,
+        },
+    )
+    .await;
     recv_until_json_contains(&mut unix, "SECRET-MAIL-BODY").await;
     unix_completes_a_turn(&mut unix, "fred", "v-attach-fred", "UNIX-MARKER-1").await;
 
@@ -1792,7 +1806,14 @@ async fn the_fred_and_teri_session_tags_are_protected_whatever_their_case() {
 
     let mut seen = vec![];
     for tag in ["Fred", "TERI"] {
-        let frames = attack(&mut tcp, ClientMsg::SessionAttach { tag: tag.into(), host: None }).await;
+        let frames = attack(
+            &mut tcp,
+            ClientMsg::SessionAttach {
+                tag: tag.into(),
+                host: None,
+            },
+        )
+        .await;
         assert_refused(&frames, &format!("session_attach {tag}"));
         seen.extend(frames);
     }
@@ -2070,7 +2091,9 @@ async fn a_tcp_client_can_still_attach_to_a_non_sensitive_session_but_cannot_wri
     let frames = attack(
         &mut tcp,
         ClientMsg::SessionAttach {
-            tag: "cody-x".into(), host: None },
+            tag: "cody-x".into(),
+            host: None,
+        },
     )
     .await;
     assert!(
@@ -2217,7 +2240,13 @@ async fn a_tcp_client_cannot_attach_to_or_drive_a_focus_that_was_created_by_send
 
     let mut seen = vec![];
     for (what, msg) in [
-        ("session_attach", ClientMsg::SessionAttach { tag: W.into(), host: None }),
+        (
+            "session_attach",
+            ClientMsg::SessionAttach {
+                tag: W.into(),
+                host: None,
+            },
+        ),
         (
             "session_send",
             ClientMsg::SessionSend {
@@ -2285,7 +2314,10 @@ async fn a_tcp_client_cannot_attach_to_or_drive_a_focus_created_through_create_f
     for (what, msg) in [
         (
             "session_attach",
-            ClientMsg::SessionAttach { tag: tag.clone(), host: None },
+            ClientMsg::SessionAttach {
+                tag: tag.clone(),
+                host: None,
+            },
         ),
         (
             "session_send",
@@ -2337,7 +2369,14 @@ async fn a_focus_created_through_create_focus_without_initial_context_is_an_ordi
     wait_for_log(view, "START", |l| l.contains("START")).await;
     let (mut tcp, _) = h.tcp(vec![]).await;
 
-    let frames = attack(&mut tcp, ClientMsg::SessionAttach { tag: tag.clone(), host: None }).await;
+    let frames = attack(
+        &mut tcp,
+        ClientMsg::SessionAttach {
+            tag: tag.clone(),
+            host: None,
+        },
+    )
+    .await;
     assert!(
         frames
             .iter()
@@ -2638,7 +2677,10 @@ async fn a_tcp_client_asking_for_the_activity_snapshot_of_a_sensitive_focus_is_n
         frames.extend(
             attack(
                 &mut tcp,
-                ClientMsg::ActivitySnapshotRequest { tag: tag.into(), host: None },
+                ClientMsg::ActivitySnapshotRequest {
+                    tag: tag.into(),
+                    host: None,
+                },
             )
             .await,
         );
@@ -3405,7 +3447,14 @@ async fn a_focus_created_by_a_fred_session_is_sensitive_even_without_initial_con
     let (mut tcp, _) = h.tcp(vec![]).await;
 
     assert_refused(
-        &attack(&mut tcp, ClientMsg::SessionAttach { tag: tag.clone(), host: None }).await,
+        &attack(
+            &mut tcp,
+            ClientMsg::SessionAttach {
+                tag: tag.clone(),
+                host: None,
+            },
+        )
+        .await,
         "attach to a Fred-created focus",
     );
     h.broadcast(ServerMsg::FocusCreated {
@@ -3439,7 +3488,9 @@ async fn a_focus_pushed_with_the_fred_agent_under_a_custom_tag_is_sensitive_befo
         &attack(
             &mut tcp,
             ClientMsg::SessionAttach {
-                tag: "my-mail".into(), host: None },
+                tag: "my-mail".into(),
+                host: None,
+            },
         )
         .await,
         "attach to a custom-tag Fred focus",
@@ -4287,7 +4338,14 @@ async fn a_tcp_client_cannot_spawn_a_session_even_for_an_ordinary_agent_and_tag_
     );
 
     // Follow-ups for the session the peer wanted deliver nothing.
-    let attach = attack(&mut tcp, ClientMsg::SessionAttach { tag: "x1".into(), host: None }).await;
+    let attach = attack(
+        &mut tcp,
+        ClientMsg::SessionAttach {
+            tag: "x1".into(),
+            host: None,
+        },
+    )
+    .await;
     assert_no_transcript(&attach);
     let sent = attack(
         &mut tcp,
@@ -4563,7 +4621,9 @@ async fn a_refused_tcp_send_does_not_mark_the_session_and_a_tcp_client_can_still
     let frames = attack(
         &mut tcp,
         ClientMsg::SessionAttach {
-            tag: "cody-chat".into(), host: None },
+            tag: "cody-chat".into(),
+            host: None,
+        },
     )
     .await;
     assert!(
@@ -4641,7 +4701,9 @@ async fn a_tcp_peer_cannot_drive_an_existing_ordinary_session_through_list_send_
     let frames = attack(
         &mut tcp,
         ClientMsg::SessionAttach {
-            tag: "cody-live".into(), host: None },
+            tag: "cody-live".into(),
+            host: None,
+        },
     )
     .await;
     assert!(
@@ -5213,7 +5275,16 @@ async fn nothing_a_work_send_creates_reaches_a_tcp_client_even_before_the_send_h
         spawned.notified().await;
         let mut attempts = Vec::new();
         for i in 0.. {
-            attempts.push(attack(&mut tcp, ClientMsg::SessionAttach { tag: tag.into(), host: None }).await);
+            attempts.push(
+                attack(
+                    &mut tcp,
+                    ClientMsg::SessionAttach {
+                        tag: tag.into(),
+                        host: None,
+                    },
+                )
+                .await,
+            );
             if i == 4 {
                 go.notify_one();
             }
@@ -5390,7 +5461,9 @@ async fn a_session_resumed_while_the_registry_is_degraded_is_sensitive_and_a_fre
     let refused = attack(
         &mut tcp,
         ClientMsg::SessionAttach {
-            tag: "cody-resumed".into(), host: None },
+            tag: "cody-resumed".into(),
+            host: None,
+        },
     )
     .await;
     assert_refused(
@@ -5414,7 +5487,9 @@ async fn a_session_resumed_while_the_registry_is_degraded_is_sensitive_and_a_fre
     let fresh = attack(
         &mut tcp,
         ClientMsg::SessionAttach {
-            tag: "cody-fresh".into(), host: None },
+            tag: "cody-fresh".into(),
+            host: None,
+        },
     )
     .await;
     assert!(
@@ -5450,7 +5525,9 @@ async fn a_session_resumed_when_the_registry_is_missing_but_the_store_lists_sess
     let refused = attack(
         &mut tcp,
         ClientMsg::SessionAttach {
-            tag: "cody-resumed".into(), host: None },
+            tag: "cody-resumed".into(),
+            host: None,
+        },
     )
     .await;
     assert_refused(
@@ -5461,7 +5538,9 @@ async fn a_session_resumed_when_the_registry_is_missing_but_the_store_lists_sess
     let fresh = attack(
         &mut tcp,
         ClientMsg::SessionAttach {
-            tag: "cody-fresh".into(), host: None },
+            tag: "cody-fresh".into(),
+            host: None,
+        },
     )
     .await;
     assert!(fresh
@@ -5876,7 +5955,10 @@ async fn sessions_under_whitespace_case_and_qualified_fred_and_teri_tags_are_unr
         for (what, msg) in [
             (
                 "session_attach",
-                ClientMsg::SessionAttach { tag: tag.clone(), host: None },
+                ClientMsg::SessionAttach {
+                    tag: tag.clone(),
+                    host: None,
+                },
             ),
             (
                 "session_send",
@@ -7130,7 +7212,9 @@ async fn a_tcp_client_can_still_use_every_read_only_request() {
     let frames = attack(
         &mut tcp,
         ClientMsg::SessionAttach {
-            tag: "cody-ro".into(), host: None },
+            tag: "cody-ro".into(),
+            host: None,
+        },
     )
     .await;
     assert!(
@@ -7143,7 +7227,9 @@ async fn a_tcp_client_can_still_use_every_read_only_request() {
         &attack(
             &mut tcp,
             ClientMsg::SessionDetach {
-                tag: "cody-ro".into(), host: None },
+                tag: "cody-ro".into(),
+                host: None,
+            },
         )
         .await,
         "session_detach",
@@ -7184,7 +7270,9 @@ async fn a_tcp_client_can_still_use_every_read_only_request() {
     let frames = attack(
         &mut tcp,
         ClientMsg::ActivitySnapshotRequest {
-            tag: "cody-ro".into(), host: None },
+            tag: "cody-ro".into(),
+            host: None,
+        },
     )
     .await;
     assert!(
@@ -7339,7 +7427,14 @@ mod model_switching {
     /// The transcript of `tag` as a fresh Unix client is served it, serialised.
     async fn transcript_of(h: &Harness, tag: &str) -> String {
         let (mut unix, _) = h.unix(vec![]).await;
-        send(&mut unix, &ClientMsg::SessionAttach { tag: tag.into(), host: None }).await;
+        send(
+            &mut unix,
+            &ClientMsg::SessionAttach {
+                tag: tag.into(),
+                host: None,
+            },
+        )
+        .await;
         let frames = recv_until(
             &mut unix,
             |m| matches!(m, ServerMsg::SessionTurns { tag: t, .. } if t == tag),
@@ -7631,7 +7726,14 @@ mod model_switching {
         spawn_fake_session(&mut unix, "fred", "fred", "v-model-fred").await;
         let (mut tcp, _) = h.tcp(vec![]).await;
 
-        send(&mut tcp, &ClientMsg::SessionModelGet { tag: FOCUS.into(), host: None }).await;
+        send(
+            &mut tcp,
+            &ClientMsg::SessionModelGet {
+                tag: FOCUS.into(),
+                host: None,
+            },
+        )
+        .await;
         let readable = recv_until(
             &mut tcp,
             |m| matches!(m, ServerMsg::SessionModelState(s) if s.tag == FOCUS),
@@ -7645,7 +7747,14 @@ mod model_switching {
         );
         assert!(state.running);
 
-        let withheld = attack(&mut tcp, ClientMsg::SessionModelGet { tag: "fred".into(), host: None }).await;
+        let withheld = attack(
+            &mut tcp,
+            ClientMsg::SessionModelGet {
+                tag: "fred".into(),
+                host: None,
+            },
+        )
+        .await;
         assert_refused(&withheld, "session_model_get on a sensitive focus");
         assert!(
             state_for(&withheld, "fred").is_none(),
@@ -7696,7 +7805,14 @@ mod model_switching {
         .await;
         spawn_fake_session(&mut unix, "fred", "fred", "v-model-fred-unix").await;
 
-        send(&mut unix, &ClientMsg::SessionModelGet { tag: FOCUS.into(), host: None }).await;
+        send(
+            &mut unix,
+            &ClientMsg::SessionModelGet {
+                tag: FOCUS.into(),
+                host: None,
+            },
+        )
+        .await;
         let frames = recv_until(
             &mut unix,
             |m| matches!(m, ServerMsg::SessionModelState(s) if s.tag == FOCUS),
@@ -7709,7 +7825,10 @@ mod model_switching {
 
         send(
             &mut unix,
-            &ClientMsg::SessionModelGet { tag: "fred".into(), host: None },
+            &ClientMsg::SessionModelGet {
+                tag: "fred".into(),
+                host: None,
+            },
         )
         .await;
         let frames = recv_until(
@@ -7817,7 +7936,9 @@ mod model_switching {
         send(
             &mut unix,
             &ClientMsg::SessionModelGet {
-                tag: READ_TAG.into(), host: None },
+                tag: READ_TAG.into(),
+                host: None,
+            },
         )
         .await;
         let local = recv_until(
@@ -7862,7 +7983,9 @@ mod model_switching {
         send_json(
             &mut tcp,
             &serde_json::to_value(ClientMsg::SessionModelGet {
-                tag: READ_TAG.into(), host: None })
+                tag: READ_TAG.into(),
+                host: None,
+            })
             .unwrap(),
         )
         .await;
@@ -8404,8 +8527,11 @@ mod background_tasks {
     }
 
     async fn attach<S: AsyncRead + AsyncWrite + Unpin>(tap: &mut Tap<S>, tag: &str) {
-        tap.send(&ClientMsg::SessionAttach { tag: tag.into(), host: None })
-            .await;
+        tap.send(&ClientMsg::SessionAttach {
+            tag: tag.into(),
+            host: None,
+        })
+        .await;
         let tag = tag.to_owned();
         tap.wait_until("the attach replay", move |f| {
             !frames_of(f, "session_state", &tag).is_empty()
@@ -8493,7 +8619,9 @@ mod background_tasks {
         let mut tcp = tcp_tap(&h).await;
         attach(&mut tcp, &open.tag).await;
         tcp.send(&ClientMsg::SessionAttach {
-            tag: sens.tag.clone(), host: None })
+            tag: sens.tag.clone(),
+            host: None,
+        })
         .await;
         tcp.wait_until("the refusal of the sensitive attach", refused)
             .await;
@@ -8788,7 +8916,9 @@ mod background_tasks {
         })
         .await;
         tcp.send(&ClientMsg::SessionAttach {
-            tag: sens.tag.clone(), host: None })
+            tag: sens.tag.clone(),
+            host: None,
+        })
         .await;
         tcp.wait_until("the refusal of the sensitive attach", refused)
             .await;
@@ -11061,7 +11191,9 @@ mod background_tasks {
         let mut tcp = tcp_tap(&h).await;
         attach(&mut tcp, &open.tag).await;
         tcp.send(&ClientMsg::SessionAttach {
-            tag: sens.tag.clone(), host: None })
+            tag: sens.tag.clone(),
+            host: None,
+        })
         .await;
         tcp.wait_until("the refusal of the sensitive attach", refused)
             .await;
@@ -13263,7 +13395,10 @@ fn a_paired_peer_is_a_network_peer_with_one_verb_more_than_a_tcp_peer() {
         assert!(refuse_for_network(&msg, &tags), "{msg:?}");
     }
     assert!(!refuse_for_network(&ClientMsg::Ping, &tags));
-    assert!(!refuse_for_network(&ClientMsg::SessionList { host: None }, &tags));
+    assert!(!refuse_for_network(
+        &ClientMsg::SessionList { host: None },
+        &tags
+    ));
 }
 
 // ── Teri, Fred and work data never reaches a device ───────────────────────────
@@ -13918,12 +14053,26 @@ async fn a_paired_device_cannot_attach_to_the_fred_session_and_never_receives_it
     spawn_fake_session(&mut unix, "fred", "fred", "v-w9-attach-fred").await;
     let (mut ws, _) = h.paired(vec![]).await;
 
-    let mut seen = attack(&mut ws, ClientMsg::SessionAttach { tag: "fred".into(), host: None }).await;
+    let mut seen = attack(
+        &mut ws,
+        ClientMsg::SessionAttach {
+            tag: "fred".into(),
+            host: None,
+        },
+    )
+    .await;
     assert_refused(&seen, "session_attach fred");
 
     // Control: a local peer attaches and sees the transcript, and a later turn
     // streams to it. Anything wrongly registered for the device would stream too.
-    send(&mut unix, &ClientMsg::SessionAttach { tag: "fred".into(), host: None }).await;
+    send(
+        &mut unix,
+        &ClientMsg::SessionAttach {
+            tag: "fred".into(),
+            host: None,
+        },
+    )
+    .await;
     recv_until_json_contains(&mut unix, "SECRET-MAIL-BODY").await;
     unix_completes_a_turn(&mut unix, "fred", "v-w9-attach-fred", "W9-UNIX-MARKER").await;
 
@@ -13986,7 +14135,9 @@ async fn a_paired_device_can_read_an_ordinary_session_but_not_drive_it() {
     let frames = attack(
         &mut ws,
         ClientMsg::SessionAttach {
-            tag: "cody-live".into(), host: None },
+            tag: "cody-live".into(),
+            host: None,
+        },
     )
     .await;
     assert!(

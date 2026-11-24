@@ -39,10 +39,12 @@ use super::device_hub::{DeviceHub, HubSlot};
 use super::devices::{DeviceStanding, RevokedBy, SatelliteAdmin, TokenCheck};
 use super::peer::SensitiveTags;
 use super::protocol::{ClientMsg, ServerMsg, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION};
-use super::router::{ingest_from_satellite, Bucket, Router, SatelliteRecord, UplinkLimits, Verdict};
+use super::router::{
+    ingest_from_satellite, Bucket, Router, SatelliteRecord, UplinkLimits, Verdict,
+};
 use super::server::{handle_client, HeldMotherJobs, PeerOrigin, RetainedCache, SatelliteLink};
-use super::uplink_wire::{wrap_server_bytes, UplinkFrame};
 use super::session_manager::SessionManager;
+use super::uplink_wire::{wrap_server_bytes, UplinkFrame};
 use crate::terminal::TerminalManager;
 
 /// Advertised in `Welcome.features` on every transport.
@@ -552,6 +554,7 @@ struct UplinkSession {
     limits: UplinkLimits,
     publish: Bucket,
     reply: Bucket,
+    client: Bucket,
 }
 
 /// What reading one uplink frame decided.
@@ -560,6 +563,8 @@ enum Inbound {
     Client(ClientMsg),
     /// Dealt with (admitted, or dropped and counted).
     Done,
+    /// A `client` frame over the rate limit: tell the satellite, do not run it.
+    Refused,
     /// Over the limit for the whole sustain window.
     Close,
 }
@@ -581,7 +586,11 @@ impl UplinkSession {
         };
         router.touch(&name);
         match frame {
-            UplinkFrame::Client { msg } => Inbound::Client(msg),
+            UplinkFrame::Client { msg } => match self.client.take(now) {
+                Verdict::Allow => Inbound::Client(msg),
+                Verdict::Drop => Inbound::Refused,
+                Verdict::Close => Inbound::Close,
+            },
             UplinkFrame::Publish { msg } => {
                 let oversize = body.len() > self.limits.max_publish_bytes;
                 match self.publish.take(now) {
@@ -617,7 +626,8 @@ impl UplinkSession {
                     }
                     Verdict::Allow => {}
                 }
-                if let Err(why) = router.accept_routed_reply(&self.record, &id, msg, &self.tags, now)
+                if let Err(why) =
+                    router.accept_routed_reply(&self.record, &id, msg, &self.tags, now)
                 {
                     router.drops.reply.fetch_add(1, Ordering::Relaxed);
                     router.note_drop(&name, "reply", &format!("{why:?}"));
@@ -631,7 +641,9 @@ impl UplinkSession {
 }
 
 /// Wait for the next routed request, or for ever when this is not an uplink.
-async fn next_request(rx: &mut Option<mpsc::UnboundedReceiver<UplinkFrame>>) -> Option<UplinkFrame> {
+async fn next_request(
+    rx: &mut Option<mpsc::UnboundedReceiver<UplinkFrame>>,
+) -> Option<UplinkFrame> {
     match rx {
         Some(rx) => rx.recv().await,
         None => std::future::pending().await,
@@ -665,14 +677,13 @@ async fn run_paired(
     let registry = Arc::clone(hub.registry());
     let mut epoch = registry.subscribe_epoch();
     epoch.borrow_and_update();
-    // Revoked between the upgrade and now.
-    if !matches!(registry.standing(&device_id), Some(DeviceStanding::Active)) {
+    // Revoked between the upgrade and now. Standing and kind are read in one
+    // look (after the subscription above, so a level change after it is not
+    // missed): a revoke between two reads must not admit a satellite as a phone.
+    let Some(satellite) = registry.admit(&device_id) else {
         reject(ws, "revoked").await;
         return Ok(());
-    }
-    // Read after the subscription above, so a level change between this read
-    // and the first `epoch.changed()` is not missed.
-    let satellite = registry.satellite_info(&device_id);
+    };
 
     let (server_side, bridge_side) = tokio::io::duplex(256 * 1024);
     let (mut bridge_rd, mut bridge_wr) = tokio::io::split(bridge_side);
@@ -699,6 +710,12 @@ async fn run_paired(
                 reply: Bucket::new(
                     uplink_limits.reply_rate,
                     uplink_limits.reply_burst,
+                    uplink_limits.sustain,
+                    now,
+                ),
+                client: Bucket::new(
+                    uplink_limits.client_rate,
+                    uplink_limits.client_burst,
                     uplink_limits.sustain,
                     now,
                 ),
@@ -783,6 +800,18 @@ async fn run_paired(
                         Some(session) => {
                             match session.read(&body, &shared, hub.router(), Instant::now()) {
                                 Inbound::Done => continue,
+                                Inbound::Refused => {
+                                    let refusal = text(&ServerMsg::Error {
+                                        message: "rate_limited".to_string(),
+                                    });
+                                    if let Message::Text(body) = refusal {
+                                        let body = wrap_server_bytes(&body);
+                                        if sink.send(Message::Text(body)).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    continue;
+                                }
                                 Inbound::Close => {
                                     closing = Some(close_msg(1008, "over the rate limit"));
                                     break;

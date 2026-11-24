@@ -332,9 +332,9 @@ impl Bucket {
         self.tokens = (self.tokens + elapsed * self.rate).min(self.burst);
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
-            if self.tokens > self.burst / 2.0 {
-                self.over_since = None;
-            }
+            // Any allowed frame ends the over-limit run: "over the limit for
+            // the whole window" means drops with no allowed frame between.
+            self.over_since = None;
             return Verdict::Allow;
         }
         let since = *self.over_since.get_or_insert(now);
@@ -357,6 +357,9 @@ pub struct UplinkLimits {
     /// `reply` frames per second, and the burst.
     pub reply_rate: f64,
     pub reply_burst: f64,
+    /// `client` frames (the satellite's own verbs) per second, and the burst.
+    pub client_rate: f64,
+    pub client_burst: f64,
     /// How long over the limit, in a row, closes the uplink with 1008.
     pub sustain: Duration,
 }
@@ -369,6 +372,8 @@ impl Default for UplinkLimits {
             max_publish_bytes: 256 * 1024,
             reply_rate: 200.0,
             reply_burst: 400.0,
+            client_rate: 10.0,
+            client_burst: 30.0,
             sustain: Duration::from_secs(30),
         }
     }
@@ -464,7 +469,9 @@ impl Router {
 
     /// The uplink `conn_id` of `name` ended. A newer uplink for the same host
     /// is left alone.
-    pub fn unregister(&self, name: &str, conn_id: u64) {
+    /// Returns whether this connection was still the host's uplink (a newer
+    /// uplink that replaced it makes this `false`).
+    pub fn unregister(&self, name: &str, conn_id: u64) -> bool {
         let removed = {
             let mut inner = self.inner.lock().unwrap();
             if inner.hosts.get(name).is_some_and(|u| u.conn_id == conn_id) {
@@ -478,6 +485,7 @@ impl Router {
         if removed {
             self.broadcast_hosts();
         }
+        removed
     }
 
     /// Note a frame from `name` (for `Hosts.last_seen`).

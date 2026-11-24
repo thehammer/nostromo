@@ -119,7 +119,14 @@ async fn session_round_trip_drives_real_claude() {
     }
 
     // Attach: expect a SessionTurns snapshot then a SessionState.
-    send(&mut stream, &ClientMsg::SessionAttach { tag: "it".into(), host: None }).await;
+    send(
+        &mut stream,
+        &ClientMsg::SessionAttach {
+            tag: "it".into(),
+            host: None,
+        },
+    )
+    .await;
     assert!(matches!(
         recv(&mut stream).await,
         ServerMsg::SessionTurns { .. }

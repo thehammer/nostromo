@@ -823,7 +823,9 @@ async fn attaching_replays_the_current_bridge_state_only_when_it_is_known() {
     send(
         &mut late,
         &ClientMsg::SessionAttach {
-            tag: "cody-known".into(), host: None },
+            tag: "cody-known".into(),
+            host: None,
+        },
     )
     .await;
     let mut frames = sync(&mut late).await;
@@ -834,7 +836,9 @@ async fn attaching_replays_the_current_bridge_state_only_when_it_is_known() {
     send(
         &mut late,
         &ClientMsg::SessionAttach {
-            tag: "cody-unknown".into(), host: None },
+            tag: "cody-unknown".into(),
+            host: None,
+        },
     )
     .await;
     let frames = sync(&mut late).await;

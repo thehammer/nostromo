@@ -131,6 +131,10 @@ pub fn normalize_code(code: &str) -> String {
     code.chars().filter(|c| c.is_ascii_digit()).collect()
 }
 
+/// Open pairings one satellite connection may hold, and per local client behind it.
+pub const MAX_OPEN_PER_ISSUER: usize = 16;
+pub const MAX_OPEN_PER_ORIGIN: usize = 4;
+
 impl PairingTable {
     pub fn new(ttl: Duration) -> Self {
         Self {
@@ -146,6 +150,37 @@ impl PairingTable {
 
     pub fn open_count(&self) -> usize {
         self.open.len()
+    }
+
+    /// [`Self::start`] for a pairing a *satellite* relays, capped so a network
+    /// peer cannot pile up pairings (each new code is checked against every
+    /// open one): `None` when `issuer` already has [`MAX_OPEN_PER_ISSUER`]
+    /// open, or `(issuer, origin)` has [`MAX_OPEN_PER_ORIGIN`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_capped(
+        &mut self,
+        issuer: &str,
+        origin: Option<String>,
+        outcome_tx: UnboundedSender<ServerMsg>,
+        name_hint: Option<String>,
+        kind: DeviceKind,
+        admin: Option<SatelliteAdmin>,
+        egress: Option<Egress>,
+        now: Instant,
+    ) -> Option<Started> {
+        self.sweep(now);
+        let by_issuer = self.open.iter().filter(|o| o.issuer == issuer).count();
+        let by_origin = self
+            .open
+            .iter()
+            .filter(|o| o.issuer == issuer && o.origin == origin)
+            .count();
+        if by_issuer >= MAX_OPEN_PER_ISSUER || by_origin >= MAX_OPEN_PER_ORIGIN {
+            return None;
+        }
+        Some(self.start(
+            issuer, origin, outcome_tx, name_hint, kind, admin, egress, now,
+        ))
     }
 
     /// Open a pairing owned by `issuer`. The code is six digits, distinct from
@@ -205,8 +240,7 @@ impl PairingTable {
     pub fn cancel(&mut self, pairing_id: &str, caller: &str, origin: Option<&str>) -> bool {
         let Some(i) = self.open.iter().position(|o| {
             o.id == pairing_id && o.issuer == caller && o.origin.as_deref() == origin
-        })
-        else {
+        }) else {
             return false;
         };
         let gone = self.open.remove(i);

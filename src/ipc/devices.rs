@@ -472,6 +472,24 @@ impl DeviceRegistry {
         })
     }
 
+    /// Admit a socket in one look at the registry: `None` when the device is
+    /// unknown or no longer active, `Some(None)` for an active phone or iPad,
+    /// `Some(Some(info))` for an active satellite. One lock, so a revoke
+    /// cannot land between "active" and "which kind" and turn a satellite
+    /// into a phone.
+    pub fn admit(&self, device_id: &str) -> Option<Option<SatelliteInfo>> {
+        let state = self.state.lock().unwrap();
+        let d = state
+            .devices
+            .iter()
+            .find(|d| d.id == device_id && d.active())?;
+        Some(d.kind.is_satellite().then(|| SatelliteInfo {
+            name: d.name.clone(),
+            admin: d.admin.unwrap_or_default(),
+            egress: d.egress.unwrap_or_default(),
+        }))
+    }
+
     /// The record behind `device_id` when it is an active satellite.
     pub fn satellite_info(&self, device_id: &str) -> Option<SatelliteInfo> {
         let state = self.state.lock().unwrap();

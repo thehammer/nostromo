@@ -4283,8 +4283,14 @@ mod tests {
             remote_control: true,
             no_codebase: false,
         });
-        round_trip_client(ClientMsg::SessionAttach { tag: "fred".into(), host: None });
-        round_trip_client(ClientMsg::SessionDetach { tag: "fred".into(), host: None });
+        round_trip_client(ClientMsg::SessionAttach {
+            tag: "fred".into(),
+            host: None,
+        });
+        round_trip_client(ClientMsg::SessionDetach {
+            tag: "fred".into(),
+            host: None,
+        });
         round_trip_client(ClientMsg::SessionInterrupt { tag: "fred".into() });
         round_trip_client(ClientMsg::ClosePane {
             tag: "perri".into(),
@@ -5706,7 +5712,9 @@ mod tests {
     #[test]
     fn activity_snapshot_request_round_trips() {
         round_trip_client(ClientMsg::ActivitySnapshotRequest {
-            tag: "cody-1".into(), host: None });
+            tag: "cody-1".into(),
+            host: None,
+        });
     }
 
     // ── render-state visibility (W1) ──────────────────────────────────────────

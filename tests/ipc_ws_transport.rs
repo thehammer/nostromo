@@ -617,7 +617,10 @@ async fn a_socket_with_no_token_that_sends_anything_else_is_unauthorized_not_pai
     let attempts: Vec<(&str, String)> = vec![
         ("a ping", json_of(&ClientMsg::Ping)),
         ("a subscribe", json_of(&Conn::subscribe(vec![]))),
-        ("a session list", json_of(&ClientMsg::SessionList { host: None })),
+        (
+            "a session list",
+            json_of(&ClientMsg::SessionList { host: None }),
+        ),
         (
             "a session send",
             json_of(&ClientMsg::SessionSend {
@@ -947,7 +950,9 @@ async fn queued_messages_merge_with_a_device_attached(device_caps: &[&str]) {
     let mut local = rig.unix_with(vec![], false, &[FEATURE_MERGED_TURNS]).await;
     local
         .send(&ClientMsg::SessionAttach {
-            tag: "cody-1".into(), host: None })
+            tag: "cody-1".into(),
+            host: None,
+        })
         .await;
     local.sync().await;
 
@@ -955,7 +960,9 @@ async fn queued_messages_merge_with_a_device_attached(device_caps: &[&str]) {
     let mut device = rig.device(&dev.token, device_caps, vec![]).await;
     device
         .send(&ClientMsg::SessionAttach {
-            tag: "cody-1".into(), host: None })
+            tag: "cody-1".into(),
+            host: None,
+        })
         .await;
     device.sync().await;
 

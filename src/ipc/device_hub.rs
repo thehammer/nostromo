@@ -333,7 +333,12 @@ impl DeviceHub {
                 pairing_id,
                 origin: _,
             } => {
-                if self.pairing.lock().unwrap().cancel(pairing_id, conn_key, None) {
+                if self
+                    .pairing
+                    .lock()
+                    .unwrap()
+                    .cancel(pairing_id, conn_key, None)
+                {
                     // The outcome (`cancelled`) already went to this connection.
                     return Dispatched::Handled;
                 }
@@ -406,14 +411,16 @@ impl DeviceHub {
             ClientMsg::DeviceRevoke { device, .. } if can_revoke => {
                 match self.registry.resolve(device) {
                     Err(e) => admin_error(request_id, revoke_reason(e)),
-                    // A satellite record is never revoked from an uplink, itself included.
+                    // A satellite record is never revoked from an uplink, itself
+                    // included. Answered exactly like a name that does not exist,
+                    // so the refusal does not say which host names are enrolled.
                     Ok(target)
                         if self
                             .registry
                             .kind_of(&target.id)
                             .is_none_or(|k| k.is_satellite()) =>
                     {
-                        refuse()
+                        admin_error(request_id, revoke_reason(RevokeError::Unknown))
                     }
                     Ok(target) => {
                         let was_connected = self.is_connected(&target.id);
@@ -437,7 +444,7 @@ impl DeviceHub {
                 origin,
                 ..
             } if level == SatelliteAdmin::Full => {
-                let started = self.pairing.lock().unwrap().start(
+                let started = self.pairing.lock().unwrap().start_capped(
                     conn_key,
                     origin.clone(),
                     reply.clone(),
@@ -447,6 +454,10 @@ impl DeviceHub {
                     None,
                     Instant::now(),
                 );
+                let Some(started) = started else {
+                    let _ = reply.send(admin_error(request_id, "too_many_pairings"));
+                    return Dispatched::Handled;
+                };
                 self.schedule_expiry();
                 ServerMsg::DevicePairing {
                     request_id: request_id.to_string(),
@@ -462,11 +473,12 @@ impl DeviceHub {
             ClientMsg::DevicePairCancel {
                 pairing_id, origin, ..
             } if can_revoke => {
-                if self.pairing.lock().unwrap().cancel(
-                    pairing_id,
-                    conn_key,
-                    origin.as_deref(),
-                ) {
+                if self
+                    .pairing
+                    .lock()
+                    .unwrap()
+                    .cancel(pairing_id, conn_key, origin.as_deref())
+                {
                     // The outcome (`cancelled`) already went to this connection.
                     return Dispatched::Handled;
                 }

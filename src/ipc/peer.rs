@@ -1887,7 +1887,10 @@ mod tests {
     #[test]
     fn session_verbs_on_a_sensitive_tag_or_for_a_fred_teri_agent_are_refused_for_network_peers() {
         let tags = tags_with("cody-core-1");
-        let attach = |tag: &str| ClientMsg::SessionAttach { tag: tag.into(), host: None };
+        let attach = |tag: &str| ClientMsg::SessionAttach {
+            tag: tag.into(),
+            host: None,
+        };
         assert!(refuse_for_network(&attach("fred"), &tags));
         assert!(refuse_for_network(&attach("cody-core-1"), &tags));
         assert!(!refuse_for_network(&attach("cody-other"), &tags));
@@ -1907,7 +1910,10 @@ mod tests {
         assert!(refuse_for_network(&spawn("anything", "cody"), &tags));
         // Detaching only releases the peer's own attachment.
         assert!(!refuse_for_network(
-            &ClientMsg::SessionDetach { tag: "fred".into(), host: None },
+            &ClientMsg::SessionDetach {
+                tag: "fred".into(),
+                host: None
+            },
             &tags
         ));
     }
@@ -2208,8 +2214,14 @@ mod tests {
                 remote_control: false,
                 no_codebase: false,
             },
-            ClientMsg::SessionAttach { tag: "x1".into(), host: None },
-            ClientMsg::SessionDetach { tag: "x1".into(), host: None },
+            ClientMsg::SessionAttach {
+                tag: "x1".into(),
+                host: None,
+            },
+            ClientMsg::SessionDetach {
+                tag: "x1".into(),
+                host: None,
+            },
             ClientMsg::SessionSend {
                 tag: "x1".into(),
                 text: "t".into(),
@@ -2252,7 +2264,10 @@ mod tests {
                 choice_id: None,
                 operator_nonce: None,
             },
-            ClientMsg::ActivitySnapshotRequest { tag: "x1".into(), host: None },
+            ClientMsg::ActivitySnapshotRequest {
+                tag: "x1".into(),
+                host: None,
+            },
             ClientMsg::RenderedShape {
                 tag: "x1".into(),
                 window_id: "w".into(),
@@ -2290,7 +2305,10 @@ mod tests {
             },
             ClientMsg::ModelCatalogRequest {},
             ClientMsg::ModelCatalogRefresh {},
-            ClientMsg::SessionModelGet { tag: "x1".into(), host: None },
+            ClientMsg::SessionModelGet {
+                tag: "x1".into(),
+                host: None,
+            },
             ClientMsg::SessionModelSet {
                 tag: "x1".into(),
                 model: Some("opus".into()),
@@ -2911,9 +2929,13 @@ mod tests {
         let tags = SensitiveTags::in_memory();
         for msg in [
             ClientMsg::SessionAttach {
-                tag: "cody-x".into(), host: None },
+                tag: "cody-x".into(),
+                host: None,
+            },
             ClientMsg::SessionDetach {
-                tag: "cody-x".into(), host: None },
+                tag: "cody-x".into(),
+                host: None,
+            },
             ClientMsg::SessionList { host: None },
             ClientMsg::Ping,
         ] {
@@ -2923,12 +2945,16 @@ mod tests {
         let sensitive = tags_with("cody-x");
         assert!(refuse_for_network(
             &ClientMsg::SessionAttach {
-                tag: "cody-x".into(), host: None },
+                tag: "cody-x".into(),
+                host: None
+            },
             &sensitive
         ));
         assert!(refuse_for_network(
             &ClientMsg::ActivitySnapshotRequest {
-                tag: "cody-x".into(), host: None },
+                tag: "cody-x".into(),
+                host: None
+            },
             &sensitive
         ));
     }

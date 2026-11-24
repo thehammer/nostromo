@@ -44,14 +44,13 @@ use super::{
     },
     protocol::{
         ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, HelloRole, HostUnavailableReason,
-        MotherActionKind, QueueResultCode,
-        QueueReturnedEntry, ServerMsg, SessionAction, Topic, TrackerEditError,
-        FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_MERGE, FEATURE_AUTHORED_PRS_MERGE_QUEUE,
-        FEATURE_AUTHORED_PRS_NOTIFY, FEATURE_AUTHORED_PRS_PERRI, FEATURE_CONVERSATION_HISTORY,
-        FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_MERGED_TURNS, FEATURE_SESSION_MCP,
-        FEATURE_SESSION_QUEUE, FEATURE_SLASH_COMMANDS, FEATURE_TERMINAL_STAGING_ONLY,
-        FEATURE_TRACKER_ACK_DROPPED, FEATURE_TRACKER_CONFLICT_IDS, FEATURE_TRACKER_EDIT,
-        MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
+        MotherActionKind, QueueResultCode, QueueReturnedEntry, ServerMsg, SessionAction, Topic,
+        TrackerEditError, FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_MERGE,
+        FEATURE_AUTHORED_PRS_MERGE_QUEUE, FEATURE_AUTHORED_PRS_NOTIFY, FEATURE_AUTHORED_PRS_PERRI,
+        FEATURE_CONVERSATION_HISTORY, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_MERGED_TURNS,
+        FEATURE_SESSION_MCP, FEATURE_SESSION_QUEUE, FEATURE_SLASH_COMMANDS,
+        FEATURE_TERMINAL_STAGING_ONLY, FEATURE_TRACKER_ACK_DROPPED, FEATURE_TRACKER_CONFLICT_IDS,
+        FEATURE_TRACKER_EDIT, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
     router::{client_host, Routed},
     session_manager::{
@@ -137,7 +136,9 @@ const MOTHER_HOLD_NEEDS_OPERATOR: &str =
 
 /// The optional capabilities the WebSocket transport and device pairing add to
 /// `Welcome.features` (on every transport).
-pub(super) use super::ws::{FEATURE_DEVICES, FEATURE_HOSTS, FEATURE_PAIR, FEATURE_UPLINK, FEATURE_WS};
+pub(super) use super::ws::{
+    FEATURE_DEVICES, FEATURE_HOSTS, FEATURE_PAIR, FEATURE_UPLINK, FEATURE_WS,
+};
 
 /// Handle to the running IPC server.  Drop to shut down.
 pub struct Server {
@@ -470,10 +471,9 @@ impl PeerOrigin {
             PeerOrigin::Tcp => Ok(PeerTrust::from_transport(Transport::Tcp)),
             PeerOrigin::Ws { satellite, .. } => match (satellite.as_ref(), role) {
                 // A satellite record, a `Hello` naming that record's host and egress.
-                (
-                    Some(link),
-                    Some(HelloRole::Satellite { host, egress }),
-                ) if *host == link.info.name && *egress == link.info.egress => {
+                (Some(link), Some(HelloRole::Satellite { host, egress }))
+                    if *host == link.info.name && *egress == link.info.egress =>
+                {
                     Ok(PeerTrust::Satellite {
                         admin: link.info.admin,
                     })
@@ -825,7 +825,10 @@ where
         }
     };
 
-    let trust = match origin.resolve(client_kind.as_deref(), hello_role.as_ref()).await {
+    let trust = match origin
+        .resolve(client_kind.as_deref(), hello_role.as_ref())
+        .await
+    {
         Ok(trust) => trust,
         Err(RoleRefused) => {
             // The socket closes 4001 (see `run_paired`).
@@ -836,7 +839,10 @@ where
                 reason: "role".to_string(),
             };
             let _ = write_frame(&mut writer, &serde_json::to_vec(&refusal)?).await;
-            warn!(claimed_id, conn_key, "a connection claimed a role its token does not allow");
+            warn!(
+                claimed_id,
+                conn_key, "a connection claimed a role its token does not allow"
+            );
             return Ok(());
         }
     };
@@ -1010,6 +1016,16 @@ where
     // targeted to this connection, never broadcast.
     let mut uplink: Option<(String, u64)> = None;
     let mut sat_level = None;
+    // Subscribed before `full_hosts` is read, so a change between the read and
+    // the first `changed()` is not missed.
+    let mut sat_epoch = match (&trust, hub.get()) {
+        (PeerTrust::Satellite { .. }, Some(h)) => {
+            let mut e = h.registry().subscribe_epoch();
+            e.borrow_and_update();
+            Some(e)
+        }
+        _ => None,
+    };
     if let (PeerTrust::Satellite { admin }, Some(h)) = (trust, hub.get()) {
         if let Some((info, req_tx)) = origin.take_uplink() {
             let conn_id = h.router().register(&info.name, info.egress, req_tx);
@@ -1022,13 +1038,8 @@ where
             sat_level = Some((admin, pair_from));
         }
     }
-    // The registry changing may change who the `full` hosts are.
-    let mut sat_epoch = match (&sat_level, hub.get()) {
-        (Some(_), Some(h)) => Some(h.registry().subscribe_epoch()),
-        _ => None,
-    };
-    if let Some(e) = sat_epoch.as_mut() {
-        e.borrow_and_update();
+    if sat_level.is_none() {
+        sat_epoch = None;
     }
     // A local client of a primary that follows the device list is on the
     // operator's own machine: it may do everything.
@@ -1615,7 +1626,12 @@ where
         // host itself: its requests, and every pairing it relayed, end here.
         h.router().drop_requester(&conn_key);
         if let Some((name, conn_id)) = &uplink {
-            h.router().unregister(name, *conn_id);
+            // The host is gone (or revoked, which closes its socket): what it
+            // published is not replayed to a later subscriber. A replaced
+            // uplink leaves the newer one's frames alone.
+            if h.router().unregister(name, *conn_id) {
+                purge_host_retained(&retained, name);
+            }
         }
     }
     {
@@ -4810,11 +4826,15 @@ fn retain_key(msg: &ServerMsg) -> Option<String> {
         ServerMsg::MotherJobs { host, .. } => return tagged("mother_jobs", host, None),
         ServerMsg::MotherStatusline(s) => return tagged("mother_status", &s.host, None),
         ServerMsg::PerriState { tag, host, .. } => return tagged("perri", host, Some(tag)),
-        ServerMsg::SessionState { tag, host, .. } => return tagged("session_state", host, Some(tag)),
+        ServerMsg::SessionState { tag, host, .. } => {
+            return tagged("session_state", host, Some(tag))
+        }
         ServerMsg::SessionBridge { tag, host, .. } => {
             return tagged("session_bridge", host, Some(tag))
         }
-        ServerMsg::ApprovalPending { tag, host, .. } => return tagged("approvals", host, Some(tag)),
+        ServerMsg::ApprovalPending { tag, host, .. } => {
+            return tagged("approvals", host, Some(tag))
+        }
         ServerMsg::TrackerSummary { tag, host, .. } => return tagged("tracker", host, Some(tag)),
         ServerMsg::FocusRegistryUpdated { host, .. } => return tagged("focuses", host, None),
         _ => {}
@@ -4888,6 +4908,15 @@ fn apply_retention(cache: &mut BTreeMap<String, ServerMsg>, msg: ServerMsg) {
         }
         cache.insert(key, msg);
     }
+}
+
+/// Forget every retained frame a satellite published.
+fn purge_host_retained(retained: &RetainedCache, host: &str) {
+    let prefix = format!("host:{host}:");
+    retained
+        .lock()
+        .unwrap()
+        .retain(|key, _| !key.starts_with(&prefix));
 }
 
 /// Retained frames kept for one satellite.
