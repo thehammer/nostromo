@@ -802,7 +802,7 @@ mod tests {
     #[test]
     fn a_satellite_enrolled_without_egress_reads_as_work_and_personal_sticks() {
         let dir = tempfile::tempdir().unwrap();
-        let reg = DeviceRegistry::load(&dir.path().join("devices.json")).unwrap();
+        let reg = DeviceRegistry::load(dir.path().join("devices.json")).unwrap();
         let a = reg
             .redeem("kobe", DeviceKind::Satellite, None, None)
             .unwrap();
