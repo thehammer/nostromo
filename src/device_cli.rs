@@ -18,7 +18,8 @@ use crate::ipc::devices::{DeviceSummary, PairOutcomeKind, RevokedBy, SatelliteAd
 use crate::ipc::protocol::{default_socket_path, ClientMsg, ServerMsg};
 
 /// Ada's copy: mail, calendar and todos are not shared in this version.
-pub const MAIL_LINE: &str = "Mail, calendar and todos aren't shared from your Macs in this version.";
+pub const MAIL_LINE: &str =
+    "Mail, calendar and todos aren't shared from your Macs in this version.";
 pub const EXPIRED_LINE: &str = "Code expired. Run the command again for a new one.";
 pub const LOCKED_OUT_LINE: &str =
     "Too many wrong attempts. This code is no longer valid. Run the command again for a new one.";
@@ -32,15 +33,9 @@ pub const EXIT_CANCELLED: i32 = 130;
 
 /// What a pairing's end prints and exits with. `None` for an outcome that is
 /// not final.
-pub fn outcome_report(
-    outcome: PairOutcomeKind,
-    name: Option<&str>,
-) -> (String, i32) {
+pub fn outcome_report(outcome: PairOutcomeKind, name: Option<&str>) -> (String, i32) {
     match outcome {
-        PairOutcomeKind::Paired => (
-            format!("Paired: {}.", name.unwrap_or("device")),
-            EXIT_OK,
-        ),
+        PairOutcomeKind::Paired => (format!("Paired: {}.", name.unwrap_or("device")), EXIT_OK),
         PairOutcomeKind::Expired => (EXPIRED_LINE.to_string(), EXIT_FAILED),
         PairOutcomeKind::LockedOut => (LOCKED_OUT_LINE.to_string(), EXIT_FAILED),
         PairOutcomeKind::Cancelled => (CANCELLED_LINE.to_string(), EXIT_CANCELLED),
@@ -70,16 +65,17 @@ pub fn render_qr(data: &str) -> String {
         return String::new();
     };
     let width = code.width();
-    let dark = |x: usize, y: usize| {
-        x < width && y < width && code[(x, y)] == Color::Dark
-    };
+    let dark = |x: usize, y: usize| x < width && y < width && code[(x, y)] == Color::Dark;
     let quiet = 2usize;
     let mut out = String::new();
     let mut y = 0;
     while y < width + 2 * quiet {
         for x in 0..width + 2 * quiet {
             let at = |dy: usize| {
-                let (px, py) = (x as isize - quiet as isize, (y + dy) as isize - quiet as isize);
+                let (px, py) = (
+                    x as isize - quiet as isize,
+                    (y + dy) as isize - quiet as isize,
+                );
                 px >= 0 && py >= 0 && dark(px as usize, py as usize)
             };
             out.push(match (at(0), at(1)) {
@@ -290,7 +286,11 @@ pub async fn list(client: &DaemonClient, all: bool, out: &mut impl Write) -> Res
         _ => None,
     })
     .await?;
-    write!(out, "{}", format_device_list(&devices, &hosts, all, Utc::now()))?;
+    write!(
+        out,
+        "{}",
+        format_device_list(&devices, &hosts, all, Utc::now())
+    )?;
     Ok(EXIT_OK)
 }
 
@@ -557,7 +557,12 @@ mod tests {
 
     #[test]
     fn no_output_carries_a_token_field() {
-        let text = format_device_list(&[summary("iPhone", DeviceKind::Iphone)], &[], true, Utc::now());
+        let text = format_device_list(
+            &[summary("iPhone", DeviceKind::Iphone)],
+            &[],
+            true,
+            Utc::now(),
+        );
         assert!(!text.to_lowercase().contains("token"));
     }
 }

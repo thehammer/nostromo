@@ -395,7 +395,9 @@ mod tests {
         let mut f = fixture();
         for _ in 0..3 {
             let a = f.table.check(&f.started.code.clone(), None, never, f.now);
-            assert!(matches!(a, CheckAnswer::Offer { name_hint: Some(ref n), .. } if n == "Kitchen"));
+            assert!(
+                matches!(a, CheckAnswer::Offer { name_hint: Some(ref n), .. } if n == "Kitchen")
+            );
         }
         assert!(f
             .table
@@ -414,9 +416,7 @@ mod tests {
         taken.notify_paired("Kitchen", false);
         assert_eq!(outcome(&mut f.rx), PairOutcomeKind::Paired);
         assert_eq!(
-            f.table
-                .take(&code, DeviceKind::Iphone, false, f.now)
-                .err(),
+            f.table.take(&code, DeviceKind::Iphone, false, f.now).err(),
             Some(PairRefusedReason::Invalid)
         );
     }
@@ -511,7 +511,9 @@ mod tests {
             f.now,
         );
         assert_eq!(
-            f.table.take(&s.code, DeviceKind::Iphone, false, f.now).err(),
+            f.table
+                .take(&s.code, DeviceKind::Iphone, false, f.now)
+                .err(),
             Some(PairRefusedReason::Invalid)
         );
         let t = f
@@ -525,12 +527,9 @@ mod tests {
     fn a_proof_is_answered_once_per_code() {
         let mut f = fixture();
         let code = f.started.code.clone();
-        let first = f.table.check(
-            &code,
-            Some("p"),
-            |_, _, _| Some("dev_1".to_string()),
-            f.now,
-        );
+        let first = f
+            .table
+            .check(&code, Some("p"), |_, _, _| Some("dev_1".to_string()), f.now);
         assert!(matches!(
             first,
             CheckAnswer::Offer {

@@ -471,7 +471,10 @@ impl DeviceRegistry {
     }
 
     /// Phones and iPads, then satellites (`hosts`), each in pairing order.
-    pub fn summaries(&self, connected: impl Fn(&str) -> bool) -> (Vec<DeviceSummary>, Vec<DeviceSummary>) {
+    pub fn summaries(
+        &self,
+        connected: impl Fn(&str) -> bool,
+    ) -> (Vec<DeviceSummary>, Vec<DeviceSummary>) {
         let state = self.state.lock().unwrap();
         let (hosts, devices): (Vec<_>, Vec<_>) = state
             .devices
@@ -520,7 +523,9 @@ fn unique_name(devices: &[DeviceRecord], name: &str) -> String {
     // the length so the name is safe to print in a terminal.
     let cleaned: String = name
         .chars()
-        .filter(|c| !c.is_control() && !matches!(*c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        .filter(|c| {
+            !c.is_control() && !matches!(*c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
         .take(64)
         .collect();
     let name = cleaned.trim();
@@ -616,7 +621,9 @@ mod tests {
     #[test]
     fn redeem_then_validate_round_trips_and_revoke_fails_validation() {
         let (_d, reg) = registry();
-        let r = reg.redeem("iPhone", DeviceKind::Iphone, None, None).unwrap();
+        let r = reg
+            .redeem("iPhone", DeviceKind::Iphone, None, None)
+            .unwrap();
         assert_eq!(
             reg.validate(&r.token),
             TokenCheck::Active {
@@ -635,7 +642,9 @@ mod tests {
     #[test]
     fn the_file_holds_a_hash_and_never_the_token() {
         let (d, reg) = registry();
-        let r = reg.redeem("iPhone", DeviceKind::Iphone, None, None).unwrap();
+        let r = reg
+            .redeem("iPhone", DeviceKind::Iphone, None, None)
+            .unwrap();
         let text = std::fs::read_to_string(d.path().join("devices.json")).unwrap();
         assert!(!text.contains(&r.token));
         assert!(text.contains(&hash_token(&r.token)));
@@ -644,12 +653,20 @@ mod tests {
     #[test]
     fn names_are_unique_among_active_devices_only() {
         let (_d, reg) = registry();
-        let a = reg.redeem("iPhone", DeviceKind::Iphone, None, None).unwrap();
-        let b = reg.redeem("iphone", DeviceKind::Iphone, None, None).unwrap();
-        let c = reg.redeem("IPHONE", DeviceKind::Iphone, None, None).unwrap();
+        let a = reg
+            .redeem("iPhone", DeviceKind::Iphone, None, None)
+            .unwrap();
+        let b = reg
+            .redeem("iphone", DeviceKind::Iphone, None, None)
+            .unwrap();
+        let c = reg
+            .redeem("IPHONE", DeviceKind::Iphone, None, None)
+            .unwrap();
         assert_eq!((b.name.as_str(), c.name.as_str()), ("iphone 2", "IPHONE 3"));
         reg.revoke(&a.device_id, RevokedBy::Operator).unwrap();
-        let d = reg.redeem("iPhone", DeviceKind::Iphone, None, None).unwrap();
+        let d = reg
+            .redeem("iPhone", DeviceKind::Iphone, None, None)
+            .unwrap();
         assert_eq!(d.name, "iPhone");
     }
 
@@ -705,7 +722,9 @@ mod tests {
     #[test]
     fn replacing_revokes_the_old_record_and_keeps_the_name() {
         let (_d, reg) = registry();
-        let old = reg.redeem("iPhone", DeviceKind::Iphone, None, None).unwrap();
+        let old = reg
+            .redeem("iPhone", DeviceKind::Iphone, None, None)
+            .unwrap();
         let epoch = reg.subscribe_epoch();
         let new = reg
             .redeem("iPhone", DeviceKind::Iphone, None, Some(&old.device_id))
@@ -722,7 +741,9 @@ mod tests {
     #[test]
     fn proofs_match_only_the_right_token_challenge_and_code() {
         let (_d, reg) = registry();
-        let r = reg.redeem("iPhone", DeviceKind::Iphone, None, None).unwrap();
+        let r = reg
+            .redeem("iPhone", DeviceKind::Iphone, None, None)
+            .unwrap();
         let proof = proof_for_token(&r.token, "chal", "123456");
         assert_eq!(
             reg.match_proof("chal", "123456", &proof),
