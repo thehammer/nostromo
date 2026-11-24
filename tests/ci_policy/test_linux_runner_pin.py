@@ -13,18 +13,22 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-RUNS_ON = re.compile(r"^\s*runs-on:\s*(\S+)", re.M)
+RUNS_ON = re.compile(r"^\s*runs-on:\s*(.+?)\s*$", re.M)
+QUOTED = re.compile(r"'([^']*)'")
 EXPLICIT_UBUNTU = re.compile(r"^ubuntu-\d\d\.\d\d$")
 
 
 def violations(name, text):
     out = []
     for runner in RUNS_ON.findall(text):
-        runner = runner.strip("'\"")
-        if runner.startswith("macos-") or runner.startswith("windows-"):
-            continue
-        if not EXPLICIT_UBUNTU.match(runner):
-            out.append(f"{name}: runs-on {runner!r} is not an explicit ubuntu-NN.NN")
+        # An expression (`${{ cond && 'macos-26' || 'ubuntu-24.04' }}`) is checked
+        # on each quoted literal it can yield.
+        runners = [q for q in QUOTED.findall(runner) if q not in ("true", "false")] if runner.startswith("${{") else [runner.strip("'\"")]
+        for r in runners:
+            if r.startswith("macos-") or r.startswith("windows-"):
+                continue
+            if not EXPLICIT_UBUNTU.match(r):
+                out.append(f"{name}: runs-on {r!r} is not an explicit ubuntu-NN.NN")
     return out
 
 
@@ -51,6 +55,11 @@ class LinuxRunnerPinBitesTests(unittest.TestCase):
 
     def test_other_latest_linux_fails(self):
         self.assertTrue(violations("x", "    runs-on: ubuntu-slim-latest\n"))
+
+    def test_expression_literals_are_checked(self):
+        ok = "    runs-on: ${{ needs.c.outputs.s == 'true' && 'macos-26' || 'ubuntu-24.04' }}\n"
+        self.assertEqual(violations("x", ok), [])
+        self.assertTrue(violations("x", ok.replace("ubuntu-24.04", "ubuntu-latest")))
 
     def test_unversioned_fails(self):
         self.assertTrue(violations("x", "    runs-on: ubuntu-24\n"))

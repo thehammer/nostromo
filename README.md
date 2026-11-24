@@ -163,6 +163,43 @@ This builds `nostromd` and the `nostromo` CLI in release mode, copies them to
 `~/Library/LaunchAgents/com.hammer.nostromd.plist`, and bootstraps it so it
 starts at login.
 
+### Install (Linux)
+
+A Linux host can be the always-on **primary** `nostromd` (a `systemd --user` service).
+A Linux primary hosts no agent sessions: operator-app verification is macOS-only, so
+decisions and approvals cannot be answered there, and the daemon logs one INFO line
+saying so at startup. It needs neither Mother nor Bishop locally.
+
+```bash
+make install-daemon-linux     # `make install-daemon` does the same on Linux
+loginctl enable-linger $USER  # one time, so it survives logout (the target tells you if needed)
+```
+
+This builds and installs `nostromd`, `nostromo-guard` and `nostromo-mcp-bridge` to
+`~/.local/bin` (same order and restart guard as macOS), renders
+`dist/systemd/nostromd.service` to `~/.config/systemd/user/nostromd.service`, then
+enables and **restarts** the service, so installing restarts a running daemon. The unit
+has `Restart=always`. Logs are at the same paths as macOS; status:
+`systemctl --user status nostromd`. Remove with `make uninstall-daemon-linux`.
+
+If `mother` is not on `PATH` the daemon logs one WARN and polls every 60 s instead of 2 s.
+
+A primary needs none of the per-user integrations, so put this in
+`~/.config/nostromo/config.toml`:
+
+```toml
+authored_prs_enabled = false
+
+[agents.fred]
+enabled = false
+[agents.teri]
+enabled = false
+[agents.huey]
+enabled = false
+[agents.perri]
+enabled = false
+```
+
 ### Inspect logs
 
 ```bash
@@ -173,8 +210,11 @@ tail -f ~/.cache/nostromd/log/nostromd.log*
 tail -f ~/.cache/nostromd/log/stdout.log
 tail -f ~/.cache/nostromd/log/stderr.log
 
-# launchctl status
+# launchctl status (macOS)
 launchctl print gui/$(id -u)/com.hammer.nostromd
+
+# systemd status (Linux)
+systemctl --user status nostromd
 ```
 
 ### Uninstall

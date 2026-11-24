@@ -14,7 +14,7 @@ instead; see "Skipping the Swift jobs" below.
 |---|---|---|---|---|
 | `Build & Lint` | ubuntu-latest | **the aggregate of the three Rust jobs below**: succeeds only if all three did. This is the required status check. | fmt, clippy and test together | the slowest of the three |
 | `Rust format` | ubuntu-latest | `cargo fmt --check` | same | ~15 s |
-| `Rust clippy` | ubuntu-latest | `cargo clippy --all-targets -- -D warnings` | same | ~2.5 min |
+| `Rust clippy` | ubuntu-latest | `cargo clippy --all-targets -- -D warnings`, then `systemd-analyze verify` on the rendered `dist/systemd/nostromd.service` (the Linux primary's unit) | same; the verify step needs a Linux host with systemd | ~2.5 min |
 | `Rust tests` | ubuntu-latest | `cargo test` (compiles and links the lib, the bins and every test binary) | same | see "Where the time goes" |
 | `Detect changed paths` | ubuntu-latest | `scripts/ci_changes.py` over the PR's changed paths | n/a | ~10 s |
 | `Python tooling tests` | macos-latest | `make python-test` (fails on any skip) | `make python-test` | ~4 min |
@@ -23,6 +23,11 @@ instead; see "Skipping the Swift jobs" below.
 | `Swift tests (NostromoKit)` | macos-26 | `make kit-test` — `swift test` over `Shared/NostromoKit`, ~570 tests | `make kit-test` | ~2.5 min |
 | `iOS simulator build` | macos-26 | `xcodebuild -scheme Nostromo -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build` (compile only; no device, no tests) | `make ios-build` is the device build; the simulator command is in the workflow | ~1.7 min |
 | `Launch smoke (advisory)` | macos-26 | see below (path-filtered, advisory) | `make mac-smoke` | ~5 min |
+
+The Linux Rust jobs are also the primary-host smoke: `tests/linux_startup.rs` starts the
+real `nostromd` with a tempdir `HOME`, an empty `PATH` and the documented primary
+`config.toml`, and asserts a clean startup (see README "Install (Linux)"). The unit check
+lives in `Rust clippy`, so the required `Build & Lint` check needs no change.
 
 Every job except the advisory launch smoke can also be dispatched by hand on a
 branch, alone or in groups; see "Running CI on a branch (dispatch)" below.
@@ -58,7 +63,10 @@ Guards (each is a failing check, not a log line):
 | no shard reported a passing `MotherDetailWidthConstraintTests` case | aggregate (the per-shard step rejects skips) |
 
 `swift == 'false'` (the path classifier) makes the aggregate green without any
-shard, exactly as the single job behaved with its steps skipped.
+shard, exactly as the single job behaved with its steps skipped. A shard that ran
+on Linux with every step skipped reports `success` exactly like one on macOS, and
+the aggregate reads no artifact in that case (its download step is gated on
+`swift == 'true'` too).
 
 **Rebalancing.** Each shard uploads `shard-<n>.json` (report) for 14 days, and on
 `main` pushes also `mac-test-log-shard-<n>` (the full log). To rebalance after
@@ -311,6 +319,18 @@ on the merge commit; both sides of a rename are listed). Every step of the three
 Swift jobs after checkout is gated on its `swift` output, so a PR that cannot
 affect Swift does none of their work: the jobs start, report **success** in
 seconds under their real names, and skip the rest.
+
+**Runner choice.** Those jobs (`Mac tests shard N/3`, `Swift tests (NostromoKit)`,
+`iOS simulator build`) pick their runner from the same output:
+`runs-on: ${{ needs.changes.outputs.swift == 'true' && 'macos-26' || 'ubuntu-24.04' }}`.
+A skipped PR therefore runs them on Linux and never waits for a macOS slot to do
+nothing. Measured 2026-11-23, during a GitHub macOS capacity shortage: docs-only
+PRs #521 and #522 queued 40-49 minutes on those jobs ("The job was not acquired
+by Runner of type hosted even after multiple attempts") and failed. Pushes to
+`main`, dispatches and any PR touching non-allow-listed paths still get `macos-26`.
+There is still no job-level `if:` (the PR #370 problem above).
+`Python tooling tests` is unchanged: it needs macOS for `codesign`/`lipo` and is
+never gated, so it still takes a macOS slot.
 
 It is default-run, not default-skip. The Swift jobs are skipped **only if every
 changed path** is on a short allow-list:

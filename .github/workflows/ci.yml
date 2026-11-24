@@ -127,6 +127,18 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # The Linux primary's systemd user unit (dist/systemd). Render the template the way
+      # `make install-daemon-linux` does, against a stub binary so ExecStart resolves.
+      - name: Verify systemd unit
+        run: |
+          prefix="$(mktemp -d)"
+          mkdir -p "$prefix/bin"
+          printf '#!/bin/sh\n' > "$prefix/bin/nostromd"
+          chmod +x "$prefix/bin/nostromd"
+          sed -e "s|__PREFIX__|$prefix|g" -e "s|__HOME__|$HOME|g" \
+            dist/systemd/nostromd.service > "$prefix/nostromd.service"
+          systemd-analyze verify "$prefix/nostromd.service"
+
   rust-test:
     if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","rust"]'), inputs.only)
     name: ${{ github.event_name == 'workflow_dispatch' && 'Rust tests (dispatch)' || 'Rust tests' }}
@@ -259,6 +271,15 @@ jobs:
   #     request whose EVERY changed path is on the short allow-list in
   #     scripts/ci_changes.py; anything unknown, an empty diff or a classifier
   #     failure runs the jobs. Pushes to `main` and dispatches always run them.
+  #   * Runner choice: `runs-on` of the shard, NostromoKit and iOS jobs is
+  #     `needs.changes.outputs.swift == 'true' && 'macos-26' || 'ubuntu-24.04'`
+  #     (`needs` is available in a job's `runs-on`). When the gate skips every
+  #     step the job runs on Linux, so a docs-only PR does not wait for macOS
+  #     runners to run zero steps. Measured 2026-11-23, during a GitHub macOS
+  #     capacity shortage: docs-only PRs #521 and #522 queued 40-49 min on
+  #     these jobs ("not acquired by Runner of type hosted") and then failed.
+  #     Check names and step gates are unchanged; still no job-level `if:` on
+  #     the classifier. tests/ci_policy/test_swift_runner_choice.py guards this.
   #     `Build & Lint` and `Python tooling tests` are never gated.
   #   * `macos-26` + an explicitly selected Xcode, same pins as
   #     macos-launch-smoke.yml, so a runner-image rollover shows up as a diff
@@ -299,7 +320,8 @@ jobs:
     needs: changes
     if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","mac"]'), inputs.only)
     name: ${{ github.event_name == 'workflow_dispatch' && format('Mac tests shard {0}/3 (dispatch)', matrix.shard) || format('Mac tests shard {0}/3', matrix.shard) }}
-    runs-on: macos-26
+    # Linux when the classifier skipped the Swift steps: see "Runner choice" above.
+    runs-on: ${{ needs.changes.outputs.swift == 'true' && 'macos-26' || 'ubuntu-24.04' }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -468,7 +490,8 @@ jobs:
     needs: changes
     if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","kit"]'), inputs.only)
     name: ${{ github.event_name == 'workflow_dispatch' && 'Swift tests (NostromoKit) (dispatch)' || 'Swift tests (NostromoKit)' }}
-    runs-on: macos-26
+    # Linux when the classifier skipped the Swift steps: see "Runner choice" above.
+    runs-on: ${{ needs.changes.outputs.swift == 'true' && 'macos-26' || 'ubuntu-24.04' }}
     timeout-minutes: 30
     concurrency:
       group: swift-tests-kit-${{ github.event_name }}-${{ github.ref }}
@@ -511,7 +534,8 @@ jobs:
     needs: [changes, swift-tests-kit]
     if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","ios"]'), inputs.only)) }}
     name: ${{ github.event_name == 'workflow_dispatch' && 'iOS simulator build (dispatch)' || 'iOS simulator build' }}
-    runs-on: macos-26
+    # Linux when the classifier skipped the Swift steps: see "Runner choice" above.
+    runs-on: ${{ needs.changes.outputs.swift == 'true' && 'macos-26' || 'ubuntu-24.04' }}
     timeout-minutes: 30
     concurrency:
       group: ios-simulator-build-${{ github.event_name }}-${{ github.ref }}

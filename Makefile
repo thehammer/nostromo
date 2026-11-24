@@ -1,4 +1,4 @@
-.PHONY: doctor build release install daemon-restart-guard test fmt-check python-test python-test-fast python-test-slow python-test-fast-par python-test-slow-par python-test-par gates-fast qa-selftest ci-remote clean daemon install-daemon uninstall-daemon
+.PHONY: doctor build release install daemon-restart-guard test fmt-check python-test python-test-fast python-test-slow python-test-fast-par python-test-slow-par python-test-par gates-fast qa-selftest ci-remote clean daemon install-daemon uninstall-daemon install-daemon-linux uninstall-daemon-linux
 
 # Where cargo writes build output. If the dedicated build-scratch volume is mounted
 # (/Volumes/Scratch: an APFS volume Time Machine excludes, so its churn never pins
@@ -138,6 +138,10 @@ daemon:
 ##
 ## Installs nostromd to $HOME/.local/bin/nostromd and loads it as a launchd
 ## user agent so it starts automatically at login.
+ifeq ($(shell uname -s),Linux)
+install-daemon: install-daemon-linux
+uninstall-daemon: uninstall-daemon-linux
+else
 install-daemon: daemon
 	@$(RESTART_GUARD)
 	@mkdir -p "$(HOME)/.local/bin"
@@ -216,6 +220,68 @@ uninstall-daemon:
 	rm -f "$(HOME)/Library/LaunchAgents/com.hammer.nostromd.plist"
 	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \
 	  rm -f "$$(dirname "$$real")/nostromo-guard" "$$(dirname "$$real")/nostromo-mcp-bridge" "$$(dirname "$$real")/nostromo"; \
+	  rm -f "$(HOME)/.local/bin/nostromo-mcp-bridge"
+	rm -f "$(HOME)/.local/bin/nostromd"
+	@echo "nostromd uninstalled"
+endif
+
+## Linux primary: install the daemon binaries and a `systemd --user` unit.
+##
+## Mirrors the macOS target (same three binaries, same stage-then-rename order:
+## bridge, guard, daemon; same restart guard first) minus codesign and launchctl.
+## After the first install run `loginctl enable-linger $USER` once so the daemon
+## survives logout (the target tells you when that is still needed).
+install-daemon-linux: daemon
+	@$(RESTART_GUARD)
+	@mkdir -p "$(HOME)/.local/bin" "$(HOME)/.config/systemd/user" "$(HOME)/.cache/nostromd/log"
+	@# Never overwrite a running binary in place (ETXTBSY): each binary is copied to a new
+	@# file and renamed over the old one. All are staged BEFORE any is replaced, and the
+	@# guard moves before nostromd, so a new daemon never sits beside a stale guard.
+	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \
+	  guard="$$(dirname "$$real")/nostromo-guard"; \
+	  bdest="$(HOME)/.local/bin/nostromo-mcp-bridge"; bridge=$$(readlink "$$bdest" 2>/dev/null || true); \
+	  if [ -z "$$bridge" ]; then if [ -e "$$bdest" ]; then bridge="$$bdest"; else bridge="$$(dirname "$$real")/nostromo-mcp-bridge"; fi; fi; \
+	  stage_daemon="$$real.new.$$$$"; stage_guard="$$guard.new.$$$$"; stage_bridge="$$bridge.new.$$$$"; \
+	  rm -f "$$stage_daemon" "$$stage_guard" "$$stage_bridge"; \
+	  if cp "$(NOSTROMO_TARGET_DIR)/release/nostromd" "$$stage_daemon" \
+	      && cp "$(NOSTROMO_TARGET_DIR)/release/nostromo-guard" "$$stage_guard" \
+	      && cp "$(NOSTROMO_TARGET_DIR)/release/nostromo-mcp-bridge" "$$stage_bridge"; then :; \
+	  else \
+	    rm -f "$$stage_daemon" "$$stage_guard" "$$stage_bridge"; \
+	    echo "install-daemon-linux: could not copy nostromd, nostromo-guard and nostromo-mcp-bridge; nothing was replaced" >&2; exit 1; \
+	  fi; \
+	  if rm -f "$$bridge" && mv "$$stage_bridge" "$$bridge" && { [ -e "$$bdest" ] || [ -L "$$bdest" ] || ln -s "$$bridge" "$$bdest"; } \
+	      && rm -f "$$guard" && mv "$$stage_guard" "$$guard" && rm -f "$$real" && mv "$$stage_daemon" "$$real"; then :; \
+	  else \
+	    rm -f "$$stage_daemon" "$$stage_guard" "$$stage_bridge"; \
+	    echo "install-daemon-linux: could not move the new binaries into place; reinstall with make install-daemon-linux" >&2; exit 1; \
+	  fi; \
+	  echo "Installed nostromd to $$real"; echo "Installed nostromo-guard to $$guard"; \
+	  echo "Installed nostromo-mcp-bridge to $$bridge"
+	sed \
+		-e 's|__PREFIX__|$(HOME)/.local|g' \
+		-e 's|__HOME__|$(HOME)|g' \
+		dist/systemd/nostromd.service \
+		> "$(HOME)/.config/systemd/user/nostromd.service"
+	@echo "Installed unit to $(HOME)/.config/systemd/user/nostromd.service"
+	systemctl --user daemon-reload
+	systemctl --user enable nostromd
+	@# restart, not just --now: installing restarts a daemon that is already running
+	systemctl --user restart nostromd
+	@echo "nostromd running; check status with: systemctl --user status nostromd"
+	@if [ "$$(loginctl show-user "$$USER" -p Linger 2>/dev/null)" != "Linger=yes" ]; then \
+	  echo ""; \
+	  echo "REQUIRED one-time step: run 'loginctl enable-linger $$USER' so nostromd survives logout."; \
+	fi
+
+## Stop and remove the nostromd systemd user unit and binaries.
+uninstall-daemon-linux:
+	@$(RESTART_GUARD)
+	systemctl --user disable --now nostromd 2>/dev/null || true
+	rm -f "$(HOME)/.config/systemd/user/nostromd.service"
+	systemctl --user daemon-reload 2>/dev/null || true
+	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \
+	  rm -f "$$(dirname "$$real")/nostromo-guard" "$$(dirname "$$real")/nostromo-mcp-bridge"; \
 	  rm -f "$(HOME)/.local/bin/nostromo-mcp-bridge"
 	rm -f "$(HOME)/.local/bin/nostromd"
 	@echo "nostromd uninstalled"

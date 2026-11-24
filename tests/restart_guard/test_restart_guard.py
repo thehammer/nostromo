@@ -18,6 +18,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -316,7 +317,8 @@ class MakefileWiringTests(unittest.TestCase):
 
     def test_uninstall_daemon_runs_the_guard_before_anything_else(self):
         out = self.dry_run("uninstall-daemon")
-        self.assertIn("nostromo-restart-guard", out.lstrip().splitlines()[0])
+        first = [l for l in out.splitlines() if not l.startswith("make:")][0]
+        self.assertIn("nostromo-restart-guard", first)
 
     def test_the_guard_target_runs_the_script_and_passes_force_through(self):
         out = self.dry_run("daemon-restart-guard")
@@ -344,6 +346,7 @@ class MakefileWiringTests(unittest.TestCase):
         self.assertIn("cargo build --release", out)
         self.assertIn("--bin nostromo-mcp-bridge", out)
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS install-daemon recipe (codesign)")
     def test_install_daemon_stages_signs_and_moves_the_bridge_after_the_other_checks(self):
         out = self.dry_run("install-daemon")
         stage = out.index('cp "target/release/nostromo-mcp-bridge" "$stage_bridge"')
@@ -360,10 +363,31 @@ class MakefileWiringTests(unittest.TestCase):
         self.assertIn("Installed nostromo-mcp-bridge to", out)
         self.assertIn("reconnects across later daemon restarts", out)
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS install-daemon recipe (codesign)")
     def test_install_daemon_never_copies_the_bridge_over_its_destination_in_place(self):
         out = self.dry_run("install-daemon")
         self.assertNotIn('cp "target/release/nostromo-mcp-bridge" "$bridge"', out)
         self.assertNotIn('cp "target/release/nostromo-mcp-bridge" "$bdest"', out)
+
+    def test_install_daemon_linux_installs_all_three_binaries_in_order_after_the_guard(self):
+        out = self.dry_run("install-daemon-linux")
+        self.assertNotIn("codesign", out)
+        self.assertNotIn("launchctl", out)
+        self.assertLess(out.index("cargo build --release"), out.index("nostromo-restart-guard"))
+        for binary in ("nostromd", "nostromo-guard", "nostromo-mcp-bridge"):
+            self.assertIn('cp "target/release/%s"' % binary, out)
+        # every binary is staged before any is replaced; bridge, then guard, then daemon
+        last_stage = out.index('cp "target/release/nostromo-mcp-bridge"')
+        self.assertLess(last_stage, out.index('mv "$stage_bridge"'))
+        self.assertLess(out.index('mv "$stage_bridge"'), out.index('mv "$stage_guard"'))
+        self.assertLess(out.index('mv "$stage_guard"'), out.index('mv "$stage_daemon"'))
+        self.assertIn("systemctl --user enable nostromd", out)
+        self.assertIn("loginctl enable-linger", out)
+
+    def test_uninstall_daemon_linux_runs_the_guard_first(self):
+        out = self.dry_run("uninstall-daemon-linux")
+        first = [l for l in out.splitlines() if not l.startswith("make:")][0]
+        self.assertIn("nostromo-restart-guard", first)
 
 
 if __name__ == "__main__":
