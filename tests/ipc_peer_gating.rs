@@ -13073,8 +13073,8 @@ use futures::{SinkExt, StreamExt};
 use nostromo::ipc::device_hub::DeviceHub;
 use nostromo::ipc::devices::{DeviceKind, DeviceRegistry};
 use nostromo::ipc::peer::{
-    classify_server_msg, is_refusal, outbound, paired_extra_allowed, refuse_for_network, PeerTrust,
-    ServerClass, Transport,
+    classify_server_msg, is_refusal, outbound, refuse_for_network, PeerTrust, ServerClass,
+    Transport,
 };
 use tokio::io::DuplexStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -13228,11 +13228,11 @@ fn a_paired_peer_is_a_network_peer_with_one_verb_more_than_a_tcp_peer() {
     assert_ne!(PeerTrust::Paired, PeerTrust::OperatorApp);
 
     let tags = nostromo::ipc::peer::SensitiveTags::in_memory();
-    // Removing its own pairing is the only thing a device may do that TCP may not.
-    assert!(paired_extra_allowed(&ClientMsg::DeviceUnpairSelf));
+    // `DeviceUnpairSelf` (the one verb a device has that TCP lacks) is allowed in
+    // `DeviceHub::dispatch`; `device_pairing.rs` drives it through a real socket.
+    // Here it, and every device-admin verb, stays refused by the network policy.
     for msg in [
-        ClientMsg::Ping,
-        ClientMsg::SessionList,
+        ClientMsg::DeviceUnpairSelf,
         ClientMsg::DeviceList {
             request_id: "r".into(),
         },
@@ -13241,7 +13241,7 @@ fn a_paired_peer_is_a_network_peer_with_one_verb_more_than_a_tcp_peer() {
             proof: None,
         },
     ] {
-        assert!(!paired_extra_allowed(&msg), "{msg:?}");
+        assert!(refuse_for_network(&msg, &tags), "{msg:?}");
     }
     assert!(!refuse_for_network(&ClientMsg::Ping, &tags));
     assert!(!refuse_for_network(&ClientMsg::SessionList, &tags));

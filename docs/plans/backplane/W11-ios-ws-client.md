@@ -71,7 +71,10 @@ older body text, this section wins. Nothing here waits on anyone any more.
   address or `server_id` (both are unauthenticated). With a credential, after
   the first `PairCheck` returns `challenge`, the phone sends a second
   `PairCheck` with `proof = HMAC-SHA256(SHA-256(token), challenge ‖ code)`
-  (W9). It never sends the token or its hash to a pairing socket.
+  (W9). It never sends the token or its hash to a pairing socket. The proof
+`PairCheck` and the later `Pair { replace: true }` MUST go over the SAME
+pairing socket (the daemon binds the verified proof to that connection); do not
+close or reopen it between them, or the old pairing is not replaced.
   - **Same server** (`knows_device: true`): the confirmation adds **"This
     replaces this iPhone's current pairing. The old one will be revoked."**
     On **Pair**, stop the current `WebSocketClient` and send `Pair { …,

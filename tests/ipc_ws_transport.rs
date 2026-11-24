@@ -685,7 +685,12 @@ async fn a_pairing_socket_is_closed_after_its_one_pair_whatever_the_answer() {
 #[tokio::test]
 async fn at_most_twenty_unauthenticated_upgrades_a_minute_per_address_and_a_device_is_not_counted()
 {
-    let rig = Rig::new().await;
+    // The slot caps are not under test here: leave room for twenty sockets.
+    let limits = nostromo::ipc::ws::WsLimits {
+        max_unauthenticated_per_ip: 64,
+        ..Default::default()
+    };
+    let rig = Rig::with_limits(limits).await;
     let dev = rig.mint_device("iPhone");
 
     let mut open = Vec::new();
@@ -1073,14 +1078,13 @@ async fn a_timed_out_handshake_releases_its_slot() {
 }
 
 #[tokio::test]
-async fn the_unauthenticated_cap_refuses_the_next_connection_and_a_device_still_gets_in() {
+async fn the_unauthenticated_cap_refuses_the_next_connection_until_a_slot_is_freed() {
     let limits = nostromo::ipc::ws::WsLimits {
         max_unauthenticated: 3,
         max_unauthenticated_per_ip: 3,
         ..Default::default()
     };
     let rig = Rig::with_limits(limits).await;
-    let dev = rig.mint_device("iPhone");
 
     let mut open = Vec::new();
     for _ in 0..3 {
@@ -1106,9 +1110,46 @@ async fn the_unauthenticated_cap_refuses_the_next_connection_and_a_device_still_
     }
     assert!(admitted, "a released slot was not reusable");
     drop(open);
-    // An authenticated device frees its slot after the upgrade, so strangers
-    // holding every slot cannot keep it out once connected.
+}
+
+#[tokio::test]
+async fn the_global_cap_alone_refuses_the_next_connection() {
+    // The per-address cap is higher, so only the global one can refuse.
+    let limits = nostromo::ipc::ws::WsLimits {
+        max_unauthenticated: 2,
+        max_unauthenticated_per_ip: 10,
+        ..Default::default()
+    };
+    let rig = Rig::with_limits(limits).await;
+    let _a = Conn::try_ws(rig.ws_port, None, "/").await.unwrap();
+    let _b = Conn::try_ws(rig.ws_port, None, "/").await.unwrap();
+    assert!(
+        Conn::try_ws(rig.ws_port, None, "/").await.is_err(),
+        "the global cap did not refuse"
+    );
+}
+
+#[tokio::test]
+async fn an_authenticated_device_releases_its_unauthenticated_slot() {
+    let limits = nostromo::ipc::ws::WsLimits {
+        max_unauthenticated: 1,
+        max_unauthenticated_per_ip: 1,
+        ..Default::default()
+    };
+    let rig = Rig::with_limits(limits).await;
+    let dev = rig.mint_device("iPhone");
     let mut device = rig.device(&dev.token, &[], vec![]).await;
+    device.sync().await;
+    // The device is still connected, yet the only slot is free for a stranger.
+    let mut admitted = false;
+    for _ in 0..50 {
+        if Conn::try_ws(rig.ws_port, None, "/").await.is_ok() {
+            admitted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(admitted, "the device kept its unauthenticated slot");
     device.sync().await;
 }
 
