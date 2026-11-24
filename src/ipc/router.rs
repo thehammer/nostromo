@@ -173,17 +173,15 @@ const NEVER_FROM_SATELLITE: &[&str] = &[
     "device_unpaired",
 ];
 
-/// The administrative classes and the named list. `allow_refusals` lets the
-/// two refusal frames through (a routed read refused on the satellite).
-fn never_from_satellite(msg: &ServerMsg, allow_refusals: bool) -> bool {
+/// The administrative classes and the named list. Applied to what a satellite
+/// *publishes*; a reply is held to its verb table and the network filter
+/// instead (see `accept_routed_reply`).
+fn never_from_satellite(msg: &ServerMsg) -> bool {
     if matches!(
         classify_server_msg(msg),
         ServerClass::LocalOnly | ServerClass::Admin | ServerClass::SatelliteControl
     ) {
         return true;
-    }
-    if allow_refusals && matches!(msg, ServerMsg::Error { .. } | ServerMsg::Withheld { .. }) {
-        return false;
     }
     NEVER_FROM_SATELLITE.contains(&msg_type(msg).as_str())
 }
@@ -225,7 +223,7 @@ pub fn ingest_from_satellite(
 ) -> Result<ServerMsg, IngestDrop> {
     // Step 2 first: a named administrative frame is reported as that, even if
     // a later `host` field opens it.
-    if never_from_satellite(&msg, false) {
+    if never_from_satellite(&msg) {
         return Err(IngestDrop::NeverFromSatellite);
     }
     // Step 1: only the host-carrying variants, and the host is the record's.
@@ -303,6 +301,9 @@ pub enum Verdict {
     Close,
 }
 
+/// Drops further apart than this are separate runs, not one sustained flood.
+const DROP_GAP: Duration = Duration::from_secs(5);
+
 /// A token bucket that also notices a sender that stays over its limit.
 #[derive(Debug)]
 pub struct Bucket {
@@ -311,6 +312,7 @@ pub struct Bucket {
     tokens: f64,
     last: Instant,
     over_since: Option<Instant>,
+    last_drop: Option<Instant>,
     sustain: Duration,
 }
 
@@ -322,6 +324,7 @@ impl Bucket {
             tokens: burst,
             last: now,
             over_since: None,
+            last_drop: None,
             sustain,
         }
     }
@@ -332,12 +335,18 @@ impl Bucket {
         self.tokens = (self.tokens + elapsed * self.rate).min(self.burst);
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
-            // Any allowed frame ends the over-limit run: "over the limit for
-            // the whole window" means drops with no allowed frame between.
-            self.over_since = None;
             return Verdict::Allow;
         }
-        let since = *self.over_since.get_or_insert(now);
+        // A run of drops: it restarts when the previous drop was long enough
+        // ago that the sender had a calm spell in between. An allowed frame
+        // does not end it (a flood at twice the rate is allowed every other
+        // frame and must still close); a quiet gap does.
+        let since = match (self.over_since, self.last_drop) {
+            (Some(since), Some(last)) if now.saturating_duration_since(last) <= DROP_GAP => since,
+            _ => now,
+        };
+        self.over_since = Some(since);
+        self.last_drop = Some(now);
         if now.saturating_duration_since(since) >= self.sustain {
             Verdict::Close
         } else {
@@ -670,7 +679,11 @@ impl Router {
             if record.egress != Egress::Personal {
                 return Err(ReplyDrop::WorkHost);
             }
-            if !reply_allowed(entry.verb, &msg) || never_from_satellite(&msg, true) {
+            // No `never_from_satellite` here: it is redundant on a reply. The
+            // verb table admits only the variants the verb produces, and the
+            // network filter below (`outbound(Tcp)`) refuses every local-only,
+            // admin and control class, so nothing it would refuse gets by.
+            if !reply_allowed(entry.verb, &msg) {
                 return Err(ReplyDrop::WrongVariant);
             }
             if let Some(h) = server_msg_host(&msg) {
@@ -777,6 +790,91 @@ mod tests {
         let later = t0 + Duration::from_secs(10);
         assert_eq!(b.take(later), Verdict::Allow);
         assert_eq!(b.take(later + Duration::from_secs(1)), Verdict::Allow);
+    }
+
+    /// The gap between frames of a sender that sends `per_second` a second,
+    /// in whole nanoseconds so a long run does not drift.
+    fn every(per_second: u64) -> Duration {
+        Duration::from_nanos(1_000_000_000 / per_second)
+    }
+
+    /// Spend the whole burst at `t0` (and one more frame), so the bucket is
+    /// empty and has seen its first drop.
+    fn drained(t0: Instant) -> Bucket {
+        let mut b = Bucket::new(50.0, 200.0, Duration::from_secs(30), t0);
+        let verdicts: Vec<Verdict> = (0..201).map(|_| b.take(t0)).collect();
+        assert_eq!(
+            verdicts.iter().filter(|v| **v == Verdict::Allow).count(),
+            200
+        );
+        assert_eq!(verdicts[200], Verdict::Drop);
+        b
+    }
+
+    #[test]
+    fn an_honest_sender_that_overran_once_is_never_closed_for_a_later_burst() {
+        let t0 = Instant::now();
+        let mut b = drained(t0);
+        // 40 s at 49 a second, under the 50 a second refill: nothing is dropped.
+        let step = every(49);
+        let mut now = t0;
+        while now - t0 < Duration::from_secs(40) {
+            now += step;
+            assert_eq!(b.take(now), Verdict::Allow, "at {:?}", now - t0);
+        }
+        // A burst of 60 now is more than has built up. The first frame over
+        // the limit is dropped; the earlier overrun, 40 s ago, is not held
+        // against the sender.
+        let burst: Vec<Verdict> = (0..60).map(|_| b.take(now)).collect();
+        assert!(
+            burst.contains(&Verdict::Allow),
+            "some of the burst passes: {burst:?}"
+        );
+        let first_refused = burst
+            .iter()
+            .find(|v| **v != Verdict::Allow)
+            .expect("60 at once is over what has built up");
+        assert_eq!(*first_refused, Verdict::Drop);
+        assert!(!burst.contains(&Verdict::Close), "{burst:?}");
+    }
+
+    /// Keep sending at `per_second` for up to `for_at_most`; how long after
+    /// the start the bucket said `Close`, if it did.
+    fn closed_after(
+        b: &mut Bucket,
+        t0: Instant,
+        per_second: u64,
+        for_at_most: Duration,
+    ) -> Option<Duration> {
+        let step = every(per_second);
+        let mut now = t0;
+        while now - t0 < for_at_most {
+            now += step;
+            if b.take(now) == Verdict::Close {
+                return Some(now - t0);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_sender_at_twice_the_rate_is_closed_after_the_sustain_window_though_half_its_frames_pass() {
+        let t0 = Instant::now();
+        let mut b = drained(t0);
+        let at = closed_after(&mut b, t0, 100, Duration::from_secs(31))
+            .expect("100 a second against a 50 a second limit is closed");
+        assert!(at >= Duration::from_secs(30), "closed early, at {at:?}");
+    }
+
+    #[test]
+    fn a_sender_only_just_over_the_rate_is_closed_eventually() {
+        let t0 = Instant::now();
+        let mut b = drained(t0);
+        // 52 a second: drops are a few seconds apart at most, and never calm
+        // enough for the run to be forgotten.
+        let at = closed_after(&mut b, t0, 52, Duration::from_secs(35))
+            .expect("52 a second against a 50 a second limit is closed");
+        assert!(at >= Duration::from_secs(30), "closed early, at {at:?}");
     }
 
     #[test]
@@ -1118,6 +1216,26 @@ mod tests {
     }
 
     #[test]
+    fn unregister_says_whether_the_ending_connection_was_still_the_hosts_uplink() {
+        let router = Router::new();
+        let (a_tx, _a) = unbounded_channel();
+        let first = router.register("sendai", Egress::Personal, a_tx);
+        let (b_tx, _b) = unbounded_channel();
+        let second = router.register("sendai", Egress::Personal, b_tx);
+        assert!(
+            !router.unregister("sendai", first),
+            "the replaced uplink was no longer the host's"
+        );
+        assert!(router.is_connected("sendai"));
+        assert!(
+            !router.unregister("never-connected", second),
+            "a host that is not connected"
+        );
+        assert!(router.unregister("sendai", second), "the current uplink");
+        assert!(!router.unregister("sendai", second), "it is already gone");
+    }
+
+    #[test]
     fn a_satellite_can_name_nothing_but_the_records_host() {
         let tags = SensitiveTags::default();
         let kobe = rec("kobe", Egress::Personal);
@@ -1205,5 +1323,142 @@ mod tests {
                 assert!(!reply_allowed(verb, f), "{verb:?} admits {f:?}");
             }
         }
+    }
+
+    fn decoded(v: serde_json::Value) -> ServerMsg {
+        serde_json::from_value(v.clone()).unwrap_or_else(|e| panic!("decode {v}: {e}"))
+    }
+
+    fn session_row(tag: &str, agent: &str) -> serde_json::Value {
+        serde_json::json!({"tag": tag, "agent_name": agent, "view_name": "a view",
+            "session_id": "s-1", "alive": true, "remote_control": false, "state": "idle",
+            "mcp_bridge_connected": true, "agent_turns": 4, "agent_messages": 5,
+            "agent_problems": 1, "activity_epoch": "e-1"})
+    }
+
+    #[test]
+    fn a_reply_the_network_filter_would_change_is_refused_and_its_trimmed_form_is_accepted() {
+        let router = Router::new();
+        let (host_tx, _host_rx) = unbounded_channel();
+        router.register("sendai", Egress::Personal, host_tx);
+        let tags = SensitiveTags::in_memory();
+        let (id, _tx, mut rx) = issue(
+            &router,
+            ClientMsg::SessionList {
+                host: Some("sendai".into()),
+            },
+            "sendai",
+        );
+        let sendai = rec("sendai", Egress::Personal);
+        // A session list that still names a Fred session: what a network peer
+        // would never be sent.
+        let untrimmed = decoded(serde_json::json!({
+            "type": "session_list_resp", "host": "sendai",
+            "sessions": [session_row("fred", "fred"), session_row("cody-open", "cody")]}));
+        assert_eq!(
+            router.accept_routed_reply(&sendai, &id, untrimmed.clone(), &tags, Instant::now()),
+            Err(ReplyDrop::Egress)
+        );
+        assert!(rx.try_recv().is_err(), "nothing was delivered");
+        // The id is still live, and the list trimmed the way the network
+        // filter trims it is what gets through.
+        let trimmed = crate::ipc::peer::redact_for_network(untrimmed, &tags);
+        assert_eq!(
+            router.accept_routed_reply(&sendai, &id, trimmed, &tags, Instant::now()),
+            Ok(())
+        );
+        match rx.try_recv() {
+            Ok(ServerMsg::SessionListResp { sessions, .. }) => {
+                assert!(
+                    sessions.iter().all(|s| s.agent_name != "fred"),
+                    "{sessions:?}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_attach_id_carries_back_only_what_an_attach_produces() {
+        let router = Router::new();
+        let (host_tx, _host_rx) = unbounded_channel();
+        router.register("sendai", Egress::Personal, host_tx);
+        let tags = SensitiveTags::in_memory();
+        let (id, _tx, mut rx) = issue(&router, attach("cody-1", "sendai"), "sendai");
+        let sendai = rec("sendai", Egress::Personal);
+        // Each is well formed for sendai and for this focus, so only the verb
+        // table stands between it and the requester.
+        for stray in [
+            serde_json::json!({"type": "mother_jobs", "jobs": [], "host": "sendai"}),
+            serde_json::json!({"type": "session_list_resp", "sessions": [], "host": "sendai"}),
+            serde_json::json!({"type": "focus_list_resp", "focuses": [], "host": "sendai"}),
+            serde_json::json!({"type": "session_model_state", "tag": "cody-1", "running": false}),
+            serde_json::json!({"type": "perri_state", "tag": "cody-1", "host": "sendai",
+                "queue": [], "current": null}),
+            serde_json::json!({"type": "approval_pending", "tag": "cody-1", "count": 1,
+                "host": "sendai"}),
+        ] {
+            let msg = decoded(stray.clone());
+            assert_eq!(
+                router.accept_routed_reply(&sendai, &id, msg, &tags, Instant::now()),
+                Err(ReplyDrop::WrongVariant),
+                "{stray}"
+            );
+        }
+        assert!(rx.try_recv().is_err(), "nothing reached the requester");
+        // The attach is still live for what it does produce.
+        assert_eq!(
+            router.accept_routed_reply(
+                &sendai,
+                &id,
+                decoded(serde_json::json!({"type": "session_turns", "tag": "cody-1", "turns": []})),
+                &tags,
+                Instant::now()
+            ),
+            Ok(())
+        );
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::SessionTurns { .. })));
+    }
+
+    #[test]
+    fn a_document_pane_cannot_be_carried_back_on_an_attach_id() {
+        use crate::ipc::protocol::PaneContentWire;
+        let router = Router::new();
+        let (host_tx, _host_rx) = unbounded_channel();
+        router.register("sendai", Egress::Personal, host_tx);
+        let tags = SensitiveTags::in_memory();
+        let (id, _tx, mut rx) = issue(&router, attach("cody-1", "sendai"), "sendai");
+        let sendai = rec("sendai", Egress::Personal);
+        let pane = |content| ServerMsg::PaneContent {
+            tag: "cody-1".into(),
+            pane_id: "report".into(),
+            content,
+            freshness: None,
+            address: None,
+        };
+        // An attach does produce pane content, so the verb table admits the
+        // variant; a document pane is local-only and must not get through.
+        let document = PaneContentWire::Document {
+            title: "Huey".into(),
+            banner: None,
+            blocks: vec![],
+            actions: vec![],
+        };
+        assert!(router
+            .accept_routed_reply(&sendai, &id, pane(document), &tags, Instant::now())
+            .is_err());
+        assert!(rx.try_recv().is_err(), "the document reached the requester");
+        // Control: plain text pane content is carried.
+        assert_eq!(
+            router.accept_routed_reply(
+                &sendai,
+                &id,
+                pane(PaneContentWire::Text { text: "hi".into() }),
+                &tags,
+                Instant::now()
+            ),
+            Ok(())
+        );
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::PaneContent { .. })));
     }
 }

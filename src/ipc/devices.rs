@@ -1153,4 +1153,80 @@ mod tests {
         );
         assert_eq!(reg.validate(&r.token), TokenCheck::Revoked);
     }
+
+    // ── admission looks at standing and kind in one read ──────────────────
+
+    #[test]
+    fn admit_tells_an_active_phone_from_an_active_satellite_and_admits_nothing_else() {
+        let (_d, reg) = registry();
+        let phone = reg
+            .redeem("iPhone", DeviceKind::Iphone, None, None)
+            .unwrap();
+        let revoked_phone = reg.redeem("Old", DeviceKind::Ipad, None, None).unwrap();
+        let sat = reg
+            .redeem_with_egress(
+                "sendai",
+                DeviceKind::Satellite,
+                Some(SatelliteAdmin::Full),
+                Some(Egress::Personal),
+                None,
+            )
+            .unwrap();
+        let revoked_sat = reg
+            .redeem_with_egress(
+                "kobe",
+                DeviceKind::Satellite,
+                Some(SatelliteAdmin::Full),
+                Some(Egress::Work),
+                None,
+            )
+            .unwrap();
+        reg.revoke(&revoked_phone.device_id, RevokedBy::Operator)
+            .unwrap();
+        reg.revoke(&revoked_sat.device_id, RevokedBy::Operator)
+            .unwrap();
+
+        assert!(reg.admit("dev_no_such_device").is_none(), "unknown id");
+        assert!(
+            matches!(reg.admit(&phone.device_id), Some(None)),
+            "an active phone is admitted as a phone"
+        );
+        match reg.admit(&sat.device_id) {
+            Some(Some(info)) => {
+                assert_eq!(info.name, "sendai");
+                assert_eq!(info.admin, SatelliteAdmin::Full);
+                assert_eq!(info.egress, Egress::Personal);
+            }
+            other => panic!("an active satellite is admitted as one: {other:?}"),
+        }
+        assert!(
+            reg.admit(&revoked_sat.device_id).is_none(),
+            "a revoked satellite is not admitted, and not as a phone"
+        );
+        assert!(
+            reg.admit(&revoked_phone.device_id).is_none(),
+            "a revoked phone"
+        );
+    }
+
+    #[test]
+    fn admit_follows_a_satellites_level_and_a_revoke_as_they_happen() {
+        let (_d, reg) = registry();
+        let sat = reg
+            .redeem_with_egress(
+                "sendai",
+                DeviceKind::Satellite,
+                Some(SatelliteAdmin::Full),
+                Some(Egress::Personal),
+                None,
+            )
+            .unwrap();
+        reg.set_admin("sendai", SatelliteAdmin::ReadOnly).unwrap();
+        match reg.admit(&sat.device_id) {
+            Some(Some(info)) => assert_eq!(info.admin, SatelliteAdmin::ReadOnly),
+            other => panic!("{other:?}"),
+        }
+        reg.revoke(&sat.device_id, RevokedBy::Operator).unwrap();
+        assert!(reg.admit(&sat.device_id).is_none());
+    }
 }

@@ -704,4 +704,111 @@ mod tests {
         let b = ch(&mut f.table, &other.code, f.now);
         assert_ne!(a, b);
     }
+
+    // ── the caps on pairings a satellite relays ───────────────────────────
+
+    /// A capped start for `issuer`/`origin`, its outcome channel dropped.
+    fn capped(
+        table: &mut PairingTable,
+        issuer: &str,
+        origin: Option<&str>,
+        now: Instant,
+    ) -> Option<Started> {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        table.start_capped(
+            issuer,
+            origin.map(String::from),
+            tx,
+            None,
+            DeviceKind::Iphone,
+            None,
+            None,
+            now,
+        )
+    }
+
+    #[test]
+    fn one_local_client_behind_a_satellite_holds_at_most_four_open_pairings() {
+        let now = Instant::now();
+        for origin in [Some("client-a"), None] {
+            let mut table = PairingTable::new(Duration::from_secs(300));
+            for i in 0..MAX_OPEN_PER_ORIGIN {
+                assert!(
+                    capped(&mut table, "sat", origin, now).is_some(),
+                    "{origin:?} #{i}"
+                );
+            }
+            assert!(
+                capped(&mut table, "sat", origin, now).is_none(),
+                "{origin:?}: a fifth"
+            );
+            assert_eq!(table.open_count(), MAX_OPEN_PER_ORIGIN);
+        }
+    }
+
+    #[test]
+    fn one_satellite_connection_holds_at_most_sixteen_open_pairings_however_many_clients_it_has() {
+        let now = Instant::now();
+        let mut table = PairingTable::new(Duration::from_secs(300));
+        for i in 0..MAX_OPEN_PER_ISSUER {
+            assert!(
+                capped(&mut table, "sat", Some(&format!("client-{i}")), now).is_some(),
+                "client {i}"
+            );
+        }
+        assert!(
+            capped(&mut table, "sat", Some("a-new-client"), now).is_none(),
+            "a seventeenth, from a client with none open"
+        );
+        assert!(capped(&mut table, "sat", None, now).is_none());
+        assert_eq!(table.open_count(), MAX_OPEN_PER_ISSUER);
+    }
+
+    #[test]
+    fn a_full_issuer_or_origin_does_not_block_another() {
+        let now = Instant::now();
+        let mut table = PairingTable::new(Duration::from_secs(300));
+        for _ in 0..MAX_OPEN_PER_ORIGIN {
+            capped(&mut table, "sat-a", Some("client-1"), now).unwrap();
+        }
+        assert!(capped(&mut table, "sat-a", Some("client-1"), now).is_none());
+        assert!(
+            capped(&mut table, "sat-a", Some("client-2"), now).is_some(),
+            "another client of the same satellite"
+        );
+        assert!(
+            capped(&mut table, "sat-b", Some("client-1"), now).is_some(),
+            "the same client name behind another satellite"
+        );
+        // A satellite at its issuer cap leaves another satellite alone.
+        for i in 0..MAX_OPEN_PER_ISSUER {
+            let _ = capped(&mut table, "sat-c", Some(&format!("c{i}")), now);
+        }
+        assert!(capped(&mut table, "sat-c", Some("one-more"), now).is_none());
+        assert!(capped(&mut table, "sat-d", Some("one-more"), now).is_some());
+    }
+
+    #[test]
+    fn a_cancelled_or_expired_pairing_frees_its_slot() {
+        let now = Instant::now();
+        let mut table = PairingTable::new(Duration::from_secs(300));
+        let first = capped(&mut table, "sat", Some("client-a"), now).unwrap();
+        for _ in 1..MAX_OPEN_PER_ORIGIN {
+            capped(&mut table, "sat", Some("client-a"), now).unwrap();
+        }
+        assert!(capped(&mut table, "sat", Some("client-a"), now).is_none());
+        assert!(table.cancel(&first.pairing_id, "sat", Some("client-a")));
+        assert!(
+            capped(&mut table, "sat", Some("client-a"), now).is_some(),
+            "a cancelled pairing's slot"
+        );
+        assert!(capped(&mut table, "sat", Some("client-a"), now).is_none());
+        // Past the lifetime they all expire; the next start finds room.
+        let later = now + Duration::from_secs(301);
+        assert!(
+            capped(&mut table, "sat", Some("client-a"), later).is_some(),
+            "expired pairings' slots"
+        );
+        assert_eq!(table.open_count(), 1);
+    }
 }

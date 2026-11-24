@@ -4911,7 +4911,7 @@ fn apply_retention(cache: &mut BTreeMap<String, ServerMsg>, msg: ServerMsg) {
 }
 
 /// Forget every retained frame a satellite published.
-fn purge_host_retained(retained: &RetainedCache, host: &str) {
+pub(super) fn purge_host_retained(retained: &RetainedCache, host: &str) {
     let prefix = format!("host:{host}:");
     retained
         .lock()
@@ -6283,5 +6283,101 @@ mod authored_prs_tests {
             assert!(!message_matches_topics(&unavailable, &topics), "{topics:?}");
             assert!(message_matches_topics(&hosts, &topics), "{topics:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod satellite_retention_tests {
+    //! What the retained cache keeps of the frames a satellite published, and
+    //! what it forgets when the satellite goes.
+
+    use super::*;
+    use crate::ipc::stream_json::SessionState;
+
+    fn jobs(host: &str) -> ServerMsg {
+        ServerMsg::MotherJobs {
+            jobs: vec![],
+            host: Some(host.to_string()),
+        }
+    }
+
+    fn session(host: &str, tag: &str, state: SessionState) -> ServerMsg {
+        ServerMsg::SessionState {
+            tag: tag.to_string(),
+            state,
+            host: Some(host.to_string()),
+        }
+    }
+
+    fn keys_of(cache: &BTreeMap<String, ServerMsg>, host: &str) -> usize {
+        let prefix = format!("host:{host}:");
+        cache.keys().filter(|k| k.starts_with(&prefix)).count()
+    }
+
+    #[test]
+    fn purging_a_host_forgets_its_frames_and_only_its_frames() {
+        let mut cache = BTreeMap::new();
+        apply_retention(&mut cache, jobs("kobe"));
+        apply_retention(&mut cache, session("kobe", "cody-1", SessionState::Idle));
+        apply_retention(&mut cache, session("kobe", "cody-2", SessionState::Idle));
+        apply_retention(&mut cache, jobs("kobe2"));
+        apply_retention(&mut cache, ServerMsg::Hosts { hosts: vec![] });
+        assert_eq!(keys_of(&cache, "kobe"), 3);
+        let retained: RetainedCache = Arc::new(Mutex::new(cache));
+
+        purge_host_retained(&retained, "kobe");
+
+        let cache = retained.lock().unwrap();
+        assert_eq!(keys_of(&cache, "kobe"), 0, "{:?}", cache.keys());
+        assert_eq!(
+            keys_of(&cache, "kobe2"),
+            1,
+            "a host whose name starts with the purged one's is left alone"
+        );
+        assert!(cache.contains_key("hosts"), "the daemon's own frames stay");
+        drop(cache);
+
+        purge_host_retained(&retained, "never-connected");
+        assert_eq!(retained.lock().unwrap().len(), 2, "nothing else went");
+    }
+
+    #[test]
+    fn a_host_keeps_at_most_512_retained_frames_and_a_new_key_past_that_is_not_kept() {
+        let mut cache = BTreeMap::new();
+        for i in 0..512 {
+            apply_retention(
+                &mut cache,
+                session("kobe", &format!("cody-{i}"), SessionState::Idle),
+            );
+        }
+        assert_eq!(keys_of(&cache, "kobe"), 512);
+
+        // A 513th distinct focus is not kept.
+        apply_retention(&mut cache, session("kobe", "cody-512", SessionState::Idle));
+        assert_eq!(keys_of(&cache, "kobe"), 512);
+        assert!(
+            !cache
+                .values()
+                .any(|m| matches!(m, ServerMsg::SessionState { tag, .. } if tag == "cody-512")),
+            "the 513th key was kept"
+        );
+
+        // A key already held is still replaced by its newer frame.
+        apply_retention(&mut cache, session("kobe", "cody-0", SessionState::MidTurn));
+        assert_eq!(keys_of(&cache, "kobe"), 512);
+        let newest = cache.values().find_map(|m| match m {
+            ServerMsg::SessionState { tag, state, .. } if tag == "cody-0" => Some(*state),
+            _ => None,
+        });
+        assert_eq!(newest, Some(SessionState::MidTurn));
+
+        // Another host's frames, one whose name starts with this one's
+        // included, are counted on their own.
+        apply_retention(&mut cache, session("sendai", "cody-0", SessionState::Idle));
+        apply_retention(&mut cache, session("kobe2", "cody-0", SessionState::Idle));
+        apply_retention(&mut cache, jobs("sendai"));
+        assert_eq!(keys_of(&cache, "sendai"), 2);
+        assert_eq!(keys_of(&cache, "kobe2"), 1);
+        assert_eq!(keys_of(&cache, "kobe"), 512);
     }
 }

@@ -42,7 +42,9 @@ use super::protocol::{ClientMsg, ServerMsg, MAX_FRAME_LEN, MIN_CLIENT_VERSION, P
 use super::router::{
     ingest_from_satellite, Bucket, Router, SatelliteRecord, UplinkLimits, Verdict,
 };
-use super::server::{handle_client, HeldMotherJobs, PeerOrigin, RetainedCache, SatelliteLink};
+use super::server::{
+    handle_client, purge_host_retained, HeldMotherJobs, PeerOrigin, RetainedCache, SatelliteLink,
+};
 use super::session_manager::SessionManager;
 use super::uplink_wire::{wrap_server_bytes, UplinkFrame};
 use crate::terminal::TerminalManager;
@@ -908,6 +910,14 @@ async fn run_paired(
     drop(bridge_wr);
     reader.abort();
     let _ = handler.await;
+    // A satellite may publish before its `Hello`, so its frames can be kept
+    // though the handler never registered it (and so never purges). With no
+    // uplink for the host now, nothing it published stays replayable.
+    if let Some(sat) = &satellite {
+        if !hub.router().is_connected(&sat.name) {
+            purge_host_retained(&shared.retained, &sat.name);
+        }
+    }
     info!(device = %device_id, "device disconnected");
     Ok(())
 }

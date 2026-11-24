@@ -6420,6 +6420,36 @@ async fn a_local_scripts_resume_follows_the_latest_job_list_once_the_hold_is_res
 }
 
 #[tokio::test]
+async fn a_satellites_open_hold_does_not_stop_a_local_script_resuming_a_daemon_job_with_that_id() {
+    let h = spawn_server_with_verifier(Arc::new(FakePeerVerifier::always_script())).await;
+    let (mut script, _) = h.unix(vec![]).await;
+    // What a satellite says about its own jobs is about its own jobs: the
+    // primary's hold on `mc3-same-id` is whatever the primary's own list says.
+    let satellite_list = |id: &str| ServerMsg::MotherJobs {
+        jobs: vec![mc3_job(id, Some(mc3_decision(false)))],
+        host: Some("kobe".into()),
+    };
+
+    h.broadcast(satellite_list("mc3-same-id"));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let frames = resume_and_collect(&mut script, "mc3-same-id").await;
+    assert!(
+        !frames.iter().any(|m| matches!(m, ServerMsg::Error { .. })),
+        "a satellite's open hold put the primary's job in the held set: {frames:?}"
+    );
+    wait_for_fake_call("mother", "mc3-same-id").await;
+
+    // The primary's own open hold is still honoured, and a satellite's later
+    // list does not lift it or replace it.
+    publish_mother_list(&h, vec![mc3_job("mc3-own-hold", Some(mc3_decision(false)))]).await;
+    h.broadcast(satellite_list("mc3-same-id"));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let frames = resume_and_collect(&mut script, "mc3-own-hold").await;
+    assert_hold_refusal(&frames, "the primary's own open decision");
+    assert_no_fake_call("mother", "mc3-own-hold").await;
+}
+
+#[tokio::test]
 async fn the_operator_app_can_still_resume_a_job_whose_mother_hold_is_open() {
     let h = spawn_server().await; // every Unix peer is the verified app
     let (mut app, _nonce) = h.unix_operator(vec![]).await;

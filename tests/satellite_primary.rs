@@ -468,6 +468,14 @@ fn is_not_permitted(m: &ServerMsg) -> bool {
     matches!(m, ServerMsg::DeviceAdminError { reason, .. } if reason == "not_permitted_on_this_mac")
 }
 
+fn is_unknown_device(m: &ServerMsg) -> bool {
+    matches!(m, ServerMsg::DeviceAdminError { reason, .. } if reason == "unknown_device")
+}
+
+fn rate_limited(m: &ServerMsg) -> bool {
+    matches!(m, ServerMsg::Error { message } if message == "rate_limited")
+}
+
 fn is_network_refusal(m: &ServerMsg) -> bool {
     matches!(m, ServerMsg::Error { message } if message.starts_with("requires_secure_connection"))
 }
@@ -904,6 +912,31 @@ async fn revoking_a_connected_satellite_closes_it_4001_and_it_cannot_come_back()
     assert_eq!(again.expect_close().await, Some(CLOSE_UNAUTHORIZED));
 }
 
+#[tokio::test]
+async fn a_revoked_satellites_token_is_not_served_as_a_phone() {
+    let rig = Rig::new().await;
+    let m = enrol(&rig, "kobe", Egress::Work, SatelliteAdmin::Full);
+    rig.registry
+        .revoke(&m.device_id, RevokedBy::Operator)
+        .unwrap();
+
+    // The way a phone connects: a `Hello` with no role.
+    let mut conn = rig.device_raw(&m.token).await;
+    let _ = conn
+        .try_send_text(serde_json::to_string(&Conn::hello(&[], false)).unwrap())
+        .await;
+    assert_eq!(conn.expect_close().await, Some(CLOSE_UNAUTHORIZED));
+    assert!(
+        !conn
+            .inbox
+            .iter()
+            .any(|m| matches!(m, ServerMsg::Welcome { .. })),
+        "the revoked record was greeted: {:?}",
+        conn.inbox
+    );
+    assert!(!rig.hub.router().is_connected("kobe"));
+}
+
 impl Sat {
     /// Like `next_server`, for a refusal the primary may write bare (before it
     /// knows the socket is an uplink) or in an envelope.
@@ -1311,8 +1344,10 @@ async fn the_admin_table_at(level: SatelliteAdmin) {
         other => panic!("DeviceList: {other:?}"),
     }
 
-    // DeviceRevoke of any satellite record, itself included: refused at every
-    // level, and the record stays active.
+    // DeviceRevoke of any satellite record, itself included: never done, and
+    // the record stays active. Below `revoke_only` the verb itself is refused;
+    // from `revoke_only` up the answer is the one for a name that does not
+    // exist (see `a_revoke_naming_a_satellite_is_answered_like_one_naming_nothing`).
     for (what, device) in [
         ("sendai by name", "sendai".to_string()),
         ("sendai by id", sendai_m.device_id.clone()),
@@ -1325,10 +1360,17 @@ async fn the_admin_table_at(level: SatelliteAdmin) {
                 device,
             })
             .await;
-        assert!(
-            is_not_permitted(&r),
-            "DeviceRevoke of {what} at {level:?}: {r:?}"
-        );
+        if at_least_revoke {
+            assert!(
+                is_unknown_device(&r),
+                "DeviceRevoke of {what} at {level:?}: {r:?}"
+            );
+        } else {
+            assert!(
+                is_not_permitted(&r),
+                "DeviceRevoke of {what} at {level:?}: {r:?}"
+            );
+        }
     }
     assert!(matches!(
         rig.registry.validate(&sendai_m.token),
@@ -1482,6 +1524,60 @@ async fn a_read_only_satellite_gets_exactly_what_the_admin_table_gives_read_only
 #[tokio::test]
 async fn an_off_satellite_gets_exactly_what_the_admin_table_gives_off() {
     the_admin_table_at(SatelliteAdmin::Off).await;
+}
+
+/// A `DeviceAdminError` with the request id taken out, for comparing answers.
+fn without_request_id(m: &ServerMsg) -> Value {
+    let mut v = serde_json::to_value(m).unwrap();
+    v["request_id"] = json!("-");
+    v
+}
+
+#[tokio::test]
+async fn a_revoke_naming_a_satellite_is_answered_like_one_naming_nothing() {
+    for level in [SatelliteAdmin::RevokeOnly, SatelliteAdmin::Full] {
+        let rig = Rig::new().await;
+        let sendai_m = enrol(&rig, "sendai", Egress::Personal, SatelliteAdmin::Full);
+        let mut kobe = join(&rig, "kobe", Egress::Work, level).await;
+        let kobe_id = kobe.minted.device_id.clone();
+
+        let mut answers = Vec::new();
+        for (what, device) in [
+            ("an enrolled satellite by name", "sendai".to_string()),
+            (
+                "an enrolled satellite by name in another case",
+                "SendAI".to_string(),
+            ),
+            ("an enrolled satellite by id", sendai_m.device_id.clone()),
+            ("itself by name", "kobe".to_string()),
+            ("itself by id", kobe_id.clone()),
+            ("a name nobody has", "osaka".to_string()),
+            ("an id nobody has", "dev_000000".to_string()),
+        ] {
+            let r = kobe
+                .call(|rid| ClientMsg::DeviceRevoke {
+                    request_id: rid,
+                    device,
+                })
+                .await;
+            assert!(is_unknown_device(&r), "{what} at {level:?}: {r:?}");
+            answers.push((what, without_request_id(&r)));
+        }
+        // Byte for byte the same answer, whichever the target.
+        let (_, first) = &answers[0];
+        for (what, a) in &answers {
+            assert_eq!(a, first, "{what} at {level:?} is told apart from the rest");
+        }
+        // And nothing was revoked.
+        assert!(matches!(
+            rig.registry.validate(&sendai_m.token),
+            TokenCheck::Active { .. }
+        ));
+        assert!(matches!(
+            rig.registry.validate(&kobe.minted.token),
+            TokenCheck::Active { .. }
+        ));
+    }
 }
 
 // ── pairing relay ─────────────────────────────────────────────────────────────
@@ -1639,6 +1735,109 @@ async fn a_satellite_that_drops_takes_its_open_pairings_with_it() {
     .await;
     let (reply, _) = rig.redeem(&code, "Phone", DeviceKind::Iphone, false).await;
     assert!(matches!(reply, ServerMsg::PairRefused { .. }), "{reply:?}");
+}
+
+// ── caps on the pairings a satellite relays ───────────────────────────────────
+
+/// Limits whose client bucket is no obstacle, for tests about what a
+/// satellite may ask for rather than how fast.
+fn roomy_client_bucket() -> WsLimits {
+    WsLimits {
+        uplink: UplinkLimits {
+            client_rate: 100_000.0,
+            client_burst: 100_000.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Send one `DevicePairStart` per entry of `origins` without waiting between
+/// them, then read every answer: the codes of the pairings opened and the
+/// reasons of the refusals.
+async fn start_pairings(sat: &mut Sat, origins: Vec<Option<String>>) -> (Vec<String>, Vec<String>) {
+    let ids: Vec<String> = origins.iter().map(|_| request_id()).collect();
+    for (rid, origin) in ids.iter().zip(&origins) {
+        sat.client(&ClientMsg::DevicePairStart {
+            request_id: rid.clone(),
+            name_hint: None,
+            satellite: None,
+            admin: None,
+            egress: None,
+            origin: origin.clone(),
+        })
+        .await;
+    }
+    let (mut codes, mut refusals) = (Vec::new(), Vec::new());
+    for rid in ids {
+        let want = rid.clone();
+        let answer = sat
+            .next_server("the answer to a pairing start", move |m| {
+                matches!(
+                    m,
+                    ServerMsg::DevicePairing { request_id, .. }
+                        | ServerMsg::DeviceAdminError { request_id, .. } if *request_id == want
+                )
+            })
+            .await;
+        match answer {
+            ServerMsg::DevicePairing { code, .. } => codes.push(code),
+            ServerMsg::DeviceAdminError { reason, .. } => refusals.push(reason),
+            _ => unreachable!(),
+        }
+    }
+    (codes, refusals)
+}
+
+#[tokio::test]
+async fn three_hundred_pairing_starts_from_one_local_client_open_four_and_the_rest_are_refused() {
+    let rig = Rig::with_limits(roomy_client_bucket()).await;
+    let mut kobe = join(&rig, "kobe", Egress::Work, SatelliteAdmin::Full).await;
+
+    let (codes, refusals) =
+        start_pairings(&mut kobe, vec![Some("client-a".to_string()); 300]).await;
+
+    assert_eq!(codes.len(), 4, "pairings opened for one local client");
+    assert_eq!(refusals.len(), 296);
+    assert!(
+        refusals.iter().all(|r| r == "too_many_pairings"),
+        "{refusals:?}"
+    );
+    assert!(kobe.closed.is_none(), "the satellite is not closed for it");
+    // Exactly the four are open: each redeems.
+    for (i, code) in codes.iter().enumerate() {
+        let (reply, _) = rig
+            .redeem(code, &format!("Phone {i}"), DeviceKind::Iphone, false)
+            .await;
+        assert!(matches!(reply, ServerMsg::Paired { .. }), "{reply:?}");
+    }
+    // Their slots are free again.
+    let (codes, refusals) = start_pairings(&mut kobe, vec![Some("client-a".to_string())]).await;
+    assert_eq!((codes.len(), refusals.len()), (1, 0));
+}
+
+#[tokio::test]
+async fn three_hundred_pairing_starts_across_many_local_clients_open_sixteen_in_all() {
+    let rig = Rig::with_limits(roomy_client_bucket()).await;
+    let mut kobe = join(&rig, "kobe", Egress::Work, SatelliteAdmin::Full).await;
+    // Thirty clients, ten attempts each: no client is over its own four
+    // until its fifth, but the connection as a whole holds sixteen.
+    let origins: Vec<Option<String>> = (0..300)
+        .map(|i| Some(format!("client-{}", i % 30)))
+        .collect();
+
+    let (codes, refusals) = start_pairings(&mut kobe, origins).await;
+
+    assert_eq!(codes.len(), 16, "pairings opened through one connection");
+    assert_eq!(refusals.len(), 284);
+    assert!(
+        refusals.iter().all(|r| r == "too_many_pairings"),
+        "{refusals:?}"
+    );
+    // Another satellite's pairings are not counted against this one.
+    let mut sendai = join(&rig, "sendai", Egress::Personal, SatelliteAdmin::Full).await;
+    let (codes, _) = start_pairings(&mut sendai, vec![Some("client-0".to_string())]).await;
+    assert_eq!(codes.len(), 1);
 }
 
 // ── the downgrade race (D), at the hub ────────────────────────────────────────
@@ -2006,6 +2205,130 @@ fn never_from_a_satellite() -> Vec<(&'static str, ServerMsg)> {
             ),
         ),
     ]
+}
+
+/// The hosts whose frames a new subscriber is replayed.
+fn replayed_hosts(frames: &[ServerMsg]) -> Vec<String> {
+    let mut hosts: Vec<String> = frames
+        .iter()
+        .filter_map(|m| match m {
+            ServerMsg::MotherJobs { host, .. } | ServerMsg::SessionState { host, .. } => {
+                host.clone()
+            }
+            _ => None,
+        })
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
+fn session_state_frame(host: &str, tag: &str) -> ServerMsg {
+    dec(json!({"type": "session_state", "tag": tag, "state": "idle", "host": host}))
+}
+
+#[tokio::test]
+async fn what_a_satellite_published_is_not_replayed_once_it_is_revoked_or_gone() {
+    let rig = Rig::new().await;
+    let mut kobe = join(&rig, "kobe", Egress::Personal, SatelliteAdmin::RevokeOnly).await;
+    let mut tokyo = join(&rig, "tokyo", Egress::Personal, SatelliteAdmin::RevokeOnly).await;
+    let mut sendai = join(&rig, "sendai", Egress::Personal, SatelliteAdmin::RevokeOnly).await;
+    for (sat, host) in [
+        (&mut kobe, "kobe"),
+        (&mut tokyo, "tokyo"),
+        (&mut sendai, "sendai"),
+    ] {
+        assert!(sat.publish(&jobs_frame(Some(host), &["a-job"])).await);
+        assert!(sat.publish(&session_state_frame(host, "cody-1")).await);
+    }
+    // Control: a new subscriber is replayed all three.
+    let replay = replay_until(&rig, |f| replayed_hosts(f).len() == 3).await;
+    assert_eq!(replayed_hosts(&replay), ["kobe", "sendai", "tokyo"]);
+
+    // kobe is revoked by the operator, tokyo drops off.
+    rig.registry
+        .revoke(&kobe.minted.device_id, RevokedBy::Operator)
+        .unwrap();
+    assert_eq!(kobe.expect_close().await, Some(CLOSE_UNAUTHORIZED));
+    tokyo.close().await;
+
+    let replay = replay_until(&rig, |f| replayed_hosts(f) == ["sendai"]).await;
+    assert_eq!(
+        jobs_in(&replay),
+        vec![(Some("sendai".to_string()), vec!["a-job".to_string()])],
+        "the host still connected keeps its snapshot"
+    );
+}
+
+#[tokio::test]
+async fn what_a_satellite_published_before_its_hello_is_forgotten_when_it_disconnects() {
+    let rig = Rig::new().await;
+    let minted = enrol(&rig, "kobe", Egress::Personal, SatelliteAdmin::RevokeOnly);
+    // A socket publishes and drops without ever sending a
+    // `Hello`: the handler never registers it, so only the socket's own
+    // clean-up can forget what it published.
+    let mut early = Sat::dial(&rig, &minted, Egress::Personal).await;
+    assert!(
+        early
+            .publish(&jobs_frame(Some("kobe"), &["early-job"]))
+            .await
+    );
+    replay_until(&rig, |f| !jobs_in(f).is_empty()).await;
+    early.close().await;
+    replay_until(&rig, |f| replayed_hosts(f).is_empty()).await;
+}
+
+#[tokio::test]
+async fn a_replaced_uplink_ending_does_not_forget_the_newer_uplinks_frames() {
+    let rig = Rig::new().await;
+    let mut first = join(&rig, "kobe", Egress::Personal, SatelliteAdmin::RevokeOnly).await;
+    assert!(
+        first
+            .publish(&jobs_frame(Some("kobe"), &["from-the-first"]))
+            .await
+    );
+    replay_until(&rig, |f| !jobs_in(f).is_empty()).await;
+
+    // The same host connects again. Its frame goes in before its `Hello`, so
+    // it is already kept when the primary swaps it in for the first uplink
+    // and the first uplink's clean-up runs.
+    let mut second = Sat::dial(&rig, &first.minted, Egress::Personal).await;
+    assert!(
+        second
+            .publish(&jobs_frame(Some("kobe"), &["from-the-second"]))
+            .await
+    );
+    replay_until(&rig, |f| {
+        jobs_in(f)
+            .iter()
+            .any(|(_, ids)| ids == &["from-the-second".to_string()])
+    })
+    .await;
+    second.hello(Some(role("kobe", Egress::Personal))).await;
+    second
+        .next_server("the Welcome", |m| matches!(m, ServerMsg::Welcome { .. }))
+        .await;
+    second.subscribe(&[]).await;
+    second
+        .next_server("DeviceAdminLevel", |m| {
+            matches!(m, ServerMsg::DeviceAdminLevel { .. })
+        })
+        .await;
+    assert_eq!(first.expect_close().await, Some(1000));
+    // Give the first uplink's clean-up time to run, then look more than once.
+    for _ in 0..4 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let replay = replay_until(&rig, |f| !jobs_in(f).is_empty()).await;
+        assert_eq!(
+            jobs_in(&replay),
+            vec![(
+                Some("kobe".to_string()),
+                vec!["from-the-second".to_string()]
+            )],
+            "the first uplink's end took the second's snapshot with it"
+        );
+    }
+    assert!(rig.hub.router().is_connected("kobe"));
 }
 
 #[tokio::test]
@@ -2404,6 +2727,116 @@ async fn replies_have_a_rate_limit_of_their_own_apart_from_publish_frames() {
         matches!(m, ServerMsg::SessionListResp { .. })
     })
     .await;
+}
+
+/// A rig whose satellites may send `burst` `client` frames at once and then
+/// `rate` a second, over-limit for `sustain` before the uplink is closed.
+async fn rig_with_client_bucket(rate: f64, burst: f64, sustain: Duration) -> Rig {
+    Rig::with_limits(WsLimits {
+        uplink: UplinkLimits {
+            client_rate: rate,
+            client_burst: burst,
+            sustain,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await
+}
+
+#[tokio::test]
+async fn client_frames_over_the_burst_are_answered_rate_limited_and_not_run() {
+    // Almost no refill, so the burst is all there is. The `Hello` and
+    // `Subscribe` of the admission used two of it.
+    let rig = rig_with_client_bucket(0.01, 10.0, Duration::from_secs(30)).await;
+    let phones: Vec<Minted> = (0..25)
+        .map(|i| rig.mint_device(&format!("phone-{i}")))
+        .collect();
+    let mut kobe = join(&rig, "kobe", Egress::Work, SatelliteAdmin::RevokeOnly).await;
+
+    for p in &phones {
+        kobe.client(&ClientMsg::DeviceRevoke {
+            request_id: request_id(),
+            device: p.device_id.clone(),
+        })
+        .await;
+    }
+    kobe.listen(Duration::from_millis(1000)).await;
+
+    let msgs = kobe.server_msgs();
+    let limited = msgs.iter().filter(|m| rate_limited(m)).count();
+    let revoked_answers = msgs
+        .iter()
+        .filter(|m| matches!(m, ServerMsg::DeviceRevoked { .. }))
+        .count();
+    let revoked_in_registry = phones
+        .iter()
+        .filter(|p| rig.registry.validate(&p.token) == TokenCheck::Revoked)
+        .count();
+    assert!(
+        (1..=10).contains(&revoked_in_registry),
+        "{revoked_in_registry} of 25 were run; the burst is 10"
+    );
+    assert_eq!(revoked_answers, revoked_in_registry);
+    assert_eq!(
+        limited,
+        25 - revoked_in_registry,
+        "every frame that was not run was answered `rate_limited`"
+    );
+    assert!(
+        kobe.frames
+            .iter()
+            .all(|f| matches!(kind_of(f), "server" | "request")),
+        "the refusal is inside an envelope: {:?}",
+        kobe.frames
+    );
+    assert!(
+        kobe.closed.is_none(),
+        "a short overrun is not closed: {:?}",
+        kobe.closed
+    );
+}
+
+#[tokio::test]
+async fn a_satellite_that_stays_over_the_client_limit_for_the_sustain_window_is_closed_1008() {
+    let rig = rig_with_client_bucket(5.0, 5.0, Duration::from_millis(300)).await;
+    let mut kobe = join(&rig, "kobe", Egress::Work, SatelliteAdmin::RevokeOnly).await;
+    for _ in 0..400 {
+        if kobe.closed.is_some()
+            || !kobe
+                .send_value(json!({"uplink": "client", "msg": {"type": "ping"}}))
+                .await
+        {
+            break;
+        }
+        kobe.pull(Duration::from_millis(1)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(kobe.expect_close().await, Some(1008));
+}
+
+#[tokio::test]
+async fn a_satellite_asking_at_an_honest_rate_is_never_limited() {
+    let rig = rig_with_client_bucket(20.0, 5.0, Duration::from_millis(300)).await;
+    let mut kobe = join(&rig, "kobe", Egress::Work, SatelliteAdmin::RevokeOnly).await;
+    // Ten a second for two seconds, each answered before the next.
+    for _ in 0..20 {
+        let r = kobe
+            .call(|rid| ClientMsg::DeviceRevoke {
+                device: format!("no-such-device-{rid}"),
+                request_id: rid,
+            })
+            .await;
+        assert!(is_unknown_device(&r), "{r:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    kobe.listen(Duration::from_millis(100)).await;
+    assert!(
+        !kobe.server_msgs().iter().any(rate_limited),
+        "{:?}",
+        kobe.frames
+    );
+    assert!(kobe.closed.is_none());
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2897,6 +3330,47 @@ async fn replies_that_do_not_match_what_was_asked_reach_nobody_and_the_honest_on
         "the model state",
         |m| matches!(m, ServerMsg::SessionModelState(s) if s.tag == "cody-a"),
     )
+    .await;
+}
+
+#[tokio::test]
+async fn an_attach_id_cannot_carry_anything_but_the_attach_family_back_to_its_requester() {
+    let rig = Rig::new().await;
+    let mut sendai = join(&rig, "sendai", Egress::Personal, SatelliteAdmin::RevokeOnly).await;
+    let mut a = rig.unix(vec![], false).await;
+    a.take_all();
+    a.send(&ClientMsg::SessionAttach {
+        tag: "cody-1".into(),
+        host: Some("sendai".into()),
+    })
+    .await;
+    let (id, _) = sendai.next_request("the attach").await;
+
+    // Each is for sendai and about this focus where it names one, so the
+    // only thing wrong with it is that an attach does not produce it.
+    for stray in [
+        json!({"type": "mother_jobs", "jobs": [], "host": "sendai"}),
+        json!({"type": "session_list_resp", "sessions": [], "host": "sendai"}),
+        json!({"type": "focus_list_resp", "focuses": [], "host": "sendai"}),
+        json!({"type": "session_model_state", "tag": "cody-1", "running": false}),
+        json!({"type": "perri_state", "tag": "cody-1", "host": "sendai", "queue": [], "current": null}),
+        json!({"type": "approval_pending", "tag": "cody-1", "count": 1, "host": "sendai"}),
+    ] {
+        assert!(sendai.reply(&id, &dec(stray)).await);
+    }
+    sendai.sync().await;
+    a.sync().await;
+    assert!(
+        a.inbox.is_empty(),
+        "something other than an attach's answer reached the requester: {:?}",
+        a.inbox
+    );
+
+    // The attach is still live for what it does produce.
+    assert!(sendai.reply(&id, &turns("cody-1")).await);
+    a.next_matching("the snapshot", |m| {
+        matches!(m, ServerMsg::SessionTurns { .. })
+    })
     .await;
 }
 
