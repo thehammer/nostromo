@@ -142,7 +142,10 @@ fn is_sensitive(msg: &ServerMsg) -> bool {
 }
 
 fn focus_registry_updated() -> ServerMsg {
-    ServerMsg::FocusRegistryUpdated { focuses: vec![], host: None }
+    ServerMsg::FocusRegistryUpdated {
+        focuses: vec![],
+        host: None,
+    }
 }
 
 /// The one `Withheld` a device is told about after subscribing.

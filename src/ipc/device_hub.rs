@@ -200,27 +200,23 @@ impl DeviceHub {
         } else {
             name
         };
-        let redeemed =
-            match self
-                .registry
-                .redeem_with_egress(
-                    proposed,
-                    kind,
-                    taken.admin,
-                    taken.egress,
-                    taken.matched_device.as_deref(),
-                )
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("could not save a new device: {e:#}");
-                    // The issuer must not wait for ever on a code that is gone.
-                    taken.notify_failed();
-                    return ServerMsg::PairRefused {
-                        reason: PairRefusedReason::Invalid,
-                    };
-                }
-            };
+        let redeemed = match self.registry.redeem_with_egress(
+            proposed,
+            kind,
+            taken.admin,
+            taken.egress,
+            taken.matched_device.as_deref(),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("could not save a new device: {e:#}");
+                // The issuer must not wait for ever on a code that is gone.
+                taken.notify_failed();
+                return ServerMsg::PairRefused {
+                    reason: PairRefusedReason::Invalid,
+                };
+            }
+        };
         taken.notify_paired(&redeemed.name, redeemed.replaced);
         info!(device = %redeemed.device_id, kind = ?kind, replaced = redeemed.replaced, "device paired");
         self.broadcast_devices();
@@ -303,14 +299,9 @@ impl DeviceHub {
                     hint,
                     kind,
                     admin.filter(|_| satellite.is_some()),
+                    (*egress).filter(|_| satellite.is_some()),
                     Instant::now(),
                 );
-                if let (Some(_), Some(e)) = (satellite, egress) {
-                    self.pairing
-                        .lock()
-                        .unwrap()
-                        .set_egress(&started.pairing_id, *e);
-                }
                 self.schedule_expiry();
                 ServerMsg::DevicePairing {
                     request_id: request_id.clone(),

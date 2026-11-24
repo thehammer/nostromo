@@ -159,6 +159,7 @@ impl PairingTable {
         name_hint: Option<String>,
         kind: DeviceKind,
         admin: Option<SatelliteAdmin>,
+        egress: Option<Egress>,
         now: Instant,
     ) -> Started {
         self.prune(now);
@@ -179,7 +180,7 @@ impl PairingTable {
             name_hint,
             kind,
             admin,
-            egress: None,
+            egress,
             expires_at: now + self.ttl,
             issuer: issuer.to_string(),
             origin,
@@ -195,13 +196,6 @@ impl PairingTable {
             code,
             expires_at: chrono::Utc::now()
                 + chrono::Duration::from_std(self.ttl).unwrap_or(chrono::Duration::minutes(5)),
-        }
-    }
-
-    /// Record the egress an enrolment code is for (satellites only).
-    pub fn set_egress(&mut self, pairing_id: &str, egress: Egress) {
-        if let Some(o) = self.open.iter_mut().find(|o| o.id == pairing_id) {
-            o.egress = Some(egress);
         }
     }
 
@@ -410,6 +404,7 @@ mod tests {
             Some("Kitchen".into()),
             DeviceKind::Iphone,
             None,
+            None,
             now,
         );
         Fixture {
@@ -536,8 +531,16 @@ mod tests {
     fn a_wrong_code_counts_against_every_open_pairing() {
         let mut f = fixture();
         let (tx2, mut rx2) = mpsc::unbounded_channel();
-        f.table
-            .start("conn-b", None, tx2, None, DeviceKind::Ipad, None, f.now);
+        f.table.start(
+            "conn-b",
+            None,
+            tx2,
+            None,
+            DeviceKind::Ipad,
+            None,
+            None,
+            f.now,
+        );
         for _ in 0..5 {
             f.table.check("not-a-code", None, never, f.now);
         }
@@ -556,6 +559,7 @@ mod tests {
             Some("Tokyo".into()),
             DeviceKind::Satellite,
             Some(SatelliteAdmin::Full),
+            None,
             f.now,
         );
         assert_eq!(
@@ -656,7 +660,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let other = f
             .table
-            .start("c", None, tx, None, DeviceKind::Iphone, None, f.now);
+            .start("c", None, tx, None, DeviceKind::Iphone, None, None, f.now);
         let ch = |t: &mut PairingTable, code: &str, now| match t.check(code, None, never, now) {
             CheckAnswer::Offer { challenge, .. } => challenge,
             other => panic!("{other:?}"),

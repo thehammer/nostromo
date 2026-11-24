@@ -735,7 +735,7 @@ the operator's own host.
   at every level including `off`; `Paired`, `Tcp` and `Routed` receive
   neither (2026-11-24 section, item 7). `PeerTrust` stays `Copy`
   (`SatelliteAdmin` is `Copy`). Add `pub fn redact_for_uplink_metadata(msg: ServerMsg,
-  host_key: &[u8; 32]) -> Option<ServerMsg>`: an **exhaustive match over
+  host_key: &[u8; 32], tags: &SensitiveTags) -> Option<ServerMsg>`: an **exhaustive match over
   every `ServerMsg` variant** (no `_` arm) implementing the memo's `work`
   column (metadata only; `None` for anything content-bearing), with focus
   tags replaced by `f-` + 8 hex of HMAC-SHA256(host_key, tag). The key is
@@ -775,7 +775,14 @@ the operator's own host.
   `Paired`, `PairRefused`, `Unauthorized`, `DeviceUnpaired`), or the frame is
   `MotherPeek`, `MotherAwaitDetected`, `Welcome`, `Pong`, `Error`, a
   targeted reply, or not in `publish_topics`; (2) if `egress == work` or
-  `is_phi_scoped`, pass it through `redact_for_uplink_metadata`; else
+  `is_phi_scoped`, pass it through `redact_for_uplink_metadata(msg, host_key,
+  &sensitive_tags)`, which **runs the sensitive-tag filter** (the same
+  `SensitiveTags` the network redaction uses): a focus-scoped frame for a
+  sensitive tag, including every Huey tag, is dropped, and the session,
+  focus and Mother-job lists lose their sensitive entries. The pseudonymous
+  tag looks the same for a sensitive focus as for any other, so the primary's
+  shape check cannot catch this: the forwarder must. W10c wires the daemon's
+  `SensitiveTags` into the forwarder; else
   `peer::outbound(PeerTrust::Tcp, …)` (which already withholds
   Teri/Fred/work state frames; there is no exception in v1); (3) stamp `host`; send it as `UplinkFrame::publish` (frames of a variant outside ingest's host-carrying allow-list are not sent at all). On
   (re)connect, replay the retained cache through the same filter first.
@@ -1053,6 +1060,14 @@ the operator's own host.
   pairing and admin frames returning `None`; the egress test's constructor
   list includes `TrackerSummary`, `SessionBridge`, `SessionTurnOrigin`,
   every `LocalOnly` frame added since 2026-10-18, and W9's ten frames.
+- [ ] **W10-19** Nothing about a sensitive focus leaves a `work` host:
+  `redact_for_uplink_metadata` takes the daemon's `SensitiveTags` and returns
+  `None` for `PerriState`, `SessionState`, `SessionBridge`, `ApprovalPending`,
+  `DecisionRequest`, `DecisionResolved`, `TrackerSummary` and `FocusCreated`
+  whose tag (or agent) is sensitive, and drops sensitive entries from
+  `SessionListResp`, `FocusListResp`, `FocusRegistryUpdated` and `MotherJobs`
+  (test per variant, with `huey` and a registered tag). The arms that return
+  `Some` are exactly the 13 published types (a source-parsed test).
 - [ ] **W10-16** A `work` satellite's `MotherJobs` built from a job in Mother's real
   HC-09 shape (`progress.signals.cost` as an object, `stage` one of
   `build|rework|gates|review|present|done`, `eta.n`, `attention_reasons` with
@@ -1188,3 +1203,17 @@ lenses:
   add: [correctness, tests, phi-security]
   remove: []
 ```
+
+## Carry-forward from W10a (for W10b and W10c)
+
+- A satellite's `Ping` gets no `Pong`: do not build a keepalive on it. Any
+  refusal sent to a satellite must be `SatelliteControl` or pass `is_refusal`,
+  or `may_receive` drops it.
+- The HMAC tag key for `pseudonymous_tag` must be created, persisted
+  (`~/.nostromo/uplink-tag-key`, mode 0600) and loaded by the uplink, which
+  refuses to publish when it is missing. It never falls back to a default key
+  (W10c).
+- A `read_only`-or-above satellite receives the full `Devices` list until the
+  "own record only" step lands in W10b.
+- The forwarder passes the daemon's `SensitiveTags` to
+  `redact_for_uplink_metadata` (W10c; step (2) above).

@@ -225,7 +225,10 @@ impl DeviceRecord {
             revoked_at: self.revoked_at,
             revoked_by: self.revoked_by,
             admin: self.admin,
-            egress: self.kind.is_satellite().then(|| self.egress.unwrap_or_default()),
+            egress: self
+                .kind
+                .is_satellite()
+                .then(|| self.egress.unwrap_or_default()),
         }
     }
 }
@@ -449,9 +452,7 @@ impl DeviceRegistry {
                 admin: kind
                     .is_satellite()
                     .then(|| admin.unwrap_or(SatelliteAdmin::RevokeOnly)),
-                egress: kind
-                    .is_satellite()
-                    .then(|| egress.unwrap_or_default()),
+                egress: kind.is_satellite().then(|| egress.unwrap_or_default()),
                 paired_at: now,
                 last_seen_at: None,
                 revoked_at: None,
@@ -489,7 +490,11 @@ impl DeviceRegistry {
     /// tell a phone from a satellite before it revokes.
     pub fn kind_of(&self, device_id: &str) -> Option<DeviceKind> {
         let state = self.state.lock().unwrap();
-        state.devices.iter().find(|d| d.id == device_id).map(|d| d.kind)
+        state
+            .devices
+            .iter()
+            .find(|d| d.id == device_id)
+            .map(|d| d.kind)
     }
 
     /// Names of the active satellites whose level is `full`.
@@ -499,7 +504,9 @@ impl DeviceRegistry {
             .devices
             .iter()
             .filter(|d| {
-                d.active() && d.kind.is_satellite() && d.admin.unwrap_or_default() == SatelliteAdmin::Full
+                d.active()
+                    && d.kind.is_satellite()
+                    && d.admin.unwrap_or_default() == SatelliteAdmin::Full
             })
             .map(|d| d.name.clone())
             .collect();
@@ -819,9 +826,14 @@ mod tests {
         assert_eq!(ka.egress, Egress::Work);
         assert_eq!(ka.admin, SatelliteAdmin::RevokeOnly);
         let kb = reg.satellite_info(&b.device_id).unwrap();
-        assert_eq!((kb.egress, kb.admin), (Egress::Personal, SatelliteAdmin::Full));
+        assert_eq!(
+            (kb.egress, kb.admin),
+            (Egress::Personal, SatelliteAdmin::Full)
+        );
         assert_eq!(reg.full_hosts(), vec!["sendai".to_string()]);
-        let phone = reg.redeem("iPhone", DeviceKind::Iphone, None, None).unwrap();
+        let phone = reg
+            .redeem("iPhone", DeviceKind::Iphone, None, None)
+            .unwrap();
         assert!(reg.satellite_info(&phone.device_id).is_none());
         assert_eq!(reg.kind_of(&phone.device_id), Some(DeviceKind::Iphone));
     }

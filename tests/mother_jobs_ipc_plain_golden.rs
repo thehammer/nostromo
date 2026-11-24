@@ -106,7 +106,8 @@ fn plain_frame() -> String {
         "golden must include a job with origin and phases"
     );
 
-    serde_json::to_string_pretty(&ServerMsg::MotherJobs { jobs, host: None }).expect("serialize frame")
+    serde_json::to_string_pretty(&ServerMsg::MotherJobs { jobs, host: None })
+        .expect("serialize frame")
 }
 
 #[test]

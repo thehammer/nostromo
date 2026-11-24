@@ -433,7 +433,11 @@ async fn a_request_is_held_and_broadcast_when_the_session_is_guarded_and_a_prese
     match (&frames[0], &frames[1]) {
         (
             ServerMsg::ApprovalRequest { tag, request },
-            ServerMsg::ApprovalPending { tag: ptag, count, host: None },
+            ServerMsg::ApprovalPending {
+                tag: ptag,
+                count,
+                host: None,
+            },
         ) => {
             assert_eq!((tag.as_str(), ptag.as_str(), *count), (T, T, 1));
             assert_eq!(request, &wire);
@@ -585,7 +589,9 @@ async fn allow_once_writes_the_input_unchanged_and_the_resolution_names_the_wind
             by_window,
             at_ms,
             ..
-        }, ServerMsg::ApprovalPending { tag: ptag, count, .. }] => {
+        }, ServerMsg::ApprovalPending {
+            tag: ptag, count, ..
+        }] => {
             assert_eq!(
                 (tag.as_str(), request_id.as_str(), outcome.as_str()),
                 (T, wire.request_id.as_str(), "allowed_once")

@@ -92,7 +92,9 @@ fn session_bridge_decodes_from_the_wire_form() {
         let frame = json!({"type": "session_bridge", "tag": "perri", "connected": connected});
         let msg: ServerMsg = serde_json::from_value(frame).expect("decode session_bridge");
         match msg {
-            ServerMsg::SessionBridge { tag, connected: c, .. } => {
+            ServerMsg::SessionBridge {
+                tag, connected: c, ..
+            } => {
                 assert_eq!(tag, "perri");
                 assert_eq!(c, connected);
             }

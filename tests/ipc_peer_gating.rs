@@ -390,7 +390,10 @@ fn send_preview(item_id: &str) -> SendPreview {
 }
 
 fn focus_registry_updated() -> ServerMsg {
-    ServerMsg::FocusRegistryUpdated { focuses: vec![], host: None }
+    ServerMsg::FocusRegistryUpdated {
+        focuses: vec![],
+        host: None,
+    }
 }
 
 /// Every broadcast kind that carries (or answers a request for) Teri/Fred
@@ -2825,7 +2828,10 @@ async fn a_job_queued_from_a_work_item_is_withheld_from_a_tcp_peer_by_its_label_
         .await
         .expect("unix handshake");
 
-    h.broadcast(ServerMsg::MotherJobs { jobs: jobs(), host: None });
+    h.broadcast(ServerMsg::MotherJobs {
+        jobs: jobs(),
+        host: None,
+    });
     for job in jobs() {
         h.broadcast(ServerMsg::MotherAwaitDetected(Box::new(job)));
     }
@@ -2940,7 +2946,10 @@ async fn a_tcp_peer_sees_who_queued_a_job_by_kind_and_name_but_never_the_focus_t
         ]
     };
 
-    h.broadcast(ServerMsg::MotherJobs { jobs: jobs(), host: None });
+    h.broadcast(ServerMsg::MotherJobs {
+        jobs: jobs(),
+        host: None,
+    });
     let unix_frames = raw_sync_via_broadcast(&h, &mut unix).await;
     let tcp_frames = raw_sync_via_broadcast(&h, &mut tcp).await;
 
@@ -3040,7 +3049,10 @@ async fn a_tcp_peer_sees_a_sensitive_focus_as_a_sensitive_focus_with_no_notice()
         ]
     };
 
-    h.broadcast(ServerMsg::MotherJobs { jobs: jobs(), host: None });
+    h.broadcast(ServerMsg::MotherJobs {
+        jobs: jobs(),
+        host: None,
+    });
     let unix_frames = raw_sync_via_broadcast(&h, &mut unix).await;
     let tcp_frames = raw_sync_via_broadcast(&h, &mut tcp).await;
 
@@ -3219,7 +3231,10 @@ async fn an_annotated_work_send_job_and_an_annotated_sensitive_job_are_still_wit
         ]
     };
 
-    h.broadcast(ServerMsg::MotherJobs { jobs: jobs(), host: None });
+    h.broadcast(ServerMsg::MotherJobs {
+        jobs: jobs(),
+        host: None,
+    });
     let unix_frames = raw_sync_via_broadcast(&h, &mut unix).await;
     let tcp_frames = raw_sync_via_broadcast(&h, &mut tcp).await;
 
@@ -3569,9 +3584,8 @@ fn assert_network_view(out: &FocusMeta, orig: &FocusMeta, via: &str) {
 
 fn metas_of(frame: &ServerMsg) -> Option<Vec<FocusMeta>> {
     match frame {
-        ServerMsg::FocusRegistryUpdated { focuses, .. } | ServerMsg::FocusListResp { focuses, .. } => {
-            Some(focuses.clone())
-        }
+        ServerMsg::FocusRegistryUpdated { focuses, .. }
+        | ServerMsg::FocusListResp { focuses, .. } => Some(focuses.clone()),
         ServerMsg::FocusCreated { meta, .. } => Some(vec![meta.clone()]),
         _ => None,
     }
@@ -3596,7 +3610,10 @@ async fn a_tcp_client_sees_redacted_focus_metadata_while_a_unix_client_sees_it_u
     )
     .await;
     for m in &metas {
-        h.broadcast(ServerMsg::FocusCreated { meta: m.clone(), host: None });
+        h.broadcast(ServerMsg::FocusCreated {
+            meta: m.clone(),
+            host: None,
+        });
     }
     h.broadcast(ServerMsg::Pong);
     tseen.extend(recv_until(&mut tcp, |m| matches!(m, ServerMsg::Pong)).await);
@@ -5129,10 +5146,14 @@ impl WorkService for AnnouncingWorkService {
                 .map_err(|e| WorkError::new("seed_failed", e.to_string()))?;
             mgr.add_or_update_focus(secret_meta.clone())
         };
-        let _ = self.tx.send(ServerMsg::FocusCreated { meta: secret_meta, host: None });
-        let _ = self
-            .tx
-            .send(ServerMsg::FocusRegistryUpdated { focuses: updated, host: None });
+        let _ = self.tx.send(ServerMsg::FocusCreated {
+            meta: secret_meta,
+            host: None,
+        });
+        let _ = self.tx.send(ServerMsg::FocusRegistryUpdated {
+            focuses: updated,
+            host: None,
+        });
         let _ = self.tx.send(ServerMsg::Notification {
             tag: tag.clone(),
             level: NotificationLevel::Info,
@@ -11169,7 +11190,10 @@ async fn a_job_queued_from_a_work_item_is_still_withheld_from_a_tcp_peer_when_it
         .await
         .expect("unix handshake");
 
-    h.broadcast(ServerMsg::MotherJobs { jobs: jobs(), host: None });
+    h.broadcast(ServerMsg::MotherJobs {
+        jobs: jobs(),
+        host: None,
+    });
     for job in jobs() {
         h.broadcast(ServerMsg::MotherAwaitDetected(Box::new(job)));
     }
@@ -14434,5 +14458,120 @@ async fn a_paired_device_s_tracker_edit_is_refused_and_writes_nothing() {
     assert!(
         !mentions_a_tracker_sentinel(&device_frames),
         "{device_frames:?}"
+    );
+}
+
+// ── a Hello's `role` is a claim, never a grant ────────────────────────────────
+
+/// Hello claiming to be a `work` satellite at `Full` admin, Welcome, Subscribe
+/// to everything, then Ping/Pong. The server must ignore the role: trust comes
+/// from the transport and the device token, never from what a peer says.
+async fn handshake_claiming_a_satellite_role<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> Vec<ServerMsg> {
+    send(
+        stream,
+        &ClientMsg::Hello {
+            capabilities: Vec::new(),
+            client_id: "role-claim-it".into(),
+            protocol_version: PROTOCOL_VERSION,
+            client_kind: None,
+            role: Some(nostromo::ipc::protocol::HelloRole::Satellite {
+                host: "kobe".into(),
+                egress: nostromo::ipc::devices::Egress::Work,
+            }),
+        },
+    )
+    .await;
+    match recv(stream).await {
+        ServerMsg::Welcome { .. } => {}
+        other => panic!("expected Welcome, got {other:?}"),
+    }
+    send(
+        stream,
+        &ClientMsg::Subscribe {
+            topics: vec![],
+            renders_decisions: false,
+            renders_approvals: false,
+            capabilities: vec![],
+            operator_nonce: None,
+        },
+    )
+    .await;
+    sync(stream).await
+}
+
+#[tokio::test]
+async fn a_unix_peer_claiming_the_satellite_role_is_still_a_local_peer() {
+    let h = spawn_server().await;
+    let mut unix = UnixStream::connect(&h.socket_path).await.expect("connect");
+    let mut seen = handshake_claiming_a_satellite_role(&mut unix).await;
+
+    for msg in all_sensitive_broadcasts() {
+        h.broadcast(msg);
+    }
+    h.broadcast(focus_registry_updated());
+    seen.extend(
+        recv_until(&mut unix, |m| {
+            matches!(m, ServerMsg::FocusRegistryUpdated { .. })
+        })
+        .await,
+    );
+
+    // A satellite receives only device administration; a local peer, all of it.
+    assert_eq!(
+        count(&seen, |m| matches!(m, ServerMsg::FredState { .. })),
+        1,
+        "{seen:?}"
+    );
+    assert_eq!(
+        count(&seen, |m| matches!(m, ServerMsg::TeriState { .. })),
+        1
+    );
+    assert_eq!(count(&seen, |m| matches!(m, ServerMsg::Withheld { .. })), 0);
+    // And it may still send what a satellite may not: a read verb is answered.
+    send(&mut unix, &ClientMsg::SessionList).await;
+    let frames = recv_until(&mut unix, |m| {
+        matches!(m, ServerMsg::SessionListResp { .. })
+    })
+    .await;
+    assert!(frames
+        .iter()
+        .all(|m| !matches!(m, ServerMsg::DeviceAdminError { .. })));
+}
+
+#[tokio::test]
+async fn an_unauthenticated_tcp_peer_claiming_the_satellite_role_gets_no_satellite_trust() {
+    let h = spawn_server().await;
+    let mut tcp = TcpStream::connect(("127.0.0.1", h.tcp_port))
+        .await
+        .expect("connect");
+    let seen = handshake_claiming_a_satellite_role(&mut tcp).await;
+
+    // Still the ordinary read-only LAN peer: told what is withheld...
+    assert_exactly_one_withheld(&seen);
+    // ...and device administration is refused as a TCP peer's, not judged at a
+    // satellite's `Full` level (which would answer with a `Devices` list).
+    send(
+        &mut tcp,
+        &ClientMsg::DeviceList {
+            request_id: "r1".into(),
+        },
+    )
+    .await;
+    let frames = sync(&mut tcp).await;
+    assert!(
+        frames.iter().all(|m| !matches!(
+            m,
+            ServerMsg::Devices { .. } | ServerMsg::DeviceAdminLevel { .. }
+        )),
+        "{frames:?}"
+    );
+    assert!(
+        frames.iter().any(|m| matches!(
+            m,
+            ServerMsg::Error { message } if message.starts_with("requires_secure_connection")
+        )),
+        "{frames:?}"
     );
 }

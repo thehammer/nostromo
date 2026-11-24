@@ -65,7 +65,10 @@ fn session(with_activity: bool) -> SessionInfo {
 }
 
 fn list(sessions: Vec<SessionInfo>) -> ServerMsg {
-    ServerMsg::SessionListResp { sessions, host: None }
+    ServerMsg::SessionListResp {
+        sessions,
+        host: None,
+    }
 }
 
 /// Pretty JSON with a trailing newline: the committed form.

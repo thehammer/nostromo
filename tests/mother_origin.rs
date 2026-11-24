@@ -2200,8 +2200,13 @@ async fn a_name_recorded_during_a_hold_stays_withheld_from_a_network_peer_after_
         .await;
 
     let listed = rig.feed.refresh().await.expect("list");
-    let frame =
-        nostromo::ipc::peer::redact_for_network(ServerMsg::MotherJobs { jobs: listed, host: None }, &tags);
+    let frame = nostromo::ipc::peer::redact_for_network(
+        ServerMsg::MotherJobs {
+            jobs: listed,
+            host: None,
+        },
+        &tags,
+    );
     let ServerMsg::MotherJobs { jobs, .. } = frame else {
         panic!("still a MotherJobs frame");
     };
@@ -3073,8 +3078,13 @@ async fn a_closed_sensitive_focus_shows_a_network_peer_neither_its_name_nor_its_
         assert!(tags.tag_is_sensitive(SECRET_FOCUS), "{how:?}");
         assert!(!tags.tag_is_sensitive(PLAIN_FOCUS), "{how:?}");
 
-        let frame =
-            nostromo::ipc::peer::redact_for_network(ServerMsg::MotherJobs { jobs: listed, host: None }, &tags);
+        let frame = nostromo::ipc::peer::redact_for_network(
+            ServerMsg::MotherJobs {
+                jobs: listed,
+                host: None,
+            },
+            &tags,
+        );
 
         let wire = serde_json::to_string(&frame).unwrap();
         let ServerMsg::MotherJobs { jobs, .. } = frame else {

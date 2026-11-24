@@ -24,9 +24,10 @@ use nostromo::data::teri_todos::TeriTodosSnapshot;
 use nostromo::data::work::{PicksSnapshot, SourceState, SourceStatus, WorkResult, WorkSource};
 use nostromo::ipc::peer::{
     classify_server_msg, is_uplink_metadata_shape, may_receive, outbound, redact_for_network,
-    redact_for_uplink_metadata, PeerTrust, SensitiveTags, ServerClass,
+    redact_for_uplink_metadata as redact_with_tags, PeerTrust, SensitiveTags, ServerClass,
 };
 use nostromo::ipc::protocol::ServerMsg;
+use nostromo::ipc::uplink_redact::pseudonymous_tag;
 use regex::Regex;
 use serde_json::{json, Value};
 
@@ -34,6 +35,11 @@ const KEY: [u8; 32] = [7u8; 32];
 const HOST: &str = "kobe";
 const PROTOCOL_SRC: &str = include_str!("../src/ipc/protocol.rs");
 const REDACT_SRC: &str = include_str!("../src/ipc/uplink_redact.rs");
+
+/// The redaction with an empty sensitive-tag list: nothing is sensitive.
+fn redact_for_uplink_metadata(msg: ServerMsg, key: &[u8; 32]) -> Option<ServerMsg> {
+    redact_with_tags(msg, key, &SensitiveTags::in_memory())
+}
 
 fn mk(field: &str) -> String {
     format!("SECRET-MARKER-{field}")
@@ -1377,5 +1383,328 @@ fn personal_egress_redaction_preserves_host() {
         }
         let out = serde_json::to_value(redact_for_network(msg, &tags)).unwrap();
         assert_eq!(out["host"], HOST, "{name}");
+    }
+}
+
+// ── a sensitive focus never leaves a work host ───────────────────────────────
+
+/// Tags the network redaction treats as sensitive: Huey's built-in tag, and a
+/// registered work-derived one. Also a sensitive Mother job.
+fn sensitive_tags() -> SensitiveTags {
+    let tags = SensitiveTags::in_memory();
+    tags.mark_tag("work-secret-1");
+    tags.mark_job("job-sens-1");
+    tags
+}
+
+/// One frame per focus-scoped published variant, for `tag`.
+fn focus_scoped_frames(tag: &str) -> Vec<(&'static str, ServerMsg)> {
+    vec![
+        (
+            "perri_state",
+            frame(json!({"type": "perri_state", "tag": tag, "host": HOST,
+                         "queue": [], "current": null})),
+        ),
+        (
+            "session_state",
+            frame(json!({"type": "session_state", "tag": tag, "state": "idle", "host": HOST})),
+        ),
+        (
+            "session_bridge",
+            frame(json!({"type": "session_bridge", "tag": tag, "connected": true, "host": HOST})),
+        ),
+        (
+            "approval_pending",
+            frame(json!({"type": "approval_pending", "tag": tag, "count": 1, "host": HOST})),
+        ),
+        (
+            "decision_request",
+            frame(
+                json!({"type": "decision_request", "tag": tag, "request_id": "req-1",
+                         "prompt": "p", "choices": [], "host": HOST}),
+            ),
+        ),
+        (
+            "decision_resolved",
+            frame(
+                json!({"type": "decision_resolved", "tag": tag, "request_id": "req-1",
+                         "resolution": "answered", "host": HOST}),
+            ),
+        ),
+        (
+            "tracker_summary",
+            frame(
+                json!({"type": "tracker_summary", "tag": tag, "has_tracker": true,
+                         "counts": {"todo": 1, "in_progress": 0, "blocked": 0,
+                                    "needs_you": 0, "done": 0}, "host": HOST}),
+            ),
+        ),
+        (
+            "focus_created",
+            frame(json!({"type": "focus_created", "host": HOST,
+                         "meta": {"tag": tag, "display_name": "d", "agent_name": "cody",
+                                  "is_built_in": false}})),
+        ),
+    ]
+}
+
+#[test]
+fn work_egress_withholds_every_focus_scoped_frame_for_a_sensitive_tag() {
+    let tags = sensitive_tags();
+    for tag in ["huey", "work-secret-1"] {
+        let frames = focus_scoped_frames(tag);
+        assert_eq!(frames.len(), 8, "every focus-scoped published variant");
+        for (name, msg) in frames {
+            assert!(
+                redact_with_tags(msg, &KEY, &tags).is_none(),
+                "{name} for the sensitive tag {tag} must never leave a work host"
+            );
+        }
+    }
+}
+
+#[test]
+fn work_egress_still_publishes_focus_scoped_frames_for_an_ordinary_tag() {
+    // The control for the test above: the filter is by tag, not blanket.
+    let tags = sensitive_tags();
+    for (name, msg) in focus_scoped_frames("cody-ABCD1234") {
+        let out = redact_with_tags(msg, &KEY, &tags)
+            .unwrap_or_else(|| panic!("{name}: an ordinary focus is published"));
+        assert!(is_uplink_metadata_shape(&out), "{name}");
+    }
+}
+
+#[test]
+fn work_egress_a_sensitive_agent_is_dropped_from_the_focus_and_session_lists() {
+    let tags = sensitive_tags();
+    let ordinary = |agent: &str, tag: &str| json!({"tag": tag, "display_name": "d", "agent_name": agent, "is_built_in": false});
+    let focuses = json!([
+        ordinary("cody", "cody-ABCD1234"),
+        ordinary("cody", "work-secret-1"),
+        ordinary("huey", "other-tag"),
+        ordinary("cody", "huey"),
+    ]);
+    let session = |agent: &str, tag: &str| {
+        json!({"tag": tag, "agent_name": agent, "view_name": "v", "alive": true,
+               "remote_control": false, "state": "idle", "mcp_bridge_connected": false})
+    };
+    let sessions = json!([
+        session("cody", "cody-ABCD1234"),
+        session("cody", "work-secret-1"),
+        session("huey", "other-tag"),
+        session("cody", "huey"),
+    ]);
+    let kept = pseudonymous_tag(&KEY, "cody-ABCD1234");
+    let only_the_ordinary = |msg: ServerMsg, key: &str, field: &str| {
+        let out = serde_json::to_value(redact_with_tags(msg, &KEY, &tags).unwrap()).unwrap();
+        let items = out[key].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{field}: only the ordinary entry stays");
+        assert_eq!(items[0]["tag"], kept.as_str(), "{field}");
+    };
+    only_the_ordinary(
+        frame(json!({"type": "focus_list_resp", "focuses": focuses, "host": HOST})),
+        "focuses",
+        "focus_list_resp",
+    );
+    only_the_ordinary(
+        frame(json!({"type": "focus_registry_updated", "focuses": focuses, "host": HOST})),
+        "focuses",
+        "focus_registry_updated",
+    );
+    only_the_ordinary(
+        frame(json!({"type": "session_list_resp", "sessions": sessions, "host": HOST})),
+        "sessions",
+        "session_list_resp",
+    );
+}
+
+#[test]
+fn work_egress_a_sensitive_job_is_dropped_from_the_job_list() {
+    let tags = sensitive_tags();
+    let mut sensitive = marker_job();
+    sensitive["id"] = json!("job-sens-1");
+    let mut ordinary = marker_job();
+    ordinary["id"] = json!("job-ordinary-a1b2c3d4");
+    let msg = frame(json!({"type": "mother_jobs", "host": HOST, "jobs": [sensitive, ordinary]}));
+    let out = serde_json::to_value(redact_with_tags(msg, &KEY, &tags).unwrap()).unwrap();
+    let jobs = out["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1, "the sensitive job is not published");
+    assert_eq!(jobs[0]["id"], "a1b2c3d4");
+}
+
+// ── the arms that publish are exactly the allowed ones ──────────────────────
+
+/// The thirteen frames a `work` satellite may publish.
+const PUBLISHED: [&str; 13] = [
+    "MotherJobs",
+    "MotherStatusline",
+    "PerriState",
+    "SessionState",
+    "SessionBridge",
+    "SessionListResp",
+    "FocusListResp",
+    "FocusRegistryUpdated",
+    "FocusCreated",
+    "ApprovalPending",
+    "DecisionRequest",
+    "DecisionResolved",
+    "TrackerSummary",
+];
+
+const NONE_MARKER: &str = "// Everything else stays on the host";
+
+/// The `ServerMsg::<Name>` variant names in `text`, sorted and de-duplicated.
+fn variants_named_in(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = text
+        .match_indices("ServerMsg::")
+        .map(|(i, m)| {
+            text[i + m.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect()
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+#[test]
+fn the_uplink_arms_that_publish_are_exactly_the_thirteen_allowed_types() {
+    let body = redact_fn_body();
+    let at = body
+        .find(NONE_MARKER)
+        .expect("the closing `None` arm is introduced by its comment");
+    let (publishing, withheld) = body.split_at(at);
+
+    // Everything before the marker is a published (or guarded) arm and names
+    // only allowed types; every allowed type is there.
+    let mut allowed: Vec<String> = PUBLISHED.iter().map(|s| s.to_string()).collect();
+    allowed.sort();
+    assert_eq!(
+        variants_named_in(publishing),
+        allowed,
+        "the arms before the closing `None` arm must name exactly the 13 allowed types"
+    );
+
+    // The closing arm withholds every other variant, and only them.
+    let mut everything_else: Vec<String> = server_msg_variants()
+        .into_iter()
+        .filter(|v| !PUBLISHED.contains(&v.as_str()))
+        .collect();
+    everything_else.sort();
+    assert_eq!(
+        variants_named_in(withheld),
+        everything_else,
+        "every ServerMsg variant outside the 13 must be in the closing `None` arm"
+    );
+    assert!(
+        withheld.contains("=> None,"),
+        "the closing arm must return None"
+    );
+    assert!(
+        !withheld.contains("Some("),
+        "the closing arm must not publish anything"
+    );
+}
+
+#[test]
+fn work_egress_withholds_daemon_reconnected_and_the_turn_origin_frame() {
+    let tags = sensitive_tags();
+    let frames = [
+        ("daemon_reconnected", ServerMsg::DaemonReconnected),
+        (
+            "session_turn_origin",
+            frame(
+                json!({"type": "session_turn_origin", "tag": "cody-ABCD1234",
+                         "turn_id": "t0", "origin": {"type": "terminal_follow_notice", "items": []}}),
+            ),
+        ),
+        (
+            "terminal_refused",
+            frame(json!({"type": "terminal_refused", "op": "input",
+                         "terminal_id": "t1", "code": "x"})),
+        ),
+    ];
+    for (name, msg) in frames {
+        assert!(redact_with_tags(msg, &KEY, &tags).is_none(), "{name}");
+    }
+}
+
+// ── counts are capped ────────────────────────────────────────────────────────
+
+#[test]
+fn work_egress_caps_the_approval_count_and_the_statusline_counts() {
+    let out = redact_for_uplink_metadata(
+        frame(
+            json!({"type": "approval_pending", "tag": "cody-1", "count": 4_000_000_000u64,
+                     "host": HOST}),
+        ),
+        &KEY,
+    )
+    .unwrap();
+    assert_eq!(serde_json::to_value(&out).unwrap()["count"], 100_000);
+    assert!(is_uplink_metadata_shape(&out));
+
+    let out = redact_for_uplink_metadata(
+        frame(
+            json!({"type": "mother_statusline", "running": 9_000_000, "queued": 9_000_001,
+                     "failed": 9_000_002, "awaiting": 9_000_003, "host": HOST}),
+        ),
+        &KEY,
+    )
+    .unwrap();
+    let v = serde_json::to_value(&out).unwrap();
+    for field in ["running", "queued", "failed", "awaiting"] {
+        assert_eq!(v[field], 100_000, "{field}");
+    }
+    assert_eq!(v["host"], HOST);
+    assert!(is_uplink_metadata_shape(&out));
+}
+
+#[test]
+fn work_egress_caps_every_free_number_in_a_job_and_the_shape_check_rejects_an_uncapped_one() {
+    // (pointer, huge value): each is a number a hostile host could use as a
+    // side channel, so each is capped and the primary rejects an uncapped one.
+    let numbers = [
+        ("/gates/attempt", json!(4_000_000_000u64)),
+        ("/gates/max_attempts", json!(4_000_000_000u64)),
+        ("/review_wave/cycle", json!(4_000_000_000u64)),
+        ("/review_wave/cycle_cap", json!(4_000_000_000u64)),
+        ("/review_wave/coverage_gaps", json!(4_000_000_000u64)),
+        ("/progress/v", json!(4_000_000_000u64)),
+        ("/progress/signals/gates/passed", json!(4_000_000_000u64)),
+        ("/progress/signals/gates/failed", json!(4_000_000_000u64)),
+        ("/progress/signals/gates/total", json!(4_000_000_000u64)),
+        (
+            "/progress/signals/elapsed_active_s",
+            json!(9_000_000_000_000u64),
+        ),
+        ("/progress/eta/lo_s", json!(9_000_000_000_000u64)),
+        ("/progress/eta/hi_s", json!(9_000_000_000_000u64)),
+    ];
+    for (pointer, huge) in numbers {
+        let mut job = marker_job();
+        *job.pointer_mut(pointer).expect(pointer) = huge.clone();
+        let out = redact_for_uplink_metadata(
+            frame(json!({"type": "mother_jobs", "host": HOST, "jobs": [job]})),
+            &KEY,
+        )
+        .unwrap();
+        let v = serde_json::to_value(&out).unwrap();
+        let got = v.pointer(&format!("/jobs/0{pointer}")).expect(pointer);
+        assert_eq!(got, &json!(100_000), "{pointer} is capped");
+        assert!(
+            is_uplink_metadata_shape(&out),
+            "{pointer}: capped output passes"
+        );
+
+        // The same frame with that number put back is not a metadata shape.
+        let mut tampered = v.clone();
+        *tampered.pointer_mut(&format!("/jobs/0{pointer}")).unwrap() = huge;
+        assert!(
+            !is_uplink_metadata_shape(&frame(tampered)),
+            "{pointer}: an uncapped number is rejected"
+        );
     }
 }

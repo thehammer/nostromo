@@ -181,7 +181,9 @@ async fn rebroadcast_jobs(state: &McpSharedState) {
     };
     match listed {
         Ok(jobs) => {
-            let _ = daemon.broadcast_tx.send(ServerMsg::MotherJobs { jobs, host: None });
+            let _ = daemon
+                .broadcast_tx
+                .send(ServerMsg::MotherJobs { jobs, host: None });
         }
         Err(e) => tracing::warn!("mother job re-poll failed: {e:#}"),
     }

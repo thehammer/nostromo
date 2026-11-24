@@ -4145,7 +4145,9 @@ pub enum ServerMsg {
     // ── satellites (W10) ──────────────────────────────────────────────────────
     /// The satellites currently connected to this primary. `Open`: names,
     /// egress and timestamps only.
-    Hosts { hosts: Vec<HostInfo> },
+    Hosts {
+        hosts: Vec<HostInfo>,
+    },
     /// A request naming `host` could not be routed.
     HostUnavailable {
         host: String,

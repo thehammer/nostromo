@@ -2964,7 +2964,11 @@ impl Inner {
             tag: tag.clone(),
             request: wire,
         });
-        self.broadcast(ServerMsg::ApprovalPending { tag, count, host: None });
+        self.broadcast(ServerMsg::ApprovalPending {
+            tag,
+            count,
+            host: None,
+        });
         if self.grace_epoch.load(Ordering::SeqCst) != epoch_at_check {
             // The presenter set changed while this request was being prepared:
             // have it checked again, so a request held just after the last

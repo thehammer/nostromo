@@ -12,12 +12,13 @@
 
 use sha2::{Digest, Sha256};
 
+use crate::ipc::peer::SensitiveTags;
 use crate::ipc::protocol::{DecisionChoice, FocusMeta, ServerMsg, SessionInfo};
 use crate::mother::crew::{
     AttentionEntry, CrewDecision, CrewGates, CrewProgress, GateResultEntry, GateSignal, LensEntry,
     LensFindings, MovedBack, ProgressEta, ProgressFlag, ProgressSignals, ReviewWave,
 };
-use crate::mother::MotherJob;
+use crate::mother::{MotherJob, MotherStatus};
 
 /// Job states Mother reports. Anything else is sent as `other`.
 const STATES: &[&str] = &[
@@ -184,9 +185,12 @@ fn ts(s: &Option<String>) -> Option<String> {
         .map(str::to_string)
 }
 
-fn ts_ok(s: &Option<String>) -> bool {
-    s.as_deref()
-        .is_none_or(|v| chrono::DateTime::parse_from_rfc3339(v).is_ok())
+fn cap32(n: Option<u32>) -> Option<u32> {
+    n.map(|n| n.min(MAX_COUNT as u32))
+}
+
+fn cap64(n: Option<u64>) -> Option<u64> {
+    n.map(|n| n.min(MAX_COUNT))
 }
 
 fn tag_ok_request_id(id: &str) -> bool {
@@ -210,8 +214,8 @@ fn metadata_job(job: &MotherJob, key: &[u8; 32]) -> MotherJob {
     };
     out.gates = job.gates.as_ref().map(|g| CrewGates {
         status: vocab_opt(&g.status, RESULTS),
-        attempt: g.attempt,
-        max_attempts: g.max_attempts,
+        attempt: cap32(g.attempt),
+        max_attempts: cap32(g.max_attempts),
         results: g
             .results
             .iter()
@@ -225,8 +229,8 @@ fn metadata_job(job: &MotherJob, key: &[u8; 32]) -> MotherJob {
         ..CrewGates::default()
     });
     out.review_wave = job.review_wave.as_ref().map(|w| ReviewWave {
-        cycle: w.cycle,
-        cycle_cap: w.cycle_cap,
+        cycle: cap32(w.cycle),
+        cycle_cap: cap32(w.cycle_cap),
         status: vocab_opt(&w.status, RESULTS),
         lenses: w
             .lenses
@@ -241,7 +245,7 @@ fn metadata_job(job: &MotherJob, key: &[u8; 32]) -> MotherJob {
                 ..LensEntry::default()
             })
             .collect(),
-        coverage_gaps: w.coverage_gaps,
+        coverage_gaps: cap32(w.coverage_gaps),
         ..ReviewWave::default()
     });
     out.decision = job.decision.as_ref().map(|d| CrewDecision {
@@ -262,22 +266,22 @@ fn metadata_job(job: &MotherJob, key: &[u8; 32]) -> MotherJob {
     out.attention = entries(&job.attention);
     out.attention_reasons = entries(&job.attention_reasons);
     out.progress = job.progress.as_ref().map(|p| CrewProgress {
-        v: p.v,
+        v: cap32(p.v),
         pct: p.pct.map(|n| n.min(100)),
         stage: vocab_opt(&p.stage, STAGES),
         signals: p.signals.as_ref().map(|s| ProgressSignals {
             stage: vocab_opt(&s.stage, STAGES),
             gates: s.gates.as_ref().map(|g| GateSignal {
-                passed: g.passed,
-                failed: g.failed,
-                total: g.total,
+                passed: g.passed.min(MAX_COUNT as u32),
+                failed: g.failed.min(MAX_COUNT as u32),
+                total: g.total.min(MAX_COUNT as u32),
             }),
-            elapsed_active_s: s.elapsed_active_s,
+            elapsed_active_s: cap64(s.elapsed_active_s),
             cost: None,
         }),
         eta: p.eta.as_ref().map(|e| ProgressEta {
-            lo_s: e.lo_s,
-            hi_s: e.hi_s,
+            lo_s: cap64(e.lo_s),
+            hi_s: cap64(e.hi_s),
             label: None,
             basis: vocab_opt(&e.basis, BASES),
         }),
@@ -301,106 +305,14 @@ fn metadata_job(job: &MotherJob, key: &[u8; 32]) -> MotherJob {
     out
 }
 
+/// Is `j` exactly what [`metadata_job`] makes? The redaction is idempotent on
+/// its own output (a ref that is already eight hex is kept whatever the key),
+/// so a job passes only if redacting it changes nothing: every blanked field is
+/// blank, every word is in its vocabulary, every list and number is within its
+/// cap. A new `MotherJob` field the redaction does not copy is checked here
+/// with no further edit.
 fn job_shape_ok(j: &MotherJob) -> bool {
-    let blank = j.repo.is_empty()
-        && j.isolation.is_empty()
-        && j.title.is_empty()
-        && j.created_at.is_none()
-        && j.started_at.is_none()
-        && j.finished_at.is_none()
-        && j.plan_path.is_none()
-        && j.question.is_none()
-        && j.adherence_notes.is_none()
-        && j.adherence_status.is_none()
-        && j.current_tier.is_none()
-        && j.current_activity.is_none()
-        && j.kind.is_none()
-        && j.phases.is_empty()
-        && j.cycles.is_empty()
-        && j.origin.is_none()
-        && j.nostromo.is_none()
-        && j.failure_reason.is_none()
-        && j.actual_cost_usd.is_none()
-        && j.pr_url.is_none()
-        && j.last_answer.is_none()
-        && j.criteria_source.is_none();
-    let opt = |s: &Option<String>, set: &[&str]| s.as_deref().is_none_or(|v| in_vocab(v, set));
-    let attn = |v: &[AttentionEntry]| {
-        v.len() <= MAX_LIST
-            && v.iter()
-                .all(|a| in_vocab(&a.reason, REASONS) && ts_ok(&a.since))
-    };
-    blank
-        && is_hex8(&j.id)
-        && in_vocab(&j.state, STATES)
-        && opt(&j.paused_reason, REASONS)
-        && opt(&j.activity, REASONS)
-        && attn(&j.attention)
-        && attn(&j.attention_reasons)
-        && j.gates.as_ref().is_none_or(|g| {
-            g.mode.is_none()
-                && g.posture.is_none()
-                && g.head_sha.is_none()
-                && g.started_at.is_none()
-                && g.finished_at.is_none()
-                && g.not_run.is_empty()
-                && !g.overridden
-                && opt(&g.status, RESULTS)
-                && g.results.len() <= MAX_LIST
-                && g.results.iter().all(|r| {
-                    r.name.is_empty()
-                        && in_vocab(&r.result, RESULTS)
-                        && r.duration_s.is_none()
-                        && r.exit_code.is_none()
-                        && r.unavailable_reason.is_none()
-                })
-        })
-        && j.review_wave.as_ref().is_none_or(|w| {
-            w.mode.is_none()
-                && w.budget_usd.is_none()
-                && w.spent_usd.is_none()
-                && w.adherence.is_none()
-                && w.claims.is_none()
-                && opt(&w.status, RESULTS)
-                && w.lenses.len() <= MAX_LIST
-                && w.lenses.iter().all(|l| {
-                    l.reviewer.is_empty()
-                        && l.lens.is_empty()
-                        && in_vocab(&l.state, RESULTS)
-                        && l.skip_reason.is_none()
-                        && l.cost_usd.is_none()
-                        && l.examined_files.is_none()
-                        && u64::from(l.findings.blocking) <= MAX_COUNT
-                        && u64::from(l.findings.advisory) <= MAX_COUNT
-                })
-        })
-        && j.decision.as_ref().is_none_or(|d| {
-            d.id.is_empty()
-                && d.options.is_empty()
-                && d.opened_at.is_none()
-                && d.resolution.is_none()
-                && in_vocab(&d.kind, REASONS)
-                && d.resolved_at.as_deref().is_none_or(|r| r == "resolved")
-        })
-        && j.progress.as_ref().is_none_or(|p| {
-            p.label.is_none()
-                && p.updated_at.is_none()
-                && p.pct.is_none_or(|n| n <= 100)
-                && opt(&p.stage, STAGES)
-                && p.signals
-                    .as_ref()
-                    .is_none_or(|s| s.cost.is_none() && opt(&s.stage, STAGES))
-                && p.eta
-                    .as_ref()
-                    .is_none_or(|e| e.label.is_none() && opt(&e.basis, BASES))
-                && p.moved_back
-                    .as_ref()
-                    .is_none_or(|m| m.at.is_none() && opt(&m.reason, REASONS))
-                && p.flags.len() <= MAX_LIST
-                && p.flags
-                    .iter()
-                    .all(|f| in_vocab(&f.reason, REASONS) && ts_ok(&f.since))
-        })
+    is_hex8(&j.id) && metadata_job(j, &[0u8; 32]) == *j
 }
 
 // ── Focus and session frames ─────────────────────────────────────────────────
@@ -478,23 +390,50 @@ fn session_shape_ok(s: &SessionInfo) -> bool {
 /// primary), transcripts, panes, approvals' content, Teri/Fred/work frames,
 /// terminals and every administrative frame return `None`. The match has no
 /// wildcard arm on purpose.
-pub fn redact_for_uplink_metadata(msg: ServerMsg, host_key: &[u8; 32]) -> Option<ServerMsg> {
+///
+/// `tags` is the daemon's [`SensitiveTags`], the list the network redaction
+/// uses. A pseudonymous tag looks the same for a Huey (sensitive) focus as for
+/// any other, so the primary's shape check cannot catch it: nothing about a
+/// sensitive focus leaves a `work` host. A focus-scoped frame for a sensitive
+/// tag returns `None`; the list frames drop their sensitive sessions, focuses
+/// and jobs.
+pub fn redact_for_uplink_metadata(
+    msg: ServerMsg,
+    host_key: &[u8; 32],
+    tags: &SensitiveTags,
+) -> Option<ServerMsg> {
     match msg {
         ServerMsg::MotherJobs { jobs, host } => Some(ServerMsg::MotherJobs {
             jobs: jobs
                 .iter()
-                .filter(|j| !j.is_work_send())
+                .filter(|j| !j.is_work_send() && !tags.job_is_sensitive(&j.id))
                 .take(MAX_LIST)
                 .map(|j| metadata_job(j, host_key))
                 .collect(),
             host,
         }),
-        ServerMsg::MotherStatusline(mut status) => {
-            status.running = status.running.min(MAX_COUNT as usize);
-            status.queued = status.queued.min(MAX_COUNT as usize);
-            status.failed = status.failed.min(MAX_COUNT as usize);
-            status.awaiting = status.awaiting.min(MAX_COUNT as usize);
-            Some(ServerMsg::MotherStatusline(status))
+        ServerMsg::MotherStatusline(status) => Some(ServerMsg::MotherStatusline(MotherStatus {
+            running: status.running.min(MAX_COUNT as usize),
+            queued: status.queued.min(MAX_COUNT as usize),
+            failed: status.failed.min(MAX_COUNT as usize),
+            awaiting: status.awaiting.min(MAX_COUNT as usize),
+            host: status.host,
+        })),
+        ServerMsg::PerriState { tag, .. } if tags.tag_is_sensitive(&tag) => None,
+        ServerMsg::SessionState { tag, .. }
+        | ServerMsg::SessionBridge { tag, .. }
+        | ServerMsg::ApprovalPending { tag, .. }
+        | ServerMsg::DecisionRequest { tag, .. }
+        | ServerMsg::DecisionResolved { tag, .. }
+        | ServerMsg::TrackerSummary { tag, .. }
+            if tags.tag_is_sensitive(&tag) =>
+        {
+            None
+        }
+        ServerMsg::FocusCreated { meta, .. }
+            if tags.focus_is_sensitive(&meta.tag, &meta.agent_name) =>
+        {
+            None
         }
         ServerMsg::PerriState {
             tag, queue, host, ..
@@ -530,6 +469,7 @@ pub fn redact_for_uplink_metadata(msg: ServerMsg, host_key: &[u8; 32]) -> Option
         ServerMsg::SessionListResp { sessions, host } => Some(ServerMsg::SessionListResp {
             sessions: sessions
                 .iter()
+                .filter(|s| !tags.focus_is_sensitive(&s.tag, &s.agent_name))
                 .take(MAX_LIST)
                 .map(|s| metadata_session(s, host_key))
                 .collect(),
@@ -538,6 +478,7 @@ pub fn redact_for_uplink_metadata(msg: ServerMsg, host_key: &[u8; 32]) -> Option
         ServerMsg::FocusListResp { focuses, host } => Some(ServerMsg::FocusListResp {
             focuses: focuses
                 .iter()
+                .filter(|m| !tags.focus_is_sensitive(&m.tag, &m.agent_name))
                 .take(MAX_LIST)
                 .map(|m| metadata_focus(m, host_key))
                 .collect(),
@@ -547,6 +488,7 @@ pub fn redact_for_uplink_metadata(msg: ServerMsg, host_key: &[u8; 32]) -> Option
             Some(ServerMsg::FocusRegistryUpdated {
                 focuses: focuses
                     .iter()
+                    .filter(|m| !tags.focus_is_sensitive(&m.tag, &m.agent_name))
                     .take(MAX_LIST)
                     .map(|m| metadata_focus(m, host_key))
                     .collect(),

@@ -608,7 +608,9 @@ fn announce_focus(daemon: &FocusHost, meta: FocusMeta) {
         .lock()
         .unwrap()
         .add_or_update_focus(meta.clone());
-    let _ = daemon.broadcast_tx.send(ServerMsg::FocusCreated { meta, host: None });
+    let _ = daemon
+        .broadcast_tx
+        .send(ServerMsg::FocusCreated { meta, host: None });
     let _ = daemon.broadcast_tx.send(ServerMsg::FocusLayout {
         tag,
         tree: PaneTree::repl_leaf(),

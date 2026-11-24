@@ -1622,7 +1622,10 @@ mod tests {
 
     #[test]
     fn non_sensitive_broadcasts_still_reach_network_peers() {
-        let msg = ServerMsg::FocusRegistryUpdated { focuses: vec![], host: None };
+        let msg = ServerMsg::FocusRegistryUpdated {
+            focuses: vec![],
+            host: None,
+        };
         assert!(!is_sensitive_server_msg(&msg).is_sensitive());
         let tags = SensitiveTags::in_memory();
         assert!(may_receive(PeerTrust::Tcp, &msg, &tags));
@@ -1697,7 +1700,10 @@ mod tests {
             select_for_client: None,
         };
         for msg in [
-            ServerMsg::FocusCreated { meta: meta.clone(), host: None },
+            ServerMsg::FocusCreated {
+                meta: meta.clone(),
+                host: None,
+            },
             ServerMsg::FocusRegistryUpdated {
                 focuses: vec![meta.clone()],
                 host: None,
@@ -2834,6 +2840,33 @@ mod tests {
             assert!(
                 names.iter().any(|n| n == allowed),
                 "no fixture for allowed verb {allowed}"
+            );
+        }
+    }
+
+    /// The only verbs a satellite may send, written out independently of
+    /// [`satellite_allowed`].
+    const SATELLITE_ALLOWED: &[&str] = &[
+        "Hello",
+        "Subscribe",
+        "Ping",
+        "DeviceList",
+        "DeviceRevoke",
+        "DevicePairStart",
+        "DevicePairCancel",
+        "DeviceSetAdmin",
+    ];
+
+    #[test]
+    fn a_satellite_may_send_exactly_the_allowed_verbs_and_no_other_client_message() {
+        for msg in every_client_msg() {
+            let allowed = SATELLITE_ALLOWED.contains(&variant_name(&msg).as_str());
+            assert_eq!(satellite_allowed(&msg), allowed, "{msg:?}");
+        }
+        for name in SATELLITE_ALLOWED {
+            assert!(
+                every_client_msg().iter().any(|m| variant_name(m) == *name),
+                "no fixture for {name}"
             );
         }
     }
@@ -4442,7 +4475,13 @@ mod tests {
         .unwrap();
         assert!(job.failure_reason.is_some(), "the fixture carries a reason");
 
-        let redacted = redact_for_network(ServerMsg::MotherJobs { jobs: vec![job], host: None }, &tags);
+        let redacted = redact_for_network(
+            ServerMsg::MotherJobs {
+                jobs: vec![job],
+                host: None,
+            },
+            &tags,
+        );
 
         let wire = serde_json::to_string(&redacted).unwrap();
         assert!(!wire.contains("SECRET-REASON"), "{wire}");
@@ -5313,13 +5352,16 @@ mod huey_surface_tests {
                 && shown.project_path.is_none()
         );
 
-        let ServerMsg::FocusCreated { meta: hidden_run, .. } = redact_for_network(
+        let ServerMsg::FocusCreated {
+            meta: hidden_run, ..
+        } = redact_for_network(
             ServerMsg::FocusCreated {
                 meta: meta("huey-run", "claude"),
                 host: None,
             },
             &tags,
-        ) else {
+        )
+        else {
             panic!("expected FocusCreated");
         };
         assert!(!hidden_run.tag.contains("huey"), "{}", hidden_run.tag);
