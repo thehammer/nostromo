@@ -203,7 +203,13 @@ impl DeviceHub {
         let redeemed =
             match self
                 .registry
-                .redeem(proposed, kind, taken.admin, taken.matched_device.as_deref())
+                .redeem_with_egress(
+                    proposed,
+                    kind,
+                    taken.admin,
+                    taken.egress,
+                    taken.matched_device.as_deref(),
+                )
             {
                 Ok(r) => r,
                 Err(e) => {
@@ -284,6 +290,7 @@ impl DeviceHub {
                 name_hint,
                 satellite,
                 admin,
+                egress,
             } => {
                 let (kind, hint) = match satellite {
                     Some(host) => (DeviceKind::Satellite, Some(host.clone())),
@@ -298,6 +305,12 @@ impl DeviceHub {
                     admin.filter(|_| satellite.is_some()),
                     Instant::now(),
                 );
+                if let (Some(_), Some(e)) = (satellite, egress) {
+                    self.pairing
+                        .lock()
+                        .unwrap()
+                        .set_egress(&started.pairing_id, *e);
+                }
                 self.schedule_expiry();
                 ServerMsg::DevicePairing {
                     request_id: request_id.clone(),
@@ -459,6 +472,7 @@ mod tests {
                 name_hint: None,
                 satellite: None,
                 admin: None,
+                egress: None,
             },
             PeerTrust::LocalOther,
             None,

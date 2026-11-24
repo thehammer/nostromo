@@ -634,6 +634,7 @@ async fn a_socket_with_no_token_that_sends_anything_else_is_unauthorized_not_pai
                 name_hint: None,
                 satellite: None,
                 admin: None,
+                egress: None,
             }),
         ),
         ("garbage", "this is not json".to_string()),
@@ -743,6 +744,7 @@ async fn a_legacy_tcp_peer_is_refused_every_pairing_and_device_verb() {
                 name_hint: None,
                 satellite: None,
                 admin: None,
+                egress: None,
             },
         ),
         (

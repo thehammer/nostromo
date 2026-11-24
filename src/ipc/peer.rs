@@ -2334,6 +2334,7 @@ mod tests {
                 name_hint: None,
                 satellite: None,
                 admin: None,
+                egress: None,
             },
             ClientMsg::DevicePairCancel {
                 request_id: "r".into(),

@@ -745,6 +745,7 @@ impl Conn {
             name_hint: name_hint.map(str::to_string),
             satellite: satellite.map(str::to_string),
             admin,
+            egress: None,
         })
         .await;
         let reply = self

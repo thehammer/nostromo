@@ -2620,6 +2620,9 @@ pub enum ClientMsg {
         satellite: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         admin: Option<crate::ipc::devices::SatelliteAdmin>,
+        /// What an enrolled satellite may publish; only with `satellite`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        egress: Option<crate::ipc::devices::Egress>,
     },
     DevicePairCancel {
         request_id: String,

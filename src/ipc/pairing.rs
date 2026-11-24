@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::devices::{
-    ct_eq, random_token, DeviceKind, PairOutcomeKind, PairRefusedReason, SatelliteAdmin,
+    ct_eq, random_token, DeviceKind, Egress, PairOutcomeKind, PairRefusedReason, SatelliteAdmin,
 };
 use super::protocol::ServerMsg;
 
@@ -29,6 +29,7 @@ struct Open {
     name_hint: Option<String>,
     kind: DeviceKind,
     admin: Option<SatelliteAdmin>,
+    egress: Option<Egress>,
     expires_at: Instant,
     /// The issuing connection's key.
     issuer: String,
@@ -77,6 +78,7 @@ pub struct Taken {
     pairing: Open,
     pub kind: DeviceKind,
     pub admin: Option<SatelliteAdmin>,
+    pub egress: Option<Egress>,
     pub name_hint: Option<String>,
     /// The active record the phone proved it holds, for `replace: true`.
     pub matched_device: Option<String>,
@@ -177,6 +179,7 @@ impl PairingTable {
             name_hint,
             kind,
             admin,
+            egress: None,
             expires_at: now + self.ttl,
             issuer: issuer.to_string(),
             origin,
@@ -192,6 +195,13 @@ impl PairingTable {
             code,
             expires_at: chrono::Utc::now()
                 + chrono::Duration::from_std(self.ttl).unwrap_or(chrono::Duration::minutes(5)),
+        }
+    }
+
+    /// Record the egress an enrolment code is for (satellites only).
+    pub fn set_egress(&mut self, pairing_id: &str, egress: Egress) {
+        if let Some(o) = self.open.iter_mut().find(|o| o.id == pairing_id) {
+            o.egress = Some(egress);
         }
     }
 
@@ -326,6 +336,7 @@ impl PairingTable {
         Ok(Taken {
             kind,
             admin: o.admin,
+            egress: o.egress,
             name_hint: o.name_hint.clone(),
             matched_device: matched,
             pairing: o,
