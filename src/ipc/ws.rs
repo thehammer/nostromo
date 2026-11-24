@@ -60,7 +60,11 @@ const UPGRADE_WINDOW: Duration = Duration::from_secs(60);
 const TOUCH_EVERY: Duration = Duration::from_secs(60);
 
 /// A pairing frame (`Hello`, `PairCheck`, `Pair`) is well under 1 KiB; a
-/// pairing-only socket refuses anything beyond a few KiB.
+/// pairing-only socket closes with 1009 on anything beyond a few KiB. (The
+/// library's own limit is chosen at accept time, before the peer's trust is
+/// known, so a message is buffered up to that limit before this check runs;
+/// the unauthenticated-slot cap and the upgrade limiter bound how many
+/// sockets can do so at once.)
 pub const PAIRING_MAX_MESSAGE: usize = 4 * 1024;
 
 /// Limits on connections that have not authenticated yet, and on devices.
@@ -144,6 +148,10 @@ impl Drop for UnauthSlot {
 /// host owns a whole /64, so per-address limits would be free to dodge).
 fn ip_key(ip: IpAddr) -> IpAddr {
     match ip {
+        // `::ffff:a.b.c.d` is the IPv4 peer `a.b.c.d` on a dual-stack socket.
+        IpAddr::V6(v6) if v6.to_ipv4_mapped().is_some() => {
+            IpAddr::V4(v6.to_ipv4_mapped().expect("checked"))
+        }
         IpAddr::V6(v6) => {
             let mut o = v6.octets();
             o[8..].fill(0);
@@ -691,6 +699,24 @@ mod tests {
         assert!(slots.try_acquire(same_64).is_none());
         drop(held);
         assert!(slots.try_acquire(same_64).is_some());
+    }
+
+    #[test]
+    fn an_ipv4_mapped_ipv6_peer_is_limited_as_its_ipv4_address() {
+        let limiter = UpgradeLimiter::new(1, Duration::from_secs(60));
+        let v4: IpAddr = "10.0.0.7".parse().unwrap();
+        let mapped: IpAddr = "::ffff:10.0.0.7".parse().unwrap();
+        let other: IpAddr = "::ffff:10.0.0.8".parse().unwrap();
+        let t0 = Instant::now();
+        assert!(limiter.allow(v4, t0));
+        assert!(
+            !limiter.allow(mapped, t0),
+            "the same peer under another spelling"
+        );
+        assert!(
+            limiter.allow(other, t0),
+            "mapped peers do not share one /64"
+        );
     }
 
     #[test]
