@@ -928,6 +928,22 @@ const MOTHER_POLL_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_
 /// The poll interval once `mother` is known to be missing from `PATH`.
 const MOTHER_UNAVAILABLE_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(60);
 
+/// The job poller's tick: every `MOTHER_POLL_INTERVAL` while `mother` works,
+/// every `MOTHER_UNAVAILABLE_INTERVAL` (first tick a full period away) once it
+/// is known to be missing.
+fn mother_poll_interval(unavailable: bool) -> tokio::time::Interval {
+    let mut interval = if unavailable {
+        tokio::time::interval_at(
+            tokio::time::Instant::now() + MOTHER_UNAVAILABLE_INTERVAL,
+            MOTHER_UNAVAILABLE_INTERVAL,
+        )
+    } else {
+        tokio::time::interval(MOTHER_POLL_INTERVAL)
+    };
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval
+}
+
 async fn run_job_poller(
     tx: broadcast::Sender<ServerMsg>,
     jobs_feed: nostromo::mother::JobsFeed,
@@ -936,8 +952,7 @@ async fn run_job_poller(
     let mut seen_awaiting: HashSet<String> = HashSet::new();
     let mut last_states: HashMap<String, String> = HashMap::new();
 
-    let mut interval = tokio::time::interval(MOTHER_POLL_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut interval = mother_poll_interval(false);
     // Set once `mother` is found missing from PATH: we warn a single time and
     // poll at `MOTHER_UNAVAILABLE_INTERVAL` until it shows up.
     let mut mother_unavailable = false;
@@ -953,8 +968,7 @@ async fn run_job_poller(
                 if mother_unavailable {
                     tracing::info!("mother CLI is available again; polling every 2 s");
                     mother_unavailable = false;
-                    interval = tokio::time::interval(MOTHER_POLL_INTERVAL);
-                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    interval = mother_poll_interval(false);
                 }
                 tracing::debug!(count = jobs.len(), skipped, "mother poll ok");
                 // A job queued from a work item is registered work-derived
@@ -1013,11 +1027,7 @@ async fn run_job_poller(
                             MOTHER_UNAVAILABLE_INTERVAL.as_secs()
                         );
                         mother_unavailable = true;
-                        interval = tokio::time::interval_at(
-                            tokio::time::Instant::now() + MOTHER_UNAVAILABLE_INTERVAL,
-                            MOTHER_UNAVAILABLE_INTERVAL,
-                        );
-                        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                        interval = mother_poll_interval(true);
                     }
                 } else {
                     tracing::warn!("mother list_jobs error: {e:#}");
@@ -1565,6 +1575,32 @@ mod tests {
         );
         let off = (clock.now() - chrono::Utc::now()).num_seconds().abs();
         assert!(off < 60, "not the wall clock: {off}s off");
+    }
+
+    async fn ticks_within(interval: &mut tokio::time::Interval, d: Duration) -> bool {
+        tokio::time::advance(d).await;
+        tokio::time::timeout(Duration::ZERO, interval.tick())
+            .await
+            .is_ok()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mother_polls_every_2s_backs_off_to_60s_and_resets_to_2s() {
+        let mut normal = mother_poll_interval(false);
+        normal.tick().await; // first tick is immediate
+        assert!(!ticks_within(&mut normal, Duration::from_millis(1900)).await);
+        assert!(ticks_within(&mut normal, Duration::from_millis(100)).await);
+
+        let mut backoff = mother_poll_interval(true);
+        assert!(!ticks_within(&mut backoff, Duration::from_secs(59)).await);
+        assert!(ticks_within(&mut backoff, Duration::from_secs(1)).await);
+        // Not due again after only 2 s.
+        assert!(!ticks_within(&mut backoff, Duration::from_secs(2)).await);
+
+        // Mother returns: back to the 2 s cadence.
+        let mut reset = mother_poll_interval(false);
+        reset.tick().await;
+        assert!(ticks_within(&mut reset, Duration::from_secs(2)).await);
     }
 
     async fn next_frame(rx: &mut broadcast::Receiver<ServerMsg>) -> ServerMsg {

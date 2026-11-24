@@ -232,40 +232,119 @@ enabled = false
     assert!(d.is_alive(), "nostromd died while the log was being read");
 }
 
+/// On a bare host the daemon creates `~/.claude/activity.jsonl` itself, so a
+/// hook that writes later is followed. Subscribe over the real socket, append
+/// an event, and require it to arrive as an `Activity` frame.
 #[test]
-fn activity_tailer_survives_missing_claude_dir_and_follows_file_when_it_appears() {
+fn activity_tailer_creates_missing_file_and_delivers_appended_events() {
+    use nostromo::ipc::codec::{read_frame, write_frame};
+    use nostromo::ipc::protocol::{ClientMsg, ServerMsg, Topic};
+
     let mut d = Daemon::start(None);
     d.run_startup_window();
 
-    // Append a valid event; the file (and ~/.claude) may or may not exist yet.
-    let claude_dir = d.home.path().join(".claude");
-    std::fs::create_dir_all(&claude_dir).unwrap();
-    let event = serde_json::json!({
-        "ts": "2026-11-23T12:00:00Z",
-        "agent": "cody",
-        "kind": "tool_use",
-        "summary": "linux startup test event",
-        "tool_name": "Read",
-    });
-    {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(claude_dir.join("activity.jsonl"))
-            .unwrap();
-        writeln!(f, "{event}").unwrap();
-    }
-
-    // Give the tailer time to notice and process the line.
-    std::thread::sleep(Duration::from_secs(2));
-
-    assert!(d.is_alive(), "nostromd died after activity.jsonl appeared");
-    let lines = d.log_lines();
+    let activity_file = d.home.path().join(".claude").join("activity.jsonl");
     assert!(
-        !lines
-            .iter()
-            .any(|(_, m)| mentions(m, "activity tailer exited")),
-        "the activity tailer must keep following the file; lines: {lines:?}"
+        activity_file.exists(),
+        "the daemon must create {} on a host with no ~/.claude",
+        activity_file.display()
     );
+
+    let socket = d.socket_path();
+    let marker = "linux startup delivery marker";
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let delivered = rt.block_on(async {
+        let mut s = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let hello = ClientMsg::Hello {
+            capabilities: Vec::new(),
+            client_id: "linux-startup".into(),
+            protocol_version: 4,
+            client_kind: None,
+        };
+        write_frame(&mut s, &serde_json::to_vec(&hello).unwrap())
+            .await
+            .unwrap();
+        let sub = ClientMsg::Subscribe {
+            topics: vec![Topic::Activity],
+            renders_decisions: false,
+            renders_approvals: false,
+            capabilities: vec![],
+            operator_nonce: None,
+        };
+        write_frame(&mut s, &serde_json::to_vec(&sub).unwrap())
+            .await
+            .unwrap();
+
+        // Welcome and the connect-time replay arrive first; wait for Welcome
+        // so the subscription is registered before the event is written.
+        loop {
+            let bytes = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut s))
+                .await
+                .expect("timed out waiting for Welcome")
+                .unwrap();
+            if matches!(
+                serde_json::from_slice::<ServerMsg>(&bytes),
+                Ok(ServerMsg::Welcome { .. })
+            ) {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let event = serde_json::json!({
+            "ts": "2026-11-23T12:00:00Z",
+            "agent": "cody",
+            "kind": "tool_use",
+            "summary": marker,
+            "tool_name": "Read",
+        });
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&activity_file)
+                .unwrap();
+            writeln!(f, "{event}").unwrap();
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let Ok(Ok(bytes)) = tokio::time::timeout(left, read_frame(&mut s)).await else {
+                return false;
+            };
+            if let Ok(ServerMsg::Activity(ev)) = serde_json::from_slice::<ServerMsg>(&bytes) {
+                if ev.summary == marker {
+                    return true;
+                }
+            }
+        }
+    });
+
+    assert!(
+        delivered,
+        "the appended activity event never reached a subscriber; log: {:?}",
+        d.log_lines()
+    );
+    assert!(
+        d.is_alive(),
+        "nostromd died after activity.jsonl was written"
+    );
+}
+
+#[test]
+fn unit_file_restarts_always_after_two_seconds() {
+    let unit = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("dist/systemd/nostromd.service"),
+    )
+    .expect("read dist/systemd/nostromd.service");
+    let has = |l: &str| unit.lines().any(|x| x.trim() == l);
+    assert!(
+        has("Restart=always"),
+        "unit must set Restart=always:\n{unit}"
+    );
+    assert!(has("RestartSec=2"), "unit must set RestartSec=2:\n{unit}");
 }
