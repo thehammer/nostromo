@@ -391,6 +391,7 @@ impl McpSharedState {
                 .send(crate::ipc::protocol::ServerMsg::SessionBridge {
                     tag: pty_id.to_owned(),
                     connected,
+                    host: None,
                 });
         }
     }

@@ -76,6 +76,9 @@ pub struct MotherStatus {
     pub queued: usize,
     pub failed: usize,
     pub awaiting: usize,
+    /// The satellite this came from; `None` is the daemon's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 impl MotherStatus {
@@ -94,6 +97,7 @@ impl MotherStatus {
             queued: get(1),
             failed: get(2),
             awaiting: get(3),
+            host: None,
         }
     }
 

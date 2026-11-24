@@ -129,6 +129,7 @@ fn hello(kind: Option<&str>) -> ClientMsg {
         client_id: "authored-prs-it".into(),
         protocol_version: PROTOCOL_VERSION,
         client_kind: kind.map(str::to_owned),
+        role: None,
     }
 }
 

@@ -48,6 +48,7 @@ fn status_line_shows_awaiting_when_nonzero() {
         queued: 0,
         failed: 0,
         awaiting: 2,
+        host: None,
     };
     assert!(s.status_line().contains("awaiting"));
 }
@@ -59,6 +60,7 @@ fn status_line_shows_running_when_no_awaiting() {
         queued: 1,
         failed: 0,
         awaiting: 0,
+        host: None,
     };
     let line = s.status_line();
     assert!(line.contains("running"), "expected 'running' in '{line}'");

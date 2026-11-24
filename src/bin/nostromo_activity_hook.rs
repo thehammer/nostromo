@@ -141,6 +141,7 @@ pub fn build_event(payload: &serde_json::Value) -> Option<ActivityEvent> {
         tool_use_id: fields.tool_use_id,
         cwd: str_field("cwd"),
         seq: None,
+        host: None,
     })
 }
 

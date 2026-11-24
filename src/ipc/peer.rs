@@ -30,6 +30,7 @@ use super::protocol::{
 };
 use crate::data::authored_prs::wire::AuthoredPrResult;
 use crate::data::work::WorkResult;
+use crate::ipc::devices::SatelliteAdmin;
 
 /// Wire transport a connection arrived on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +60,12 @@ pub enum PeerTrust {
     /// equivalent to `OperatorApp`. The device id travels on the connection,
     /// not here, so this stays `Copy`.
     Paired,
+    /// A satellite's uplink: a WebSocket whose token belongs to a satellite
+    /// record and whose `Hello` named that record's host and egress. The
+    /// `admin` level is the registry's value at admission (a snapshot: the
+    /// primary closes the uplink when it changes). Not `Tcp`'s policy: see
+    /// [`satellite_allowed`].
+    Satellite { admin: SatelliteAdmin },
 }
 
 impl PeerTrust {
@@ -75,7 +82,7 @@ impl PeerTrust {
     /// True for peers reached over the network.
     pub fn is_network(&self) -> bool {
         match self {
-            PeerTrust::Tcp | PeerTrust::Paired => true,
+            PeerTrust::Tcp | PeerTrust::Paired | PeerTrust::Satellite { .. } => true,
             PeerTrust::OperatorApp | PeerTrust::LocalOther => false,
         }
     }
@@ -683,6 +690,12 @@ pub enum ServerClass<'a> {
     /// Device administration (`Devices`, `DevicePairing`, ...): delivered to
     /// local peers only, never to a `Tcp` or `Paired` peer.
     Admin,
+    /// The level a satellite holds and the refusal it is answered with
+    /// (`DeviceAdminLevel`, `DeviceAdminError`): delivered to local peers and
+    /// to a satellite at **every** level (an `off` satellite must still learn
+    /// it is off), never to a `Paired`, `Tcp` peer. Only ever written
+    /// targeted, never broadcast.
+    SatelliteControl,
 }
 
 // ── What is NOT gated (read this before trusting the exhaustive matches) ─────
@@ -901,8 +914,15 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         ServerMsg::DevicePairing { .. }
         | ServerMsg::DevicePairOutcome { .. }
         | ServerMsg::Devices { .. }
-        | ServerMsg::DeviceRevoked { .. }
-        | ServerMsg::DeviceAdminError { .. } => ServerClass::Admin,
+        | ServerMsg::DeviceRevoked { .. } => ServerClass::Admin,
+
+        // A satellite's level and its refusals: see `ServerClass::SatelliteControl`.
+        ServerMsg::DeviceAdminLevel { .. } | ServerMsg::DeviceAdminError { .. } => {
+            ServerClass::SatelliteControl
+        }
+
+        // Satellite bookkeeping: host names, egress and timestamps only.
+        ServerMsg::Hosts { .. } | ServerMsg::HostUnavailable { .. } => ServerClass::Open,
 
         // The CLI's model list and the per-agent defaults name agents and
         // models, never focus content. A request result goes only to the
@@ -922,7 +942,8 @@ pub fn is_sensitive_server_msg(msg: &ServerMsg) -> SensitiveClass {
         | ServerClass::Job(_)
         | ServerClass::Activity(_)
         | ServerClass::LocalOnly
-        | ServerClass::Admin => SensitiveClass::NotSensitive,
+        | ServerClass::Admin
+        | ServerClass::SatelliteControl => SensitiveClass::NotSensitive,
     }
 }
 
@@ -998,6 +1019,15 @@ pub fn may_receive(trust: PeerTrust, msg: &ServerMsg, tags: &SensitiveTags) -> b
     if !trust.is_network() || is_refusal(msg) {
         return true;
     }
+    // A satellite is a publisher: it receives only device administration (at
+    // `read_only` or above) and its own level and refusals, nothing else.
+    if let PeerTrust::Satellite { admin } = trust {
+        return match classify_server_msg(msg) {
+            ServerClass::Admin => admin != SatelliteAdmin::Off,
+            ServerClass::SatelliteControl => true,
+            _ => false,
+        };
+    }
     match classify_server_msg(msg) {
         ServerClass::Sensitive => false,
         ServerClass::Open => true,
@@ -1005,7 +1035,9 @@ pub fn may_receive(trust: PeerTrust, msg: &ServerMsg, tags: &SensitiveTags) -> b
         ServerClass::Job(job_id) => !tags.job_is_sensitive(job_id),
         ServerClass::Activity(Some(tag)) => !tags.tag_is_sensitive(tag),
         ServerClass::Activity(None) => false,
-        ServerClass::LocalOnly | ServerClass::Admin => false,
+        ServerClass::LocalOnly => false,
+        // Local peers always pass (above); a satellite was handled above; any other network peer: no.
+        ServerClass::Admin | ServerClass::SatelliteControl => false,
     }
 }
 
@@ -1023,6 +1055,29 @@ pub fn outbound(trust: PeerTrust, msg: ServerMsg, tags: &SensitiveTags) -> Optio
 }
 
 // ── client → server classification ───────────────────────────────────────────
+
+pub use super::uplink_redact::{is_uplink_metadata_shape, redact_for_uplink_metadata};
+
+/// What a satellite's uplink may send the primary: its handshake, topic
+/// selection, `Ping`, and the device-administration verbs (which
+/// `DeviceHub::dispatch` then judges per level; `DeviceUnpairSelf` is a
+/// phone's verb and is not here). Everything else, in particular every
+/// routable read verb, is refused before it reaches `handle_client_msg`, the
+/// router or any other dispatch: a satellite publishes, it does not consume
+/// another host's state.
+pub fn satellite_allowed(msg: &ClientMsg) -> bool {
+    matches!(
+        msg,
+        ClientMsg::Hello { .. }
+            | ClientMsg::Subscribe { .. }
+            | ClientMsg::Ping
+            | ClientMsg::DeviceList { .. }
+            | ClientMsg::DeviceRevoke { .. }
+            | ClientMsg::DevicePairStart { .. }
+            | ClientMsg::DevicePairCancel { .. }
+            | ClientMsg::DeviceSetAdmin { .. }
+    )
+}
 
 /// What a network (TCP) peer may do with a client-to-daemon message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1396,19 +1451,21 @@ pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
         metas
     }
     match msg {
-        ServerMsg::FocusListResp { focuses } => ServerMsg::FocusListResp {
+        ServerMsg::FocusListResp { focuses, host } => ServerMsg::FocusListResp {
             focuses: redact_all(focuses, tags),
+            host,
         },
-        ServerMsg::FocusRegistryUpdated { focuses } => ServerMsg::FocusRegistryUpdated {
+        ServerMsg::FocusRegistryUpdated { focuses, host } => ServerMsg::FocusRegistryUpdated {
             focuses: redact_all(focuses, tags),
+            host,
         },
-        ServerMsg::FocusCreated { mut meta } => {
+        ServerMsg::FocusCreated { mut meta, host } => {
             redact_meta(&mut meta, tags);
-            ServerMsg::FocusCreated { meta }
+            ServerMsg::FocusCreated { meta, host }
         }
-        ServerMsg::SessionListResp { mut sessions } => {
+        ServerMsg::SessionListResp { mut sessions, host } => {
             sessions.retain(|s| !tags.focus_is_sensitive(&s.tag, &s.agent_name));
-            ServerMsg::SessionListResp { sessions }
+            ServerMsg::SessionListResp { sessions, host }
         }
         // A task list passes unchanged: it has no sensitive field by
         // construction (see `TaskMeta`, and the key-set test below).
@@ -1432,7 +1489,7 @@ pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
             defaults: Default::default(),
             declared: Default::default(),
         },
-        ServerMsg::MotherJobs { mut jobs } => {
+        ServerMsg::MotherJobs { mut jobs, host } => {
             // By label as well as by id: `mother add` returns before the daemon
             // has registered the new job's id, and the job feed must not
             // include it in that gap.
@@ -1440,7 +1497,7 @@ pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
             for job in &mut jobs {
                 redact_job(job, tags);
             }
-            ServerMsg::MotherJobs { jobs }
+            ServerMsg::MotherJobs { jobs, host }
         }
         ServerMsg::MotherAwaitDetected(mut job) => {
             redact_job(&mut job, tags);
@@ -1565,7 +1622,7 @@ mod tests {
 
     #[test]
     fn non_sensitive_broadcasts_still_reach_network_peers() {
-        let msg = ServerMsg::FocusRegistryUpdated { focuses: vec![] };
+        let msg = ServerMsg::FocusRegistryUpdated { focuses: vec![], host: None };
         assert!(!is_sensitive_server_msg(&msg).is_sensitive());
         let tags = SensitiveTags::in_memory();
         assert!(may_receive(PeerTrust::Tcp, &msg, &tags));
@@ -1640,12 +1697,14 @@ mod tests {
             select_for_client: None,
         };
         for msg in [
-            ServerMsg::FocusCreated { meta: meta.clone() },
+            ServerMsg::FocusCreated { meta: meta.clone(), host: None },
             ServerMsg::FocusRegistryUpdated {
                 focuses: vec![meta.clone()],
+                host: None,
             },
             ServerMsg::FocusListResp {
                 focuses: vec![meta.clone()],
+                host: None,
             },
         ] {
             let json = serde_json::to_string(&redact_for_network(msg, &SensitiveTags::in_memory()))
@@ -1874,6 +1933,7 @@ mod tests {
                 tool_use_id: None,
                 cwd: None,
                 seq: None,
+                host: None,
             })
         };
         assert!(may_receive(
@@ -1917,9 +1977,10 @@ mod tests {
             project_path: Some("/Users/x".into()),
             select_for_client: None,
         };
-        let ServerMsg::FocusCreated { meta: derived } = redact_for_network(
+        let ServerMsg::FocusCreated { meta: derived, .. } = redact_for_network(
             ServerMsg::FocusCreated {
                 meta: meta("cody-secret-jira-title", "cody"),
+                host: None,
             },
             &tags,
         ) else {
@@ -1931,9 +1992,10 @@ mod tests {
         assert_eq!(derived.tag, tags.opaque_tag("cody-secret-jira-title"));
         assert_ne!(derived.tag, tags.opaque_tag("cody-other"));
 
-        let ServerMsg::FocusCreated { meta: fred } = redact_for_network(
+        let ServerMsg::FocusCreated { meta: fred, .. } = redact_for_network(
             ServerMsg::FocusCreated {
                 meta: meta("fred", "fred"),
+                host: None,
             },
             &tags,
         ) else {
@@ -1969,7 +2031,7 @@ mod tests {
             last_problem: None,
         };
         let tags = tags_with("cody-core-1");
-        let ServerMsg::SessionListResp { sessions } = redact_for_network(
+        let ServerMsg::SessionListResp { sessions, .. } = redact_for_network(
             ServerMsg::SessionListResp {
                 sessions: vec![
                     info("fred", "fred"),
@@ -1977,6 +2039,7 @@ mod tests {
                     info("renamed", "teri"),
                     info("cody-ok", "cody"),
                 ],
+                host: None,
             },
             &tags,
         ) else {
@@ -2031,8 +2094,8 @@ mod tests {
                     project_path: None,
                     select_for_client: None,
                 };
-                let ServerMsg::FocusCreated { meta } =
-                    redact_for_network(ServerMsg::FocusCreated { meta }, &tags)
+                let ServerMsg::FocusCreated { meta, .. } =
+                    redact_for_network(ServerMsg::FocusCreated { meta, host: None }, &tags)
                 else {
                     panic!("expected FocusCreated");
                 };
@@ -2085,6 +2148,7 @@ mod tests {
                 client_id: "c".into(),
                 protocol_version: 4,
                 client_kind: None,
+                role: None,
             },
             ClientMsg::Subscribe {
                 topics: vec![],
@@ -3633,6 +3697,7 @@ mod tests {
                 needs_you: 4,
                 done: 5,
             },
+            host: None,
         }
     }
 
@@ -4230,6 +4295,7 @@ mod tests {
         ServerMsg::ApprovalPending {
             tag: tag.into(),
             count: 3,
+            host: None,
         }
     }
 
@@ -4376,7 +4442,7 @@ mod tests {
         .unwrap();
         assert!(job.failure_reason.is_some(), "the fixture carries a reason");
 
-        let redacted = redact_for_network(ServerMsg::MotherJobs { jobs: vec![job] }, &tags);
+        let redacted = redact_for_network(ServerMsg::MotherJobs { jobs: vec![job], host: None }, &tags);
 
         let wire = serde_json::to_string(&redacted).unwrap();
         assert!(!wire.contains("SECRET-REASON"), "{wire}");
@@ -5228,9 +5294,10 @@ mod huey_surface_tests {
     #[test]
     fn h6_11_a_network_peer_sees_the_huey_focus_only_under_an_opaque_tag() {
         let tags = SensitiveTags::in_memory();
-        let ServerMsg::FocusCreated { meta: shown } = redact_for_network(
+        let ServerMsg::FocusCreated { meta: shown, .. } = redact_for_network(
             ServerMsg::FocusCreated {
                 meta: meta("huey", "huey"),
+                host: None,
             },
             &tags,
         ) else {
@@ -5246,9 +5313,10 @@ mod huey_surface_tests {
                 && shown.project_path.is_none()
         );
 
-        let ServerMsg::FocusCreated { meta: hidden_run } = redact_for_network(
+        let ServerMsg::FocusCreated { meta: hidden_run, .. } = redact_for_network(
             ServerMsg::FocusCreated {
                 meta: meta("huey-run", "claude"),
+                host: None,
             },
             &tags,
         ) else {
@@ -5278,13 +5346,14 @@ mod huey_surface_tests {
             last_problem: None,
         };
         let tags = SensitiveTags::in_memory();
-        let ServerMsg::SessionListResp { sessions } = redact_for_network(
+        let ServerMsg::SessionListResp { sessions, .. } = redact_for_network(
             ServerMsg::SessionListResp {
                 sessions: vec![
                     info("huey", "huey"),
                     info("huey-run", "claude"),
                     info("cody-ok", "cody"),
                 ],
+                host: None,
             },
             &tags,
         ) else {
@@ -5293,9 +5362,10 @@ mod huey_surface_tests {
         let kept: Vec<&str> = sessions.iter().map(|s| s.tag.as_str()).collect();
         assert_eq!(kept, vec!["cody-ok"]);
 
-        let ServerMsg::FocusListResp { focuses } = redact_for_network(
+        let ServerMsg::FocusListResp { focuses, .. } = redact_for_network(
             ServerMsg::FocusListResp {
                 focuses: vec![meta("huey", "huey"), meta("cody-ok", "cody")],
+                host: None,
             },
             &tags,
         ) else {

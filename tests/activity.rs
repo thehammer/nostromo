@@ -43,6 +43,7 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
             client_id: "activity-it".into(),
             protocol_version: 4,
             client_kind: None,
+            role: None,
         },
     )
     .await;

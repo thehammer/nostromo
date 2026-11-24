@@ -134,6 +134,7 @@ async fn connect(d: &Daemon) -> UnixStream {
             client_id: "native-surfaces-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: None,
+            role: None,
         },
     )
     .await;
@@ -479,6 +480,7 @@ async fn replayed_layout(d: &Daemon, tag: &str) -> Option<PaneTree> {
             client_id: "replay-probe".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: None,
+            role: None,
         },
     )
     .await;
@@ -660,6 +662,7 @@ async fn a_fresh_spawn_of_teri_or_fred_does_not_announce_its_layout_to_a_network
             client_id: "native-surfaces-tcp".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: None,
+            role: None,
         })
         .unwrap(),
     )

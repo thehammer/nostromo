@@ -930,6 +930,7 @@ impl TrackerRegistry {
                 tag: tag.to_string(),
                 has_tracker: summary.has_tracker,
                 counts: summary.counts,
+                host: None,
             },
         ]
     }

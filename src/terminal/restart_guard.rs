@@ -83,6 +83,7 @@ async fn ask(stream: UnixStream) -> Result<Vec<RemoteShellSummary>> {
         client_id: format!("remote-shells-{}", std::process::id()),
         protocol_version: PROTOCOL_VERSION.max(MIN_CLIENT_VERSION),
         client_kind: None,
+        role: None,
     };
     write_frame(&mut writer, &serde_json::to_vec(&hello)?).await?;
     let welcome: ServerMsg = serde_json::from_slice(&read_frame(&mut reader).await?)?;

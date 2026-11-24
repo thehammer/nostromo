@@ -1128,7 +1128,7 @@ fn the_mother_jobs_frame_for_the_fixture_snapshots_matches_the_golden() {
         ["j-gates1", "j-wave1", "j-hold1"]
     );
 
-    let frame = serde_json::to_string_pretty(&ServerMsg::MotherJobs { jobs }).unwrap();
+    let frame = serde_json::to_string_pretty(&ServerMsg::MotherJobs { jobs, host: None }).unwrap();
     let path = fixture_dir().join("ipc_mother_jobs.golden.json");
 
     if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {

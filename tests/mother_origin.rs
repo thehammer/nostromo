@@ -2201,8 +2201,8 @@ async fn a_name_recorded_during_a_hold_stays_withheld_from_a_network_peer_after_
 
     let listed = rig.feed.refresh().await.expect("list");
     let frame =
-        nostromo::ipc::peer::redact_for_network(ServerMsg::MotherJobs { jobs: listed }, &tags);
-    let ServerMsg::MotherJobs { jobs } = frame else {
+        nostromo::ipc::peer::redact_for_network(ServerMsg::MotherJobs { jobs: listed, host: None }, &tags);
+    let ServerMsg::MotherJobs { jobs, .. } = frame else {
         panic!("still a MotherJobs frame");
     };
     let snapshot = |id: &str| {
@@ -2336,6 +2336,7 @@ fn golden_frame() -> String {
 
     let mut frame = serde_json::to_value(ServerMsg::MotherJobs {
         jobs: vec![focus, unverified, you, unknown],
+        host: None,
     })
     .expect("serialise the frame");
     assert_eq!(frame["type"], "mother_jobs", "the frame's tag");
@@ -2584,6 +2585,7 @@ fn notice_history_frame() -> String {
     );
     let frame = serde_json::to_value(ServerMsg::MotherJobs {
         jobs: vec![history, told, not_sent],
+        host: None,
     })
     .expect("serialise the frame");
     assert_eq!(frame["type"], "mother_jobs", "the frame's tag");
@@ -3072,10 +3074,10 @@ async fn a_closed_sensitive_focus_shows_a_network_peer_neither_its_name_nor_its_
         assert!(!tags.tag_is_sensitive(PLAIN_FOCUS), "{how:?}");
 
         let frame =
-            nostromo::ipc::peer::redact_for_network(ServerMsg::MotherJobs { jobs: listed }, &tags);
+            nostromo::ipc::peer::redact_for_network(ServerMsg::MotherJobs { jobs: listed, host: None }, &tags);
 
         let wire = serde_json::to_string(&frame).unwrap();
-        let ServerMsg::MotherJobs { jobs } = frame else {
+        let ServerMsg::MotherJobs { jobs, .. } = frame else {
             panic!("still a MotherJobs frame");
         };
         let origin_of = |id: &str| {

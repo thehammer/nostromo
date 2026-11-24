@@ -137,6 +137,7 @@ async fn raw_handshake(stream: &mut UnixStream, client_id: &str) {
             client_id: client_id.into(),
             protocol_version: 4,
             client_kind: None,
+            role: None,
         },
     )
     .await;

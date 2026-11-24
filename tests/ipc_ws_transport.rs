@@ -142,7 +142,7 @@ fn is_sensitive(msg: &ServerMsg) -> bool {
 }
 
 fn focus_registry_updated() -> ServerMsg {
-    ServerMsg::FocusRegistryUpdated { focuses: vec![] }
+    ServerMsg::FocusRegistryUpdated { focuses: vec![], host: None }
 }
 
 /// The one `Withheld` a device is told about after subscribing.
@@ -265,6 +265,7 @@ async fn an_old_protocol_version_is_told_so_and_closed_on_a_paired_and_a_pairing
         client_id: "old-client".into(),
         protocol_version: 0,
         client_kind: None,
+        role: None,
     };
     for (what, mut ws) in [
         ("a paired socket", rig.device_raw(&dev.token).await),
@@ -537,25 +538,28 @@ async fn a_paired_device_receives_mother_jobs_and_approval_counts_for_ordinary_f
 
     rig.server.broadcast(ServerMsg::MotherJobs {
         jobs: vec![mother_job("job-ws-1")],
+        host: None,
     });
     // A count for a sensitive focus is withheld; the ordinary one is not.
     rig.server.broadcast(ServerMsg::ApprovalPending {
         tag: "fred".into(),
         count: 9,
+        host: None,
     });
     rig.server.broadcast(ServerMsg::ApprovalPending {
         tag: "cody-x".into(),
         count: 2,
+        host: None,
     });
 
     ws.next_matching(
         "the job list",
-        |m| matches!(m, ServerMsg::MotherJobs { jobs } if jobs.iter().any(|j| j.id == "job-ws-1")),
+        |m| matches!(m, ServerMsg::MotherJobs { jobs, .. } if jobs.iter().any(|j| j.id == "job-ws-1")),
     )
     .await;
     ws.next_matching(
         "the approval count",
-        |m| matches!(m, ServerMsg::ApprovalPending { tag, count: 2 } if tag == "cody-x"),
+        |m| matches!(m, ServerMsg::ApprovalPending { tag, count: 2, .. } if tag == "cody-x"),
     )
     .await;
     // The broadcast channel is ordered: the withheld count was queued before the

@@ -193,6 +193,7 @@ impl Rig {
             } else {
                 Vec::new()
             },
+            role: None,
         })
         .await;
         conn.next("the Welcome", |m| matches!(m, ServerMsg::Welcome { .. }))

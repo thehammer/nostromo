@@ -74,6 +74,7 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
             client_id: "pane-source-liveness-it".into(),
             protocol_version: 3,
             client_kind: None,
+            role: None,
         },
     )
     .await;

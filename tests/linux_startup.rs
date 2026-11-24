@@ -273,6 +273,7 @@ fn activity_tailer_creates_missing_file_and_delivers_appended_events() {
             client_id: "linux-startup".into(),
             protocol_version: 4,
             client_kind: None,
+            role: None,
         };
         write_frame(&mut s, &serde_json::to_vec(&hello).unwrap())
             .await

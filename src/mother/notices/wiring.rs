@@ -138,7 +138,7 @@ pub fn spawn_publisher(
                     changes.borrow_and_update();
                     let _ = tx.send(engine.state_msg());
                     if let Some(jobs) = feed.republish_annotations() {
-                        let _ = tx.send(ServerMsg::MotherJobs { jobs });
+                        let _ = tx.send(ServerMsg::MotherJobs { jobs, host: None });
                     }
                 }
                 lost = republish.changed(), if listening => {

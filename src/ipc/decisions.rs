@@ -186,6 +186,7 @@ impl DecisionRegistry {
             detail,
             choices,
             context_pane_id,
+            host: None,
         };
 
         if self.active_by_tag.contains_key(&tag) {
@@ -340,6 +341,7 @@ impl DecisionRegistry {
             request_id: request_id.to_string(),
             resolution,
             choice_id,
+            host: None,
         });
     }
 
@@ -552,6 +554,7 @@ mod tests {
                 detail,
                 choices,
                 context_pane_id,
+                ..
             } => {
                 assert_eq!(tag, "mother");
                 assert_eq!(wire_id, request_id);

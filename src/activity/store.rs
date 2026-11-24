@@ -299,6 +299,7 @@ mod tests {
             tool_use_id: None,
             cwd: None,
             seq: None,
+            host: None,
         }
     }
 

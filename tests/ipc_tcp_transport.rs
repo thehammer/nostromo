@@ -71,6 +71,7 @@ async fn do_handshake(mut stream: &mut TcpStream) {
         client_id: "test-ios-client".to_string(),
         protocol_version: PROTOCOL_VERSION,
         client_kind: None,
+        role: None,
     };
     write_frame(&mut stream, &serde_json::to_vec(&hello).unwrap())
         .await
@@ -145,7 +146,7 @@ async fn tcp_session_list_returns_empty_resp() {
     let resp: ServerMsg = serde_json::from_slice(&resp_bytes).unwrap();
 
     match resp {
-        ServerMsg::SessionListResp { sessions } => {
+        ServerMsg::SessionListResp { sessions, .. } => {
             assert!(
                 sessions.is_empty(),
                 "expected 0 sessions from a fresh daemon, got {sessions:?}"
@@ -170,6 +171,7 @@ async fn tcp_and_unix_share_broadcast() {
         client_id: "broadcast-test".to_string(),
         protocol_version: PROTOCOL_VERSION,
         client_kind: None,
+        role: None,
     };
     write_frame(&mut stream, &serde_json::to_vec(&hello).unwrap())
         .await
@@ -234,6 +236,7 @@ async fn tcp_rejects_old_protocol_version() {
         client_id: "old-client".to_string(),
         protocol_version: 0,
         client_kind: None,
+        role: None,
     };
     write_frame(&mut stream, &serde_json::to_vec(&hello).unwrap())
         .await

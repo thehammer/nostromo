@@ -260,6 +260,7 @@ async fn handshake_with_nonce<S: AsyncRead + AsyncWrite + Unpin>(
             protocol_version: PROTOCOL_VERSION,
             // Claimed over TCP too: the claim never lifts a network peer.
             client_kind: Some(MAC_APP_CLIENT_KIND.into()),
+            role: None,
         },
     )
     .await;
@@ -389,7 +390,7 @@ fn send_preview(item_id: &str) -> SendPreview {
 }
 
 fn focus_registry_updated() -> ServerMsg {
-    ServerMsg::FocusRegistryUpdated { focuses: vec![] }
+    ServerMsg::FocusRegistryUpdated { focuses: vec![], host: None }
 }
 
 /// Every broadcast kind that carries (or answers a request for) Teri/Fred
@@ -2006,7 +2007,7 @@ async fn a_tcp_client_cannot_spawn_a_session_under_a_sensitive_tag_or_for_a_fred
     let sessions = listed
         .iter()
         .find_map(|m| match m {
-            ServerMsg::SessionListResp { sessions } => Some(sessions.clone()),
+            ServerMsg::SessionListResp { sessions, .. } => Some(sessions.clone()),
             _ => None,
         })
         .expect("session_list_resp");
@@ -2027,7 +2028,7 @@ async fn a_tcp_client_s_session_list_omits_sensitive_sessions_while_a_unix_clien
         frames
             .iter()
             .find_map(|m| match m {
-                ServerMsg::SessionListResp { sessions } => {
+                ServerMsg::SessionListResp { sessions, .. } => {
                     Some(sessions.iter().map(|s| s.tag.clone()).collect())
                 }
                 _ => None,
@@ -2145,6 +2146,7 @@ async fn session_transcript_frames_for_a_sensitive_tag_are_never_broadcast_to_a_
         h.broadcast(ServerMsg::SessionState {
             tag: tag.into(),
             state: SessionState::MidTurn,
+            host: None,
         });
         h.broadcast(ServerMsg::SessionSummaryUpdate {
             tag: tag.into(),
@@ -2162,6 +2164,7 @@ async fn session_transcript_frames_for_a_sensitive_tag_are_never_broadcast_to_a_
     h.broadcast(ServerMsg::SessionState {
         tag: "cody-x".into(),
         state: SessionState::Idle,
+        host: None,
     });
     h.broadcast(ServerMsg::Pong);
     tseen.extend(recv_until(&mut tcp, |m| matches!(m, ServerMsg::Pong)).await);
@@ -2387,12 +2390,14 @@ fn focus_scoped_frames(tag: &str) -> Vec<ServerMsg> {
             detail: None,
             choices: vec![],
             context_pane_id: None,
+            host: None,
         },
         ServerMsg::DecisionResolved {
             tag: tag.into(),
             request_id: format!("req-{tag}"),
             resolution: DecisionResolution::Answered,
             choice_id: None,
+            host: None,
         },
         ServerMsg::Activity(activity_event(&format!("ACT-SUMMARY-{tag}"), Some(tag))),
         ServerMsg::ActivitySnapshot {
@@ -2653,6 +2658,7 @@ fn mother_job(id: &str) -> nostromo::mother::MotherJob {
 fn mother_frames(job_ids: &[&str]) -> Vec<ServerMsg> {
     let mut frames = vec![ServerMsg::MotherJobs {
         jobs: job_ids.iter().map(|i| mother_job(i)).collect(),
+        host: None,
     }];
     for id in job_ids {
         frames.push(ServerMsg::MotherPeek {
@@ -2673,7 +2679,7 @@ fn mother_ids(frames: &[ServerMsg]) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut awaiting = vec![];
     for m in frames {
         match m {
-            ServerMsg::MotherJobs { jobs } => listed.extend(jobs.iter().map(|j| j.id.clone())),
+            ServerMsg::MotherJobs { jobs, .. } => listed.extend(jobs.iter().map(|j| j.id.clone())),
             ServerMsg::MotherPeek { job_id, .. } => peeked.push(job_id.clone()),
             ServerMsg::MotherAwaitDetected(j) => awaiting.push(j.id.clone()),
             _ => {}
@@ -2819,7 +2825,7 @@ async fn a_job_queued_from_a_work_item_is_withheld_from_a_tcp_peer_by_its_label_
         .await
         .expect("unix handshake");
 
-    h.broadcast(ServerMsg::MotherJobs { jobs: jobs() });
+    h.broadcast(ServerMsg::MotherJobs { jobs: jobs(), host: None });
     for job in jobs() {
         h.broadcast(ServerMsg::MotherAwaitDetected(Box::new(job)));
     }
@@ -2934,7 +2940,7 @@ async fn a_tcp_peer_sees_who_queued_a_job_by_kind_and_name_but_never_the_focus_t
         ]
     };
 
-    h.broadcast(ServerMsg::MotherJobs { jobs: jobs() });
+    h.broadcast(ServerMsg::MotherJobs { jobs: jobs(), host: None });
     let unix_frames = raw_sync_via_broadcast(&h, &mut unix).await;
     let tcp_frames = raw_sync_via_broadcast(&h, &mut tcp).await;
 
@@ -3034,7 +3040,7 @@ async fn a_tcp_peer_sees_a_sensitive_focus_as_a_sensitive_focus_with_no_notice()
         ]
     };
 
-    h.broadcast(ServerMsg::MotherJobs { jobs: jobs() });
+    h.broadcast(ServerMsg::MotherJobs { jobs: jobs(), host: None });
     let unix_frames = raw_sync_via_broadcast(&h, &mut unix).await;
     let tcp_frames = raw_sync_via_broadcast(&h, &mut tcp).await;
 
@@ -3111,7 +3117,7 @@ fn redacting_for_the_network_removes_the_notice_of_a_sensitive_origin_and_keeps_
         j
     };
 
-    let ServerMsg::MotherJobs { jobs } = redact_for_network(
+    let ServerMsg::MotherJobs { jobs, .. } = redact_for_network(
         ServerMsg::MotherJobs {
             jobs: vec![
                 annotated(
@@ -3123,6 +3129,7 @@ fn redacting_for_the_network_removes_the_notice_of_a_sensitive_origin_and_keeps_
                 annotated("plain", Some("claudia-AAAA1111"), OriginKind::Focus),
                 annotated("you", None, OriginKind::You),
             ],
+            host: None,
         },
         &tags,
     ) else {
@@ -3212,7 +3219,7 @@ async fn an_annotated_work_send_job_and_an_annotated_sensitive_job_are_still_wit
         ]
     };
 
-    h.broadcast(ServerMsg::MotherJobs { jobs: jobs() });
+    h.broadcast(ServerMsg::MotherJobs { jobs: jobs(), host: None });
     let unix_frames = raw_sync_via_broadcast(&h, &mut unix).await;
     let tcp_frames = raw_sync_via_broadcast(&h, &mut tcp).await;
 
@@ -3281,6 +3288,7 @@ fn perri_state(tag: &str) -> ServerMsg {
         queue: vec![],
         current: None,
         jira_site: None,
+        host: None,
     }
 }
 
@@ -3388,6 +3396,7 @@ async fn a_focus_created_by_a_fred_session_is_sensitive_even_without_initial_con
     );
     h.broadcast(ServerMsg::FocusCreated {
         meta: meta(&tag, "Mail from SECRET-SENDER", "cody", false),
+        host: None,
     });
     h.broadcast(ServerMsg::Pong);
     let seen = recv_until(&mut tcp, |m| matches!(m, ServerMsg::Pong)).await;
@@ -3560,10 +3569,10 @@ fn assert_network_view(out: &FocusMeta, orig: &FocusMeta, via: &str) {
 
 fn metas_of(frame: &ServerMsg) -> Option<Vec<FocusMeta>> {
     match frame {
-        ServerMsg::FocusRegistryUpdated { focuses } | ServerMsg::FocusListResp { focuses } => {
+        ServerMsg::FocusRegistryUpdated { focuses, .. } | ServerMsg::FocusListResp { focuses, .. } => {
             Some(focuses.clone())
         }
-        ServerMsg::FocusCreated { meta } => Some(vec![meta.clone()]),
+        ServerMsg::FocusCreated { meta, .. } => Some(vec![meta.clone()]),
         _ => None,
     }
 }
@@ -3587,7 +3596,7 @@ async fn a_tcp_client_sees_redacted_focus_metadata_while_a_unix_client_sees_it_u
     )
     .await;
     for m in &metas {
-        h.broadcast(ServerMsg::FocusCreated { meta: m.clone() });
+        h.broadcast(ServerMsg::FocusCreated { meta: m.clone(), host: None });
     }
     h.broadcast(ServerMsg::Pong);
     tseen.extend(recv_until(&mut tcp, |m| matches!(m, ServerMsg::Pong)).await);
@@ -3707,7 +3716,7 @@ async fn focus_created_for_a_create_focus_with_initial_context_reaches_a_tcp_cli
 
     // Control: the Unix peer sees the real tag, the title, and the layout.
     assert!(
-        useen.iter().any(|m| matches!(m, ServerMsg::FocusCreated { meta } if meta.tag == tag && meta.display_name == "SECRET-JIRA-TITLE-B")),
+        useen.iter().any(|m| matches!(m, ServerMsg::FocusCreated { meta, .. } if meta.tag == tag && meta.display_name == "SECRET-JIRA-TITLE-B")),
         "control: {useen:?}"
     );
     assert!(useen
@@ -3728,7 +3737,7 @@ async fn focus_created_for_a_create_focus_with_initial_context_reaches_a_tcp_cli
     let created_meta: Vec<&FocusMeta> = tseen
         .iter()
         .filter_map(|m| {
-            if let ServerMsg::FocusCreated { meta } = m {
+            if let ServerMsg::FocusCreated { meta, .. } = m {
                 Some(meta)
             } else {
                 None
@@ -4205,7 +4214,7 @@ async fn unix_session_tags(unix: &mut UnixStream) -> Vec<String> {
         .await
         .into_iter()
         .find_map(|m| match m {
-            ServerMsg::SessionListResp { sessions } => {
+            ServerMsg::SessionListResp { sessions, .. } => {
                 Some(sessions.into_iter().map(|s| s.tag).collect())
             }
             _ => None,
@@ -4571,7 +4580,7 @@ async fn a_tcp_peer_cannot_drive_an_existing_ordinary_session_through_list_send_
     assert!(
         listed.iter().any(|m| matches!(
             m,
-            ServerMsg::SessionListResp { sessions } if sessions.iter().any(|s| s.tag == "cody-live")
+            ServerMsg::SessionListResp { sessions, .. } if sessions.iter().any(|s| s.tag == "cody-live")
         )),
         "step 1: the live ordinary session is visible to the peer: {listed:?}"
     );
@@ -5120,10 +5129,10 @@ impl WorkService for AnnouncingWorkService {
                 .map_err(|e| WorkError::new("seed_failed", e.to_string()))?;
             mgr.add_or_update_focus(secret_meta.clone())
         };
-        let _ = self.tx.send(ServerMsg::FocusCreated { meta: secret_meta });
+        let _ = self.tx.send(ServerMsg::FocusCreated { meta: secret_meta, host: None });
         let _ = self
             .tx
-            .send(ServerMsg::FocusRegistryUpdated { focuses: updated });
+            .send(ServerMsg::FocusRegistryUpdated { focuses: updated, host: None });
         let _ = self.tx.send(ServerMsg::Notification {
             tag: tag.clone(),
             level: NotificationLevel::Info,
@@ -5239,7 +5248,7 @@ async fn nothing_a_work_send_creates_reaches_a_tcp_client_even_before_the_send_h
     assert!(
         useen
             .iter()
-            .any(|m| matches!(m, ServerMsg::FocusCreated { meta } if meta.tag == tag)),
+            .any(|m| matches!(m, ServerMsg::FocusCreated { meta, .. } if meta.tag == tag)),
         "control: a Unix peer sees the focus: {useen:?}"
     );
 }
@@ -5307,7 +5316,7 @@ async fn a_tcp_client_pushing_many_huge_fred_looking_tags_cannot_make_the_daemon
         matches!(m, ServerMsg::FocusRegistryUpdated { .. })
     })
     .await;
-    let Some(ServerMsg::FocusRegistryUpdated { focuses }) = seen.last() else {
+    let Some(ServerMsg::FocusRegistryUpdated { focuses, .. }) = seen.last() else {
         panic!("the TCP client must still receive focus_registry_updated: {seen:?}");
     };
     assert!(!focuses.is_empty());
@@ -5917,7 +5926,7 @@ async fn sessions_under_whitespace_case_and_qualified_fred_and_teri_tags_are_unr
     let tcp_tags: Vec<String> = listed
         .into_iter()
         .find_map(|m| match m {
-            ServerMsg::SessionListResp { sessions } => {
+            ServerMsg::SessionListResp { sessions, .. } => {
                 Some(sessions.into_iter().map(|s| s.tag).collect())
             }
             _ => None,
@@ -6135,7 +6144,7 @@ fn mc3_decision(resolved: bool) -> Value {
 /// Publish `jobs` as the daemon's latest Mother list, then give the daemon a
 /// moment to take it in (it mirrors the broadcast channel).
 async fn publish_mother_list(h: &Harness, jobs: Vec<nostromo::mother::MotherJob>) {
-    h.broadcast(ServerMsg::MotherJobs { jobs });
+    h.broadcast(ServerMsg::MotherJobs { jobs, host: None });
     tokio::time::sleep(Duration::from_millis(150)).await;
 }
 
@@ -6691,7 +6700,7 @@ fn registry_tags(frames: &[ServerMsg]) -> Vec<String> {
     frames
         .iter()
         .find_map(|m| match m {
-            ServerMsg::FocusListResp { focuses } => {
+            ServerMsg::FocusListResp { focuses, .. } => {
                 Some(focuses.iter().map(|f| f.tag.clone()).collect())
             }
             _ => None,
@@ -8088,6 +8097,7 @@ mod background_tasks {
                 client_id: "tasks-it".into(),
                 protocol_version: PROTOCOL_VERSION,
                 client_kind,
+                role: None,
             })
             .await;
             tap.wait_until("the welcome", |f| count_type(f, "welcome") > 0)
@@ -11159,7 +11169,7 @@ async fn a_job_queued_from_a_work_item_is_still_withheld_from_a_tcp_peer_when_it
         .await
         .expect("unix handshake");
 
-    h.broadcast(ServerMsg::MotherJobs { jobs: jobs() });
+    h.broadcast(ServerMsg::MotherJobs { jobs: jobs(), host: None });
     for job in jobs() {
         h.broadcast(ServerMsg::MotherAwaitDetected(Box::new(job)));
     }
@@ -11203,6 +11213,7 @@ async fn a_tcp_peer_receives_a_non_sensitive_job_s_crew_fields_unchanged() {
 
     h.broadcast(ServerMsg::MotherJobs {
         jobs: vec![job.clone()],
+        host: None,
     });
     h.broadcast(ServerMsg::MotherAwaitDetected(Box::new(job)));
     let tcp_frames = raw_sync_via_broadcast(&h, &mut tcp).await;
@@ -13757,12 +13768,14 @@ async fn a_paired_device_receives_the_approval_count_and_tracker_summary_of_an_o
         h.broadcast(ServerMsg::ApprovalPending {
             tag: tag.into(),
             count: 9,
+            host: None,
         });
         h.broadcast(summary(tag));
     }
     h.broadcast(ServerMsg::ApprovalPending {
         tag: "cody-ordinary".into(),
         count: 3,
+        host: None,
     });
     h.broadcast(summary("cody-ordinary"));
     h.broadcast(ServerMsg::Pong);
@@ -13770,7 +13783,7 @@ async fn a_paired_device_receives_the_approval_count_and_tracker_summary_of_an_o
 
     assert!(
         seen.iter().any(
-            |m| matches!(m, ServerMsg::ApprovalPending { tag, count: 3 } if tag == "cody-ordinary")
+            |m| matches!(m, ServerMsg::ApprovalPending { tag, count: 3, .. } if tag == "cody-ordinary")
         ),
         "the ordinary focus's approval count reaches a device: {seen:?}"
     );
@@ -13917,7 +13930,7 @@ async fn a_paired_device_can_read_an_ordinary_session_but_not_drive_it() {
     assert!(
         listed.iter().any(|m| matches!(
             m,
-            ServerMsg::SessionListResp { sessions } if sessions.iter().any(|s| s.tag == "cody-live")
+            ServerMsg::SessionListResp { sessions, .. } if sessions.iter().any(|s| s.tag == "cody-live")
         )),
         "{listed:?}"
     );

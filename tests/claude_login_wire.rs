@@ -431,6 +431,7 @@ impl Conn {
             client_id: "claude-login-wire-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: client_kind.map(str::to_owned),
+            role: None,
         })
         .await;
         match self

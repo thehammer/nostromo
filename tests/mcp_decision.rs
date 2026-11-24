@@ -638,6 +638,7 @@ async fn raw_handshake(
             client_id: client_id.into(),
             protocol_version: 4,
             client_kind: Some("mac_app".into()),
+            role: None,
         },
     )
     .await;
@@ -1231,6 +1232,7 @@ async fn a_connection_whose_second_frame_is_ping_instead_of_subscribe_does_not_c
             client_id: "ping-only".into(),
             protocol_version: 4,
             client_kind: Some("mac_app".into()),
+            role: None,
         },
     )
     .await;

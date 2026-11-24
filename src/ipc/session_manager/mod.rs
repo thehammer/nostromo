@@ -2008,6 +2008,7 @@ impl SessionManager {
             ServerMsg::SessionState {
                 tag: tag.to_string(),
                 state,
+                host: None,
             },
         );
         if let Some(connected) = self.bridge_connected(tag) {
@@ -2016,6 +2017,7 @@ impl SessionManager {
                 ServerMsg::SessionBridge {
                     tag: tag.to_string(),
                     connected,
+                    host: None,
                 },
             );
         }
@@ -5477,6 +5479,7 @@ mod tests {
             tool_use_id: None,
             cwd: None,
             seq: None,
+            host: None,
         }
     }
 

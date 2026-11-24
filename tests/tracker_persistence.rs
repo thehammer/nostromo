@@ -356,6 +356,7 @@ fn the_attach_replay_of_a_restarted_registry_carries_the_board_and_summary_of_ev
                     tag: t,
                     has_tracker,
                     counts,
+                    ..
                 } if t == tag => Some((*has_tracker, *counts)),
                 _ => None,
             })
