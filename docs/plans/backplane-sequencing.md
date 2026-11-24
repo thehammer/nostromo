@@ -417,7 +417,7 @@ ones that change the backplane, and what each wedge does about it.
    (daemon `TerminalManager`, slice 1a, not merged); every `terminal_*` frame
    is planned `LocalOnly`/`Refused` and iOS gets only a "Terminal: open on Mac"
    placeholder (slice 1e). **The backplane carries no terminal bytes**
-   (open question 4). The `nostromo device|uplink|push` CLI moves to a new,
+   (this memo's own open question 4, on terminals; not the pairing PRD's). The `nostromo device|uplink|push` CLI moves to a new,
    small `nostromo` binary (`src/bin/nostromo_cli.rs`) that `make
    install-daemon` installs next to `nostromd`; it has no TUI and prints help
    with no subcommand.
@@ -668,7 +668,13 @@ over WebSocket; no fields, the device id travels on the connection,
 `peer.rs:57-61`), `Satellite { admin: SatelliteAdmin }` (a satellite's
 uplink, seen on the primary; W10). On a satellite, frames the primary routes
 down run under `Routed`, which has exactly `Tcp`'s policy. `is_network()` is
-true for all four.
+true for all four. A `Satellite` does **not** get `Tcp`'s policy: it may send
+only `Hello`, `Subscribe`, `Ping` and its level's admin verbs (nothing
+routable), receives only `Topic::Devices` (hosts cut to its own record), and
+what it publishes enters the primary only through an ingest check (host =
+its record's name; no `LocalOnly`, `Admin`, `SatelliteControl`, pairing
+reply, `Hosts`, `HostUnavailable`, `Welcome`, `Pong` or `Error`, whatever the
+egress). See W10, "Trust boundary on the primary".
 
 | Message (direction) | Wedge | FND-1 class / policy | Notes |
 |---|---|---|---|
@@ -1085,7 +1091,7 @@ flagged, not made (open question 8).
 |---|---|---|---|---|---|
 | W14 | first install: `make install-daemon-linux`, then `loginctl enable-linger $USER` once | — | — | — | none (no wire change) |
 | W9 | install; set `ws_addr = "0.0.0.0:47101"` (or its WireGuard/LAN address) and `pair_host` in `config.toml`; restart | optional, any time between jobs (listener stays loopback) | optional, between jobs (loopback; never listens off-box) | — (W11) | old Mac/iOS clients ignore the new features; legacy TCP unchanged |
-| W10 | install first; restart | install between jobs; set `mode = "satellite"`, `uplink.url`, `uplink.egress = "personal"`, `host_name`; run `nostromo device pair --satellite sendai --egress personal --admin full` on Tokyo (`--admin full` must be explicit: unset means revoke-only) and `nostromo uplink pair --url … CODE` on Sendai | install between jobs (open question 4 answered yes, 2026-11-24): the same, with `uplink.egress = "work"` (the default) and `nostromo device pair --satellite kobe --egress work` on Tokyo (unset admin = revoke-only, Q1); WireGuard split tunnel | — | satellite before primary → satellite stays local-only and retries |
+| W10 | install first; restart | install between jobs; set `mode = "satellite"`, `uplink.url`, `uplink.egress = "personal"`, `host_name`; run `nostromo device pair --satellite sendai --egress personal --admin full` on Tokyo (`--admin full` must be explicit: unset means revoke-only) and `nostromo uplink pair --url … CODE` on Sendai. A Sendai record enrolled before W10 has no egress (reads as `work`) and egress cannot be changed: revoke it on Tokyo and re-enrol as above | install between jobs (open question 4 answered yes, 2026-11-24): the same, with `uplink.egress = "work"` (the default) and `nostromo device pair --satellite kobe --egress work` on Tokyo (unset admin = revoke-only, Q1); WireGuard split tunnel | — | satellite before primary → satellite stays local-only and retries |
 | W11 | — | — | — | install from Xcode (operator); pair | needs Tokyo ≥ W9 (pairing) and ≥ W10 (host badge; absent host renders as one list) |
 | W15 | — | `make mac-install` | `make mac-install` | — | needs the local daemon ≥ W10 and Tokyo ≥ W10; against an older daemon the menu items show "Can't reach" |
 | W12 | install first | install between jobs | install between jobs | new iOS build | old clients ignore `seq`/`Gap`; a satellite resumes only if the primary advertises `"seq"` |
@@ -1253,4 +1259,5 @@ first step, to be opened up later), and the entitlement finding.
 |---|---|---|---|
 | Pairing PRD open question 4 | Does the employer's policy allow Kobe's job states, short references and host name to leave Kobe for the operator's personal server, the push relay and Apple, and to show on a personal phone? | **Yes** (operator, 2026-11-24): fixed-vocabulary metadata only, never Carefeed text, which is what the `work` profile sends. The permissive v1 default stands. W10 is no longer gated on it, and Kobe is enrolled as a `work` satellite at install. If the policy ever changes, Kobe is not enrolled (or its satellite record is revoked); PRD criteria 12, 24's "works from Kobe", 50 and the lost-phone-at-work path then lapse. | W10 (release no longer gated; install row), W13 (Kobe pushes stay), PRDs (`daemon-pairing-flow.md`, `push-relay.md`) |
 | — (Archie, not an operator answer) | How do `DeviceAdminLevel` and the admin frames reach a satellite through W9's `may_receive`, which drops `Admin` for every network trust? | A new `ServerClass::SatelliteControl` (`DeviceAdminLevel`, `DeviceAdminError`) passes for `Satellite` at every level including `off` and is refused for `Paired`, `Tcp`, `Routed`; `Admin` passes for `Satellite` when its level is not `off`; a level change closes the uplink with 1012 so it is re-admitted with the new trust. (Perri's #522 item.) | W10 ("Refreshed 2026-11-24") |
+| — (Archie, after Perri's review of #529) | May a satellite change other satellites' records, and what may it see and publish? | Satellite records change only from the primary's CLI: from a satellite, `DeviceRevoke` targets phones and iPads only, at every level (W15's "reducing access is safe from any surface" read as applying to devices), and `DeviceSetAdmin` is refused. A satellite sees only its own row in `Devices.hosts`, receives only `Topic::Devices`, sends nothing routable, and the primary re-checks every frame it publishes (host = record name; admin, control and local-only frames dropped). The operator can widen the revoke rule later. | W10 ("Trust boundary on the primary") |
 | — (Archie) | Where are future `Paired`-only verbs gated now that `paired_extra_allowed` is gone (#528)? | At the pre-dispatch site in `handle_client` (`server.rs:1379-1395`), as `DeviceUnpairSelf` is in `DeviceHub::dispatch`: a push-engine hook for W13's four verbs and W16's `PushDetail`, acting only for `(Paired, Some(device_id))`. | W13, W16 |

@@ -10,7 +10,8 @@ Wins over the sections below where they differ.
   **106–109** (`RegisterPush` 106, `SetPushPrefs` 107, `PushSentLog` 108,
   `PushWaiting` 109), S7a's `OperatorPresence` takes **110**, and the
   constant goes **106 → 111**. Re-derive on the base if anything else landed
-  a verb first. Every "105–108", "109" and "110" below means these numbers.
+  a verb first. Below, "105–108" means 106–109, `OperatorPresence`'s
+  "109" means 110, and the old constant "110" ("105 → 110") means 111.
 - **There is no `paired_extra_allowed`.** W9's follow-up (#528) removed it.
   As built, a `Paired`-only verb is `Refused` in `network_policy`
   (`peer.rs:1207-1220`) and is handled **before** `handle_client_msg`, at the

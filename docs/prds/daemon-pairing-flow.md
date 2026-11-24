@@ -877,7 +877,7 @@ The rest is for information.
 
 | AC | Decision | Where |
 |---|---|---|
-| AC12, AC24 (pair and manage from Kobe) | **Planned as written.** The Mac app sends pair/list/revoke/scope to its local daemon. On a satellite, that daemon relays them up the uplink it already dials out on, and answers come back the same way. Nothing connects toward Kobe. The primary, not Kobe, holds how much each Mac may do (`full`, `read-only` or `off`), so your open question 2 becomes a setting, not a redesign. | W9 (admin verbs), W10 (relay and enforcement), W15 (UI) |
+| AC12, AC24 (pair and manage from Kobe) | **Planned as written.** The Mac app sends pair/list/revoke to its local daemon (no scope verb in v1, Q2). On a satellite, that daemon relays them up the uplink it already dials out on, and answers come back the same way. Nothing connects toward Kobe. The primary, not Kobe, holds how much each Mac may do (`full`, `revoke-only`, `read-only` or `off`; revoke-only added by Q1), so your open question 2 becomes a setting, not a redesign. | W9 (admin verbs), W10 (relay and enforcement), W15 (UI) |
 | AC13 (Mac window updates on its own) | **Planned.** The pairing is owned by the window's connection, and the outcome is pushed to it. | W9, W10, W15 |
 | AC14 (`device pair` stays running) | **Planned as written,** including exit codes and Ctrl-C invalidating the code. | W9 |
 | AC35 (live mail-and-todos change) | **Planned as written.** A connected device's permission is re-checked the moment it changes. Off removes content already on screen; on refills it without a reconnect. The daemon side completes in under 1 s. | W9, W11, W15 |

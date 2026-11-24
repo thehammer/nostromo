@@ -187,7 +187,157 @@ this section): the `DeviceAdmin` name, the Q4 gate, "re-scopes", "cancel,
 turn mail-and-todos off", the variant count in W10-18, the stale line
 numbers in Files, and the Files entries for `devices.rs`, `pairing.rs`,
 `device_hub.rs` and `server.rs`'s `deliverable_topics`. New criterion
-**W10-20** covers items 4, 6, 7, 8 and 9.
+**W10-20** covers items 4, 6, 7, 8 and 9; the next section adds the
+primary-side trust boundary (W10-20 extended, new W10-21).
+
+## Trust boundary on the primary (2026-11-24, after Perri's review of #529)
+
+**Read with the section above; this one wins where they differ.** The
+primary must treat a satellite as possibly compromised: Kobe is an
+employer-managed laptop. Everything below is enforced **on the primary**, not
+by trusting the satellite's own filters (which stay as defence in depth). The
+point is that a crafted satellite can never act above its tier, impersonate
+another host, or read what it is not meant to.
+
+**A. Ingest: what the primary accepts from a satellite** (new function
+`router::ingest_from_satellite(record: &SatelliteRecord, msg: ServerMsg) ->
+Option<ServerMsg>` in `src/ipc/router.rs`, the only path by which a
+satellite's frames reach the primary's broadcast channel):
+1. **Host is the record's name, always (M1).** If the frame's `host` is not
+   exactly `Some(<record name>)` (absent counts as a mismatch), drop it and
+   count it (one WARN per variant per hour). Never trust a satellite's
+   `host` to key `retain_broadcasts`: otherwise Kobe could publish
+   `MotherJobs { host: Some("sendai") }` or `host: None` (the primary's own
+   key) and overwrite Sendai's or Tokyo's retained snapshot on every phone.
+   (Drop rather than overwrite, so a buggy honest satellite is visible.)
+2. **Never-from-a-satellite variants, whatever the egress (M2).** Drop every
+   frame whose `classify_server_msg` is `LocalOnly`, `Admin` or
+   `SatelliteControl`; the five W9 pairing replies (`PairOffer`, `Paired`,
+   `PairRefused`, `Unauthorized`, `DeviceUnpaired`); and `Hosts`,
+   `HostUnavailable`, `Welcome`, `Pong`, `Error`, `MotherPeek`,
+   `MotherAwaitDetected`. Without this, a crafted `Devices`,
+   `DeviceAdminLevel { level: full, pair_from: [...] }` or `Hosts` published by
+   Kobe would pass the primary's per-downstream `peer::outbound` to its local
+   clients and, through `Admin`/`SatelliteControl`, to Sendai's uplink, and
+   Sendai's Mac app would show a forged device list, level or pair-from host.
+3. **Egress shape.** A `work` satellite's frame must also be one of the
+   metadata shapes `redact_for_uplink_metadata` produces (re-run it on the
+   primary with the satellite's pseudonymous tags left as they are and drop
+   the frame if the output differs from the input); a `personal` satellite's
+   frame must survive `peer::outbound(PeerTrust::Tcp, …)` unchanged (drop it
+   otherwise). Both are counted.
+4. Only then is the frame broadcast. The per-downstream `peer::outbound`
+   still runs for every receiver.
+
+**B. What a satellite may send and receive (M3).** "A satellite publishes;
+it does not consume" is enforced on the primary:
+- **Verbs.** `network_policy` (`src/ipc/peer.rs:1081`) takes no trust, so a
+  separate allow-list `peer::satellite_allowed(&ClientMsg) -> bool` is
+  checked first for `PeerTrust::Satellite`: `Hello`, `Subscribe`, `Ping`, and
+  the admin verbs of the per-level table (C) only. Everything else, in
+  particular every routable read verb (`SessionAttach`, `SessionDetach`,
+  `ActivitySnapshotRequest`, `SessionModelGet`, `SessionList`, `FocusList`,
+  with or without `host`), is refused with the normal network refusal frame,
+  no side effect, and **never reaches the router**. Otherwise Kobe could send
+  `SessionAttach { host: Some("sendai") }` (allowed for `Tcp`) and be handed
+  Sendai's non-sensitive transcripts.
+- **Topics.** `deliverable_topics` (`src/ipc/server.rs:3946-3955`) keeps
+  **only** `Topic::Devices` for a satellite (and only when its level is not
+  `off`); every other topic is removed, so a satellite subscribing to "all"
+  gets nothing but `Devices`.
+- **What it sees in `Devices` (M4).** A per-connection write step for
+  `PeerTrust::Satellite`, applied after `outbound` on the broadcast,
+  targeted and replay paths (`server.rs:1181`, `:1230`, `:1020-1150`; the
+  pattern of `without_notes_unless_model`, `:1233`, defined `:3988`),
+  rewrites `Devices.hosts` to the satellite's **own** record only (matched by
+  the connection's device id, `PeerOrigin::ws_device`, `:445`). The phone and
+  iPad rows stay (the satellite lists and revokes those). Without it,
+  `DeviceRegistry::summaries` (`src/ipc/devices.rs:538-548`) gives Kobe every
+  host's id, name, level, `connected` and `last_seen_at`. (`pair_from` in
+  `DeviceAdminLevel` still names the `full` hosts: W15 needs it to say where
+  to pair from, and it is names only.)
+
+**C. Per-level table, final** (enforced in the new satellite arm of
+`DeviceHub::dispatch`; replaces the shorter lists elsewhere in this file):
+
+| Verb from a satellite | `full` | `revoke_only` | `read_only` | `off` |
+|---|---|---|---|---|
+| `DeviceList` | runs (hosts cut to own record) | runs (same) | runs (same) | refused |
+| `DeviceRevoke` of a **phone or iPad** | runs | runs | refused | refused |
+| `DeviceRevoke` of a **satellite** record (any, itself included) | refused | refused | refused | refused |
+| `DevicePairStart` (device code) | runs | refused | refused | refused |
+| `DevicePairStart { satellite: Some(_) }` (enrolment) | refused | refused | refused | refused |
+| `DevicePairCancel` | runs, own `(connection, origin)` only | same | refused | refused |
+| `DeviceSetAdmin` | refused | refused | refused | refused |
+| `DeviceUnpairSelf` | refused (`Paired` only) | refused | refused | refused |
+
+"Refused" is `DeviceAdminError { not_permitted_on_this_mac }` with no side
+effect. **Decision (M4):** satellite records are changed only from the
+primary's CLI (`device revoke`, `device admin`), like `DeviceSetAdmin`. W15's
+"reducing access is safe from any surface" (`W15-mac-device-admin.md:60-62`)
+is read as applying to phones and iPads; letting a `revoke_only` Kobe revoke
+Sendai's satellite record (`DeviceRegistry::resolve`/`revoke` have no kind
+filter, `devices.rs:397-426`, and re-enrolling needs the primary's CLI) is a
+denial of service the operator did not ask for. The arm resolves the target
+first and checks its kind: add a `kind` to what `resolve` returns (or a
+`DeviceRegistry::kind_of(id)`).
+**`DevicePairCancel` needs the origin (nit).** `PairingTable::cancel`
+(`src/ipc/pairing.rs:199-210`) matches `issuer == caller`, and every
+pairing a satellite relays has the same issuer (the uplink's `conn_key`), so
+one local client of a `full` satellite could cancel another's pairing.
+Match `(issuer, origin)` for relayed pairings: pass the frame's `origin` to
+`cancel` (`device_hub.rs:318`).
+
+**D. Downgrade race (S1).** `handle_client` runs in its own task behind a
+256 KiB duplex (`src/ipc/ws.rs:553`), so verbs already buffered when the
+epoch changes still dispatch with the old `Satellite { admin }` snapshot
+before the 1012 close. The satellite arm of `DeviceHub::dispatch` therefore
+uses `min(snapshot, current record level)`, reading the record through the
+`ws_device` it already receives (`device_hub.rs:251-258`), and refuses if the
+record is no longer an active satellite. `run_paired` must read the record's
+kind, level and egress **after** `subscribe_epoch()` and
+`borrow_and_update()` (`ws.rs:545-546`), next to the existing standing check
+(`:547-551`), or a `set_admin` between the read and the subscription is
+missed. (`set_admin` saves under the registry lock before bumping the epoch,
+`devices.rs:456-484`, so there is no save-versus-reconnect race.)
+
+**E. How `DeviceAdminLevel` is delivered (S2).** Every write path is gated by
+class, and `SatelliteControl` passes for every satellite, so a broadcast
+would reach all of them. On the **primary** it is never broadcast: it is
+written to the connection's targeted sender (a) to a satellite on admission,
+with its effective level and the current `pair_from`; (b) to a satellite
+again from its own `run_paired` epoch arm when the set of `full` hosts
+changes but its own level does not (its own level changing closes 1012
+instead); (c) to a local client, `{ level: full, pair_from: [] }`, when it
+subscribes to `Topic::Devices`. Add `ServerMsg::DeviceAdminLevel { .. } =>
+false` to `deliver_broadcast` (`src/ipc/server.rs:4766`) beside W9's
+targeted admin frames (`:4818-4826`), so even an accidental broadcast is
+dropped. On a **satellite**, re-sending it to local subscribers as a local
+broadcast is fine: a satellite has no `Satellite` peers, and its loopback
+`Tcp`/`Paired` peers are refused by class.
+
+**F. Refusing a role (S3).** `PeerOrigin::resolve` returns a bare
+`PeerTrust` (`src/ipc/server.rs:416`, called at `:766`). Change it to
+`Result<PeerTrust, RoleRefused>`; on `Err`, `handle_client` writes
+`Unauthorized { reason: "role" }` targeted and returns, and `run_paired`
+closes with 4001 rather than its usual 1000 when the handler ended with a
+role refusal (signal it through a flag the handler sets, since today the
+`out_rx` close arm decides only from the registry standing, `ws.rs`). A
+`role: Satellite` claim on a **Unix or TCP** connection is ignored: those
+origins never yield `PeerTrust::Satellite` (test both).
+
+**G. Names and egress at enrolment (S4).** The host check compares the
+`Hello`'s host with the stored record name, which is the operator's
+`--satellite` hint as stored (`device_hub.rs:197-201`, then de-duplicated,
+`devices.rs:366`). `nostromo uplink pair` warns when `Paired.name` differs
+from the satellite's `host_name` ("Enrolled as <name>, but host_name is
+<host_name>: set host_name to match or re-enrol"). A satellite enrolled
+before W10 has no recorded egress, so it reads as `work`, and nothing changes
+egress later: a `personal` satellite (Sendai) enrolled before W10 must be
+re-enrolled (revoke the old record on Tokyo, then `device pair --satellite
+sendai --egress personal --admin full`). The memo's install row says so.
+
+Tests for A–G are in Approach step 5 and criteria W10-20 and W10-21.
 
 ## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
 
@@ -240,13 +390,13 @@ Memo, "Decision log 2026-11-23". What changes here:
     ranked in that sequence by an explicit `rank()` (not a derived `Ord`; see
     the 2026-11-24 section, item 1); the effective level is the lower of the
     two.
-  - Per verb on the primary, for a satellite whose effective level is
-    `revoke_only` (v1: list and revoke only): `DeviceList` and `DeviceRevoke`
-    run (and `DevicePairCancel`, which can only concern a pairing that
-    satellite owns, so it never applies in practice); `DevicePairStart` and
-    `DeviceSetAdmin` get `DeviceAdminError { not_permitted_on_this_mac }`
-    with no side effect (`DeviceSetAdmin` is refused over an uplink at every
-    level). Admin frames (`Devices`) are delivered as for `read_only`. (There
+  - Per verb on the primary: the final per-level table is in "Trust
+    boundary on the primary", C. For `revoke_only` (v1: list and revoke
+    only): `DeviceList` (hosts cut to its own record) and `DeviceRevoke` of a
+    phone or iPad run, and `DevicePairCancel` of its own pairings;
+    `DevicePairStart`, `DeviceSetAdmin` and `DeviceRevoke` of any satellite
+    record get `DeviceAdminError { not_permitted_on_this_mac }` with no side
+    effect. Admin frames (`Devices`) are delivered as for `read_only`. (There
     is no mail-and-todos verb in v1, Q2.)
   - An unset level is `revoke_only` for every enrolment, whatever its egress
     (Ada's rule). Sendai becomes `full` only when enrolled or set with an
@@ -258,12 +408,14 @@ Memo, "Decision log 2026-11-23". What changes here:
     `Admin` class filter: the primary writes it **targeted to that satellite's own
     uplink connection, whatever the level, `off` included** (otherwise an
     `off` satellite would never learn it is off), on uplink admission and
-    whenever that record's level changes. It is never broadcast and never sent
+    when the set of `full` hosts changes ("Trust boundary on the primary",
+    E; `deliver_broadcast` drops it). It is never broadcast and never sent
     to a `Paired`, `Tcp` or `Routed` peer, or to another satellite. `pair_from`
     lists the hosts whose level is `full`. The satellite lowers `level` by its
     local narrowing, retains it, and sends it to each local (non-network)
     client that subscribes to `devices`. A primary sends `{ level: full,
-    pair_from: [] }` to its own local subscribers. W15 uses it to disable
+    pair_from: [] }` to each of its own local clients, targeted, when it
+    subscribes to `devices`. W15 uses it to disable
     controls up front and to name the Mac to pair from. A level change
     reaches a live uplink by closing it with 1012 and re-admitting it
     (2026-11-24 section, item 9).
@@ -433,7 +585,9 @@ the operator's own host.
   (primary side, an uplink connection) and `PeerTrust::Routed` (satellite
   side, frames the primary routes down). Both are `is_network()`. `Routed`
   has exactly `Tcp`'s `network_policy` and `targets_sensitive_session`;
-  `Satellite` has the same policy plus the device-admin exception below. In
+  `Satellite` does **not** get `Tcp`'s policy: it gets only
+  `peer::satellite_allowed` (`Hello`, `Subscribe`, `Ping` and the per-level
+  admin verbs; nothing routable; "Trust boundary on the primary", B). In
   `may_receive` (`:997-1010`) it receives `ServerClass::Admin` frames when
   its `admin` is at least `read_only`, and the new
   `ServerClass::SatelliteControl` (`DeviceAdminLevel`, `DeviceAdminError`)
@@ -530,19 +684,16 @@ the operator's own host.
   `msg.host().is_some()`; `Remote` forwards and returns, `Unavailable`
   replies `HostUnavailable`. The retained cache key gains the host:
   `retain_broadcasts` (`:4652`) keys `MotherJobs` etc. by `(variant, host)`
-  so one host's snapshot never overwrites another's. Frames published by a
-  satellite enter the primary's broadcast channel and are filtered again
-  per downstream peer by `peer::outbound`, so the primary never widens what
-  the satellite sent. **Satellite admin
-  authorisation (primary side):** a W9 admin verb arriving on a satellite's
-  uplink connection is executed only if that satellite's registry record
-  has `admin: full`. With `revoke_only`, the verb table under "Sign-offs
-  folded in" applies (list, revoke and cancel only). With
-  `read_only`, only `DeviceList` is executed and the
-  rest get `DeviceAdminError { not_permitted_on_this_mac }`. With `off`,
-  everything gets that error. `DevicePairStart { satellite: Some(_) }`
-  (satellite enrolment) and `DeviceSetAdmin` are always refused over an
-  uplink. This is a new arm in `DeviceHub::dispatch`
+  so one host's snapshot never overwrites another's; the host on a
+  satellite's frame is the record's name, checked at ingest ("Trust boundary
+  on the primary", A). Frames published by a satellite enter the primary's
+  broadcast channel only through `router::ingest_from_satellite` and are
+  filtered again per downstream peer by `peer::outbound`, so the primary
+  never widens what the satellite sent. A satellite's own requests pass
+  `peer::satellite_allowed` first and never reach the router (B).
+  **Satellite admin authorisation (primary side):** the per-level table in
+  "Trust boundary on the primary", C, using `min(snapshot, current record
+  level)` (D). This is a new arm in `DeviceHub::dispatch`
   (`src/ipc/device_hub.rs:251`), before its `trust.is_network()` early
   return (`:268-270`). `deliverable_topics` (`:3946-3955`) keeps
   `Topic::Devices` for a satellite whose level is not `off`. Pairings started
@@ -558,10 +709,13 @@ the operator's own host.
   sets `PeerTrust::Satellite { admin }` from that record, and hands the
   connection to the router keyed by the record's name. In `run_paired`'s
   epoch arm, a satellite whose level changed is closed with 1012 (2026-11-24
-  section, items 4 and 9). A satellite's frames are *published*
-  into the primary's broadcast channel only if their variant and shape are
-  allowed for its declared egress (a `work` satellite may only publish the
-  metadata shapes; anything else is dropped and counted), and
+  section, items 4 and 9). Read the record **after** `subscribe_epoch()`
+  and `borrow_and_update()` (D); `resolve` returns `Result` so a role
+  refusal closes 4001 (F). A satellite's frames are *published* into the
+  primary's broadcast channel only through `router::ingest_from_satellite`
+  (host = record name, the never-from-a-satellite variants dropped whatever
+  the egress, the egress shape checked; "Trust boundary on the primary",
+  A), and
   `Hello.role.egress` must match the egress recorded at enrolment (`nostromo
   device pair --satellite <host> --egress work|personal`, default `work`;
   an unset `--admin` is `revoke_only` on either egress). A
@@ -626,6 +780,27 @@ the operator's own host.
    registry, approval store and Mother stub saw nothing). Disconnect the
    satellite → the primary broadcasts `Hosts` without it; reconnect →
    retained `MotherJobs` for `sat` reappears.
+   **Crafted satellite** (a test client holding a valid satellite token for
+   record `kobe`, speaking the uplink protocol by hand): publishing
+   `MotherJobs { host: Some("sendai") }`, `{ host: None }` or no host → the
+   primary's retained `MotherJobs` for `sendai` and for the primary itself are
+   unchanged and no subscriber receives the frame; publishing `Devices`,
+   `DeviceAdminLevel { level: full, pair_from: ["kobe"] }`, `Hosts`,
+   `HostUnavailable`, a pairing reply, `Welcome`, `Pong`, `Error` or a
+   `LocalOnly` frame (on either egress) → neither the primary's Unix
+   subscriber nor a second satellite (`sendai`) receives it; sending
+   `SessionAttach { host: Some("sendai"), tag }`, `SessionList`,
+   `FocusList` → refused, and the `sendai` satellite sees no routed frame;
+   `Subscribe { topics: [] }` → receives only `Devices`; `DeviceList` →
+   `Devices.hosts` holds only `kobe`'s record; `DeviceRevoke sendai` (by
+   name and by id) at `full` and `revoke_only` → `not_permitted_on_this_mac`
+   and Sendai's record stays active; `DeviceRevoke <phone>` at
+   `revoke_only` → revoked. A `Hello { role: Satellite }` on the primary's
+   Unix socket and TCP listener → never `Satellite` trust. With two local
+   clients on a `full` satellite, one's `DevicePairCancel` of the other's
+   `pairing_id` → `unknown_pairing`, and the pairing stays open. Buffer a
+   `DeviceRevoke <phone>` behind a `set_admin kobe read_only` (paused
+   handler) → refused (the current record level wins).
 6. **Device-admin relay.** With the two-server harness (primary record for
    `sat` set to `admin: full`): a Unix client on the satellite sends
    `DevicePairStart` and gets `DevicePairing` with the **primary's**
@@ -735,7 +910,25 @@ the operator's own host.
   peer still does not; after `nostromo device admin <host> <level>` the
   uplink closes with 1012, reconnects, and the satellite's local subscriber
   receives the new `DeviceAdminLevel` within 3 s; no admin frame is ever
-  forwarded upstream by a satellite.
+  forwarded upstream by a satellite. Satellite verbs and receipt ("Trust
+  boundary on the primary", B–G): a satellite's `SessionAttach { host }` (and
+  every other routable verb) is refused and never routed; it receives only
+  `Topic::Devices`, with `Devices.hosts` cut to its own record; the
+  per-level table C holds, including `DeviceRevoke` of any satellite record
+  refused at every level and `DevicePairCancel` matching `(connection,
+  origin)`; a verb buffered across a level downgrade is judged at the current
+  record level; `DeviceAdminLevel` is never broadcast on the primary
+  (`deliver_broadcast` returns `false`); a role refusal closes 4001; a
+  `role: Satellite` on Unix or TCP never yields `Satellite`; `nostromo uplink
+  pair` warns when the enrolled name differs from `host_name`.
+- [ ] **W10-21** Ingest from a satellite ("Trust boundary on the primary", A;
+  crafted-satellite test in Approach step 5): a frame whose `host` is not
+  exactly the record's name (absent included) is dropped and never retained
+  or delivered; every `LocalOnly`, `Admin` and `SatelliteControl` frame, the
+  five W9 pairing replies, `Hosts`, `HostUnavailable`, `Welcome`, `Pong` and
+  `Error` published by a satellite are dropped on either egress and reach no
+  local client and no other satellite; a `work` satellite's non-metadata
+  frame is dropped.
 
 ## Mother crew: gates, lenses, checklist and calibration
 
@@ -759,7 +952,7 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   merged since this was first written); the repo default is all four lenses
   (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
 - **Review depth:** **Manual Perri pass is still required** (the `perri` entry below at xhigh, then the operator's review). Lens findings are input to it, not a substitute: a lens sees only the diff (patch input is capped at 120 KB, so a large wedge will report `coverage_gap` findings), and Mother's `phi-security` checklist is written for care data, so it does not know this repo's trust tiers (B9, B10). Egress filter on a managed laptop; routed frames into a satellite.
-- **Checklist:** the acceptance items above carry ids (`W10-1` to `W10-20`) so
+- **Checklist:** the acceptance items above carry ids (`W10-1` to `W10-21`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The
   worker ticks each with `mother check <job> --done --evidence <short ref>` only
   when its test or check has passed.

@@ -267,7 +267,7 @@ side).
 - `.../Transport/PairingClient.swift` (new) — opens a token-less WS and
   runs `check(code, proof?) -> PairOffer` and `pair(code, name, kind,
   replace) -> Paired`, plus `proof(token, challenge, code)` (pure, tested
-  against W9's pinned vector: token, challenge and code `123456` give
+  against W9's pinned vector: W9's token and challenge from that table, with code `123456`, give
   `ONMjmbNsnby-4Laxp33owC99gferbRJQsDdW6Ofz4cA`),
   with typed errors `expired`, `invalid`, `unreachable` and
   `localNetworkDenied`. `kind` comes from `UIDevice.userInterfaceIdiom`.
