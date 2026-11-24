@@ -40,6 +40,8 @@ impl Daemon {
             .env("PATH", empty_path.path())
             .env("RUST_LOG", "info")
             .env("NOSTROMD_TCP_ADDR", "127.0.0.1:0")
+            // Parallel daemons must not fight over the default WebSocket port.
+            .env("NOSTROMD_WS_ADDR", "127.0.0.1:0")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
