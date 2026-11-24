@@ -911,6 +911,23 @@ fn metadata_shape_accepts_what_redaction_makes_and_rejects_any_other_tag_ref_or_
     }
 }
 
+#[test]
+fn work_egress_caps_tracker_counts_so_an_honest_frame_passes_the_shape_check() {
+    let huge = frame(json!({"type": "tracker_summary", "tag": "claudia-ABCD1234",
+        "has_tracker": true, "host": HOST,
+        "counts": {"todo": 5_000_000, "in_progress": 200_000, "blocked": 100_001,
+                   "needs_you": 100_000, "done": 3}}));
+    let out = redact_for_uplink_metadata(huge, &KEY).expect("tracker_summary is published");
+    assert!(
+        is_uplink_metadata_shape(&out),
+        "an honest frame must pass: {}",
+        json_of(&out)
+    );
+    let v = serde_json::to_value(&out).unwrap();
+    assert_eq!(v["counts"]["todo"], 100_000);
+    assert_eq!(v["counts"]["done"], 3);
+}
+
 // ── W10-18: the redaction match is exhaustive ────────────────────────────────
 
 fn server_msg_variants() -> Vec<String> {

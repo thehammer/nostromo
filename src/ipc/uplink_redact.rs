@@ -615,7 +615,13 @@ pub fn redact_for_uplink_metadata(msg: ServerMsg, host_key: &[u8; 32]) -> Option
         } => Some(ServerMsg::TrackerSummary {
             tag: pseudonymous_tag(host_key, &tag),
             has_tracker,
-            counts,
+            counts: crate::tracker::Counts {
+                todo: counts.todo.min(MAX_COUNT as usize),
+                in_progress: counts.in_progress.min(MAX_COUNT as usize),
+                blocked: counts.blocked.min(MAX_COUNT as usize),
+                needs_you: counts.needs_you.min(MAX_COUNT as usize),
+                done: counts.done.min(MAX_COUNT as usize),
+            },
             host,
         }),
 
