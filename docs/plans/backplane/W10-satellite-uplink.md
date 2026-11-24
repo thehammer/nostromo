@@ -13,6 +13,7 @@ states, short references and host name (fixed-vocabulary metadata, never
 Carefeed text) to leave Kobe for the personal server, the push relay and
 Apple, and to show on a personal phone. Nothing gates this wedge's merge or
 install any more, and Kobe is enrolled as a `work` satellite as planned.
+Queue it once the docs PR carrying this section has merged.
 
 **What W9 shipped that this plan builds on, and the corrections it forces:**
 

@@ -343,8 +343,8 @@ Technical criteria:
   in the PR body or a follow-up comment; not Cody gates):
   - On **Sendai** (enrolled `--admin full`), **Pair a Device…** → an iPhone
     scans → the window says "Paired: …" within 2 s (PRD-AC13).
-  - On **Kobe** (revoke-only, WireGuard split-tunnel up; only once the
-    operator has confirmed PRD open question 4): **Pair a Device…** shows the
+  - On **Kobe** (revoke-only, WireGuard split-tunnel up; PRD open question
+    4 answered yes on 2026-11-24): **Pair a Device…** shows the
     "Pairing new devices is turned off on this Mac" line; **Devices…** →
     **Revoke…** works; nothing listens off-loopback on Kobe (`lsof -iTCP
     -sTCP:LISTEN`) (PRD-AC12 as narrowed to "manage from Kobe", AC50).

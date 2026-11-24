@@ -4,7 +4,7 @@
 
 Wins over the sections below where they differ.
 - **Ordinal.** W9 shipped eight verbs, 98–105 (with `DeviceSetAdmin` at 105;
-  `src/ipc/peer.rs:2676-2692`), so `CLIENT_MSG_VARIANTS` is 106 (`:2582`) and
+  `src/ipc/peer.rs:2685-2692`), so `CLIENT_MSG_VARIANTS` is 106 (`:2582`) and
   W13 takes 106–110 (push verbs 106–109, `OperatorPresence` 110). **`PushDetail`
   takes 111, and the constant goes 111 → 112.** Re-derive on the base.
 - **There is no `paired_extra_allowed`** (removed in W9's follow-up, #528).

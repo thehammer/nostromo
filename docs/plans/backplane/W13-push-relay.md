@@ -4,7 +4,7 @@
 
 Wins over the sections below where they differ.
 - **Ordinals moved by one.** W9 shipped **eight** verbs, 98–105: the seven
-  planned plus `DeviceSetAdmin` (105) (`src/ipc/peer.rs:2676-2692`), and
+  planned plus `DeviceSetAdmin` (105) (`src/ipc/peer.rs:2685-2692`), and
   `CLIENT_MSG_VARIANTS` is **106** (`:2582`, asserted `:2738-2739`). W10,
   W11, W12 and W15 add no `ClientMsg` variant. So the four push verbs take
   **106–109** (`RegisterPush` 106, `SetPushPrefs` 107, `PushSentLog` 108,

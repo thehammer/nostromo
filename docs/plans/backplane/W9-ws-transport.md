@@ -11,7 +11,7 @@ follow-ups) against a $65 cap (memo, "Estimate").
 - **Eight verbs, not seven.** Ordinals 98–105: `PairCheck` 98, `Pair` 99,
   `DeviceUnpairSelf` 100, `DevicePairStart` 101, `DevicePairCancel` 102,
   `DeviceList` 103, `DeviceRevoke` 104 and **`DeviceSetAdmin` 105**
-  (`src/ipc/peer.rs:2676-2692`). `CLIENT_MSG_VARIANTS` is **106** (`:2582`,
+  (`src/ipc/peer.rs:2685-2692`). `CLIENT_MSG_VARIANTS` is **106** (`:2582`,
   asserted `:2738-2739`). `DeviceSetAdmin { request_id, host, admin }`
   (`src/ipc/protocol.rs:2636-2641`) is what `nostromo device admin` sends;
   the plan's "no new verb" for Q1 was a deliberate departure, recorded in
