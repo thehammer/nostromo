@@ -1061,7 +1061,7 @@ fn mothers_real_job_shape_publishes_metadata_and_no_text() {
     assert!(
         decision["options"]
             .as_array()
-            .map_or(true, |o| o.is_empty()),
+            .is_none_or(|o| o.is_empty()),
         "option text must go"
     );
 }
