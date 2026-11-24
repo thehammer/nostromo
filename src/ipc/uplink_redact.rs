@@ -21,21 +21,66 @@ use crate::mother::MotherJob;
 
 /// Job states Mother reports. Anything else is sent as `other`.
 const STATES: &[&str] = &[
-    "queued", "ready", "running", "awaiting", "paused", "succeeded", "failed", "cancelled",
-    "canceled", "blocked",
+    "queued",
+    "ready",
+    "running",
+    "awaiting",
+    "paused",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "canceled",
+    "blocked",
 ];
 /// Reason, activity, attention, flag and decision-kind words (Mother's crew
 /// vocabulary). Anything else is sent as `other`.
 const REASONS: &[&str] = &[
-    "gate_hold", "gate_fix", "review_wave", "review_hold", "decision_awaiting", "gates", "review",
-    "build", "rework", "present", "done", "decision", "question", "plan_review", "approval",
-    "budget", "rate_limit", "quota", "auth", "stale", "conflict", "ci_failed", "gates_failed",
-    "review_blocked", "blocked", "timeout", "crashed", "idle", "working", "waiting", "queued",
-    "running", "failed", "cancelled", "none",
+    "gate_hold",
+    "gate_fix",
+    "review_wave",
+    "review_hold",
+    "decision_awaiting",
+    "gates",
+    "review",
+    "build",
+    "rework",
+    "present",
+    "done",
+    "decision",
+    "question",
+    "plan_review",
+    "approval",
+    "budget",
+    "rate_limit",
+    "quota",
+    "auth",
+    "stale",
+    "conflict",
+    "ci_failed",
+    "gates_failed",
+    "review_blocked",
+    "blocked",
+    "timeout",
+    "crashed",
+    "idle",
+    "working",
+    "waiting",
+    "queued",
+    "running",
+    "failed",
+    "cancelled",
+    "none",
 ];
 const STAGES: &[&str] = &["build", "rework", "gates", "review", "present", "done"];
 const RESULTS: &[&str] = &[
-    "passed", "failed", "skipped", "unavailable", "running", "pending", "overridden", "none",
+    "passed",
+    "failed",
+    "skipped",
+    "unavailable",
+    "running",
+    "pending",
+    "overridden",
+    "none",
 ];
 const BASES: &[&str] = &["none", "history", "default", "fallback", "estimate"];
 /// The agents a session can run as, by bare name. Another agent is `other`.
@@ -56,7 +101,10 @@ fn hmac_sha256(key: &[u8; 32], msg: &[u8]) -> [u8; 32] {
         ipad[i] ^= k;
         opad[i] ^= k;
     }
-    let inner = Sha256::new().chain_update(ipad).chain_update(msg).finalize();
+    let inner = Sha256::new()
+        .chain_update(ipad)
+        .chain_update(msg)
+        .finalize();
     Sha256::new()
         .chain_update(opad)
         .chain_update(inner)
@@ -77,7 +125,14 @@ pub fn pseudonymous_tag(host_key: &[u8; 32], tag: &str) -> String {
 /// A short, lower-case-hex reference to a Mother job: the id's last eight
 /// characters when they are hex already, else a keyed hash of the id.
 fn short_ref(host_key: &[u8; 32], id: &str) -> String {
-    let tail: String = id.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
+    let tail: String = id
+        .chars()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     if tail.len() == 8 && is_hex8(&tail) {
         tail
     } else {
@@ -86,7 +141,9 @@ fn short_ref(host_key: &[u8; 32], id: &str) -> String {
 }
 
 fn is_hex8(s: &str) -> bool {
-    s.len() == 8 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 8
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn is_focus_tag(s: &str) -> bool {
@@ -98,7 +155,11 @@ fn in_vocab(s: &str, set: &[&str]) -> bool {
 }
 
 fn vocab(s: &str, set: &[&str]) -> String {
-    if set.contains(&s) { s.to_string() } else { OTHER.to_string() }
+    if set.contains(&s) {
+        s.to_string()
+    } else {
+        OTHER.to_string()
+    }
 }
 
 fn vocab_opt(s: &Option<String>, set: &[&str]) -> Option<String> {
@@ -106,7 +167,13 @@ fn vocab_opt(s: &Option<String>, set: &[&str]) -> Option<String> {
 }
 
 fn agent(name: &str) -> String {
-    let bare = name.trim().rsplit(':').next().unwrap_or("").trim().to_ascii_lowercase();
+    let bare = name
+        .trim()
+        .rsplit(':')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     vocab(&bare, AGENTS)
 }
 
@@ -118,11 +185,16 @@ fn ts(s: &Option<String>) -> Option<String> {
 }
 
 fn ts_ok(s: &Option<String>) -> bool {
-    s.as_deref().is_none_or(|v| chrono::DateTime::parse_from_rfc3339(v).is_ok())
+    s.as_deref()
+        .is_none_or(|v| chrono::DateTime::parse_from_rfc3339(v).is_ok())
 }
 
 fn tag_ok_request_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 // ── Mother job ───────────────────────────────────────────────────────────────
@@ -255,7 +327,8 @@ fn job_shape_ok(j: &MotherJob) -> bool {
     let opt = |s: &Option<String>, set: &[&str]| s.as_deref().is_none_or(|v| in_vocab(v, set));
     let attn = |v: &[AttentionEntry]| {
         v.len() <= MAX_LIST
-            && v.iter().all(|a| in_vocab(&a.reason, REASONS) && ts_ok(&a.since))
+            && v.iter()
+                .all(|a| in_vocab(&a.reason, REASONS) && ts_ok(&a.since))
     };
     blank
         && is_hex8(&j.id)
@@ -314,13 +387,19 @@ fn job_shape_ok(j: &MotherJob) -> bool {
                 && p.updated_at.is_none()
                 && p.pct.is_none_or(|n| n <= 100)
                 && opt(&p.stage, STAGES)
-                && p.signals.as_ref().is_none_or(|s| {
-                    s.cost.is_none() && opt(&s.stage, STAGES)
-                })
-                && p.eta.as_ref().is_none_or(|e| e.label.is_none() && opt(&e.basis, BASES))
-                && p.moved_back.as_ref().is_none_or(|m| m.at.is_none() && opt(&m.reason, REASONS))
+                && p.signals
+                    .as_ref()
+                    .is_none_or(|s| s.cost.is_none() && opt(&s.stage, STAGES))
+                && p.eta
+                    .as_ref()
+                    .is_none_or(|e| e.label.is_none() && opt(&e.basis, BASES))
+                && p.moved_back
+                    .as_ref()
+                    .is_none_or(|m| m.at.is_none() && opt(&m.reason, REASONS))
                 && p.flags.len() <= MAX_LIST
-                && p.flags.iter().all(|f| in_vocab(&f.reason, REASONS) && ts_ok(&f.since))
+                && p.flags
+                    .iter()
+                    .all(|f| in_vocab(&f.reason, REASONS) && ts_ok(&f.since))
         })
 }
 
@@ -417,7 +496,9 @@ pub fn redact_for_uplink_metadata(msg: ServerMsg, host_key: &[u8; 32]) -> Option
             status.awaiting = status.awaiting.min(MAX_COUNT as usize);
             Some(ServerMsg::MotherStatusline(status))
         }
-        ServerMsg::PerriState { tag, queue, host, .. } => Some(ServerMsg::PerriState {
+        ServerMsg::PerriState {
+            tag, queue, host, ..
+        } => Some(ServerMsg::PerriState {
             tag: pseudonymous_tag(host_key, &tag),
             queue: queue
                 .iter()
@@ -437,7 +518,11 @@ pub fn redact_for_uplink_metadata(msg: ServerMsg, host_key: &[u8; 32]) -> Option
             state,
             host,
         }),
-        ServerMsg::SessionBridge { tag, connected, host } => Some(ServerMsg::SessionBridge {
+        ServerMsg::SessionBridge {
+            tag,
+            connected,
+            host,
+        } => Some(ServerMsg::SessionBridge {
             tag: pseudonymous_tag(host_key, &tag),
             connected,
             host,
@@ -451,7 +536,11 @@ pub fn redact_for_uplink_metadata(msg: ServerMsg, host_key: &[u8; 32]) -> Option
             host,
         }),
         ServerMsg::FocusListResp { focuses, host } => Some(ServerMsg::FocusListResp {
-            focuses: focuses.iter().take(MAX_LIST).map(|m| metadata_focus(m, host_key)).collect(),
+            focuses: focuses
+                .iter()
+                .take(MAX_LIST)
+                .map(|m| metadata_focus(m, host_key))
+                .collect(),
             host,
         }),
         ServerMsg::FocusRegistryUpdated { focuses, host } => {
@@ -473,7 +562,13 @@ pub fn redact_for_uplink_metadata(msg: ServerMsg, host_key: &[u8; 32]) -> Option
             count: count.min(MAX_COUNT as u32),
             host,
         }),
-        ServerMsg::DecisionRequest { tag, request_id, choices, host, .. } => {
+        ServerMsg::DecisionRequest {
+            tag,
+            request_id,
+            choices,
+            host,
+            ..
+        } => {
             if !tag_ok_request_id(&request_id) {
                 return None;
             }
@@ -494,7 +589,13 @@ pub fn redact_for_uplink_metadata(msg: ServerMsg, host_key: &[u8; 32]) -> Option
                 host,
             })
         }
-        ServerMsg::DecisionResolved { tag, request_id, resolution, host, .. } => {
+        ServerMsg::DecisionResolved {
+            tag,
+            request_id,
+            resolution,
+            host,
+            ..
+        } => {
             if !tag_ok_request_id(&request_id) {
                 return None;
             }
@@ -506,109 +607,112 @@ pub fn redact_for_uplink_metadata(msg: ServerMsg, host_key: &[u8; 32]) -> Option
                 host,
             })
         }
-        ServerMsg::TrackerSummary { tag, has_tracker, counts, host } => {
-            Some(ServerMsg::TrackerSummary {
-                tag: pseudonymous_tag(host_key, &tag),
-                has_tracker,
-                counts,
-                host,
-            })
-        }
+        ServerMsg::TrackerSummary {
+            tag,
+            has_tracker,
+            counts,
+            host,
+        } => Some(ServerMsg::TrackerSummary {
+            tag: pseudonymous_tag(host_key, &tag),
+            has_tracker,
+            counts,
+            host,
+        }),
 
         // Everything else stays on the host: no host field to attribute it
         // by, content, administration, or another peer's business.
-        ServerMsg::Welcome { .. } |
-        ServerMsg::Activity(..) |
-        ServerMsg::TeriState { .. } |
-        ServerMsg::MotherAwaitDetected(..) |
-        ServerMsg::FredState { .. } |
-        ServerMsg::Pong |
-        ServerMsg::Error { .. } |
-        ServerMsg::SessionSpawned { .. } |
-        ServerMsg::SessionTurns { .. } |
-        ServerMsg::SessionTurnDelta { .. } |
-        ServerMsg::SessionTurnOrigin { .. } |
-        ServerMsg::SessionPermissionRequest { .. } |
-        ServerMsg::SessionExited { .. } |
-        ServerMsg::SessionDown { .. } |
-        ServerMsg::SessionSummaryUpdate { .. } |
-        ServerMsg::MotherPeek { .. } |
-        ServerMsg::FocusLayout { .. } |
-        ServerMsg::PaneContent { .. } |
-        ServerMsg::ApprovalRequest { .. } |
-        ServerMsg::ApprovalPreview { .. } |
-        ServerMsg::ApprovalsSnapshot { .. } |
-        ServerMsg::ApprovalResolved { .. } |
-        ServerMsg::ApprovalSessionRules { .. } |
-        ServerMsg::ApprovalRules { .. } |
-        ServerMsg::ApprovalGuardBlocked { .. } |
-        ServerMsg::ApprovalsLogPage { .. } |
-        ServerMsg::ApprovalsLogDetail { .. } |
-        ServerMsg::ApprovalsLogRefused { .. } |
-        ServerMsg::ApprovalAnswerRefused { .. } |
-        ServerMsg::ClaudeLoginState { .. } |
-        ServerMsg::PaneActionResult { .. } |
-        ServerMsg::Notification { .. } |
-        ServerMsg::ActivitySnapshot { .. } |
-        ServerMsg::ActivityHealth { .. } |
-        ServerMsg::WorkSourceStatus { .. } |
-        ServerMsg::WorkSnapshot { .. } |
-        ServerMsg::TeriPicks { .. } |
-        ServerMsg::WorkDetail { .. } |
-        ServerMsg::WorkSendPreview { .. } |
-        ServerMsg::WorkSendResult { .. } |
-        ServerMsg::Withheld { .. } |
-        ServerMsg::ModelCatalog { .. } |
-        ServerMsg::SessionModelState(..) |
-        ServerMsg::ModelDefaults { .. } |
-        ServerMsg::ModelRequestResult { .. } |
-        ServerMsg::SessionQueue { .. } |
-        ServerMsg::SessionQueueResult { .. } |
-        ServerMsg::SessionQueueReturned { .. } |
-        ServerMsg::SessionTasks { .. } |
-        ServerMsg::SessionTaskDetail { .. } |
-        ServerMsg::SessionCommands { .. } |
-        ServerMsg::ConversationHistory { .. } |
-        ServerMsg::ConversationResumeResult { .. } |
-        ServerMsg::ConversationHistoryChanged { .. } |
-        ServerMsg::ConversationResumeFailed { .. } |
-        ServerMsg::SessionTaskStopResult { .. } |
-        ServerMsg::SessionMcpResult { .. } |
-        ServerMsg::SessionTaskOutputResult { .. } |
-        ServerMsg::TrackerBoard { .. } |
-        ServerMsg::TrackerEditResult { .. } |
-        ServerMsg::TerminalList { .. } |
-        ServerMsg::TerminalState { .. } |
-        ServerMsg::TerminalClosed(..) |
-        ServerMsg::TerminalReplay { .. } |
-        ServerMsg::TerminalOutput { .. } |
-        ServerMsg::TerminalRefused { .. } |
-        ServerMsg::TerminalRemoteSummary { .. } |
-        ServerMsg::TerminalStagingList { .. } |
-        ServerMsg::RemoteShellTargets { .. } |
-        ServerMsg::RemoteShellConfirmRequest { .. } |
-        ServerMsg::RemoteShellResolved { .. } |
-        ServerMsg::DaemonReconnected |
-        ServerMsg::MotherNoticeState { .. } |
-        ServerMsg::AuthoredPrPreview { .. } |
-        ServerMsg::AuthoredPrNotifyResult { .. } |
-        ServerMsg::AuthoredPrStartSessionResult { .. } |
-        ServerMsg::AuthoredPrLinkResult { .. } |
-        ServerMsg::AuthoredPrMergeResult { .. } |
-        ServerMsg::AuthoredPrs { .. } |
-        ServerMsg::PairOffer { .. } |
-        ServerMsg::Paired { .. } |
-        ServerMsg::PairRefused { .. } |
-        ServerMsg::Unauthorized { .. } |
-        ServerMsg::DeviceUnpaired |
-        ServerMsg::DevicePairing { .. } |
-        ServerMsg::DevicePairOutcome { .. } |
-        ServerMsg::Devices { .. } |
-        ServerMsg::DeviceRevoked { .. } |
-        ServerMsg::DeviceAdminError { .. } |
-        ServerMsg::Hosts { .. } |
-        ServerMsg::HostUnavailable { .. } |
-        ServerMsg::DeviceAdminLevel { .. } => None,
+        ServerMsg::Welcome { .. }
+        | ServerMsg::Activity(..)
+        | ServerMsg::TeriState { .. }
+        | ServerMsg::MotherAwaitDetected(..)
+        | ServerMsg::FredState { .. }
+        | ServerMsg::Pong
+        | ServerMsg::Error { .. }
+        | ServerMsg::SessionSpawned { .. }
+        | ServerMsg::SessionTurns { .. }
+        | ServerMsg::SessionTurnDelta { .. }
+        | ServerMsg::SessionTurnOrigin { .. }
+        | ServerMsg::SessionPermissionRequest { .. }
+        | ServerMsg::SessionExited { .. }
+        | ServerMsg::SessionDown { .. }
+        | ServerMsg::SessionSummaryUpdate { .. }
+        | ServerMsg::MotherPeek { .. }
+        | ServerMsg::FocusLayout { .. }
+        | ServerMsg::PaneContent { .. }
+        | ServerMsg::ApprovalRequest { .. }
+        | ServerMsg::ApprovalPreview { .. }
+        | ServerMsg::ApprovalsSnapshot { .. }
+        | ServerMsg::ApprovalResolved { .. }
+        | ServerMsg::ApprovalSessionRules { .. }
+        | ServerMsg::ApprovalRules { .. }
+        | ServerMsg::ApprovalGuardBlocked { .. }
+        | ServerMsg::ApprovalsLogPage { .. }
+        | ServerMsg::ApprovalsLogDetail { .. }
+        | ServerMsg::ApprovalsLogRefused { .. }
+        | ServerMsg::ApprovalAnswerRefused { .. }
+        | ServerMsg::ClaudeLoginState { .. }
+        | ServerMsg::PaneActionResult { .. }
+        | ServerMsg::Notification { .. }
+        | ServerMsg::ActivitySnapshot { .. }
+        | ServerMsg::ActivityHealth { .. }
+        | ServerMsg::WorkSourceStatus { .. }
+        | ServerMsg::WorkSnapshot { .. }
+        | ServerMsg::TeriPicks { .. }
+        | ServerMsg::WorkDetail { .. }
+        | ServerMsg::WorkSendPreview { .. }
+        | ServerMsg::WorkSendResult { .. }
+        | ServerMsg::Withheld { .. }
+        | ServerMsg::ModelCatalog { .. }
+        | ServerMsg::SessionModelState(..)
+        | ServerMsg::ModelDefaults { .. }
+        | ServerMsg::ModelRequestResult { .. }
+        | ServerMsg::SessionQueue { .. }
+        | ServerMsg::SessionQueueResult { .. }
+        | ServerMsg::SessionQueueReturned { .. }
+        | ServerMsg::SessionTasks { .. }
+        | ServerMsg::SessionTaskDetail { .. }
+        | ServerMsg::SessionCommands { .. }
+        | ServerMsg::ConversationHistory { .. }
+        | ServerMsg::ConversationResumeResult { .. }
+        | ServerMsg::ConversationHistoryChanged { .. }
+        | ServerMsg::ConversationResumeFailed { .. }
+        | ServerMsg::SessionTaskStopResult { .. }
+        | ServerMsg::SessionMcpResult { .. }
+        | ServerMsg::SessionTaskOutputResult { .. }
+        | ServerMsg::TrackerBoard { .. }
+        | ServerMsg::TrackerEditResult { .. }
+        | ServerMsg::TerminalList { .. }
+        | ServerMsg::TerminalState { .. }
+        | ServerMsg::TerminalClosed(..)
+        | ServerMsg::TerminalReplay { .. }
+        | ServerMsg::TerminalOutput { .. }
+        | ServerMsg::TerminalRefused { .. }
+        | ServerMsg::TerminalRemoteSummary { .. }
+        | ServerMsg::TerminalStagingList { .. }
+        | ServerMsg::RemoteShellTargets { .. }
+        | ServerMsg::RemoteShellConfirmRequest { .. }
+        | ServerMsg::RemoteShellResolved { .. }
+        | ServerMsg::DaemonReconnected
+        | ServerMsg::MotherNoticeState { .. }
+        | ServerMsg::AuthoredPrPreview { .. }
+        | ServerMsg::AuthoredPrNotifyResult { .. }
+        | ServerMsg::AuthoredPrStartSessionResult { .. }
+        | ServerMsg::AuthoredPrLinkResult { .. }
+        | ServerMsg::AuthoredPrMergeResult { .. }
+        | ServerMsg::AuthoredPrs { .. }
+        | ServerMsg::PairOffer { .. }
+        | ServerMsg::Paired { .. }
+        | ServerMsg::PairRefused { .. }
+        | ServerMsg::Unauthorized { .. }
+        | ServerMsg::DeviceUnpaired
+        | ServerMsg::DevicePairing { .. }
+        | ServerMsg::DevicePairOutcome { .. }
+        | ServerMsg::Devices { .. }
+        | ServerMsg::DeviceRevoked { .. }
+        | ServerMsg::DeviceAdminError { .. }
+        | ServerMsg::Hosts { .. }
+        | ServerMsg::HostUnavailable { .. }
+        | ServerMsg::DeviceAdminLevel { .. } => None,
     }
 }
 
@@ -621,11 +725,19 @@ pub fn redact_for_uplink_metadata(msg: ServerMsg, host_key: &[u8; 32]) -> Option
 /// `false`.
 pub fn is_uplink_metadata_shape(msg: &ServerMsg) -> bool {
     match msg {
-        ServerMsg::MotherJobs { jobs, .. } => jobs.len() <= MAX_LIST && jobs.iter().all(job_shape_ok),
-        ServerMsg::MotherStatusline(s) => {
-            [s.running, s.queued, s.failed, s.awaiting].iter().all(|n| *n as u64 <= MAX_COUNT)
+        ServerMsg::MotherJobs { jobs, .. } => {
+            jobs.len() <= MAX_LIST && jobs.iter().all(job_shape_ok)
         }
-        ServerMsg::PerriState { tag, queue, current, jira_site, .. } => {
+        ServerMsg::MotherStatusline(s) => [s.running, s.queued, s.failed, s.awaiting]
+            .iter()
+            .all(|n| *n as u64 <= MAX_COUNT),
+        ServerMsg::PerriState {
+            tag,
+            queue,
+            current,
+            jira_site,
+            ..
+        } => {
             is_focus_tag(tag)
                 && current.is_none()
                 && jira_site.is_none()
@@ -642,16 +754,29 @@ pub fn is_uplink_metadata_shape(msg: &ServerMsg) -> bool {
                         && !q.is_bot
                 })
         }
-        ServerMsg::SessionState { tag, .. } | ServerMsg::SessionBridge { tag, .. } => is_focus_tag(tag),
+        ServerMsg::SessionState { tag, .. } | ServerMsg::SessionBridge { tag, .. } => {
+            is_focus_tag(tag)
+        }
         ServerMsg::SessionListResp { sessions, .. } => {
             sessions.len() <= MAX_LIST && sessions.iter().all(session_shape_ok)
         }
-        ServerMsg::FocusListResp { focuses, .. } | ServerMsg::FocusRegistryUpdated { focuses, .. } => {
+        ServerMsg::FocusListResp { focuses, .. }
+        | ServerMsg::FocusRegistryUpdated { focuses, .. } => {
             focuses.len() <= MAX_LIST && focuses.iter().all(focus_shape_ok)
         }
         ServerMsg::FocusCreated { meta, .. } => focus_shape_ok(meta),
-        ServerMsg::ApprovalPending { tag, count, .. } => is_focus_tag(tag) && u64::from(*count) <= MAX_COUNT,
-        ServerMsg::DecisionRequest { tag, request_id, prompt, detail, choices, context_pane_id, .. } => {
+        ServerMsg::ApprovalPending { tag, count, .. } => {
+            is_focus_tag(tag) && u64::from(*count) <= MAX_COUNT
+        }
+        ServerMsg::DecisionRequest {
+            tag,
+            request_id,
+            prompt,
+            detail,
+            choices,
+            context_pane_id,
+            ..
+        } => {
             is_focus_tag(tag)
                 && tag_ok_request_id(request_id)
                 && prompt.is_empty()
@@ -659,17 +784,29 @@ pub fn is_uplink_metadata_shape(msg: &ServerMsg) -> bool {
                 && context_pane_id.is_none()
                 && choices.len() <= MAX_LIST
                 && choices.iter().enumerate().all(|(i, c)| {
-                    c.id == format!("c{i}") && c.label.is_empty() && c.detail.is_none() && !c.is_default
+                    c.id == format!("c{i}")
+                        && c.label.is_empty()
+                        && c.detail.is_none()
+                        && !c.is_default
                 })
         }
-        ServerMsg::DecisionResolved { tag, request_id, choice_id, .. } => {
-            is_focus_tag(tag) && tag_ok_request_id(request_id) && choice_id.is_none()
-        }
+        ServerMsg::DecisionResolved {
+            tag,
+            request_id,
+            choice_id,
+            ..
+        } => is_focus_tag(tag) && tag_ok_request_id(request_id) && choice_id.is_none(),
         ServerMsg::TrackerSummary { tag, counts, .. } => {
             is_focus_tag(tag)
-                && [counts.todo, counts.in_progress, counts.blocked, counts.needs_you, counts.done]
-                    .iter()
-                    .all(|n| *n as u64 <= MAX_COUNT)
+                && [
+                    counts.todo,
+                    counts.in_progress,
+                    counts.blocked,
+                    counts.needs_you,
+                    counts.done,
+                ]
+                .iter()
+                .all(|n| *n as u64 <= MAX_COUNT)
         }
         _ => false,
     }
