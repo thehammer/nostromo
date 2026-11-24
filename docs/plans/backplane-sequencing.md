@@ -672,9 +672,13 @@ true for all four. A `Satellite` does **not** get `Tcp`'s policy: it may send
 only `Hello`, `Subscribe`, `Ping` and its level's admin verbs (nothing
 routable), receives only `Topic::Devices` (hosts cut to its own record), and
 what it publishes enters the primary only through an ingest check (host =
-its record's name; no `LocalOnly`, `Admin`, `SatelliteControl`, pairing
-reply, `Hosts`, `HostUnavailable`, `Welcome`, `Pong` or `Error`, whatever the
-egress). See W10, "Trust boundary on the primary".
+its record's name; only the host-carrying variants; no `LocalOnly`,
+`Admin`, `SatelliteControl`, pairing reply, `Hosts`, `HostUnavailable`,
+`Welcome`, `Pong`, `Error`, `MotherPeek` or `MotherAwaitDetected`, whatever
+the egress; rate- and size-capped). The uplink socket carries a tagged
+`UplinkFrame` envelope (client verb, publish, routed reply), and a routed
+reply is accepted only for a request id the primary issued to that host. See
+W10, "Trust boundary on the primary".
 
 | Message (direction) | Wedge | FND-1 class / policy | Notes |
 |---|---|---|---|
@@ -1259,5 +1263,5 @@ first step, to be opened up later), and the entitlement finding.
 |---|---|---|---|
 | Pairing PRD open question 4 | Does the employer's policy allow Kobe's job states, short references and host name to leave Kobe for the operator's personal server, the push relay and Apple, and to show on a personal phone? | **Yes** (operator, 2026-11-24): fixed-vocabulary metadata only, never Carefeed text, which is what the `work` profile sends. The permissive v1 default stands. W10 is no longer gated on it, and Kobe is enrolled as a `work` satellite at install. If the policy ever changes, Kobe is not enrolled (or its satellite record is revoked); PRD criteria 12, 24's "works from Kobe", 50 and the lost-phone-at-work path then lapse. | W10 (release no longer gated; install row), W13 (Kobe pushes stay), PRDs (`daemon-pairing-flow.md`, `push-relay.md`) |
 | — (Archie, not an operator answer) | How do `DeviceAdminLevel` and the admin frames reach a satellite through W9's `may_receive`, which drops `Admin` for every network trust? | A new `ServerClass::SatelliteControl` (`DeviceAdminLevel`, `DeviceAdminError`) passes for `Satellite` at every level including `off` and is refused for `Paired`, `Tcp`, `Routed`; `Admin` passes for `Satellite` when its level is not `off`; a level change closes the uplink with 1012 so it is re-admitted with the new trust. (Perri's #522 item.) | W10 ("Refreshed 2026-11-24") |
-| — (Archie, after Perri's review of #529) | May a satellite change other satellites' records, and what may it see and publish? | Satellite records change only from the primary's CLI: from a satellite, `DeviceRevoke` targets phones and iPads only, at every level (W15's "reducing access is safe from any surface" read as applying to devices), and `DeviceSetAdmin` is refused. A satellite sees only its own row in `Devices.hosts`, receives only `Topic::Devices`, sends nothing routable, and the primary re-checks every frame it publishes (host = record name; admin, control and local-only frames dropped). The operator can widen the revoke rule later. | W10 ("Trust boundary on the primary") |
+| — (Archie, after Perri's review of #529) | May a satellite change other satellites' records, and what may it see and publish? | Satellite records change only from the primary's CLI: from a satellite, `DeviceRevoke` targets phones and iPads only, at every level (W15's "reducing access is safe from any surface" read as applying to devices), and `DeviceSetAdmin` is refused. A satellite sees only its own row in `Devices.hosts`, receives only `Topic::Devices`, sends nothing routable, and the primary re-checks every frame it publishes (host = record name; only host-carrying variants; admin, control, local-only, `MotherPeek` and `MotherAwaitDetected` frames dropped; rate- and size-capped) and accepts a routed reply only for a request id it issued to that host. The operator can widen the revoke rule later. | W10 ("Trust boundary on the primary") |
 | — (Archie) | Where are future `Paired`-only verbs gated now that `paired_extra_allowed` is gone (#528)? | At the pre-dispatch site in `handle_client` (`server.rs:1379-1395`), as `DeviceUnpairSelf` is in `DeviceHub::dispatch`: a push-engine hook for W13's four verbs and W16's `PushDetail`, acting only for `(Paired, Some(device_id))`. | W13, W16 |

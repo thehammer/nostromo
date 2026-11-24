@@ -199,41 +199,134 @@ by trusting the satellite's own filters (which stay as defence in depth). The
 point is that a crafted satellite can never act above its tier, impersonate
 another host, or read what it is not meant to.
 
+**A0. How the primary reads a satellite's socket (M5a).** `handle_client`
+decodes every inbound frame as a `ClientMsg` (`src/ipc/server.rs:1249`) and
+W10 adds no `ClientMsg` variant, so a satellite's published `ServerMsg`s and
+its own verbs need a wire distinction. **Chosen: a tagged envelope on the
+uplink socket only**, `enum UplinkFrame` in a new `src/ipc/uplink_wire.rs`
+shared by both sides, serde-tagged `"uplink"`:
+- satellite → primary: `client { msg: ClientMsg }` (its own `Hello`,
+  `Subscribe`, `Ping`, admin verbs), `publish { msg: ServerMsg }` (a
+  broadcast it forwards), `reply { id: String, msg: ServerMsg }` (an answer to
+  a routed request);
+- primary → satellite: `server { msg: ServerMsg }` (anything its
+  `handle_client` writes) and `request { id: String, msg: ClientMsg }` (a
+  routed read).
+
+Why an envelope and not "decode `ClientMsg`, fall back to `ServerMsg`": both
+enums are internally tagged on `type` in one namespace, so a fallback would
+let the satellite choose which decoder runs and would break silently the day
+a variant name is shared; it would also need a `ClientMsg` variant (an
+ordinal, moving W13's and W16's numbers again) to carry routed replies. The
+envelope is transport framing, not a `ClientMsg`, so `CLIENT_MSG_VARIANTS`
+stays 106. `run_paired` (`src/ipc/ws.rs:530`) knows the record is a
+satellite before the first frame (item 4), so for a satellite record it
+expects envelopes from the first frame on (the `Hello` too): it unwraps
+`client` into the `handle_client` bridge exactly as today, sends **every**
+`publish` through `router::ingest_from_satellite` and every `reply` through
+`router::accept_routed_reply` (below), and never lets either reach
+`handle_client`. It drops (and counts) a frame that is not valid
+`UplinkFrame` or carries a primary → satellite tag. It wraps everything the
+handler writes as `server`. The satellite accepts only `server` and
+`request`. Phones and iPads never see the envelope.
+
 **A. Ingest: what the primary accepts from a satellite** (new function
 `router::ingest_from_satellite(record: &SatelliteRecord, msg: ServerMsg) ->
-Option<ServerMsg>` in `src/ipc/router.rs`, the only path by which a
-satellite's frames reach the primary's broadcast channel):
-1. **Host is the record's name, always (M1).** If the frame's `host` is not
+Option<ServerMsg>` in `src/ipc/router.rs`; every `publish` frame goes
+through it, and it is the only path from a satellite to the primary's
+broadcast channel; routed replies take the second path in A5):
+0. **Rate and size (R3).** Per satellite connection: a `publish` frame over
+   **256 KiB** of JSON is dropped (counted); `publish` frames pass a token
+   bucket of **50 per second, burst 200**, excess dropped and counted, and a
+   satellite over the limit for 30 s in a row is closed with 1008. (The
+   library still accepts frames up to `MAX_FRAME_LEN * 2`, `ws.rs:330-336`,
+   because the limit is chosen at accept time; the cap is applied on read in
+   `run_paired`.) `reply` frames are bounded by the outstanding requests (A5)
+   and capped at `MAX_FRAME_LEN` (`src/ipc/protocol.rs:52`), since a
+   transcript snapshot can be large. A test drives 1,000 frames in a second
+   and a 300 KiB frame from a crafted satellite and asserts the drops and that
+   a phone subscriber sees no lag beyond the bucket.
+1. **Only host-carrying variants, and host is the record's name, always
+   (M1, R5).** The allow-list is exactly the variants that carry `host`:
+   `MotherJobs`, `MotherStatusline`, `Activity`, `FocusListResp`,
+   `SessionListResp`, `ApprovalPending`, `PerriState`, `DecisionRequest`,
+   `DecisionResolved` (the nine in Files), plus `SessionState`,
+   `TrackerSummary`, `SessionBridge`, `FocusCreated` and
+   `FocusRegistryUpdated`, to which W10 now also adds the same optional
+   `host` because the per-topic publish table publishes them. Any other
+   variant is dropped (so a host-less open frame such as `Withheld`,
+   `DaemonReconnected` or `ModelCatalog` never enters from a satellite).
+   Transcript and other per-focus content of a `personal` host reaches the
+   primary only as routed replies to a routed `SessionAttach` (A5), not as
+   broadcasts (it carries no host and could not be attributed). If the frame's `host` is not
    exactly `Some(<record name>)` (absent counts as a mismatch), drop it and
    count it (one WARN per variant per hour). Never trust a satellite's
    `host` to key `retain_broadcasts`: otherwise Kobe could publish
    `MotherJobs { host: Some("sendai") }` or `host: None` (the primary's own
    key) and overwrite Sendai's or Tokyo's retained snapshot on every phone.
    (Drop rather than overwrite, so a buggy honest satellite is visible.)
+   The host rule applies to every allowed variant.
 2. **Never-from-a-satellite variants, whatever the egress (M2).** Drop every
    frame whose `classify_server_msg` is `LocalOnly`, `Admin` or
    `SatelliteControl`; the five W9 pairing replies (`PairOffer`, `Paired`,
    `PairRefused`, `Unauthorized`, `DeviceUnpaired`); and `Hosts`,
    `HostUnavailable`, `Welcome`, `Pong`, `Error`, `MotherPeek`,
-   `MotherAwaitDetected`. Without this, a crafted `Devices`,
+   `MotherAwaitDetected` (by name). Step 1's allow-list already excludes all
+   of these; the explicit list stays as a second, named check so a later
+   `host` field on one of them cannot open it. Without this, a crafted `Devices`,
    `DeviceAdminLevel { level: full, pair_from: [...] }` or `Hosts` published by
    Kobe would pass the primary's per-downstream `peer::outbound` to its local
    clients and, through `Admin`/`SatelliteControl`, to Sendai's uplink, and
    Sendai's Mac app would show a forged device list, level or pair-from host.
-3. **Egress shape.** A `work` satellite's frame must also be one of the
-   metadata shapes `redact_for_uplink_metadata` produces (re-run it on the
-   primary with the satellite's pseudonymous tags left as they are and drop
-   the frame if the output differs from the input); a `personal` satellite's
-   frame must survive `peer::outbound(PeerTrust::Tcp, …)` unchanged (drop it
-   otherwise). Both are counted.
+3. **Egress shape (R2).** A `work` satellite's frame must satisfy a pure
+   predicate `peer::is_uplink_metadata_shape(&ServerMsg) -> bool` (re-running
+   `redact_for_uplink_metadata` on the primary would re-hash the `f-` tags,
+   so its output never equals its input). The predicate checks, per allowed
+   variant, that every field the metadata function blanks is absent or empty,
+   every focus tag matches `^f-[0-9a-f]{8}$`, every job or item ref is 8
+   lower-case hex, every enum is in its fixed vocabulary, agent names are in
+   the fixed agent set, and counts are within sane bounds. A round-trip test
+   asserts `is_uplink_metadata_shape(redact_for_uplink_metadata(m))` for a
+   constructor of every allowed variant (an honest `work` frame survives) and
+   `false` for each frame with a planted marker string. A `personal`
+   satellite's frame must survive `peer::outbound(PeerTrust::Tcp, …)`
+   unchanged (drop it otherwise). Both are counted.
 4. Only then is the frame broadcast. The per-downstream `peer::outbound`
    still runs for every receiver.
+5. **Routed replies (M5b): `router::accept_routed_reply`.** When the router
+   forwards one of the six read verbs to a `personal` satellite, it mints an
+   opaque random id (16 bytes, base64url) and records `id → (requesting
+   connection's targeted sender and conn_key, host routed to, allowed reply
+   variants for that verb, expiry)`; the satellite receives `request { id,
+   msg }`. The satellite never names a target connection. A `reply { id, msg
+   }` is accepted only if: the id is outstanding; it arrived on the uplink of
+   **the host the request was routed to** (and that host is `personal`; a
+   `work` host is never routed to, so it can never hold an id); `msg`'s
+   variant is in the verb's allowed set (derived from what
+   `handle_client_msg`'s arms send for that verb; a test pins the table); and
+   it passes steps 1–2 (host = record name, drop list). Then it is written to
+   the requester's targeted sender, whose `outbound` still runs. Anything
+   else (unknown, expired, foreign host, wrong variant) is dropped and
+   counted. Single-answer verbs (`SessionList`, `FocusList`,
+   `SessionModelGet`, `ActivitySnapshotRequest`, `SessionDetach`) retire the
+   id on the first accepted reply or after 10 s. A `SessionAttach` id stays
+   live, carrying that attach's snapshot and live deltas, until the requester
+   detaches or disconnects (the primary then routes `SessionDetach` with the
+   same id) or the uplink drops. On the satellite the injected key is
+   `uplink:<id>` (not the primary's connection id), and every frame the
+   local handler writes to that key goes back as `reply { id, … }` through
+   the egress filter.
 
 **B. What a satellite may send and receive (M3).** "A satellite publishes;
 it does not consume" is enforced on the primary:
 - **Verbs.** `network_policy` (`src/ipc/peer.rs:1081`) takes no trust, so a
   separate allow-list `peer::satellite_allowed(&ClientMsg) -> bool` is
-  checked first for `PeerTrust::Satellite`: `Hello`, `Subscribe`, `Ping`, and
+  checked for `PeerTrust::Satellite` **at the top of `handle_client`'s frame
+  loop, right after the `ClientMsg` decode (`src/ipc/server.rs:1249`)**,
+  before the `Subscribe` handling, the operator-answer checks, the terminal
+  verbs, the `DeviceHub::dispatch` call (`:1379-1395`) and
+  `handle_client_msg` (R4). A satellite never reaches the `network_policy`
+  path a `Tcp` peer takes; the later gates are not relied on for it. Allowed: `Hello`, `Subscribe`, `Ping`, and
   the admin verbs of the per-level table (C) only. Everything else, in
   particular every routable read verb (`SessionAttach`, `SessionDetach`,
   `ActivitySnapshotRequest`, `SessionModelGet`, `SessionList`, `FocusList`,
@@ -309,12 +402,18 @@ with its effective level and the current `pair_from`; (b) to a satellite
 again from its own `run_paired` epoch arm when the set of `full` hosts
 changes but its own level does not (its own level changing closes 1012
 instead); (c) to a local client, `{ level: full, pair_from: [] }`, when it
-subscribes to `Topic::Devices`. Add `ServerMsg::DeviceAdminLevel { .. } =>
-false` to `deliver_broadcast` (`src/ipc/server.rs:4766`) beside W9's
-targeted admin frames (`:4818-4826`), so even an accidental broadcast is
-dropped. On a **satellite**, re-sending it to local subscribers as a local
-broadcast is fine: a satellite has no `Satellite` peers, and its loopback
-`Tcp`/`Paired` peers are refused by class.
+subscribes to `Topic::Devices`. (b) goes through that satellite
+connection's targeted sender (the handler's channel, so it passes the class
+gate like every other write), never straight to the socket from
+`run_paired`. **It is targeted on both sides (R1).** On a **satellite** too,
+the uplink task keeps the set of local connections subscribed to
+`Topic::Devices` (it already tracks local connections for `origin`) and
+writes the narrowed `DeviceAdminLevel` to each one's targeted sender, on
+subscribe and whenever the retained level changes. So one mode-independent
+arm, `ServerMsg::DeviceAdminLevel { .. } => false`, goes in
+`message_matches_topics` (`src/ipc/server.rs:4785`, beside W9's targeted
+admin frames at `:4818-4826`; `deliver_broadcast`, `:4766`, is only its
+wrapper), and an accidental broadcast is dropped on every daemon.
 
 **F. Refusing a role (S3).** `PeerOrigin::resolve` returns a bare
 `PeerTrust` (`src/ipc/server.rs:416`, called at `:766`). Change it to
@@ -336,6 +435,9 @@ before W10 has no recorded egress, so it reads as `work`, and nothing changes
 egress later: a `personal` satellite (Sendai) enrolled before W10 must be
 re-enrolled (revoke the old record on Tokyo, then `device pair --satellite
 sendai --egress personal --admin full`). The memo's install row says so.
+
+Add `src/ipc/uplink_wire.rs` (the `UplinkFrame` envelope, A0) to the files
+this wedge creates.
 
 Tests for A–G are in Approach step 5 and criteria W10-20 and W10-21.
 
@@ -553,7 +655,9 @@ the operator's own host.
   `ActivityEvent` (`src/agent_bus.rs:19`), `SessionListResp` (`:3265`),
   `FocusListResp` (`:3278`), `PerriState` (`:3166`), `DecisionRequest`
   (`:3341`), `DecisionResolved` (`:3361`) and `ApprovalPending` (`:3422`;
-  same two fields plus `host`). **Never add `host` to `MotherJob`**
+  same two fields plus `host`), and (2026-11-24, for ingest's allow-list) also
+  `SessionState` (`:3220`), `SessionBridge` (`:3229`), `FocusRegistryUpdated`
+  (`:3282`), `FocusCreated` (`:3333`) and `TrackerSummary` (`:3804`). **Never add `host` to `MotherJob`**
   (`src/mother/mod.rs`): it is Mother's contract type, and
   `tests/fixtures/mother-contract/ipc_mother_jobs*.golden.json` must stay
   byte-identical when `host` is `None`. `MotherAwaitDetected` is not
@@ -636,15 +740,17 @@ the operator's own host.
   targeted reply, or not in `publish_topics`; (2) if `egress == work` or
   `is_phi_scoped`, pass it through `redact_for_uplink_metadata`; else
   `peer::outbound(PeerTrust::Tcp, …)` (which already withholds
-  Teri/Fred/work state frames; there is no exception in v1); (3) stamp `host`; send. On
+  Teri/Fred/work state frames; there is no exception in v1); (3) stamp `host`; send it as `UplinkFrame::publish` (frames of a variant outside ingest's host-carrying allow-list are not sent at all). On
   (re)connect, replay the retained cache through the same filter first.
   **Inbound:** a frame from the primary is accepted only if it is a routable
   read verb (`SessionAttach`, `SessionDetach`, `ActivitySnapshotRequest`,
   `SessionModelGet`, `SessionList`, `FocusList`) and the satellite is
   `personal`; it is then injected into the local `handle_client_msg` under
-  `PeerTrust::Routed` with a synthetic `conn_key` `uplink:<primary-conn-id>`
+  `PeerTrust::Routed` with a synthetic `conn_key` `uplink:<id>`, where `id`
+  is the opaque request id from the primary's `request { id, msg }` envelope
   (attached through `attach_network`, so B11 keeps the merge gate open), and
-  targeted replies go back up through the same egress filter. Anything
+  targeted replies go back up as `reply { id, msg }` through the same egress
+  filter ("Trust boundary on the primary", A0 and A5). Anything
   else from the primary (in particular `DecisionAnswer`, `ApprovalAnswer`,
   `ApprovalRefusalReport`, `MotherResume`, `MotherAction`, `PerriAction`,
   `Session{Spawn,Send,Interrupt,Control}`) is dropped with one WARN per
@@ -800,7 +906,21 @@ the operator's own host.
    clients on a `full` satellite, one's `DevicePairCancel` of the other's
    `pairing_id` → `unknown_pairing`, and the pairing stays open. Buffer a
    `DeviceRevoke <phone>` behind a `set_admin kobe read_only` (paused
-   handler) → refused (the current record level wins).
+   handler) → refused (the current record level wins). Publishing a host-less
+   open frame (`Withheld`, `DaemonReconnected`, `ModelCatalog`) → dropped. A
+   `ServerMsg` sent without the envelope, or a `server`/`request` envelope
+   from the satellite → dropped. **Routed replies:** a `reply { id, msg }`
+   with an id the primary never issued, an expired id, an id issued for a
+   request routed to `sendai` but sent by `kobe`, or a variant outside the
+   verb's set → dropped, and no phone's targeted channel receives it; a
+   `reply` from a `work` satellite → dropped (it never holds an id); an honest
+   `personal` satellite's reply to a routed `SessionList` reaches only the
+   requesting connection. **Shape:** an honest `work` satellite's
+   `MotherJobs`, `DecisionRequest` and `SessionState` survive ingest
+   (round trip through `redact_for_uplink_metadata` and
+   `is_uplink_metadata_shape`). **Flood:** 1,000 `publish` frames in one
+   second and one 300 KiB frame → the excess and the large frame are dropped
+   and counted.
 6. **Device-admin relay.** With the two-server harness (primary record for
    `sat` set to `admin: full`): a Unix client on the satellite sends
    `DevicePairStart` and gets `DevicePairing` with the **primary's**
@@ -925,10 +1045,19 @@ the operator's own host.
   crafted-satellite test in Approach step 5): a frame whose `host` is not
   exactly the record's name (absent included) is dropped and never retained
   or delivered; every `LocalOnly`, `Admin` and `SatelliteControl` frame, the
-  five W9 pairing replies, `Hosts`, `HostUnavailable`, `Welcome`, `Pong` and
-  `Error` published by a satellite are dropped on either egress and reach no
-  local client and no other satellite; a `work` satellite's non-metadata
-  frame is dropped.
+  five W9 pairing replies, `Hosts`, `HostUnavailable`, `Welcome`, `Pong`,
+  `Error`, `MotherPeek` and `MotherAwaitDetected` published by a satellite
+  are dropped on either egress and reach no local client and no other
+  satellite; only the host-carrying allow-list (A1) is ingested, so a
+  host-less open frame (`Withheld`, `DaemonReconnected`, `ModelCatalog`) is
+  dropped; a `work` satellite's frame must pass `is_uplink_metadata_shape`,
+  and an honest one does; a satellite's socket carries only `UplinkFrame`
+  envelopes (A0) and an unwrapped or wrong-direction frame is dropped; a
+  routed `reply` is accepted only for an outstanding id issued for a request
+  routed to that same `personal` host and with an allowed variant, and goes
+  only to the requesting connection (an unsolicited, expired, foreign-host,
+  `work`-host or wrong-variant reply is dropped and counted); `publish`
+  frames over 256 KiB or above 50/s (burst 200) are dropped and counted.
 
 ## Mother crew: gates, lenses, checklist and calibration
 
