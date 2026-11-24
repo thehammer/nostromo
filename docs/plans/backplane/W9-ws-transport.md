@@ -492,8 +492,10 @@ Devices redeem codes over the WebSocket listener without a token.
    (c) oversize frame → 1009; binary frame → 1003;
    (d) a `Paired` peer never receives `TeriState`, `FredState` or a work
    frame, and its subscribe yields `Withheld { reason: "not_shared" }`;
-   (e) a `Paired` peer is replayed the retained frames its trust allows
-   (`MotherJobs`, `ApprovalPending`) on subscribe.
+   (e) a `Paired` peer is replayed exactly what the outbound filter allows
+   (currently none), plus one `Withheld { not_shared }`, on subscribe. (The
+   held-approval replay over a `Paired` socket is a follow-up in
+   `tests/approvals_wire.rs`.)
    In `tests/device_pairing.rs`:
    (f) an admin client sends `DevicePairStart`, a device sends `PairCheck`
    then `Pair` → device gets `Paired`, the admin gets `DevicePairOutcome::
@@ -696,6 +698,28 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
 - Widening what a `Paired` device may *do* (it gets the `Tcp` allow-list
   plus `DeviceUnpairSelf`, and W13's self-scoped push verbs later). Per bet
   B10, approval/decision answers are never accepted from it.
+
+## Pinned wire vector: the re-pair proof (D6)
+
+W11 (Kit) must produce these exact bytes. The encoding, exactly:
+
+- **key** = the raw 32-byte SHA-256 of the token's **base64url text** (the
+  token string as the daemon issued it, hashed as UTF-8 bytes; not decoded);
+- **message** = the challenge's **base64url text** (as it appears in
+  `PairOffer.challenge`, UTF-8 bytes) followed by the pairing code **reduced to
+  its digits** (`123 456` is `123456`);
+- **proof** = HMAC-SHA256(key, message), encoded **base64url without padding**.
+
+| Input | Value |
+| --- | --- |
+| token | `dG9rZW4tZm9yLXRoZS1maXhlZC12ZWN0b3ItMDAwMDAwMDA` |
+| SHA-256(token) (key, hex) | `6ea97a4459aa83bb2f9776d280a02605de0d9614bb35991db08c6173e40fc47c` |
+| challenge | `Y2hhbGxlbmdlLWZvci10aGUtZml4ZWQtdmVjdG9yLTAwMDA` |
+| code | `123456` |
+| **proof** | `ONMjmbNsnby-4Laxp33owC99gferbRJQsDdW6Ofz4cA` |
+
+The vector is checked in as `the_proof_encoding_is_pinned_by_a_fixed_vector`
+in `src/ipc/devices.rs`, next to the RFC 4231 HMAC vector.
 
 ```yaml
 suggested_config:

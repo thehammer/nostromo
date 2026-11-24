@@ -20,7 +20,7 @@ pub struct OperatorCap {
 pub(crate) fn mint(trust: PeerTrust) -> Option<OperatorCap> {
     match trust {
         PeerTrust::OperatorApp => Some(OperatorCap { _private: () }),
-        PeerTrust::LocalOther | PeerTrust::Tcp => None,
+        PeerTrust::LocalOther | PeerTrust::Tcp | PeerTrust::Paired => None,
     }
 }
 

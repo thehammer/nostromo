@@ -22,8 +22,13 @@ release:
 install: release
 	@$(RESTART_GUARD)
 	cargo install --path .
-	@# The `nostromo` TUI binary no longer exists, and `cargo install` does not remove an old ~/.cargo/bin/nostromo.
-	@echo "installed nostromd, nostromo-mcp-bridge, nostromo-activity-hook, nostromo-guard, sensitive-text-scan, nostromo-google-auth to ~/.cargo/bin"
+	@# `nostromo` is the device-management CLI. An old TUI binary of the same name may still sit in
+	@# ~/.cargo/bin on this Mac; the install above overwrites it with the CLI.
+	@echo "installed nostromd, nostromo (CLI), nostromo-mcp-bridge, nostromo-activity-hook, nostromo-guard, sensitive-text-scan, nostromo-google-auth to ~/.cargo/bin"
+	@a=$$(readlink "$(HOME)/.local/bin/nostromo" 2>/dev/null || echo "$(HOME)/.local/bin/nostromo"); b="$(HOME)/.cargo/bin/nostromo"; \
+	  if [ -e "$(HOME)/.local/bin/nostromo" ] && [ -e "$$b" ] && ! cmp -s "$$a" "$$b"; then \
+	    echo "note: ~/.local/bin/nostromo and ~/.cargo/bin/nostromo differ; PATH resolves $$(command -v nostromo) first"; \
+	  fi
 	@# Restart the daemon if it's registered with launchd so the new binary takes effect.
 	@launchctl kickstart -k "gui/$$(id -u)/com.hammer.nostromd" 2>/dev/null && echo "nostromd restarted" || echo "nostromd not registered with launchd (skipping restart)"
 
@@ -125,9 +130,9 @@ RESTART_GUARD = FORCE="$(FORCE)" bin/nostromo-restart-guard
 daemon-restart-guard:
 	@$(RESTART_GUARD)
 
-## Build the nostromd daemon binary, its production-shell guard and the MCP bridge (release).
+## Build the nostromd daemon binary, its production-shell guard, the MCP bridge and the nostromo CLI (release).
 daemon:
-	cargo build --release --bin nostromd --bin nostromo-guard --bin nostromo-mcp-bridge
+	cargo build --release --bin nostromd --bin nostromo-guard --bin nostromo-mcp-bridge --bin nostromo
 
 ## Install the daemon binary and register the launchd agent.
 ##
@@ -178,6 +183,19 @@ install-daemon: daemon
 	  echo "Installed nostromd to $$real"; echo "Installed nostromo-guard to $$guard"; \
 	  echo "Installed nostromo-mcp-bridge to $$bridge"; \
 	  echo "Note: running agent sessions keep their old bridge until restarted; a session whose bridge is the new one reconnects across later daemon restarts."
+	@# The `nostromo` CLI (`nostromo device ...`) is a fourth, independent binary: nothing the daemon
+	@# runs depends on it, so it is not part of the all-or-nothing swap above. It is installed after
+	@# nostromd, beside it, signed the same way; a failed copy only warns and leaves the daemon installed.
+	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \
+	  cli="$$(dirname "$$real")/nostromo"; cdest="$(HOME)/.local/bin/nostromo"; stage_cli="$$cli.new.$$$$"; \
+	  rm -f "$$stage_cli"; \
+	  if cp "$(NOSTROMO_TARGET_DIR)/release/nostromo" "$$stage_cli" && codesign --force -s - --identifier nostromo "$$stage_cli" \
+	      && rm -f "$$cli" && mv "$$stage_cli" "$$cli" && { [ -e "$$cdest" ] || [ -L "$$cdest" ] || ln -s "$$cli" "$$cdest"; }; then \
+	    echo "Installed nostromo to $$cli"; \
+	  else \
+	    rm -f "$$stage_cli"; \
+	    echo "install-daemon: warning: could not install the nostromo CLI; the daemon is installed" >&2; \
+	  fi
 	sed \
 		-e 's|__PREFIX__|$(HOME)/.local|g' \
 		-e 's|__HOME__|$(HOME)|g' \
@@ -201,8 +219,8 @@ uninstall-daemon:
 	launchctl bootout "gui/$$(id -u)/com.hammer.nostromd" 2>/dev/null || true
 	rm -f "$(HOME)/Library/LaunchAgents/com.hammer.nostromd.plist"
 	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \
-	  rm -f "$$(dirname "$$real")/nostromo-guard" "$$(dirname "$$real")/nostromo-mcp-bridge"; \
-	  rm -f "$(HOME)/.local/bin/nostromo-mcp-bridge"
+	  rm -f "$$(dirname "$$real")/nostromo-guard" "$$(dirname "$$real")/nostromo-mcp-bridge" "$$(dirname "$$real")/nostromo"; \
+	  rm -f "$(HOME)/.local/bin/nostromo-mcp-bridge" "$(HOME)/.local/bin/nostromo"
 	rm -f "$(HOME)/.local/bin/nostromd"
 	@echo "nostromd uninstalled"
 endif
@@ -240,6 +258,18 @@ install-daemon-linux: daemon
 	  fi; \
 	  echo "Installed nostromd to $$real"; echo "Installed nostromo-guard to $$guard"; \
 	  echo "Installed nostromo-mcp-bridge to $$bridge"
+	@# The `nostromo` CLI (`nostromo device ...`) is independent of the daemon, so it is not part of
+	@# the all-or-nothing swap above; a failed copy only warns and leaves the daemon installed.
+	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \
+	  cli="$$(dirname "$$real")/nostromo"; cdest="$(HOME)/.local/bin/nostromo"; stage_cli="$$cli.new.$$$$"; \
+	  rm -f "$$stage_cli"; \
+	  if cp "$(NOSTROMO_TARGET_DIR)/release/nostromo" "$$stage_cli" \
+	      && rm -f "$$cli" && mv "$$stage_cli" "$$cli" && { [ -e "$$cdest" ] || [ -L "$$cdest" ] || ln -s "$$cli" "$$cdest"; }; then \
+	    echo "Installed nostromo to $$cli"; \
+	  else \
+	    rm -f "$$stage_cli"; \
+	    echo "install-daemon-linux: warning: could not install the nostromo CLI; the daemon is installed" >&2; \
+	  fi
 	sed \
 		-e 's|__PREFIX__|$(HOME)/.local|g' \
 		-e 's|__HOME__|$(HOME)|g' \
@@ -263,8 +293,8 @@ uninstall-daemon-linux:
 	rm -f "$(HOME)/.config/systemd/user/nostromd.service"
 	systemctl --user daemon-reload 2>/dev/null || true
 	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \
-	  rm -f "$$(dirname "$$real")/nostromo-guard" "$$(dirname "$$real")/nostromo-mcp-bridge"; \
-	  rm -f "$(HOME)/.local/bin/nostromo-mcp-bridge"
+	  rm -f "$$(dirname "$$real")/nostromo-guard" "$$(dirname "$$real")/nostromo-mcp-bridge" "$$(dirname "$$real")/nostromo"; \
+	  rm -f "$(HOME)/.local/bin/nostromo-mcp-bridge" "$(HOME)/.local/bin/nostromo"
 	rm -f "$(HOME)/.local/bin/nostromd"
 	@echo "nostromd uninstalled"
 

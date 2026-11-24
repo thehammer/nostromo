@@ -380,6 +380,45 @@ async fn main() -> Result<()> {
         Arc::clone(&decisions),
     );
 
+    // ── IPC server (WebSocket — paired devices and satellite Macs) ────────────
+    // Authenticated by a per-device bearer token; devices are paired with
+    // `nostromo device pair`. Loopback unless the operator opts in.
+    if let Some(warning) = config.ws_addr_warning() {
+        warn!("{warning}");
+    }
+    match config.ws_listen_addr() {
+        None => info!("WebSocket listener disabled (NOSTROMD_WS_ADDR=off)"),
+        Some(ws_addr) => {
+            // A busy port or an unreadable device registry must not take down
+            // approvals and sessions: log it and run without device features.
+            match nostromo::ipc::ws::setup_listener(
+                &config,
+                ws_addr,
+                nostromo::ipc::devices::default_devices_path(),
+            )
+            .await
+            {
+                Ok(setup) => {
+                    info!(addr = %setup.bound, pair_host = %setup.pair_host, "IPC WebSocket listener bound");
+                    if let Some(warning) = config.plaintext_transport_warning(setup.bound) {
+                        warn!("{warning}");
+                    }
+                    server.bind_ws(
+                        setup.listener,
+                        setup.hub,
+                        Arc::clone(&session_mgr),
+                        config.perri_state_dir(),
+                        Arc::clone(&decisions),
+                    );
+                }
+                Err(e) => error!(
+                    addr = %ws_addr,
+                    "WebSocket listener and device features are disabled: {e:#}"
+                ),
+            }
+        }
+    }
+
     // ── mDNS / Bonjour advertising ────────────────────────────────────────────
     // Advertise nostromd on the LAN so iOS clients can discover it without a
     // hardcoded IP.  Failure is non-fatal: some sandboxed or enterprise

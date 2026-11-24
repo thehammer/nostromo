@@ -190,6 +190,53 @@ async fn the_gate_follows_attach_detach_and_disconnect() {
 }
 
 #[tokio::test]
+async fn a_network_peer_that_declared_nothing_does_not_close_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut reap, shared, _out) = idle_session(&dir);
+    let mgr = &mut reap.0;
+    mgr.set_client_merge_capable("app", true);
+    mgr.attach("t", "app").unwrap();
+    mgr.attach_network("t", "phone").unwrap();
+    mgr.attach_network("t", "device").unwrap();
+    mgr.set_client_merge_capable("device", false);
+    assert!(
+        shared.queue.merge_allowed(),
+        "a network peer cannot send, so it never closes the gate"
+    );
+}
+
+#[tokio::test]
+async fn a_local_client_that_declared_nothing_still_closes_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut reap, shared, _out) = idle_session(&dir);
+    let mgr = &mut reap.0;
+    mgr.set_client_merge_capable("app", true);
+    mgr.attach("t", "app").unwrap();
+    mgr.attach("t", "cli").unwrap();
+    assert!(!shared.queue.merge_allowed());
+}
+
+#[tokio::test]
+async fn a_network_peer_detaching_or_dropping_recounts_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut reap, shared, _out) = idle_session(&dir);
+    let mgr = &mut reap.0;
+    mgr.attach("t", "old").unwrap();
+    mgr.attach_network("t", "phone").unwrap();
+    assert!(
+        !shared.queue.merge_allowed(),
+        "the local legacy client closes it"
+    );
+    mgr.detach("t", "phone");
+    assert!(!shared.queue.merge_allowed());
+    mgr.on_client_disconnect("old");
+    mgr.attach_network("t", "phone2").unwrap();
+    assert!(shared.queue.merge_allowed());
+    mgr.on_client_disconnect("phone2");
+    assert!(shared.queue.merge_allowed());
+}
+
+#[tokio::test]
 async fn the_view_groups_the_entries_that_will_merge() {
     let dir = tempfile::tempdir().unwrap();
     let (_reap, shared, _out) = idle_session(&dir);

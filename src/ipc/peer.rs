@@ -36,6 +36,8 @@ use crate::data::work::WorkResult;
 pub enum Transport {
     Unix,
     Tcp,
+    /// WebSocket, authenticated by a per-device bearer token.
+    Ws,
 }
 
 /// How far a peer is trusted.
@@ -52,6 +54,11 @@ pub enum PeerTrust {
     LocalOther,
     /// A TCP peer: unauthenticated, possibly anywhere on the LAN.
     Tcp,
+    /// A WebSocket peer that presented a valid device token. Gets `Tcp`'s
+    /// verbs plus `DeviceUnpairSelf` ([`paired_extra_allowed`]) and is never
+    /// equivalent to `OperatorApp`. The device id travels on the connection,
+    /// not here, so this stays `Copy`.
+    Paired,
 }
 
 impl PeerTrust {
@@ -61,13 +68,14 @@ impl PeerTrust {
         match transport {
             Transport::Unix => PeerTrust::LocalOther,
             Transport::Tcp => PeerTrust::Tcp,
+            Transport::Ws => PeerTrust::Paired,
         }
     }
 
     /// True for peers reached over the network.
     pub fn is_network(&self) -> bool {
         match self {
-            PeerTrust::Tcp => true,
+            PeerTrust::Tcp | PeerTrust::Paired => true,
             PeerTrust::OperatorApp | PeerTrust::LocalOther => false,
         }
     }
@@ -672,6 +680,9 @@ pub enum ServerClass<'a> {
     /// whatever the focus, so no sensitive-tag bookkeeping can leak it. A
     /// network peer never receives it, even for a tag that is not sensitive.
     LocalOnly,
+    /// Device administration (`Devices`, `DevicePairing`, ...): delivered to
+    /// local peers only, never to a `Tcp` or `Paired` peer.
+    Admin,
 }
 
 // ── What is NOT gated (read this before trusting the exhaustive matches) ─────
@@ -878,6 +889,21 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::Withheld { .. }
         | ServerMsg::DaemonReconnected => ServerClass::Open,
 
+        // Pairing replies are written only to the socket that asked (never
+        // broadcast; a test asserts it), so they are open.
+        ServerMsg::PairOffer { .. }
+        | ServerMsg::Paired { .. }
+        | ServerMsg::PairRefused { .. }
+        | ServerMsg::Unauthorized { .. }
+        | ServerMsg::DeviceUnpaired => ServerClass::Open,
+
+        // Device administration: local peers only.
+        ServerMsg::DevicePairing { .. }
+        | ServerMsg::DevicePairOutcome { .. }
+        | ServerMsg::Devices { .. }
+        | ServerMsg::DeviceRevoked { .. }
+        | ServerMsg::DeviceAdminError { .. } => ServerClass::Admin,
+
         // The CLI's model list and the per-agent defaults name agents and
         // models, never focus content. A request result goes only to the
         // connection that asked.
@@ -895,7 +921,8 @@ pub fn is_sensitive_server_msg(msg: &ServerMsg) -> SensitiveClass {
         | ServerClass::Focus(_)
         | ServerClass::Job(_)
         | ServerClass::Activity(_)
-        | ServerClass::LocalOnly => SensitiveClass::NotSensitive,
+        | ServerClass::LocalOnly
+        | ServerClass::Admin => SensitiveClass::NotSensitive,
     }
 }
 
@@ -978,7 +1005,7 @@ pub fn may_receive(trust: PeerTrust, msg: &ServerMsg, tags: &SensitiveTags) -> b
         ServerClass::Job(job_id) => !tags.job_is_sensitive(job_id),
         ServerClass::Activity(Some(tag)) => !tags.tag_is_sensitive(tag),
         ServerClass::Activity(None) => false,
-        ServerClass::LocalOnly => false,
+        ServerClass::LocalOnly | ServerClass::Admin => false,
     }
 }
 
@@ -1178,8 +1205,26 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::AuthoredPrLink { .. }
         // Merging a PR, irreversibly, with the operator's GitHub token: the
         // verified app only.
-        | ClientMsg::AuthoredPrMerge { .. } => NetworkPolicy::Refused,
+        | ClientMsg::AuthoredPrMerge { .. }
+        // Pairing verbs are accepted only on a token-less pairing socket (ws.rs
+        // checks before dispatch); `DeviceUnpairSelf` is allowed to a `Paired`
+        // peer by `paired_extra_allowed`, not here. Every device-admin verb is
+        // refused for every network peer.
+        | ClientMsg::PairCheck { .. }
+        | ClientMsg::Pair { .. }
+        | ClientMsg::DeviceUnpairSelf
+        | ClientMsg::DevicePairStart { .. }
+        | ClientMsg::DevicePairCancel { .. }
+        | ClientMsg::DeviceList { .. }
+        | ClientMsg::DeviceRevoke { .. }
+        | ClientMsg::DeviceSetAdmin { .. } => NetworkPolicy::Refused,
     }
+}
+
+/// What a `Paired` device may do beyond [`network_policy`]'s allow list: remove
+/// its own pairing, and nothing else. (W13 adds self-scoped push verbs.)
+pub fn paired_extra_allowed(msg: &ClientMsg) -> bool {
+    matches!(msg, ClientMsg::DeviceUnpairSelf)
 }
 
 /// Is `msg` refused for a network peer whatever it names? See [`network_policy`].
@@ -1225,7 +1270,15 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::TrackerOpenLink { tag, .. }
         | ClientMsg::TrackerEdit { tag, .. } => tags.tag_is_sensitive(tag),
 
-        ClientMsg::Hello { .. }
+        ClientMsg::PairCheck { .. }
+        | ClientMsg::Pair { .. }
+        | ClientMsg::DeviceUnpairSelf
+        | ClientMsg::DevicePairStart { .. }
+        | ClientMsg::DevicePairCancel { .. }
+        | ClientMsg::DeviceList { .. }
+        | ClientMsg::DeviceRevoke { .. }
+        | ClientMsg::DeviceSetAdmin { .. }
+        | ClientMsg::Hello { .. }
         | ClientMsg::Subscribe { .. }
         | ClientMsg::Ping
         | ClientMsg::PtySpawn { .. }
@@ -1420,11 +1473,22 @@ pub fn withheld_topics() -> Vec<Topic> {
     vec![Topic::Fred, Topic::Teri, Topic::Work]
 }
 
-/// The `Withheld` notice sent once to a network peer after it subscribes.
+/// The `Withheld` notice sent once to a legacy TCP peer after it subscribes.
 pub fn withheld_msg() -> ServerMsg {
+    withheld_msg_for(PeerTrust::Tcp)
+}
+
+/// The `Withheld` notice for a network peer of this trust: `Tcp` is told the
+/// connection is not secure; a `Paired` device is told the topics are not
+/// shared from this Mac in this version (Q2).
+pub fn withheld_msg_for(trust: PeerTrust) -> ServerMsg {
     ServerMsg::Withheld {
         topics: withheld_topics(),
-        reason: "requires_secure_connection".to_string(),
+        reason: match trust {
+            PeerTrust::Paired => "not_shared",
+            _ => "requires_secure_connection",
+        }
+        .to_string(),
     }
 }
 
@@ -2260,6 +2324,39 @@ mod tests {
                 server: None,
                 enabled: None,
             },
+            ClientMsg::PairCheck {
+                code: "123456".into(),
+                proof: None,
+            },
+            ClientMsg::Pair {
+                code: "123456".into(),
+                name: "iPhone".into(),
+                kind: crate::ipc::devices::DeviceKind::Iphone,
+                replace: false,
+            },
+            ClientMsg::DeviceUnpairSelf,
+            ClientMsg::DevicePairStart {
+                request_id: "r".into(),
+                name_hint: None,
+                satellite: None,
+                admin: None,
+            },
+            ClientMsg::DevicePairCancel {
+                request_id: "r".into(),
+                pairing_id: "p".into(),
+            },
+            ClientMsg::DeviceList {
+                request_id: "r".into(),
+            },
+            ClientMsg::DeviceRevoke {
+                request_id: "r".into(),
+                device: "d".into(),
+            },
+            ClientMsg::DeviceSetAdmin {
+                request_id: "r".into(),
+                host: "h".into(),
+                admin: crate::ipc::devices::SatelliteAdmin::Full,
+            },
             ClientMsg::SessionCommandsGet {
                 request_id: "r".into(),
                 tag: "x1".into(),
@@ -2488,7 +2585,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 98;
+    const CLIENT_MSG_VARIANTS: usize = 106;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2591,6 +2688,14 @@ mod tests {
             ClientMsg::SessionQueueTakeBack { .. } => 95,
             ClientMsg::SessionQueueRemove { .. } => 96,
             ClientMsg::SessionMcp { .. } => 97,
+            ClientMsg::PairCheck { .. } => 98,
+            ClientMsg::Pair { .. } => 99,
+            ClientMsg::DeviceUnpairSelf => 100,
+            ClientMsg::DevicePairStart { .. } => 101,
+            ClientMsg::DevicePairCancel { .. } => 102,
+            ClientMsg::DeviceList { .. } => 103,
+            ClientMsg::DeviceRevoke { .. } => 104,
+            ClientMsg::DeviceSetAdmin { .. } => 105,
         }
     }
 
@@ -2635,9 +2740,10 @@ mod tests {
         // 77 with `TerminalFollowInviteStagingOnly` (S3a); 78 with `SessionCommandsGet`;
         // 80 with the two authored-PR verbs; 87 with the seven conversation-history verbs; 88 with the rename;
         // 92 with the four authored-PR hand-off verbs (preview, notify, start session, link);
-        // 93 with `TrackerEdit` (T3a); 94 with `AuthoredPrMerge`; 97 with the three queue verbs; 98 with `SessionMcp`.
-        assert_eq!(CLIENT_MSG_VARIANTS, 98);
-        assert_eq!(every_client_msg().len(), 98);
+        // 93 with `TrackerEdit` (T3a); 94 with `AuthoredPrMerge`; 97 with the three queue verbs; 98 with `SessionMcp`;
+        // 106 with the seven pairing and device-admin verbs (W9) and `DeviceSetAdmin`.
+        assert_eq!(CLIENT_MSG_VARIANTS, 106);
+        assert_eq!(every_client_msg().len(), 106);
     }
 
     #[test]

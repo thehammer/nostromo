@@ -19,7 +19,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -31,9 +31,10 @@ use uuid::Uuid;
 use super::{
     codec::{read_frame, write_frame},
     decisions::{AnswerOutcome, DecisionRegistry},
+    device_hub::{DeviceHub, Dispatched, HubSlot},
     peer::{
-        outbound, refuse_for_network, withheld_msg, within_work_send, PeerTrust, SensitiveTags,
-        Transport,
+        outbound, refuse_for_network, withheld_msg, withheld_msg_for, within_work_send, PeerTrust,
+        SensitiveTags, Transport,
     },
     peer_verify::{
         claim_diagnostic, classify_peer, still_same_operator, PeerInfo, PeerVerifier,
@@ -111,11 +112,11 @@ const ANSWER_PERMISSION_SUPERSEDED: &str =
 
 /// Latest broadcast frame per retain key (see [`retain_key`]), replayed to a
 /// local client that subscribes after the frame was sent.
-type RetainedCache = Arc<Mutex<BTreeMap<String, ServerMsg>>>;
+pub(super) type RetainedCache = Arc<Mutex<BTreeMap<String, ServerMsg>>>;
 
 /// The ids of the Mother jobs that, in the latest job list the daemon broadcast, are held with an
 /// open structured decision. Only an id is kept, never job content.
-type HeldMotherJobs = Arc<Mutex<HashSet<String>>>;
+pub(super) type HeldMotherJobs = Arc<Mutex<HashSet<String>>>;
 
 /// How long an operator connection's terminal input and resizes go without
 /// a fresh look at the peer (open, attach, close and restart always get one).
@@ -129,6 +130,10 @@ const PERRI_DISABLED: &str =
 const MOTHER_HOLD_NEEDS_OPERATOR: &str =
     "This Mother hold needs the operator's choice in Nostromo's Mother panel.";
 
+/// The optional capabilities the WebSocket transport and device pairing add to
+/// `Welcome.features` (on every transport).
+pub(super) use super::ws::{FEATURE_DEVICES, FEATURE_PAIR, FEATURE_WS};
+
 /// Handle to the running IPC server.  Drop to shut down.
 pub struct Server {
     socket_path: PathBuf,
@@ -140,6 +145,9 @@ pub struct Server {
     republish: tokio::sync::watch::Sender<u64>,
     /// Daemon-owned terminal panes, shared by both transports.
     terminals: Arc<Mutex<TerminalManager>>,
+    /// The device registry and pairing table, once the daemon installs them
+    /// (see [`Server::bind_ws`]); empty on a daemon with no WebSocket listener.
+    hub: HubSlot,
 }
 
 impl Server {
@@ -227,6 +235,8 @@ impl Server {
         let held_for_loop = Arc::clone(&held_mother_jobs);
         let unix_peers = UnixPeers { verifier, qa_mode };
         let terminals_for_loop = Arc::clone(&terminals);
+        let hub: HubSlot = Arc::new(OnceLock::new());
+        let hub_for_loop = Arc::clone(&hub);
         tokio::spawn(async move {
             if let Err(e) = accept_loop(
                 listener,
@@ -238,6 +248,7 @@ impl Server {
                 retained_for_loop,
                 held_for_loop,
                 terminals_for_loop,
+                hub_for_loop,
             )
             .await
             {
@@ -254,6 +265,7 @@ impl Server {
             held_mother_jobs,
             republish,
             terminals,
+            hub,
         })
     }
 
@@ -288,6 +300,7 @@ impl Server {
         let retained = Arc::clone(&self.retained);
         let held = Arc::clone(&self.held_mother_jobs);
         let terminals = Arc::clone(&self.terminals);
+        let hub = Arc::clone(&self.hub);
         tokio::spawn(async move {
             if let Err(e) = accept_loop_tcp(
                 listener,
@@ -298,10 +311,62 @@ impl Server {
                 retained,
                 held,
                 terminals,
+                hub,
             )
             .await
             {
                 warn!("TCP IPC accept loop exited: {e:#}");
+            }
+        });
+    }
+
+    /// Attach the WebSocket listener: the third transport, authenticated by a
+    /// per-device bearer token (see [`super::ws`]). Installs `hub` so local
+    /// clients can run the device-admin verbs, and so `Devices` frames are
+    /// broadcast on this server's channel.
+    pub fn bind_ws(
+        &self,
+        listener: TcpListener,
+        hub: Arc<DeviceHub>,
+        session_mgr: Arc<Mutex<SessionManager>>,
+        perri_state_dir: PathBuf,
+        decisions: Arc<Mutex<DecisionRegistry>>,
+    ) {
+        self.bind_ws_with_limits(
+            listener,
+            hub,
+            session_mgr,
+            perri_state_dir,
+            decisions,
+            super::ws::WsLimits::default(),
+        );
+    }
+
+    /// [`Server::bind_ws`] with explicit connection limits (tests shorten them).
+    pub fn bind_ws_with_limits(
+        &self,
+        listener: TcpListener,
+        hub: Arc<DeviceHub>,
+        session_mgr: Arc<Mutex<SessionManager>>,
+        perri_state_dir: PathBuf,
+        decisions: Arc<Mutex<DecisionRegistry>>,
+        limits: super::ws::WsLimits,
+    ) {
+        hub.set_broadcast(self.tx.clone());
+        let _ = self.hub.set(Arc::clone(&hub));
+        let shared = super::ws::WsShared {
+            tx: self.tx.clone(),
+            session_mgr,
+            perri_state_dir,
+            decisions,
+            retained: Arc::clone(&self.retained),
+            held_mother_jobs: Arc::clone(&self.held_mother_jobs),
+            terminals: Arc::clone(&self.terminals),
+            hub_slot: Arc::clone(&self.hub),
+        };
+        tokio::spawn(async move {
+            if let Err(e) = super::ws::accept_loop_ws(listener, hub, shared, limits).await {
+                warn!("WebSocket accept loop exited: {e:#}");
             }
         });
     }
@@ -325,7 +390,7 @@ struct UnixPeers {
 /// Who a connection is. A Unix peer is resolved by the verifier after its
 /// `Hello` (see [`PeerOrigin::resolve`]), and again for every `DecisionAnswer`
 /// (see [`PeerOrigin::still_the_operator`]).
-enum PeerOrigin {
+pub(super) enum PeerOrigin {
     Unix {
         verifier: Arc<dyn PeerVerifier>,
         /// A dup of the accepted socket, so the verifier can look at the peer
@@ -337,6 +402,10 @@ enum PeerOrigin {
         info: Option<PeerInfo>,
     },
     Tcp,
+    /// A WebSocket peer that presented a valid device token.
+    Ws {
+        device_id: String,
+    },
 }
 
 impl PeerOrigin {
@@ -368,13 +437,22 @@ impl PeerOrigin {
                 classify_peer(info.as_ref(), client_kind, *qa_mode)
             }
             PeerOrigin::Tcp => PeerTrust::from_transport(Transport::Tcp),
+            PeerOrigin::Ws { .. } => PeerTrust::from_transport(Transport::Ws),
+        }
+    }
+
+    /// The device id of a WebSocket peer.
+    fn ws_device(&self) -> Option<&str> {
+        match self {
+            PeerOrigin::Ws { device_id } => Some(device_id),
+            _ => None,
         }
     }
 
     fn info(&self) -> Option<&PeerInfo> {
         match self {
             PeerOrigin::Unix { info, .. } => info.as_ref(),
-            PeerOrigin::Tcp => None,
+            PeerOrigin::Tcp | PeerOrigin::Ws { .. } => None,
         }
     }
 
@@ -457,11 +535,13 @@ async fn accept_loop(
     retained: RetainedCache,
     held_mother_jobs: HeldMotherJobs,
     terminals: Arc<Mutex<TerminalManager>>,
+    hub: HubSlot,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let terminals = Arc::clone(&terminals);
+                let hub = Arc::clone(&hub);
                 let rx = tx.subscribe();
                 let session_mgr = Arc::clone(&session_mgr);
                 let broadcast_tx = tx.clone();
@@ -497,6 +577,7 @@ async fn accept_loop(
                         retained,
                         held,
                         terminals,
+                        hub,
                     )
                     .await
                     {
@@ -521,11 +602,13 @@ async fn accept_loop_tcp(
     retained: RetainedCache,
     held_mother_jobs: HeldMotherJobs,
     terminals: Arc<Mutex<TerminalManager>>,
+    hub: HubSlot,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 let terminals = Arc::clone(&terminals);
+                let hub = Arc::clone(&hub);
                 info!(%addr, "TCP IPC client connected");
                 let rx = tx.subscribe();
                 let session_mgr = Arc::clone(&session_mgr);
@@ -546,6 +629,7 @@ async fn accept_loop_tcp(
                         retained,
                         held,
                         terminals,
+                        hub,
                     )
                     .await
                     {
@@ -582,6 +666,9 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
         FEATURE_TRACKER_EDIT.to_string(),
         FEATURE_TRACKER_CONFLICT_IDS.to_string(),
         FEATURE_TRACKER_ACK_DROPPED.to_string(),
+        FEATURE_WS.to_string(),
+        FEATURE_PAIR.to_string(),
+        FEATURE_DEVICES.to_string(),
     ];
     if mgr.authored_prs().is_some() {
         features.push(FEATURE_AUTHORED_PRS.to_string());
@@ -614,7 +701,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
 /// A network peer is never sent Teri/Fred data and its requests for it are
 /// refused; see [`super::peer`]. Only the operator app may answer a decision.
 #[allow(clippy::too_many_arguments)]
-async fn handle_client<S>(
+pub(super) async fn handle_client<S>(
     stream: S,
     mut origin: PeerOrigin,
     mut broadcast_rx: broadcast::Receiver<ServerMsg>,
@@ -625,6 +712,7 @@ async fn handle_client<S>(
     retained: RetainedCache,
     held_mother_jobs: HeldMotherJobs,
     terminals: Arc<Mutex<TerminalManager>>,
+    hub: HubSlot,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
@@ -1032,10 +1120,20 @@ where
     // ── Retained replay — latest Teri/Fred/work frames, local clients only ────
     // A network peer is never replayed anything retained (all of it is
     // sensitive); it gets one `Withheld` notice instead.
-    if trust.is_network() {
-        replay_messages(&mut writer, [withheld_msg()]).await;
-    } else {
-        replay_messages(&mut writer, retained_matching(&retained, &topics, None)).await;
+    // A `Paired` device is replayed every retained frame its trust allows and
+    // told once which topics are not shared.
+    match trust {
+        PeerTrust::Tcp => replay_messages(&mut writer, [withheld_msg()]).await,
+        PeerTrust::Paired => {
+            let frames = retained_matching(&retained, &topics, None)
+                .into_iter()
+                .filter_map(|m| outbound(trust, m, &sensitive))
+                .chain(std::iter::once(withheld_msg_for(trust)));
+            replay_messages(&mut writer, frames).await;
+        }
+        PeerTrust::OperatorApp | PeerTrust::LocalOther => {
+            replay_messages(&mut writer, retained_matching(&retained, &topics, None)).await
+        }
     }
 
     // ── Model replay — catalogue, defaults and every focus's model state ──────
@@ -1196,10 +1294,15 @@ where
                             }
                             // Replay retained frames only for the topics this
                             // subscribe adds; a network peer gets none.
-                            let mut frames = if trust.is_network() {
-                                vec![]
-                            } else {
-                                retained_matching(&retained, &new_topics, Some(&topics))
+                            let mut frames = match trust {
+                                PeerTrust::Tcp => vec![],
+                                PeerTrust::Paired => retained_matching(&retained, &new_topics, Some(&topics))
+                                    .into_iter()
+                                    .filter_map(|m| outbound(trust, m, &sensitive))
+                                    .collect(),
+                                PeerTrust::OperatorApp | PeerTrust::LocalOther => {
+                                    retained_matching(&retained, &new_topics, Some(&topics))
+                                }
                             };
                             if wants_model(&new_topics) && !wants_model(&topics) {
                                 frames.extend(
@@ -1273,6 +1376,25 @@ where
                                 }
                             }
                         }
+                        // Pairing and device administration (see `DeviceHub::dispatch`).
+                        match hub.get() {
+                            Some(h) => match h.dispatch(&msg, trust, origin.ws_device(), &conn_key, &targeted_tx) {
+                                Dispatched::Handled => continue,
+                                Dispatched::Unpaired => {
+                                    replay_messages(&mut writer, [ServerMsg::DeviceUnpaired]).await;
+                                    break Ok(());
+                                }
+                                Dispatched::NotHandled => {}
+                            },
+                            None if !trust.is_network() && is_device_admin_verb(&msg) => {
+                                let _ = targeted_tx.send(ServerMsg::DeviceAdminError {
+                                    request_id: device_admin_request_id(&msg),
+                                    reason: "devices_unavailable".to_string(),
+                                });
+                                continue;
+                            }
+                            None => {}
+                        }
                         handle_client_msg(msg, trust, origin.info(), answer_check, &sensitive, &conn_key, &claimed_id, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions, &held_mother_jobs, cap.as_ref(), &terminals);
                     }
                     Err(_) => {
@@ -1291,6 +1413,10 @@ where
         claimed_id,
         conn_key, "client handler exiting; detaching sessions"
     );
+    // A pairing never outlives the window or command that shows its code.
+    if let Some(h) = hub.get() {
+        h.drop_connection(&conn_key);
+    }
     {
         let mut mgr = session_mgr.lock().unwrap();
         mgr.on_client_disconnect(&conn_key);
@@ -3287,6 +3413,21 @@ fn handle_client_msg(
             });
         }
 
+        // Pairing and device administration are dispatched by `handle_client`
+        // through the device hub before this function runs. What reaches here is
+        // either a device-side verb sent on an established connection, or an
+        // admin verb with no hub: nothing to do.
+        ClientMsg::PairCheck { .. }
+        | ClientMsg::Pair { .. }
+        | ClientMsg::DeviceUnpairSelf
+        | ClientMsg::DevicePairStart { .. }
+        | ClientMsg::DevicePairCancel { .. }
+        | ClientMsg::DeviceList { .. }
+        | ClientMsg::DeviceRevoke { .. }
+        | ClientMsg::DeviceSetAdmin { .. } => {
+            debug!(?trust, "device verb ignored on this connection");
+        }
+
         // The commands a session's CLI reports: a local answer to the asking
         // client, from what the daemon already read. Network refused earlier.
         ClientMsg::SessionCommandsGet { request_id, tag } => {
@@ -3807,7 +3948,34 @@ fn deliverable_topics(mut topics: Vec<Topic>, trust: PeerTrust) -> Vec<Topic> {
     if trust != PeerTrust::OperatorApp {
         topics.retain(|t| *t != Topic::AuthoredPrs);
     }
+    // The device list is administration: never for a network peer.
+    if trust.is_network() {
+        topics.retain(|t| *t != Topic::Devices);
+    }
     topics
+}
+
+/// Is `msg` one of the local device-admin verbs?
+fn is_device_admin_verb(msg: &ClientMsg) -> bool {
+    matches!(
+        msg,
+        ClientMsg::DevicePairStart { .. }
+            | ClientMsg::DevicePairCancel { .. }
+            | ClientMsg::DeviceList { .. }
+            | ClientMsg::DeviceRevoke { .. }
+            | ClientMsg::DeviceSetAdmin { .. }
+    )
+}
+
+fn device_admin_request_id(msg: &ClientMsg) -> String {
+    match msg {
+        ClientMsg::DevicePairStart { request_id, .. }
+        | ClientMsg::DevicePairCancel { request_id, .. }
+        | ClientMsg::DeviceList { request_id }
+        | ClientMsg::DeviceRevoke { request_id, .. }
+        | ClientMsg::DeviceSetAdmin { request_id, .. } => request_id.clone(),
+        _ => String::new(),
+    }
 }
 
 fn wants_authored_prs(topics: &[Topic]) -> bool {
@@ -4066,6 +4234,7 @@ fn peer_json(trust: PeerTrust, peer: Option<&PeerInfo>) -> serde_json::Value {
             PeerTrust::OperatorApp => "operator_app",
             PeerTrust::LocalOther => "local_other",
             PeerTrust::Tcp => "tcp",
+            PeerTrust::Paired => "paired",
         },
     });
     if let Some(p) = peer {
@@ -4643,6 +4812,18 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::MotherNoticeState { .. } => subscribed(topics, Topic::MotherJobs),
         // Only to a client that names the topic: the empty list does not include it.
         ServerMsg::AuthoredPrs { .. } => wants_authored_prs(topics),
+        // The device list: only to a client that names the topic.
+        ServerMsg::Devices { .. } => topics.contains(&Topic::Devices),
+        // The other admin frames and the pairing replies are targeted, never broadcast.
+        ServerMsg::DevicePairing { .. }
+        | ServerMsg::DevicePairOutcome { .. }
+        | ServerMsg::DeviceRevoked { .. }
+        | ServerMsg::DeviceAdminError { .. }
+        | ServerMsg::PairOffer { .. }
+        | ServerMsg::Paired { .. }
+        | ServerMsg::PairRefused { .. }
+        | ServerMsg::Unauthorized { .. }
+        | ServerMsg::DeviceUnpaired => false,
         ServerMsg::MotherPeek { .. } => subscribed(topics, Topic::MotherPeek),
         ServerMsg::TeriState { .. } => subscribed(topics, Topic::Teri),
         ServerMsg::WorkSourceStatus { .. }
