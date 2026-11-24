@@ -413,6 +413,9 @@ pub(super) enum PeerOrigin {
         /// Set when the token belongs to a satellite record: what the record
         /// says, and the channel the primary's routed reads travel on.
         satellite: Option<SatelliteLink>,
+        /// Set when the connection ended because its `Hello` claimed a role
+        /// its token may not have, so the socket closes 4001 rather than 1000.
+        role_refused: Arc<AtomicBool>,
     },
 }
 
@@ -425,9 +428,6 @@ pub(super) struct SatelliteLink {
     /// Taken at registration: the router then holds the only sender, so
     /// replacing or ending the uplink closes the socket's request channel.
     pub req_tx: Option<mpsc::UnboundedSender<UplinkFrame>>,
-    /// Set when the connection ended because its `Hello` claimed a role it
-    /// may not have, so the socket closes 4001 rather than 1000.
-    pub role_refused: Arc<AtomicBool>,
 }
 
 /// A `Hello` named a role the connection's token does not allow.
@@ -829,12 +829,8 @@ where
         Ok(trust) => trust,
         Err(RoleRefused) => {
             // The socket closes 4001 (see `run_paired`).
-            if let PeerOrigin::Ws {
-                satellite: Some(link),
-                ..
-            } = &origin
-            {
-                link.role_refused.store(true, Ordering::SeqCst);
+            if let PeerOrigin::Ws { role_refused, .. } = &origin {
+                role_refused.store(true, Ordering::SeqCst);
             }
             let refusal = ServerMsg::Unauthorized {
                 reason: "role".to_string(),
@@ -4881,9 +4877,21 @@ fn apply_retention(cache: &mut BTreeMap<String, ServerMsg>, msg: ServerMsg) {
         _ => {}
     }
     if let Some(key) = retain_key(&msg) {
+        // A satellite's frames are bounded per host: past the cap a new key
+        // is not kept (an existing one is still replaced).
+        if let Some(rest) = key.strip_prefix("host:") {
+            let prefix = format!("host:{}:", rest.split(':').next().unwrap_or(""));
+            let held = cache.keys().filter(|k| k.starts_with(&prefix)).count();
+            if held >= MAX_RETAINED_PER_HOST && !cache.contains_key(&key) {
+                return;
+            }
+        }
         cache.insert(key, msg);
     }
 }
+
+/// Retained frames kept for one satellite.
+const MAX_RETAINED_PER_HOST: usize = 512;
 
 /// Remember the latest retained frame per key until the broadcast channel closes.
 ///

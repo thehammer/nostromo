@@ -142,6 +142,13 @@ pub fn server_msg_host(msg: &ServerMsg) -> Option<Option<&str>> {
     })
 }
 
+/// The focus tag a frame is about, for the variants that carry one.
+fn reply_tag(msg: &ServerMsg) -> Option<String> {
+    serde_json::to_value(msg)
+        .ok()
+        .and_then(|v| v.get("tag").and_then(|t| t.as_str().map(String::from)))
+}
+
 fn msg_type(msg: &ServerMsg) -> String {
     serde_json::to_value(msg)
         .ok()
@@ -280,6 +287,8 @@ pub enum ReplyDrop {
     WorkHost,
     WrongVariant,
     WrongHostField,
+    /// The reply is about a different focus than the request.
+    WrongTag,
     Egress,
 }
 
@@ -432,12 +441,7 @@ impl Router {
     /// Record an admitted uplink under the record's `name`. A second uplink
     /// for the same host replaces the first (whose request channel closes).
     /// Returns the connection id to hand back to [`Router::unregister`].
-    pub fn register(
-        &self,
-        name: &str,
-        egress: Egress,
-        tx: UnboundedSender<UplinkFrame>,
-    ) -> u64 {
+    pub fn register(&self, name: &str, egress: Egress, tx: UnboundedSender<UplinkFrame>) -> u64 {
         let conn_id = self.next_conn.fetch_add(1, Ordering::Relaxed) + 1;
         let now = Utc::now();
         {
@@ -666,6 +670,12 @@ impl Router {
                     return Err(ReplyDrop::WrongHostField);
                 }
             }
+            // A reply that names a focus names the one the request asked about.
+            if let (Some(asked), Some(answered)) = (entry.tag.as_deref(), reply_tag(&msg)) {
+                if asked != answered {
+                    return Err(ReplyDrop::WrongTag);
+                }
+            }
             if !unchanged_by_tcp_outbound(&msg, tags) {
                 return Err(ReplyDrop::Egress);
             }
@@ -690,7 +700,10 @@ impl Router {
             .is_none_or(|at| at.elapsed() >= Duration::from_secs(3600));
         if due {
             warned.insert(key, Instant::now());
-            warn!(host, variant, why, "a satellite sent a frame the primary does not accept");
+            warn!(
+                host,
+                variant, why, "a satellite sent a frame the primary does not accept"
+            );
         }
     }
 
@@ -839,7 +852,10 @@ mod tests {
         while host_rx.try_recv().is_ok() {
             requests += 1;
         }
-        assert_eq!(requests, MAX_OUTSTANDING_PER_HOST, "no 33rd request went down");
+        assert_eq!(
+            requests, MAX_OUTSTANDING_PER_HOST,
+            "no 33rd request went down"
+        );
     }
 
     #[test]
@@ -847,13 +863,29 @@ mod tests {
         const { assert!(MAX_OUTSTANDING_PER_REQUESTER < MAX_OUTSTANDING_PER_HOST) };
     }
 
-    fn issue(router: &Router, verb_msg: ClientMsg, host: &str) -> (String, UnboundedSender<ServerMsg>, tokio::sync::mpsc::UnboundedReceiver<ServerMsg>) {
+    fn issue(
+        router: &Router,
+        verb_msg: ClientMsg,
+        host: &str,
+    ) -> (
+        String,
+        UnboundedSender<ServerMsg>,
+        tokio::sync::mpsc::UnboundedReceiver<ServerMsg>,
+    ) {
         let (tx, rx) = unbounded_channel();
         assert_eq!(
             router.route(host, verb_msg, &tx, "c1", Instant::now()),
             Routed::Sent
         );
-        let id = router.inner.lock().unwrap().out.keys().next().unwrap().clone();
+        let id = router
+            .inner
+            .lock()
+            .unwrap()
+            .out
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
         (id, tx, rx)
     }
 
@@ -883,7 +915,13 @@ mod tests {
         );
         // Another host's uplink.
         assert_eq!(
-            router.accept_routed_reply(&rec("kobe", Egress::Personal), &id, list(Some("kobe")), &tags, now),
+            router.accept_routed_reply(
+                &rec("kobe", Egress::Personal),
+                &id,
+                list(Some("kobe")),
+                &tags,
+                now
+            ),
             Err(ReplyDrop::ForeignHost)
         );
         // Wrong variant for the verb.
@@ -895,7 +933,10 @@ mod tests {
             router.accept_routed_reply(
                 &sendai,
                 &id,
-                ServerMsg::Devices { devices: vec![], hosts: vec![] },
+                ServerMsg::Devices {
+                    devices: vec![],
+                    hosts: vec![]
+                },
                 &tags,
                 now
             ),
@@ -916,7 +957,10 @@ mod tests {
             router.accept_routed_reply(&sendai, &id, list(Some("sendai")), &tags, now),
             Ok(())
         );
-        assert!(matches!(rx.try_recv(), Ok(ServerMsg::SessionListResp { .. })));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ServerMsg::SessionListResp { .. })
+        ));
         assert_eq!(
             router.accept_routed_reply(&sendai, &id, list(Some("sendai")), &tags, now),
             Err(ReplyDrop::UnknownId),
@@ -942,7 +986,10 @@ mod tests {
             router.accept_routed_reply(
                 &rec("sendai", Egress::Personal),
                 &id,
-                ServerMsg::SessionListResp { sessions: vec![], host: Some("sendai".into()) },
+                ServerMsg::SessionListResp {
+                    sessions: vec![],
+                    host: Some("sendai".into())
+                },
                 &tags,
                 later
             ),
@@ -967,7 +1014,10 @@ mod tests {
             router.accept_routed_reply(
                 &rec("sendai", Egress::Work),
                 &id,
-                ServerMsg::SessionListResp { sessions: vec![], host: Some("sendai".into()) },
+                ServerMsg::SessionListResp {
+                    sessions: vec![],
+                    host: Some("sendai".into())
+                },
                 &tags,
                 Instant::now()
             ),
@@ -998,13 +1048,15 @@ mod tests {
                 Ok(())
             );
         }
-        assert_eq!(rx.try_recv().is_ok(), true);
+        assert!(rx.try_recv().is_ok());
         // A refusal retires it.
         assert_eq!(
             router.accept_routed_reply(
                 &sendai,
                 &id,
-                ServerMsg::Error { message: "no".into() },
+                ServerMsg::Error {
+                    message: "no".into()
+                },
                 &tags,
                 Instant::now()
             ),
@@ -1017,13 +1069,22 @@ mod tests {
         // Re-attach, then the requester going away detaches on the host.
         while host_rx.try_recv().is_ok() {}
         assert_eq!(
-            router.route("sendai", attach("cody-1", "sendai"), &tx, "c1", Instant::now()),
+            router.route(
+                "sendai",
+                attach("cody-1", "sendai"),
+                &tx,
+                "c1",
+                Instant::now()
+            ),
             Routed::Sent
         );
         while host_rx.try_recv().is_ok() {}
         router.drop_requester("c1");
         match host_rx.try_recv().unwrap() {
-            UplinkFrame::Request { msg: ClientMsg::SessionDetach { tag, .. }, .. } => {
+            UplinkFrame::Request {
+                msg: ClientMsg::SessionDetach { tag, .. },
+                ..
+            } => {
                 assert_eq!(tag, "cody-1")
             }
             other => panic!("{other:?}"),
@@ -1072,10 +1133,15 @@ mod tests {
         for egress in [Egress::Work, Egress::Personal] {
             let kobe = rec("kobe", egress);
             for msg in [
-                ServerMsg::Devices { devices: vec![], hosts: vec![] },
+                ServerMsg::Devices {
+                    devices: vec![],
+                    hosts: vec![],
+                },
                 ServerMsg::Hosts { hosts: vec![] },
                 ServerMsg::Pong,
-                ServerMsg::Error { message: "x".into() },
+                ServerMsg::Error {
+                    message: "x".into(),
+                },
                 ServerMsg::DeviceUnpaired,
             ] {
                 assert_eq!(
@@ -1083,7 +1149,13 @@ mod tests {
                     IngestDrop::NeverFromSatellite
                 );
             }
-            for msg in [ServerMsg::DaemonReconnected, ServerMsg::Withheld { topics: vec![], reason: String::new() }] {
+            for msg in [
+                ServerMsg::DaemonReconnected,
+                ServerMsg::Withheld {
+                    topics: vec![],
+                    reason: String::new(),
+                },
+            ] {
                 assert!(ingest_from_satellite(&kobe, msg, &tags).is_err());
             }
         }
@@ -1092,7 +1164,10 @@ mod tests {
     #[test]
     fn no_verb_table_admits_an_administrative_or_bookkeeping_frame() {
         let frames = [
-            ServerMsg::Devices { devices: vec![], hosts: vec![] },
+            ServerMsg::Devices {
+                devices: vec![],
+                hosts: vec![],
+            },
             ServerMsg::Hosts { hosts: vec![] },
             ServerMsg::Welcome {
                 protocol_version: 1,
@@ -1105,7 +1180,10 @@ mod tests {
             ServerMsg::Pong,
             ServerMsg::DeviceUnpaired,
             ServerMsg::Unauthorized { reason: "x".into() },
-            ServerMsg::DeviceAdminError { request_id: "r".into(), reason: "x".into() },
+            ServerMsg::DeviceAdminError {
+                request_id: "r".into(),
+                reason: "x".into(),
+            },
         ];
         for verb in [
             Verb::SessionList,

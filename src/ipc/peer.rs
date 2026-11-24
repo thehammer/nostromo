@@ -452,6 +452,13 @@ impl SensitiveTags {
         if let Some(opaque) = registered.tags.get(tag) {
             return opaque.clone();
         }
+        // Redacting twice is redacting once: a tag that is already a stand-in
+        // (this daemon's, or one a satellite's own filter issued) stays as it
+        // is. It names nothing, and re-minting it would make the primary
+        // change every honest frame a personal satellite already redacted.
+        if is_opaque_shape(tag) {
+            return tag.to_string();
+        }
         // The key is attacker-controlled (a network peer pushes whatever tag it
         // likes), so an oversized tag is remembered by a fixed-size digest.
         let key = ephemeral_key(tag);
@@ -622,6 +629,12 @@ fn ephemeral_key(tag: &str) -> std::borrow::Cow<'_, str> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     tag.hash(&mut hasher);
     std::borrow::Cow::Owned(format!("\u{0}h{}:{:016x}", tag.len(), hasher.finish()))
+}
+
+/// `focus-` and sixteen hex digits: what [`new_opaque_tag`] makes.
+fn is_opaque_shape(tag: &str) -> bool {
+    tag.strip_prefix("focus-")
+        .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 fn new_opaque_tag() -> String {

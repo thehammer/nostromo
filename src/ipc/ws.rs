@@ -708,7 +708,6 @@ async fn run_paired(
                 Some(SatelliteLink {
                     info: info.clone(),
                     req_tx: Some(req_tx),
-                    role_refused: Arc::clone(&role_refused),
                 }),
                 Some(req_rx),
                 Some(session),
@@ -722,6 +721,7 @@ async fn run_paired(
         PeerOrigin::Ws {
             device_id: device_id.clone(),
             satellite: link,
+            role_refused: Arc::clone(&role_refused),
         },
         shared.tx.subscribe(),
         shared.tx.clone(),
@@ -816,9 +816,19 @@ async fn run_paired(
             }
             routed = next_request(&mut req_rx) => {
                 let Some(frame) = routed else {
-                    // Replaced by a newer uplink for the same host, or ended.
-                    closing = Some(ended(&registry, &role_refused));
-                    break;
+                    // The router let go of the channel: a newer uplink for the
+                    // same host replaced this one, or this one is ending (the
+                    // handler's last frames are still to be written).
+                    req_rx = None;
+                    let replaced = !role_refused.load(Ordering::SeqCst)
+                        && satellite
+                            .as_ref()
+                            .is_some_and(|s| hub.router().is_connected(&s.name));
+                    if replaced {
+                        closing = Some(close_msg(1000, "replaced by a newer uplink"));
+                        break;
+                    }
+                    continue;
                 };
                 let body = serde_json::to_string(&frame).unwrap_or_default();
                 if sink.send(Message::Text(body)).await.is_err() {
@@ -834,9 +844,14 @@ async fn run_paired(
                     // The device removed itself: the handler says so, then closes.
                     Some(DeviceStanding::Revoked(RevokedBy::Device)) => {}
                     _ => {
-                        let _ = sink.send(text(&ServerMsg::Unauthorized {
+                        let revoked = text(&ServerMsg::Unauthorized {
                             reason: "revoked".to_string(),
-                        })).await;
+                        });
+                        let revoked = match (&uplink, revoked) {
+                            (Some(_), Message::Text(body)) => Message::Text(wrap_server_bytes(&body)),
+                            (_, other) => other,
+                        };
+                        let _ = sink.send(revoked).await;
                         closing = Some(close_msg(CLOSE_UNAUTHORIZED, "unauthorized"));
                         break;
                     }

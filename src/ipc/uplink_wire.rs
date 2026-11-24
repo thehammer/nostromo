@@ -82,7 +82,9 @@ mod tests {
         let body = serde_json::to_string(&ServerMsg::Pong).unwrap();
         let wrapped = wrap_server_bytes(&body);
         match serde_json::from_str::<UplinkFrame>(&wrapped).unwrap() {
-            UplinkFrame::Server { msg: ServerMsg::Pong } => {}
+            UplinkFrame::Server {
+                msg: ServerMsg::Pong,
+            } => {}
             other => panic!("{other:?}"),
         }
     }
