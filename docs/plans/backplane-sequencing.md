@@ -87,10 +87,8 @@ parallel; the wedges cite decisions by id, not by PRD line.
 
 **Still with the operator.** One gates a release: **pairing PRD open
 question 4** (employer policy on Kobe's metadata) must be answered before W10
-ships. Two have conservative v1 defaults that need no action to proceed: open
-question 3 (which Microsoft 365 and/or Google accounts Fred reads) and open
-question 5 (does calendar stay home too; default yes, hence "Mail, calendar
-and todos"). None of the rest blocks a wedge: whether to add the iOS
+ships. Open questions 3 and 5 were answered 2026-11-23: Fred on Sendai reads
+Google, and calendar stays home (hence "Mail, calendar and todos"). None of the rest blocks a wedge: whether to add the iOS
 test target first (recommend yes; it reverses a committed policy); crew
 delta 7 (recommend yes, before W10); nextest (optional); whether to split W13
 (recommend no); creating the dedicated AWS account before deploying W13's
@@ -536,7 +534,7 @@ second filter per downstream peer:
   AC56):* Teri, Fred and work frames are never published, on any profile,
   and there is no flag or config key to change that (the 2026-10-10
   `publish_sensitive` switch is not built): Fred reads Microsoft 365 mail
-  that is probably the employer's, so even Sendai's mail and todos stay home.
+  that was assumed to be the employer's; the operator later said Fred on Sendai reads Google (2026-11-23), but sharing stays off in v1 by decision, so Sendai's mail and todos stay home.
   Opening it up is a later wedge.
 - **`work`** (Kobe, and the default for any satellite whose config does not
   say `personal`): publish **metadata only**, through an exhaustive
@@ -1062,8 +1060,8 @@ Driving Mother, sessions or Perri from a phone needs a new bet and PRD.
 
 *Updated 2026-11-23.* Items 1, 5, 6, 9 and 10 are resolved (see "Decision log
 2026-11-23"); nothing in this list blocks a wedge. The pairing PRD's own
-open questions 3–5 are listed under "Readiness" (question 4 gates W10's
-release).
+open question 4 is listed under "Readiness" (it gates W10's release); questions
+3 and 5 were answered 2026-11-23.
 
 1. **Ada sign-offs D1–D7 (pairing) and S1–S8 (push). RESOLVED 2026-11-23.**
    Ada signed every item: D1 accepted with a change (a fifth failure message
@@ -1154,7 +1152,7 @@ first step, to be opened up later), and the entitlement finding.
 | # | Question | Answer | Lands in |
 |---|---|---|---|
 | Q1 | What may Kobe (the employer-managed Mac) do with personal devices? | New `revoke-only` level: list, revoke (and turn mail-and-todos off, once that exists; there is no such control in v1); cannot pair or widen anything. Ada's addition: an unset level means revoke-only, and Sendai becomes `full` only when set explicitly. | W9 (enum, CLI), W10 (enforcement, `DeviceAdminLevel`), W15 (definition, UI) |
-| Q2 | Should mail and todos reach the phone in v1? | No, for every host, with no checkbox, flag, command or config key anywhere that turns sharing on (PRD AC56). Fred's mail is probably the employer's Microsoft 365, so even Sendai's mail is treated as work-sensitive. Copy: "Mail, calendar and todos aren't shared from your Macs in this version." (Mac pair window, `nostromo device pair`) and "Mail, calendar and todos stay on your Mac in this version." (device Fred, Teri, Settings). | W9 (no scope verbs or fields, `not_shared`), W10 (no `publish_sensitive`), W11, W15 (copy) |
+| Q2 | Should mail and todos reach the phone in v1? | No, for every host, with no checkbox, flag, command or config key anywhere that turns sharing on (PRD AC56). Sharing stays off in v1 by decision for every host (the operator later said Fred on Sendai reads Google, 2026-11-23; unconfirmed whether any account is Carefeed's). Copy: "Mail, calendar and todos aren't shared from your Macs in this version." (Mac pair window, `nostromo device pair`) and "Mail, calendar and todos stay on your Mac in this version." (device Fred, Teri, Settings). | W9 (no scope verbs or fields, `not_shared`), W10 (no `publish_sensitive`), W11, W15 (copy) |
 | Q3 | Do you accept that work-host notifications are never enriched? | Yes: Kobe, work and PHI notifications never carry extra detail on the phone (reverses the 2026-10-10 answer). | W16 |
 | Q4 | Does the phone answer nothing in this sequence? | Yes: no decisions, approvals, Mother questions or PRs from the phone; the iPhone vision is narrowed (Ada amends it). | all (B10) |
 | Q5 | What may a work-host notification say? | Kind, host, short ref, fixed reason. | W13 |

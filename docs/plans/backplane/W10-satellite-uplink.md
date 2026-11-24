@@ -77,10 +77,11 @@ Memo, "Decision log 2026-11-23". What changes here:
   `uplink.publish_sensitive`: no satellite ever publishes `TeriState`,
   `FredState`, `Work*` or `TeriPicks` upstream, on either profile, so they
   never reach Tokyo's memory or retained cache either. Reason recorded in the
-  decision log: Fred's mailbox is Microsoft 365 Graph
-  (`src/data/fred_mailbox_native.rs`, `src/data/graph_client.rs`), probably
-  the employer tenant, so v1 treats even Sendai's mail and todos as
-  work-sensitive. Opening it up is a later wedge.
+  decision log: Fred can read Microsoft 365 (Graph) and Google mail
+  (`src/data/fred_mailbox_native.rs`, `src/data/graph_client.rs`,
+  `src/data/fred_accounts.rs`); the operator said Fred on Sendai reads
+  Google (2026-11-23), but v1 keeps mail and todos home by decision for
+  every host. Opening it up is a later wedge.
 - **Q3, Q5 (work-host text)**: unchanged; the metadata function already sends
   only kind-level enums, the host, the 8-hex ref and counts. **Q7**: the queue
   frames are `LocalOnly` and dropped at step 1 of the forward filter; a test
