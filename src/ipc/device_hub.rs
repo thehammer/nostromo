@@ -473,7 +473,10 @@ mod tests {
 
         let reply = hub.pair(7, &started, "Phone", DeviceKind::Iphone, false);
         assert!(matches!(reply, ServerMsg::PairRefused { .. }), "{reply:?}");
-        match rx.recv().await.unwrap() {
+        let heard = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the issuer was told nothing and would wait for ever");
+        match heard.unwrap() {
             ServerMsg::DevicePairOutcome { outcome, .. } => {
                 assert_eq!(outcome, crate::ipc::devices::PairOutcomeKind::Failed);
             }
