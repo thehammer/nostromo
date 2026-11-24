@@ -343,14 +343,13 @@ confirmation) would be its own PRD and security review.
 **(v1) Decision: mail and todos stay on the Macs, for every host.** Nothing
 from Fred (mail) or Teri (todos, tickets) reaches any device in this
 version, from Sendai or from Kobe. **Calendar stays home too, by default**:
-Fred's calendar comes from the same Fred accounts (Microsoft 365 and/or
-Google) as the mail. The
+Fred's calendar comes from the same Fred accounts as the mail. The
 operator confirmed on 2026-11-23 that calendar stays home in v1 (open
 question 5): no calendar content reaches a device, and the copy below names
 it so nothing is promised.
 
 Why, in one line: the operator confirmed on 2026-11-23 that Fred on Sendai
-reads Google accounts (no Microsoft 365), and Teri is the Carefeed work
+reads Google (the operator did not mention Microsoft 365), and Teri is the Carefeed work
 assistant. Mail, calendar and todos still stay home in v1 by decision (Q2 and
 open question 5), so nothing about Fred's accounts changes what reaches a
 device now. If Fred's Google accounts are personal, mail and calendar from
@@ -573,8 +572,8 @@ start at 38.
 34. **(amended 2026-11-23)** On every paired device, from every host, the
     Fred and Teri tabs show "Mail, calendar and todos stay on your Mac in
     this version." and never show mail, calendar, todo or ticket content, a
-    spinner, or an empty list. (Calendar is the v1 default pending open
-    question 5.) No surface (Mac window, terminal, device confirmation,
+    spinner, or an empty list. (Calendar stays home: confirmed by the
+    operator 2026-11-23, open question 5.) No surface (Mac window, terminal, device confirmation,
     success screen, device Settings, Devices list) offers a mail-and-todos
     checkbox, flag or toggle. *(later, when opened up: a device paired with
     mail and todos on shows Fred and Teri content; one paired with it off
@@ -826,7 +825,7 @@ confirmed before W10 ships.
    up.) It cannot pair or turn anything on.
 3. ~~**Which accounts (Microsoft 365 and/or Google) does Fred read on
    Sendai?**~~ **Answered 2026-11-23: Google.** Fred on Sendai reads Google
-   accounts and no Microsoft 365. Mail, calendar and todos still stay home in
+   (the operator did not mention Microsoft 365). Mail, calendar and todos still stay home in
    v1 (Q2 and question 5), so nothing changes now. The operator did not state
    whether any of the Google accounts is a Carefeed Google account; Carefeed
    uses Microsoft 365, so they are assumed personal. Confirm that when
@@ -1048,11 +1047,11 @@ The push PRD's log uses the same numbering.
 | # | Decision (v1) | What it reverses or narrows | Later, when opened up |
 |---|---|---|---|
 | Q1 | **Kobe is `revoke-only`**, a new device-admin level: list, revoke, turn mail and todos off. It cannot pair or turn anything on. In v1 the "turn off" part has no control, because nothing can be on (Q2). (That an unset Mac is revoke-only, and that Sendai becomes full only when set on the server, is Ada's choice, recorded below.) | Narrows AC12's bet from "pair from Kobe" to "manage from Kobe". Reverses the draft's "Kobe does everything" (draft open question 2). | Raise Kobe's level on the server if employer policy and the remote-management question are ever settled. |
-| Q2 | **Mail and todos stay on the Macs for every host.** No checkbox, flag, toggle, terminal command or configuration key on any surface or machine can turn sharing on. The pairing window says "Mail, calendar and todos aren't shared from your Macs in this version."; the Fred and Teri tabs and device Settings say "Mail, calendar and todos stay on your Mac in this version." (exact text per AC11, AC34 and the "Final v1 copy" table; "calendar" is Ada's default pending open question 5). Operator answers the same day: Fred on Sendai reads Google accounts (open question 3) and calendar stays home (open question 5), so mail, calendar and todos stay home for every host in v1. | Reverses the draft's "on by default" grant (draft open question 1). AC34 rewritten; AC35 deferred; AC10, AC11, AC13, AC14, AC23 drop the scope wording. | The per-device permission, its default and the live toggle (AC35's bet), once the operator confirms whose mail Fred reads. |
+| Q2 | **Mail and todos stay on the Macs for every host.** No checkbox, flag, toggle, terminal command or configuration key on any surface or machine can turn sharing on. The pairing window says "Mail, calendar and todos aren't shared from your Macs in this version."; the Fred and Teri tabs and device Settings say "Mail, calendar and todos stay on your Mac in this version." (exact text per AC11, AC34 and the "Final v1 copy" table; "calendar" confirmed by the operator, open question 5). Operator answers the same day: Fred on Sendai reads Google accounts (open question 3) and calendar stays home (open question 5), so mail, calendar and todos stay home for every host in v1. | Reverses the draft's "on by default" grant (draft open question 1). AC34 rewritten; AC35 deferred; AC10, AC11, AC13, AC14, AC23 drop the scope wording. | The per-device permission, its default and the live toggle (AC35's bet), once the operator confirms no Carefeed account is connected to Fred. |
 | Q8 (multi-Mac list) | **One merged list**, "needs you" first, host badge whenever the list holds rows from more than one Mac. Kobe rows use push's fixed vocabulary; the tap card says "Details stay on kobe." | Nothing (new). | Sections or a host switcher, if the merged list proves confusing. |
 | Q4 | **The device answers nothing in this sequence**: no decisions, approvals, Mother questions, PR actions, enqueue or sending. | Narrows `docs/visions/iphone.md` and `docs/visions/ipad.md` (amended in the same change). | A device-trust PRD (Face ID-bound keys, per-action confirmation) and its own security review. |
 | Q7 (= D7) | **Nothing from the message queue on a device**: no text, count or take-back. | Nothing; this is today's behaviour. | A count, "2 messages waiting", on the session row. |
-| Open question 3 | **Fred on Sendai reads Google accounts** (no Microsoft 365). Mail, calendar and todos still stay home in v1. | Replaces Ada's working assumption that Fred's mail is probably Carefeed's Microsoft 365 tenant. | Open mail and calendar to devices, after confirming no Google account is Carefeed's. |
+| Open question 3 | **Fred on Sendai reads Google** (the operator did not mention Microsoft 365). Mail, calendar and todos still stay home in v1. | Replaces Ada's working assumption that Fred's mail on Sendai is probably Carefeed's Microsoft 365 tenant; Microsoft 365 on Sendai is unconfirmed either way. | Open mail and calendar to devices, after confirming no Google account is Carefeed's. |
 | Open question 5 | **Calendar stays home in v1**, with mail and todos. | Nothing (confirms Ada's default). | A calendar quick-view on the phone, if the source is personal. |
 
 ### Ada's sign-offs
@@ -1060,8 +1059,7 @@ The push PRD's log uses the same numbering.
 - **Ada's choices at sign-off (not operator decisions; conservative
   defaults the operator may open up):** a Mac with no device-admin level set
   is revoke-only, and Sendai becomes full only when the operator sets it on
-  the server; calendar stays home until the operator answers open question
-  5; Kobe rows use per-kind references (criterion 53).
+  the server; calendar stays home (the operator confirmed this 2026-11-23, open question 5); Kobe rows use per-kind references (criterion 53).
 - **Answered 2026-11-23:** open question 3 (Fred on Sendai reads Google
   accounts) and open question 5 (calendar stays home).
 - **Still open for the operator:** open question 4 (employer policy on

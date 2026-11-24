@@ -29,8 +29,7 @@ conversations — without pretending to be a full Mac.
 > **Mail and todos stay on the Macs**, so the Fred mailbox capability below
 > is deferred and the Fred and Teri views say "Mail, calendar and todos stay
 > on your Mac in this version." **Calendar stays home too by default** (it comes
-> from the same Fred accounts (Microsoft 365 and/or Google) as the mail; an open operator question
-> in the pairing PRD). Kobe (work) items are metadata only.
+> from the same Fred accounts as the mail; the operator confirmed this on 2026-11-23). Kobe (work) items are metadata only.
 >
 > **What is v1 on the iPad** is exactly what the pairing PRD delivers to any
 > paired device: the merged "needs you" list across Macs, Mother job state

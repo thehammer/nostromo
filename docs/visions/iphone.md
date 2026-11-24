@@ -98,11 +98,10 @@ sequence delivers it, or **(later, when opened up)** where it is deferred.
   on the Mac, Archie + Cody run there. The phone never spawns workers.
 - **Calendar quick-view (later, when opened up).** Today/tomorrow agenda.
   Tap for details, join link, mark as done. Read-only. Deferred because
-  the calendar comes from the same Fred accounts (Microsoft 365 and/or
-  Google) as Fred's mail,
-  which stays on the Macs in v1. Whether calendar stays home is an open
-  operator question in `docs/prds/daemon-pairing-flow.md`; the v1 default
-  is yes.
+  the calendar comes from the same Fred accounts as Fred's mail,
+  which stays on the Macs in v1. The operator confirmed on 2026-11-23 that
+  calendar stays home in v1 (`docs/prds/daemon-pairing-flow.md`, open
+  question 5).
 - **Budget posture awareness (later, when opened up).** Tiny pace bars in a
   glance widget. Surfaces if posture flips to conservative / critical. (In
   v1, a spend pace running ahead of budget only counts toward the badge and
