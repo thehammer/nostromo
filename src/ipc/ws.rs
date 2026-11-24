@@ -75,7 +75,12 @@ pub struct WsLimits {
     /// Connections in the unauthenticated stage (handshake, or a pairing-only
     /// socket), all addresses together.
     pub max_unauthenticated: usize,
-    /// The same, per source address (IPv6: per /64).
+    /// The same, per source address (IPv6: per /64). Eight: a household has a
+    /// handful of devices, so no honest address needs more at once, and a few
+    /// addresses cannot hold the whole listener full (the upgrade limiter counts
+    /// only completed handshakes, so a trickler reconnecting every
+    /// `handshake_timeout` is bounded by this alone). A full cap refuses the
+    /// newcomer; it does not evict the oldest unauthenticated socket.
     pub max_unauthenticated_per_ip: usize,
     /// Concurrent authenticated sockets of one device.
     pub max_sockets_per_device: usize,
@@ -86,7 +91,7 @@ impl Default for WsLimits {
         Self {
             handshake_timeout: Duration::from_secs(10),
             max_unauthenticated: 64,
-            max_unauthenticated_per_ip: 32,
+            max_unauthenticated_per_ip: 8,
             max_sockets_per_device: 8,
         }
     }
@@ -699,6 +704,27 @@ mod tests {
         assert!(slots.try_acquire(same_64).is_none());
         drop(held);
         assert!(slots.try_acquire(same_64).is_some());
+    }
+
+    #[test]
+    fn the_global_cap_alone_refuses_a_distinct_address_and_a_release_frees_it() {
+        let limits = WsLimits {
+            max_unauthenticated: 2,
+            max_unauthenticated_per_ip: 2,
+            ..Default::default()
+        };
+        let slots = UnauthSlots::new(&limits);
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let b: IpAddr = "10.0.0.2".parse().unwrap();
+        let c: IpAddr = "10.0.0.3".parse().unwrap();
+        let held_a = slots.try_acquire(a).expect("first");
+        let _held_b = slots.try_acquire(b).expect("second");
+        assert!(
+            slots.try_acquire(c).is_none(),
+            "no address is over its own cap"
+        );
+        drop(held_a);
+        assert!(slots.try_acquire(c).is_some());
     }
 
     #[test]

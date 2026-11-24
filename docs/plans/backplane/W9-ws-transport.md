@@ -718,6 +718,13 @@ W11 (Kit) must produce these exact bytes. The encoding, exactly:
 | code | `123456` |
 | **proof** | `ONMjmbNsnby-4Laxp33owC99gferbRJQsDdW6Ofz4cA` |
 
+**Replacing an old pairing needs both steps on the SAME pairing socket.** The
+proof `PairCheck` and the `Pair { replace: true }` must travel on one
+connection: the daemon ties the verified proof to the socket that sent it, so a
+proof sent on one socket does not authorise a `Pair` on another (that `Pair`
+leaves the old phone active). Kit must not close or reopen the socket between
+them.
+
 The vector is checked in as `the_proof_encoding_is_pinned_by_a_fixed_vector`
 in `src/ipc/devices.rs`, next to the RFC 4231 HMAC vector.
 

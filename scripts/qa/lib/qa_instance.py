@@ -393,6 +393,9 @@ def daemon_env(qa_root, base_env, fake_claude, guard_bin):
         "NOSTROMD_SOCKET": os.path.join(qa_root, "nostromd.sock"),
         "NOSTROMO_MCP_SOCKET": os.path.join(qa_root, "mcp.sock"),
         "NOSTROMD_TCP_ADDR": "127.0.0.1:0",
+        # An ephemeral device port: a fixed one (47101) could be taken from the
+        # owner's real daemon, which would then run without device features.
+        "NOSTROMD_WS_ADDR": "127.0.0.1:0",
         # NOSTROMO_QA_CLAUDE_BIN (a real CLI) is for the user-run tracker-discoverability.sh only.
         "NOSTROMO_CLAUDE_BIN": base_env.get("NOSTROMO_QA_CLAUDE_BIN") or fake_claude,
         "NOSTROMO_GUARD_BIN": guard_bin,

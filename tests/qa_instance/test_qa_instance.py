@@ -299,6 +299,10 @@ class EnvTests(unittest.TestCase):
         self.assertNotIn("SECRET_TOKEN", env)
         self.assertNotIn("/Users/real", "".join(env.values()))
 
+    def test_daemon_env_never_binds_the_real_daemons_websocket_port(self):
+        env = qa.daemon_env(self.ROOT_DIR, self.BASE, "f", "g")
+        self.assertEqual(env.get("NOSTROMD_WS_ADDR"), "127.0.0.1:0")
+
     def test_daemon_env_trusts_the_clone_exe_as_operator_app(self):
         env = qa.daemon_env(self.ROOT_DIR, self.BASE, "f", "g")
         self.assertEqual(env["NOSTROMO_OPERATOR_APP_PATH"],

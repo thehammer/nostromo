@@ -55,7 +55,7 @@ pub enum PeerTrust {
     /// A TCP peer: unauthenticated, possibly anywhere on the LAN.
     Tcp,
     /// A WebSocket peer that presented a valid device token. Gets `Tcp`'s
-    /// verbs plus `DeviceUnpairSelf` ([`paired_extra_allowed`]) and is never
+    /// verbs plus `DeviceUnpairSelf` (allowed in `DeviceHub::dispatch`) and is never
     /// equivalent to `OperatorApp`. The device id travels on the connection,
     /// not here, so this stays `Copy`.
     Paired,
@@ -1208,7 +1208,7 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::AuthoredPrMerge { .. }
         // Pairing verbs are accepted only on a token-less pairing socket (ws.rs
         // checks before dispatch); `DeviceUnpairSelf` is allowed to a `Paired`
-        // peer by `paired_extra_allowed`, not here. Every device-admin verb is
+        // peer by `DeviceHub::dispatch`, not here. Every device-admin verb is
         // refused for every network peer.
         | ClientMsg::PairCheck { .. }
         | ClientMsg::Pair { .. }
@@ -1219,12 +1219,6 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::DeviceRevoke { .. }
         | ClientMsg::DeviceSetAdmin { .. } => NetworkPolicy::Refused,
     }
-}
-
-/// What a `Paired` device may do beyond [`network_policy`]'s allow list: remove
-/// its own pairing, and nothing else. (W13 adds self-scoped push verbs.)
-pub fn paired_extra_allowed(msg: &ClientMsg) -> bool {
-    matches!(msg, ClientMsg::DeviceUnpairSelf)
 }
 
 /// Is `msg` refused for a network peer whatever it names? See [`network_policy`].
