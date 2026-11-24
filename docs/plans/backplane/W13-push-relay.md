@@ -1,5 +1,62 @@
 # W13 — Push notifications: closed-vocabulary push engine on the primary, a stateless AWS relay, and iOS registration
 
+## Refreshed 2026-11-24 against `origin/main` `4cafd5e8` (W9 as built; Perri's #522 review items)
+
+Wins over the sections below where they differ.
+- **Ordinals moved by one.** W9 shipped **eight** verbs, 98–105: the seven
+  planned plus `DeviceSetAdmin` (105) (`src/ipc/peer.rs:2676-2692`), and
+  `CLIENT_MSG_VARIANTS` is **106** (`:2582`, asserted `:2738-2739`). W10,
+  W11, W12 and W15 add no `ClientMsg` variant. So the four push verbs take
+  **106–109** (`RegisterPush` 106, `SetPushPrefs` 107, `PushSentLog` 108,
+  `PushWaiting` 109), S7a's `OperatorPresence` takes **110**, and the
+  constant goes **106 → 111**. Re-derive on the base if anything else landed
+  a verb first. Every "105–108", "109" and "110" below means these numbers.
+- **There is no `paired_extra_allowed`.** W9's follow-up (#528) removed it.
+  As built, a `Paired`-only verb is `Refused` in `network_policy`
+  (`peer.rs:1207-1220`) and is handled **before** `handle_client_msg`, at the
+  pre-dispatch site in `handle_client` (`src/ipc/server.rs:1379-1395`):
+  `DeviceHub::dispatch` acts on `DeviceUnpairSelf` only for `(PeerTrust::Paired,
+  Some(device_id))` (`src/ipc/device_hub.rs:259-266`, the device id from
+  `PeerOrigin::ws_device`, `server.rs:445`) and returns `NotHandled`
+  otherwise, so every other peer falls through to the FND-1 refusal. **Gate
+  the push verbs the same way:** a `dispatch(&msg, trust, ws_device,
+  conn_key, &targeted_tx)` on the push engine (`src/push/`), called at that
+  same site next to the hub, that handles `RegisterPush`, `SetPushPrefs`,
+  `PushSentLog` and `PushWaiting` only for `(PeerTrust::Paired,
+  Some(device_id))`, scoped to that device id, and returns `NotHandled` for
+  every other trust (including W10's `Satellite` and `Routed`). None goes into
+  `NETWORK_ALLOWED` (`peer.rs:2552`). `OperatorPresence` is not a network
+  verb at all: `Refused` in `network_policy`, and handled in
+  `handle_client_msg` only when `trust == PeerTrust::OperatorApp` (ignored
+  from `LocalOther`).
+- **`RegisterPush` itself carries `capabilities`** (Perri, #522). Until now
+  only the stored record had `capabilities`, with nothing on the wire to fill
+  it. The verb is `ClientMsg::RegisterPush { apns_token, environment, tz,
+  capabilities: PushCapabilities }`, with `#[serde(default)]` on
+  `capabilities` (absent = every flag `false`) and `PushCapabilities {
+  nse_withdraw: bool }` (`#[serde(default)]` per field). The record stores
+  what the latest `RegisterPush` sent; W13's iOS side sends `nse_withdraw:
+  false`. W16 adds `nse: bool` to the same struct (W16, "The extension must
+  actually run").
+- **The relay maps `mutable_content` to `aps.mutable-content`** (Perri,
+  #522). W16's Notification Service Extension only runs for pushes with
+  `"aps": { "mutable-content": 1 }`. The relay sets it when the request's
+  `mutable_content` is `true` and omits it when `false`; a relay test asserts
+  both from the APNs request body captured by `wiremock`. Criterion W13-37.
+- **Where the presence field is stripped** (Perri, #522). Not in
+  `redact_for_network` (`peer.rs:1391`) and not in `outbound` (`:1014`): W10's
+  `personal` uplink sends through `peer::outbound(PeerTrust::Tcp, …)`, which
+  calls `redact_for_network`, so stripping there would drop
+  `operator_presence` from Sendai's own uplink and the primary would never see
+  `away`. Strip it in `handle_client`'s per-connection write step instead,
+  after `outbound`, for `PeerTrust::Paired` and `PeerTrust::Tcp`: the
+  broadcast, targeted and replay paths (`server.rs:1181`, `:1230` and the
+  replay `filter_map`s at `:1020-1150`), the way `without_notes_unless_model`
+  (`:1233`, defined `:3988`) already trims the targeted path per connection.
+  Tests: a `personal` satellite's `DecisionRequest` reaches the primary with
+  `operator_presence` set, and a `Paired` (and a `Tcp`) peer on the primary
+  receives the same frame without it. Criterion W13-38.
+
 ## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
 
 Versus the 2026-10-18 version (read the memo's "What changed since
@@ -117,10 +174,10 @@ operator's deploy step after merge.
   which needs no extra permission and already runs on both Macs). W15 adds an
   `OperatorPresenceReporter` that sends `operator_presence` to the local
   daemon; this wedge adds the daemon side:
-  - `ClientMsg::OperatorPresence { state: active | away }` (ordinal 109).
+  - `ClientMsg::OperatorPresence { state: active | away }` (ordinal 110 as of 2026-11-24).
     Accepted only from `PeerTrust::OperatorApp`; ignored from `LocalOther`;
-    `Refused` for every network trust (it is not in `NETWORK_ALLOWED` nor
-    `paired_extra_allowed`). No reply. `"presence"` is added to
+    `Refused` for every network trust (it is not in `NETWORK_ALLOWED`, and no
+    `Paired` pre-dispatch hook handles it; 2026-11-24 section). No reply. `"presence"` is added to
     `Welcome.features` on every daemon.
   - The originating daemon keeps the latest state per operator-app
     connection (dropped on disconnect) and stamps
@@ -144,7 +201,8 @@ operator's deploy step after merge.
   - Privacy: presence leaves the satellite only as this field on an open
     decision, and only to the primary. The primary **strips** it from
     `DecisionRequest` before delivering the frame to any `Paired` or `Tcp`
-    peer (in its per-downstream filter), so phones never see it, and it is
+    peer (in `handle_client`'s per-connection write step, never in
+    `redact_for_network`; 2026-11-24 section), so phones never see it, and it is
     never in a relay request.
   - Sleep is best effort: a sleeping Mac's daemon sleeps too, so an `away`
     sent at sleep may never arrive; the 30-second rule covers it.
@@ -214,7 +272,7 @@ design-loop notes **turn 2** (S7, S8). Versus the 2026-10-10 draft:
   (below) keeps Rust and Kit from drifting. Acknowledgement semantics are in
   "Acknowledgement and withdrawal".
 - No `PROTOCOL_VERSION` bump; the primary advertises `"push"`. New
-  `ClientMsg` ordinals per the memo's wire inventory (105–108 since 2026-11-23), `Paired`-only
+  `ClientMsg` ordinals per the memo's wire inventory (106–109 since 2026-11-24), `Paired`-only
   and self-scoped.
 - Tests run in CI: Rust (daemon and the `infra/push-relay` crate) in the RWX
   sandbox, Kit/iOS on GitHub Actions. Hermetic: `wiremock` stands in for the
@@ -442,8 +500,9 @@ Daemon push engine (new module):
   the W9 device id. Each record holds:
   - `apns_token` and `environment` (`sandbox|production`).
   - `push_id`: random 128-bit, the relay's *anonymous device reference*.
-  - `capabilities { nse_withdraw: bool }`: reserved; always `false` (W16 keeps
-    it only for an optional later Filtering build).
+  - `capabilities { nse_withdraw: bool }`: from the latest `RegisterPush`
+    (which carries it, 2026-11-24 section); always `false` from W13's iOS side
+    (W16 keeps it only for an optional later Filtering build).
   - `prefs { kinds: {mother, decision, review}: bool, quiet: Option<{start,
     end}>, evening_summary: Option<HH:MM>, tz: String }`.
   Before every send, check the W9 device registry. A revoked or unknown device
@@ -475,7 +534,8 @@ Daemon push engine (new module):
   Entries older than 7 days are pruned on every append and hourly. Also
   tracks per-device `last_ok_at` and `failing_since` for the banner.
 - `src/ipc/protocol.rs` (new messages; `"push"` added to `Welcome.features`):
-  - `ClientMsg::RegisterPush { apns_token, environment, tz }`.
+  - `ClientMsg::RegisterPush { apns_token, environment, tz, capabilities }`
+    (`capabilities: PushCapabilities`, `#[serde(default)]`).
   - `ClientMsg::SetPushPrefs { prefs }`.
   - `ClientMsg::PushSentLog` → `ServerMsg::PushSentLog { entries }`, for this
     device only.
@@ -485,11 +545,13 @@ Daemon push engine (new module):
     failing_since }`: targeted reply to the device. Host classes and work
     owners are **read-only**; there is no `ClientMsg` that changes them (S5).
   - A network peer may only read or write its *own* device's push record.
-  - `ClientMsg::OperatorPresence { state }` (ordinal 109, `OperatorApp`
+  - `ClientMsg::OperatorPresence { state }` (ordinal 110, `OperatorApp`
     only; S7a). `"presence"` added to `Welcome.features`.
-  - FND-1: the four push `ClientMsg`s take ordinals 105–108 (or the next free
-    ones; bump `CLIENT_MSG_VARIANTS` to 110 with `OperatorPresence`) and are `Refused` in `network_policy`
-    and allowed by W9's `paired_extra_allowed` for `Paired` peers only; the
+  - FND-1: the four push `ClientMsg`s take ordinals 106–109 (or the next free
+    ones; bump `CLIENT_MSG_VARIANTS` 106 → 111 with `OperatorPresence` at 110) and are `Refused` in `network_policy`
+    and handled for `Paired` peers only by the push engine's pre-dispatch
+    hook beside `DeviceHub::dispatch` (`server.rs:1379-1395`; 2026-11-24
+    section); the
     three new `ServerMsg`s are `Open` and only ever sent targeted.
 - `src/bin/nostromd.rs:196-260`: in `Primary` mode with `[push]`, call
   `PushEngine::spawn`.
@@ -833,6 +895,16 @@ iOS:
   renders no repository name on a personal host; with a personal-owner
   `pr_url` it does; a decision whose focus remote is a work owner, or has no
   remote, renders none.
+- [ ] **W13-37** The relay sets `aps.mutable-content: 1` in the APNs request when
+  the body's `mutable_content` is `true` and omits it when `false` (relay test
+  against the `wiremock` APNs capture); `RegisterPush` carries
+  `capabilities` and the stored record reflects the latest one (a
+  `RegisterPush` without the field decodes with every flag `false`).
+- [ ] **W13-38** `operator_presence` survives a `personal` satellite's uplink to the
+  primary and is stripped in `handle_client`'s per-connection write step for
+  `Paired` and `Tcp` peers only (not in `redact_for_network`); the four push
+  verbs are handled only for `(Paired, Some(device_id))` at the pre-dispatch
+  site and refused for `Tcp`, `Satellite` and `Routed`.
 
 ### Acknowledgement and withdrawal
 
@@ -885,7 +957,7 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   merged since this was first written); the repo default is all four lenses
   (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
 - **Review depth:** **Manual Perri pass is still required** (the `perri` entry below at xhigh, then the operator's review). Lens findings are input to it, not a substitute: a lens sees only the diff (patch input is capped at 120 KB, so a large wedge will report `coverage_gap` findings), and Mother's `phi-security` checklist is written for care data, so it does not know this repo's trust tiers (B9, B10). First data to leave the operator's machines, plus a Lambda and its SAM template.
-- **Checklist:** the acceptance items above carry ids (`W13-1` to `W13-36`) so
+- **Checklist:** the acceptance items above carry ids (`W13-1` to `W13-38`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The
   worker ticks each with `mother check <job> --done --evidence <short ref>` only
   when its test or check has passed.

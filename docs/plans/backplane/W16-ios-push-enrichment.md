@@ -1,5 +1,29 @@
 # W16 — iOS push enrichment: Notification Service Extension and on-phone enrichment for personal hosts
 
+## Refreshed 2026-11-24 against `origin/main` `4cafd5e8` (W9 as built)
+
+Wins over the sections below where they differ.
+- **Ordinal.** W9 shipped eight verbs, 98–105 (with `DeviceSetAdmin` at 105;
+  `src/ipc/peer.rs:2676-2692`), so `CLIENT_MSG_VARIANTS` is 106 (`:2582`) and
+  W13 takes 106–110 (push verbs 106–109, `OperatorPresence` 110). **`PushDetail`
+  takes 111, and the constant goes 111 → 112.** Re-derive on the base.
+- **There is no `paired_extra_allowed`** (removed in W9's follow-up, #528).
+  `PushDetail` is `Refused` in `network_policy` and handled only for
+  `(PeerTrust::Paired, Some(device_id))` by W13's push-engine pre-dispatch
+  hook, which sits beside `DeviceHub::dispatch` at the pre-dispatch site in
+  `handle_client` (`src/ipc/server.rs:1379-1395`; the pattern is
+  `DeviceUnpairSelf`'s, `src/ipc/device_hub.rs:259-266`). Add `PushDetail` to
+  that hook; it returns `NotHandled` for every other trust, so FND-1 refuses
+  it. See W13, "Refreshed 2026-11-24".
+- **`RegisterPush.capabilities` exists from W13** (W13 now puts
+  `capabilities: PushCapabilities` on the verb, not only on the record); this
+  wedge adds `nse: bool` to that struct (`#[serde(default)]`).
+- **The extension cannot remove its own notification.** Step 5 of the
+  extension's flow said it would "also remove" a notification that no longer
+  needs the operator. An NSE must deliver a notification; suppressing or
+  removing it needs Apple's notification-filtering entitlement, which is not
+  being requested (memo, decision log). Corrected in place below.
+
 ## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
 
 Versus the 2026-10-18 version (read the memo's "What changed since
@@ -110,8 +134,8 @@ Versus the 2026-10-10 draft of this file:
   PHI-repo items are metadata-only from any host. Work-host enrichment
   toggles are therefore not built.
 - No `PROTOCOL_VERSION` bump; the primary advertises `"push_detail"`.
-  `ClientMsg::PushDetail` takes the next free ordinal (111 in the memo's
-  2026-11-23 inventory) and is `Paired`-only, self-scoped.
+  `ClientMsg::PushDetail` takes the next free ordinal (111 as of
+  2026-11-24; the memo's wire inventory) and is `Paired`-only, self-scoped.
 - Tests run in CI (Rust in the RWX sandbox; Kit and the iOS build with the
   embedded extension on GitHub Actions). Hermetic: fake transports, no APNs,
   no VPN, no device.
@@ -181,10 +205,11 @@ Daemon (Rust):
     (`SessionManager` sensitive tags) or a work-send job; and the item's
     repository owner is known and not in `push.work_owners` (W13, S5). The
     rule never exceeds what the device sees in the app.
-  - FND-1: `PushDetail` (c→d) takes the next free ordinal (bump
-    `CLIENT_MSG_VARIANTS`), `Refused` in `network_policy`, allowed by W9's
-    `paired_extra_allowed` for `Paired` only; the reply is `Open`, targeted
-    only. Add `"push_detail"` to `Welcome.features`.
+  - FND-1: `PushDetail` (c→d) takes the next free ordinal (111; bump
+    `CLIENT_MSG_VARIANTS` to 112), `Refused` in `network_policy`, handled for
+    `Paired` only by W13's push-engine pre-dispatch hook beside
+    `DeviceHub::dispatch` (`server.rs:1379-1395`); the reply is `Open`,
+    targeted only. Add `"push_detail"` to `Welcome.features`.
 - `src/push/mod.rs` (W13): serve `PushDetail` from the item map plus the
   retained snapshots. **Optional, off by default** (see "Sign-offs folded
   in"): for devices with `capabilities.nse_withdraw == true`, which no shipped
@@ -226,7 +251,11 @@ iOS:
      `PushDetailFetcher.fetch(itemRef, deadline:)`: a one-shot
      `URLSessionWebSocketTask` to the primary URL from the app group, the W11
      token from the shared keychain, `PushDetail`, close.
-  5. On `waiting == false`: deliver the contract content and also remove it.
+  5. On `waiting == false`: deliver the contract content unchanged. The
+     extension cannot suppress or remove its own notification (that needs
+     Apple's filtering entitlement, which is not requested); the stale
+     notification is replaced by W13's withdrawal push (same collapse id) and
+     removed when the app next runs.
      On `text`: set `body`, moving the original body to `subtitle`; for a
      decision the body is `<text> · answer on your Mac`.
   6. On budget expiry or any error, deliver the original contract content

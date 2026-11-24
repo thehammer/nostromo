@@ -154,11 +154,12 @@ coordination"):
 - **Human gesture.** The app's sensitive controls now pass through
   `HumanGesture.permit(NSApp.currentEvent, control:)`
   (`macOS/Nostromo/Security/HumanGesture.swift`, AP1). **Pair a Device…**'s
-  code issuance, the **Will see mail and todos** checkbox (turning it on),
-  each row's **Mail and todos** toggle (turning it on) and **Revoke** call it
-  first and do nothing on `.refused`, so app-control and synthetic input
-  cannot pair a device or widen a device's scope. No `keyEquivalent` on any
-  of them.
+  code issuance and **Revoke** call it first and do nothing on `.refused`, so
+  app-control and synthetic input cannot pair or revoke a device. No
+  `keyEquivalent` on either. (*2026-11-24:* this paragraph used to list a
+  **Will see mail and todos** checkbox and a per-row **Mail and todos**
+  toggle; Q2 removed both, so there is no device scope to widen in v1. See
+  "Sign-offs folded in".)
 - **Menu collisions.** AP3, BA3 and FV4 also edit `setupMenu`; do not run
   this wedge concurrently with them. New Mac files need `project.pbxproj`
   entries with ids prefixed `BP0000` (following the `AA0000…` style), so do
