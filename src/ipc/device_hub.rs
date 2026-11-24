@@ -18,6 +18,7 @@ use super::devices::{
 use super::pairing::{CheckAnswer, PairingTable};
 use super::peer::PeerTrust;
 use super::protocol::{ClientMsg, ServerMsg};
+use super::router::Router;
 
 /// How the hub reaches the rest of the daemon: set once, when the daemon wires
 /// the listeners. Empty on a daemon with no device registry.
@@ -32,6 +33,8 @@ pub struct DeviceHub {
     ws_port: u16,
     broadcast: OnceLock<broadcast::Sender<ServerMsg>>,
     socket_ids: AtomicU64,
+    /// Which satellites are connected, and the reads routed to them.
+    router: Router,
 }
 
 /// Holds a device's connection open in the hub's table; dropping it records
@@ -83,6 +86,7 @@ impl DeviceHub {
             ws_port,
             broadcast: OnceLock::new(),
             socket_ids: AtomicU64::new(1),
+            router: Router::new(),
         })
     }
 
@@ -90,8 +94,14 @@ impl DeviceHub {
         &self.registry
     }
 
-    /// Where `Devices` frames are broadcast. The first call wins.
+    /// The host table and routed-request table for satellite uplinks.
+    pub fn router(&self) -> &Router {
+        &self.router
+    }
+
+    /// Where `Devices` and `Hosts` frames are broadcast. The first call wins.
     pub fn set_broadcast(&self, tx: broadcast::Sender<ServerMsg>) {
+        self.router.set_broadcast(tx.clone());
         let _ = self.broadcast.set(tx);
     }
 
@@ -267,6 +277,9 @@ impl DeviceHub {
                 _ => Dispatched::NotHandled,
             };
         }
+        if let PeerTrust::Satellite { admin } = trust {
+            return self.dispatch_satellite(msg, admin, ws_device, conn_key, reply);
+        }
         if trust.is_network() {
             return Dispatched::NotHandled;
         }
@@ -287,6 +300,7 @@ impl DeviceHub {
                 satellite,
                 admin,
                 egress,
+                origin: _,
             } => {
                 let (kind, hint) = match satellite {
                     Some(host) => (DeviceKind::Satellite, Some(host.clone())),
@@ -317,8 +331,9 @@ impl DeviceHub {
             ClientMsg::DevicePairCancel {
                 request_id,
                 pairing_id,
+                origin: _,
             } => {
-                if self.pairing.lock().unwrap().cancel(pairing_id, conn_key) {
+                if self.pairing.lock().unwrap().cancel(pairing_id, conn_key, None) {
                     // The outcome (`cancelled`) already went to this connection.
                     return Dispatched::Handled;
                 }
@@ -359,6 +374,110 @@ impl DeviceHub {
         Dispatched::Handled
     }
 
+    /// A device-admin verb from a satellite's uplink, judged per level (see
+    /// the table in the W10 plan). The level used is the lower of the
+    /// connection's snapshot and the record's level now, so a verb already
+    /// buffered when a level was lowered is judged at the lower one; a record
+    /// that is no longer an active satellite gets nothing.
+    ///
+    /// Satellite records are changed only from the primary's own CLI:
+    /// `DeviceSetAdmin`, an enrolment code, and the revoke of any satellite
+    /// record are refused at every level.
+    fn dispatch_satellite(
+        self: &Arc<Self>,
+        msg: &ClientMsg,
+        snapshot: SatelliteAdmin,
+        ws_device: Option<&str>,
+        conn_key: &str,
+        reply: &mpsc::UnboundedSender<ServerMsg>,
+    ) -> Dispatched {
+        let Some(request_id) = satellite_verb_request_id(msg) else {
+            return Dispatched::NotHandled;
+        };
+        let level = ws_device
+            .and_then(|id| self.registry.satellite_info(id))
+            .map(|rec| snapshot.min_with(rec.admin))
+            .unwrap_or(SatelliteAdmin::Off);
+        info!(level = level.as_str(), "satellite device admin verb");
+        let refuse = || admin_error(request_id, NOT_PERMITTED);
+        let can_revoke = level.rank() >= SatelliteAdmin::RevokeOnly.rank();
+        let out = match msg {
+            ClientMsg::DeviceList { .. } if level != SatelliteAdmin::Off => self.devices_msg(),
+            ClientMsg::DeviceRevoke { device, .. } if can_revoke => {
+                match self.registry.resolve(device) {
+                    Err(e) => admin_error(request_id, revoke_reason(e)),
+                    // A satellite record is never revoked from an uplink, itself included.
+                    Ok(target)
+                        if self
+                            .registry
+                            .kind_of(&target.id)
+                            .is_none_or(|k| k.is_satellite()) =>
+                    {
+                        refuse()
+                    }
+                    Ok(target) => {
+                        let was_connected = self.is_connected(&target.id);
+                        match self.registry.revoke(&target.id, RevokedBy::Operator) {
+                            Ok(_) => {
+                                self.broadcast_devices();
+                                ServerMsg::DeviceRevoked {
+                                    request_id: request_id.to_string(),
+                                    device_id: target.id,
+                                    was_connected,
+                                }
+                            }
+                            Err(e) => admin_error(request_id, revoke_reason(e)),
+                        }
+                    }
+                }
+            }
+            ClientMsg::DevicePairStart {
+                satellite: None,
+                name_hint,
+                origin,
+                ..
+            } if level == SatelliteAdmin::Full => {
+                let started = self.pairing.lock().unwrap().start(
+                    conn_key,
+                    origin.clone(),
+                    reply.clone(),
+                    name_hint.clone(),
+                    DeviceKind::Iphone,
+                    None,
+                    None,
+                    Instant::now(),
+                );
+                self.schedule_expiry();
+                ServerMsg::DevicePairing {
+                    request_id: request_id.to_string(),
+                    pairing_id: started.pairing_id,
+                    server_url: format!(
+                        "nostromo://pair?v=1&host={}&port={}&code={}",
+                        self.pair_host, self.ws_port, started.code
+                    ),
+                    code: started.code,
+                    expires_at: started.expires_at,
+                }
+            }
+            ClientMsg::DevicePairCancel {
+                pairing_id, origin, ..
+            } if can_revoke => {
+                if self.pairing.lock().unwrap().cancel(
+                    pairing_id,
+                    conn_key,
+                    origin.as_deref(),
+                ) {
+                    // The outcome (`cancelled`) already went to this connection.
+                    return Dispatched::Handled;
+                }
+                admin_error(request_id, "unknown_pairing")
+            }
+            _ => refuse(),
+        };
+        let _ = reply.send(out);
+        Dispatched::Handled
+    }
+
     /// Sweep the table when the newest pairing is due, so an expiry reaches its
     /// issuer on time rather than on the next attempt.
     fn schedule_expiry(self: &Arc<Self>) {
@@ -381,6 +500,20 @@ fn revoke_reason(e: RevokeError) -> &'static str {
         RevokeError::Unknown => "unknown_device",
         RevokeError::Ambiguous => "ambiguous_name",
         RevokeError::NotSaved => "not_saved",
+    }
+}
+
+/// The refusal a satellite gets for a verb its level does not allow.
+const NOT_PERMITTED: &str = "not_permitted_on_this_mac";
+
+fn satellite_verb_request_id(msg: &ClientMsg) -> Option<&str> {
+    match msg {
+        ClientMsg::DevicePairStart { request_id, .. }
+        | ClientMsg::DevicePairCancel { request_id, .. }
+        | ClientMsg::DeviceList { request_id }
+        | ClientMsg::DeviceRevoke { request_id, .. }
+        | ClientMsg::DeviceSetAdmin { request_id, .. } => Some(request_id),
+        _ => None,
     }
 }
 
@@ -464,6 +597,7 @@ mod tests {
                 satellite: None,
                 admin: None,
                 egress: None,
+                origin: None,
             },
             PeerTrust::LocalOther,
             None,

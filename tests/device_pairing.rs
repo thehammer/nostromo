@@ -316,6 +316,7 @@ async fn a_cancelled_code_is_reported_to_its_issuer_and_afterwards_invalid() {
         .send(&ClientMsg::DevicePairCancel {
             request_id: request_id(),
             pairing_id: pairing.pairing_id.clone(),
+            origin: None,
         })
         .await;
     let outcome = admin.outcome_of(&pairing, Duration::from_secs(2)).await;
@@ -521,6 +522,7 @@ async fn another_connection_cannot_cancel_a_pairing_and_it_stays_open() {
         .send(&ClientMsg::DevicePairCancel {
             request_id: rid.clone(),
             pairing_id: pairing.pairing_id.clone(),
+            origin: None,
         })
         .await;
     let refused = other
@@ -613,6 +615,7 @@ async fn the_device_admin_verbs_are_refused_on_a_device_socket_and_change_nothin
                 satellite: None,
                 admin: None,
                 egress: None,
+                origin: None,
             },
         ),
         (
@@ -620,6 +623,7 @@ async fn the_device_admin_verbs_are_refused_on_a_device_socket_and_change_nothin
             ClientMsg::DevicePairCancel {
                 request_id: "r2".into(),
                 pairing_id: "pair_nothing".into(),
+                origin: None,
             },
         ),
         (
@@ -1156,6 +1160,7 @@ async fn a_code_checked_and_then_cancelled_is_refused_as_invalid_at_pair() {
         .send(&ClientMsg::DevicePairCancel {
             request_id: request_id(),
             pairing_id: pairing.pairing_id.clone(),
+            origin: None,
         })
         .await;
     assert_eq!(

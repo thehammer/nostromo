@@ -136,7 +136,7 @@ async fn tcp_session_list_returns_empty_resp() {
     );
 
     // → SessionList
-    let list_req = ClientMsg::SessionList;
+    let list_req = ClientMsg::SessionList { host: None };
     write_frame(&mut stream, &serde_json::to_vec(&list_req).unwrap())
         .await
         .unwrap();

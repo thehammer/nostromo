@@ -1138,12 +1138,12 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         ClientMsg::Hello { .. }
         | ClientMsg::Subscribe { .. }
         | ClientMsg::Ping
-        | ClientMsg::SessionList
+        | ClientMsg::SessionList { .. }
         | ClientMsg::SessionAttach { .. }
         | ClientMsg::SessionDetach { .. }
         | ClientMsg::PtyList
         | ClientMsg::PtyDetach { .. }
-        | ClientMsg::FocusList
+        | ClientMsg::FocusList { .. }
         | ClientMsg::ActivitySnapshotRequest { .. }
         | ClientMsg::ModelCatalogRequest {}
         | ClientMsg::SessionModelGet { .. }
@@ -1296,15 +1296,15 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         ClientMsg::MotherAction { job_id, .. } | ClientMsg::MotherResume { job_id, .. } => {
             tags.job_is_sensitive(job_id)
         }
-        ClientMsg::SessionAttach { tag }
+        ClientMsg::SessionAttach { tag, .. }
         | ClientMsg::SessionSend { tag, .. }
         | ClientMsg::SessionInterrupt { tag }
         | ClientMsg::SessionControl { tag, .. }
         | ClientMsg::SessionAnswerPermission { tag, .. }
         | ClientMsg::ClosePane { tag, .. }
-        | ClientMsg::ActivitySnapshotRequest { tag }
+        | ClientMsg::ActivitySnapshotRequest { tag, .. }
         | ClientMsg::RenderedShape { tag, .. }
-        | ClientMsg::SessionModelGet { tag }
+        | ClientMsg::SessionModelGet { tag, .. }
         | ClientMsg::SessionModelSet { tag, .. }
         | ClientMsg::ApprovalRevokeSessionRule { tag, .. }
         | ClientMsg::SessionTaskStop { tag, .. }
@@ -1338,9 +1338,9 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::PtyKill { .. }
         | ClientMsg::PtyList
         | ClientMsg::SessionDetach { .. }
-        | ClientMsg::SessionList
+        | ClientMsg::SessionList { .. }
         | ClientMsg::FocusRegistryPush { .. }
-        | ClientMsg::FocusList
+        | ClientMsg::FocusList { .. }
         | ClientMsg::PerriAction { .. }
         | ClientMsg::DecisionAnswer { .. }
         // Name a request id (or none), never a tag; refused for a network peer anyway.
@@ -1669,7 +1669,7 @@ mod tests {
             assert!(refused_for_network(msg), "{msg:?}");
         }
         assert!(!refused_for_network(&ClientMsg::Ping));
-        assert!(!refused_for_network(&ClientMsg::SessionList));
+        assert!(!refused_for_network(&ClientMsg::SessionList { host: None }));
     }
 
     #[test]
@@ -1874,7 +1874,7 @@ mod tests {
     #[test]
     fn session_verbs_on_a_sensitive_tag_or_for_a_fred_teri_agent_are_refused_for_network_peers() {
         let tags = tags_with("cody-core-1");
-        let attach = |tag: &str| ClientMsg::SessionAttach { tag: tag.into() };
+        let attach = |tag: &str| ClientMsg::SessionAttach { tag: tag.into(), host: None };
         assert!(refuse_for_network(&attach("fred"), &tags));
         assert!(refuse_for_network(&attach("cody-core-1"), &tags));
         assert!(!refuse_for_network(&attach("cody-other"), &tags));
@@ -1894,7 +1894,7 @@ mod tests {
         assert!(refuse_for_network(&spawn("anything", "cody"), &tags));
         // Detaching only releases the peer's own attachment.
         assert!(!refuse_for_network(
-            &ClientMsg::SessionDetach { tag: "fred".into() },
+            &ClientMsg::SessionDetach { tag: "fred".into(), host: None },
             &tags
         ));
     }
@@ -2195,8 +2195,8 @@ mod tests {
                 remote_control: false,
                 no_codebase: false,
             },
-            ClientMsg::SessionAttach { tag: "x1".into() },
-            ClientMsg::SessionDetach { tag: "x1".into() },
+            ClientMsg::SessionAttach { tag: "x1".into(), host: None },
+            ClientMsg::SessionDetach { tag: "x1".into(), host: None },
             ClientMsg::SessionSend {
                 tag: "x1".into(),
                 text: "t".into(),
@@ -2217,9 +2217,9 @@ mod tests {
                 request_id: "r".into(),
                 decision: PermissionDecision::Allow,
             },
-            ClientMsg::SessionList,
+            ClientMsg::SessionList { host: None },
             ClientMsg::FocusRegistryPush { focuses: vec![] },
-            ClientMsg::FocusList,
+            ClientMsg::FocusList { host: None },
             ClientMsg::MotherAction {
                 job_id: "j".into(),
                 action: MotherActionKind::Cancel,
@@ -2239,7 +2239,7 @@ mod tests {
                 choice_id: None,
                 operator_nonce: None,
             },
-            ClientMsg::ActivitySnapshotRequest { tag: "x1".into() },
+            ClientMsg::ActivitySnapshotRequest { tag: "x1".into(), host: None },
             ClientMsg::RenderedShape {
                 tag: "x1".into(),
                 window_id: "w".into(),
@@ -2277,7 +2277,7 @@ mod tests {
             },
             ClientMsg::ModelCatalogRequest {},
             ClientMsg::ModelCatalogRefresh {},
-            ClientMsg::SessionModelGet { tag: "x1".into() },
+            ClientMsg::SessionModelGet { tag: "x1".into(), host: None },
             ClientMsg::SessionModelSet {
                 tag: "x1".into(),
                 model: Some("opus".into()),
@@ -2405,10 +2405,12 @@ mod tests {
                 satellite: None,
                 admin: None,
                 egress: None,
+                origin: None,
             },
             ClientMsg::DevicePairCancel {
                 request_id: "r".into(),
                 pairing_id: "p".into(),
+                origin: None,
             },
             ClientMsg::DeviceList {
                 request_id: "r".into(),
@@ -2673,9 +2675,9 @@ mod tests {
             ClientMsg::SessionInterrupt { .. } => 15,
             ClientMsg::SessionControl { .. } => 16,
             ClientMsg::SessionAnswerPermission { .. } => 17,
-            ClientMsg::SessionList => 18,
+            ClientMsg::SessionList { .. } => 18,
             ClientMsg::FocusRegistryPush { .. } => 19,
-            ClientMsg::FocusList => 20,
+            ClientMsg::FocusList { .. } => 20,
             ClientMsg::MotherAction { .. } => 21,
             ClientMsg::MotherResume { .. } => 22,
             ClientMsg::PerriAction { .. } => 23,
@@ -2896,12 +2898,10 @@ mod tests {
         let tags = SensitiveTags::in_memory();
         for msg in [
             ClientMsg::SessionAttach {
-                tag: "cody-x".into(),
-            },
+                tag: "cody-x".into(), host: None },
             ClientMsg::SessionDetach {
-                tag: "cody-x".into(),
-            },
-            ClientMsg::SessionList,
+                tag: "cody-x".into(), host: None },
+            ClientMsg::SessionList { host: None },
             ClientMsg::Ping,
         ] {
             assert!(!refuse_for_network(&msg, &tags), "{msg:?}");
@@ -2910,14 +2910,12 @@ mod tests {
         let sensitive = tags_with("cody-x");
         assert!(refuse_for_network(
             &ClientMsg::SessionAttach {
-                tag: "cody-x".into()
-            },
+                tag: "cody-x".into(), host: None },
             &sensitive
         ));
         assert!(refuse_for_network(
             &ClientMsg::ActivitySnapshotRequest {
-                tag: "cody-x".into()
-            },
+                tag: "cody-x".into(), host: None },
             &sensitive
         ));
     }

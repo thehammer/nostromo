@@ -17,6 +17,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv6Addr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -35,9 +36,12 @@ use tracing::{debug, info, warn};
 use super::codec::read_frame;
 use super::decisions::DecisionRegistry;
 use super::device_hub::{DeviceHub, HubSlot};
-use super::devices::{DeviceStanding, RevokedBy, TokenCheck};
+use super::devices::{DeviceStanding, RevokedBy, SatelliteAdmin, TokenCheck};
+use super::peer::SensitiveTags;
 use super::protocol::{ClientMsg, ServerMsg, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION};
-use super::server::{handle_client, HeldMotherJobs, PeerOrigin, RetainedCache};
+use super::router::{ingest_from_satellite, Bucket, Router, SatelliteRecord, UplinkLimits, Verdict};
+use super::server::{handle_client, HeldMotherJobs, PeerOrigin, RetainedCache, SatelliteLink};
+use super::uplink_wire::{wrap_server_bytes, UplinkFrame};
 use super::session_manager::SessionManager;
 use crate::terminal::TerminalManager;
 
@@ -45,6 +49,10 @@ use crate::terminal::TerminalManager;
 pub const FEATURE_WS: &str = "ws";
 pub const FEATURE_PAIR: &str = "pair";
 pub const FEATURE_DEVICES: &str = "devices";
+/// A primary that lists connected satellites and routes reads to them.
+pub const FEATURE_HOSTS: &str = "hosts";
+/// A primary that accepts a satellite's uplink.
+pub const FEATURE_UPLINK: &str = "uplink";
 
 /// Close code for "this server refuses you" (revoked, unknown, not paired).
 pub const CLOSE_UNAUTHORIZED: u16 = 4001;
@@ -84,6 +92,8 @@ pub struct WsLimits {
     pub max_unauthenticated_per_ip: usize,
     /// Concurrent authenticated sockets of one device.
     pub max_sockets_per_device: usize,
+    /// What the primary accepts from a satellite's uplink.
+    pub uplink: UplinkLimits,
 }
 
 impl Default for WsLimits {
@@ -93,6 +103,7 @@ impl Default for WsLimits {
             max_unauthenticated: 64,
             max_unauthenticated_per_ip: 8,
             max_sockets_per_device: 8,
+            uplink: UplinkLimits::default(),
         }
     }
 }
@@ -382,7 +393,15 @@ async fn serve(
         Some(Admission::Paired(id)) => {
             // Authenticated: no longer counted against the unauthenticated caps.
             drop(slot);
-            run_paired(ws, id, hub, shared, limits.max_sockets_per_device).await
+            run_paired(
+                ws,
+                id,
+                hub,
+                shared,
+                limits.max_sockets_per_device,
+                limits.uplink.clone(),
+            )
+            .await
         }
         Some(Admission::PairingOnly) => run_pairing_only(ws, hub, slot).await,
         Some(Admission::Rejected(reason)) => {
@@ -524,15 +543,117 @@ async fn run_pairing_only(
 
 // ── paired socket ─────────────────────────────────────────────────────────────
 
+/// What `run_paired` holds for a satellite's uplink: the record behind the
+/// token, the rate limits, and the counters the router keeps.
+struct UplinkSession {
+    record: SatelliteRecord,
+    snapshot: SatelliteAdmin,
+    tags: SensitiveTags,
+    limits: UplinkLimits,
+    publish: Bucket,
+    reply: Bucket,
+}
+
+/// What reading one uplink frame decided.
+enum Inbound {
+    /// Hand this to `handle_client` (the satellite's own verb).
+    Client(ClientMsg),
+    /// Dealt with (admitted, or dropped and counted).
+    Done,
+    /// Over the limit for the whole sustain window.
+    Close,
+}
+
+impl UplinkSession {
+    fn read(&mut self, body: &str, shared: &WsShared, router: &Router, now: Instant) -> Inbound {
+        let name = self.record.name.clone();
+        let junk = |s: &mut Self, router: &Router| {
+            router.drops.junk.fetch_add(1, Ordering::Relaxed);
+            router.note_drop(&name, "envelope", "malformed or wrong direction");
+            match s.publish.take(now) {
+                Verdict::Close => Inbound::Close,
+                _ => Inbound::Done,
+            }
+        };
+        let frame = match serde_json::from_str::<UplinkFrame>(body) {
+            Ok(f) if f.is_from_satellite() => f,
+            _ => return junk(self, router),
+        };
+        router.touch(&name);
+        match frame {
+            UplinkFrame::Client { msg } => Inbound::Client(msg),
+            UplinkFrame::Publish { msg } => {
+                let oversize = body.len() > self.limits.max_publish_bytes;
+                match self.publish.take(now) {
+                    Verdict::Close => return Inbound::Close,
+                    Verdict::Drop => {
+                        router.drops.publish.fetch_add(1, Ordering::Relaxed);
+                        return Inbound::Done;
+                    }
+                    Verdict::Allow => {}
+                }
+                if oversize {
+                    router.drops.oversize.fetch_add(1, Ordering::Relaxed);
+                    router.note_drop(&name, &Router::variant_of(&msg), "over the size cap");
+                    return Inbound::Done;
+                }
+                match ingest_from_satellite(&self.record, msg, &self.tags) {
+                    Ok(admitted) => {
+                        let _ = shared.tx.send(admitted);
+                    }
+                    Err(why) => {
+                        router.drops.publish.fetch_add(1, Ordering::Relaxed);
+                        router.note_drop(&name, "publish", &format!("{why:?}"));
+                    }
+                }
+                Inbound::Done
+            }
+            UplinkFrame::Reply { id, msg } => {
+                match self.reply.take(now) {
+                    Verdict::Close => return Inbound::Close,
+                    Verdict::Drop => {
+                        router.drops.reply.fetch_add(1, Ordering::Relaxed);
+                        return Inbound::Done;
+                    }
+                    Verdict::Allow => {}
+                }
+                if let Err(why) = router.accept_routed_reply(&self.record, &id, msg, &self.tags, now)
+                {
+                    router.drops.reply.fetch_add(1, Ordering::Relaxed);
+                    router.note_drop(&name, "reply", &format!("{why:?}"));
+                }
+                Inbound::Done
+            }
+            // `is_from_satellite` filtered these above.
+            UplinkFrame::Server { .. } | UplinkFrame::Request { .. } => Inbound::Done,
+        }
+    }
+}
+
+/// Wait for the next routed request, or for ever when this is not an uplink.
+async fn next_request(rx: &mut Option<mpsc::UnboundedReceiver<UplinkFrame>>) -> Option<UplinkFrame> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Serve an authenticated device: bridge the socket to `handle_client` through
 /// an in-memory stream that carries the codec's length-prefixed frames, and
 /// watch the registry so a revoke closes this socket at once.
+///
+/// A satellite's token is served the same way, but its socket carries
+/// `UplinkFrame` envelopes (see [`super::uplink_wire`]): its own verbs are
+/// unwrapped into the bridge, what it publishes and the answers it gives to
+/// routed reads go through the router's checks, and what the handler writes
+/// is wrapped as `server`.
 async fn run_paired(
     ws: WebSocketStream<TcpStream>,
     device_id: String,
     hub: Arc<DeviceHub>,
     shared: Arc<WsShared>,
     max_sockets: usize,
+    uplink_limits: UplinkLimits,
 ) -> Result<()> {
     let Some(_conn) = hub.try_connected(&device_id, max_sockets) else {
         let mut ws = ws;
@@ -549,15 +670,58 @@ async fn run_paired(
         reject(ws, "revoked").await;
         return Ok(());
     }
+    // Read after the subscription above, so a level change between this read
+    // and the first `epoch.changed()` is not missed.
+    let satellite = registry.satellite_info(&device_id);
 
     let (server_side, bridge_side) = tokio::io::duplex(256 * 1024);
     let (mut bridge_rd, mut bridge_wr) = tokio::io::split(bridge_side);
     let (mut sink, mut stream) = ws.split();
 
+    let role_refused = Arc::new(AtomicBool::new(false));
+    let (req_tx, req_rx) = mpsc::unbounded_channel::<UplinkFrame>();
+    let (link, mut req_rx, mut uplink) = match &satellite {
+        Some(info) => {
+            let now = Instant::now();
+            let session = UplinkSession {
+                record: SatelliteRecord {
+                    name: info.name.clone(),
+                    egress: info.egress,
+                },
+                snapshot: info.admin,
+                tags: shared.session_mgr.lock().unwrap().sensitive_tags(),
+                publish: Bucket::new(
+                    uplink_limits.publish_rate,
+                    uplink_limits.publish_burst,
+                    uplink_limits.sustain,
+                    now,
+                ),
+                reply: Bucket::new(
+                    uplink_limits.reply_rate,
+                    uplink_limits.reply_burst,
+                    uplink_limits.sustain,
+                    now,
+                ),
+                limits: uplink_limits,
+            };
+            (
+                Some(SatelliteLink {
+                    info: info.clone(),
+                    req_tx: Some(req_tx),
+                    role_refused: Arc::clone(&role_refused),
+                }),
+                Some(req_rx),
+                Some(session),
+            )
+        }
+        None => (None, None, None),
+    };
+
     let handler = tokio::spawn(handle_client(
         server_side,
         PeerOrigin::Ws {
             device_id: device_id.clone(),
+            satellite: link,
         },
         shared.tx.subscribe(),
         shared.tx.clone(),
@@ -583,6 +747,18 @@ async fn run_paired(
     let mut touch = tokio::time::interval(TOUCH_EVERY);
     touch.tick().await;
     let mut closing: Option<Message> = None;
+    // How the socket closes when the handler is done or the uplink was replaced.
+    let ended = |registry: &super::devices::DeviceRegistry, refused: &AtomicBool| -> Message {
+        if refused.load(Ordering::SeqCst) {
+            return close_msg(CLOSE_UNAUTHORIZED, "unauthorized");
+        }
+        match registry.standing(&device_id) {
+            Some(DeviceStanding::Revoked(_)) | None => {
+                close_msg(CLOSE_UNAUTHORIZED, "unauthorized")
+            }
+            Some(DeviceStanding::Active) => close_msg(1000, "bye"),
+        }
+    };
 
     loop {
         tokio::select! {
@@ -601,6 +777,23 @@ async fn run_paired(
                     break;
                 }
                 if let Message::Text(body) = frame {
+                    // A satellite's frames are envelopes; a phone's are bare.
+                    let body = match uplink.as_mut() {
+                        None => body,
+                        Some(session) => {
+                            match session.read(&body, &shared, hub.router(), Instant::now()) {
+                                Inbound::Done => continue,
+                                Inbound::Close => {
+                                    closing = Some(close_msg(1008, "over the rate limit"));
+                                    break;
+                                }
+                                Inbound::Client(msg) => match serde_json::to_string(&msg) {
+                                    Ok(b) => b,
+                                    Err(_) => continue,
+                                },
+                            }
+                        }
+                    };
                     let mut framed = Vec::with_capacity(4 + body.len());
                     framed.extend_from_slice(&(body.len() as u32).to_be_bytes());
                     framed.extend_from_slice(body.as_bytes());
@@ -611,16 +804,23 @@ async fn run_paired(
             }
             outbound = out_rx.recv() => {
                 let Some(bytes) = outbound else {
-                    // The handler is done (a clean exit, or the device removed itself).
-                    closing = Some(match registry.standing(&device_id) {
-                        Some(DeviceStanding::Revoked(_)) | None => {
-                            close_msg(CLOSE_UNAUTHORIZED, "unauthorized")
-                        }
-                        Some(DeviceStanding::Active) => close_msg(1000, "bye"),
-                    });
+                    // The handler is done (a clean exit, a refused role, or the device removed itself).
+                    closing = Some(ended(&registry, &role_refused));
                     break;
                 };
                 let body = String::from_utf8_lossy(&bytes).into_owned();
+                let body = if uplink.is_some() { wrap_server_bytes(&body) } else { body };
+                if sink.send(Message::Text(body)).await.is_err() {
+                    break;
+                }
+            }
+            routed = next_request(&mut req_rx) => {
+                let Some(frame) = routed else {
+                    // Replaced by a newer uplink for the same host, or ended.
+                    closing = Some(ended(&registry, &role_refused));
+                    break;
+                };
+                let body = serde_json::to_string(&frame).unwrap_or_default();
                 if sink.send(Message::Text(body)).await.is_err() {
                     break;
                 }
@@ -638,6 +838,15 @@ async fn run_paired(
                             reason: "revoked".to_string(),
                         })).await;
                         closing = Some(close_msg(CLOSE_UNAUTHORIZED, "unauthorized"));
+                        break;
+                    }
+                }
+                // `PeerTrust` is fixed after the `Hello`: a satellite whose level
+                // changed reconnects and is admitted with the new one.
+                if let Some(session) = &uplink {
+                    let now = registry.satellite_info(&device_id).map(|r| r.admin);
+                    if now.is_some_and(|level| level != session.snapshot) {
+                        closing = Some(close_msg(1012, "level changed"));
                         break;
                     }
                 }

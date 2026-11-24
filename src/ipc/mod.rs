@@ -43,7 +43,9 @@ pub mod session_manager;
 pub mod stream_json;
 pub mod task_output;
 pub mod tasks;
+pub mod router;
 pub mod uplink_redact;
+pub mod uplink_wire;
 pub mod ws;
 
 pub use client::{ConnectionState, DaemonClient};

@@ -326,8 +326,7 @@ fn typed_messages_queued_behind_a_turn_reach_the_cli_as_one_frame_and_show_as_tw
     run(|rig| async move {
         let mut conn = rig.connect(true).await;
         conn.send(&ClientMsg::SessionAttach {
-            tag: "cody-1".into(),
-        })
+            tag: "cody-1".into(), host: None })
         .await;
         conn.sync().await;
         conn.send(&send("cody-1", &rig.hold_cue())).await;
@@ -371,8 +370,7 @@ fn typed_messages_queued_behind_a_turn_reach_the_cli_as_one_frame_and_show_as_tw
         // A client attaching now gets the same in its snapshot.
         let mut late = rig.connect(true).await;
         late.send(&ClientMsg::SessionAttach {
-            tag: "cody-1".into(),
-        })
+            tag: "cody-1".into(), host: None })
         .await;
         let snapshot = late
             .next("the snapshot", |m| {
@@ -403,8 +401,7 @@ fn a_connection_without_the_capability_closes_the_gate_until_its_socket_drops() 
         let mut legacy = rig.connect(false).await;
         legacy
             .send(&ClientMsg::SessionAttach {
-                tag: "cody-1".into(),
-            })
+                tag: "cody-1".into(), host: None })
             .await;
         legacy.sync().await;
         legacy.send(&send("cody-1", &rig.hold_cue())).await;

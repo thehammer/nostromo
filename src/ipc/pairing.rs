@@ -199,12 +199,13 @@ impl PairingTable {
         }
     }
 
-    /// Cancel a pairing; honoured only for the connection that owns it.
-    pub fn cancel(&mut self, pairing_id: &str, caller: &str) -> bool {
-        let Some(i) = self
-            .open
-            .iter()
-            .position(|o| o.id == pairing_id && o.issuer == caller)
+    /// Cancel a pairing; honoured only for the connection that owns it and,
+    /// for a pairing a satellite relayed, the local client (`origin`) that
+    /// started it.
+    pub fn cancel(&mut self, pairing_id: &str, caller: &str, origin: Option<&str>) -> bool {
+        let Some(i) = self.open.iter().position(|o| {
+            o.id == pairing_id && o.issuer == caller && o.origin.as_deref() == origin
+        })
         else {
             return false;
         };
@@ -488,9 +489,9 @@ mod tests {
         let mut f = fixture();
         let id = f.started.pairing_id.clone();
         let code = f.started.code.clone();
-        assert!(!f.table.cancel(&id, "someone-else"));
+        assert!(!f.table.cancel(&id, "someone-else", None));
         assert_eq!(f.table.open_count(), 1);
-        assert!(f.table.cancel(&id, "conn-a"));
+        assert!(f.table.cancel(&id, "conn-a", None));
         assert_eq!(outcome(&mut f.rx), PairOutcomeKind::Cancelled);
         assert_eq!(
             f.table.take(&code, DeviceKind::Iphone, false, f.now).err(),
