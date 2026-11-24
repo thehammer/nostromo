@@ -5950,4 +5950,61 @@ mod authored_prs_tests {
             assert!(deliverable_topics(vec![], trust).is_empty());
         }
     }
+
+    #[test]
+    fn a_satellite_is_subscribed_to_the_device_list_only_whatever_it_asked_for() {
+        use crate::ipc::devices::SatelliteAdmin;
+        use crate::ipc::protocol::HostUnavailableReason;
+
+        for admin in [
+            SatelliteAdmin::Full,
+            SatelliteAdmin::RevokeOnly,
+            SatelliteAdmin::ReadOnly,
+            SatelliteAdmin::Off,
+        ] {
+            let trust = PeerTrust::Satellite { admin };
+            for asked in [
+                vec![],
+                vec![Topic::MotherJobs, Topic::Devices],
+                vec![Topic::MotherJobs, Topic::Perri, Topic::Focuses],
+                vec![Topic::Devices],
+            ] {
+                assert_eq!(
+                    deliverable_topics(asked.clone(), trust),
+                    vec![Topic::Devices],
+                    "{admin:?} asked for {asked:?}: never empty (that means everything)"
+                );
+            }
+        }
+
+        // Any other network peer still loses the device list.
+        for trust in [PeerTrust::Paired, PeerTrust::Tcp] {
+            assert_eq!(
+                deliverable_topics(vec![Topic::Perri, Topic::Devices], trust),
+                vec![Topic::Perri],
+                "{trust:?}"
+            );
+        }
+
+        // Satellite control frames are targeted, never matched by topic; the
+        // host list goes to every subscriber.
+        let level = ServerMsg::DeviceAdminLevel {
+            level: SatelliteAdmin::Full,
+            pair_from: vec![],
+        };
+        let unavailable = ServerMsg::HostUnavailable {
+            host: "kobe".into(),
+            reason: HostUnavailableReason::Busy,
+        };
+        let hosts = ServerMsg::Hosts { hosts: vec![] };
+        for topics in [
+            vec![],
+            vec![Topic::Devices],
+            vec![Topic::MotherJobs, Topic::Devices],
+        ] {
+            assert!(!message_matches_topics(&level, &topics), "{topics:?}");
+            assert!(!message_matches_topics(&unavailable, &topics), "{topics:?}");
+            assert!(message_matches_topics(&hosts, &topics), "{topics:?}");
+        }
+    }
 }
