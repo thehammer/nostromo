@@ -200,21 +200,23 @@ impl DeviceHub {
         } else {
             name
         };
-        let redeemed =
-            match self
-                .registry
-                .redeem(proposed, kind, taken.admin, taken.matched_device.as_deref())
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("could not save a new device: {e:#}");
-                    // The issuer must not wait for ever on a code that is gone.
-                    taken.notify_failed();
-                    return ServerMsg::PairRefused {
-                        reason: PairRefusedReason::Invalid,
-                    };
-                }
-            };
+        let redeemed = match self.registry.redeem_with_egress(
+            proposed,
+            kind,
+            taken.admin,
+            taken.egress,
+            taken.matched_device.as_deref(),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("could not save a new device: {e:#}");
+                // The issuer must not wait for ever on a code that is gone.
+                taken.notify_failed();
+                return ServerMsg::PairRefused {
+                    reason: PairRefusedReason::Invalid,
+                };
+            }
+        };
         taken.notify_paired(&redeemed.name, redeemed.replaced);
         info!(device = %redeemed.device_id, kind = ?kind, replaced = redeemed.replaced, "device paired");
         self.broadcast_devices();
@@ -284,6 +286,7 @@ impl DeviceHub {
                 name_hint,
                 satellite,
                 admin,
+                egress,
             } => {
                 let (kind, hint) = match satellite {
                     Some(host) => (DeviceKind::Satellite, Some(host.clone())),
@@ -296,6 +299,7 @@ impl DeviceHub {
                     hint,
                     kind,
                     admin.filter(|_| satellite.is_some()),
+                    (*egress).filter(|_| satellite.is_some()),
                     Instant::now(),
                 );
                 self.schedule_expiry();
@@ -459,6 +463,7 @@ mod tests {
                 name_hint: None,
                 satellite: None,
                 admin: None,
+                egress: None,
             },
             PeerTrust::LocalOther,
             None,

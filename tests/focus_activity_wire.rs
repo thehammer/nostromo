@@ -65,7 +65,10 @@ fn session(with_activity: bool) -> SessionInfo {
 }
 
 fn list(sessions: Vec<SessionInfo>) -> ServerMsg {
-    ServerMsg::SessionListResp { sessions }
+    ServerMsg::SessionListResp {
+        sessions,
+        host: None,
+    }
 }
 
 /// Pretty JSON with a trailing newline: the committed form.
@@ -141,7 +144,7 @@ fn a_session_list_without_activity_matches_its_golden_file_and_has_none_of_the_k
 fn a_frame_from_a_daemon_without_the_fields_decodes_with_all_five_unknown() {
     let path = fixture_path("frame-session-list-without-activity.json");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
-    let ServerMsg::SessionListResp { sessions } = serde_json::from_str(&text).unwrap() else {
+    let ServerMsg::SessionListResp { sessions, .. } = serde_json::from_str(&text).unwrap() else {
         panic!("a session_list_resp");
     };
     let s = &sessions[0];
@@ -157,7 +160,7 @@ fn a_frame_from_a_daemon_without_the_fields_decodes_with_all_five_unknown() {
 fn the_frame_with_activity_decodes_back_to_the_same_values() {
     let path = fixture_path("frame-session-list-with-activity.json");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
-    let ServerMsg::SessionListResp { sessions } = serde_json::from_str(&text).unwrap() else {
+    let ServerMsg::SessionListResp { sessions, .. } = serde_json::from_str(&text).unwrap() else {
         panic!("a session_list_resp");
     };
     let s = &sessions[0];
@@ -289,6 +292,7 @@ fn the_welcome_a_local_peer_receives_advertises_focus_activity_and_the_protocol_
             client_id: "focus-activity-wire-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: Some("mac_app".into()),
+            role: None,
         };
         write_frame(&mut w, &serde_json::to_vec(&hello).unwrap())
             .await
@@ -334,7 +338,7 @@ fn a_network_peer_still_gets_the_non_sensitive_sessions_with_their_counters_unch
     quiet.tag = "cody-quiet".into();
     let sent = list(vec![secret, open.clone(), quiet.clone()]);
 
-    let ServerMsg::SessionListResp { sessions } = redact_for_network(sent, &tags) else {
+    let ServerMsg::SessionListResp { sessions, .. } = redact_for_network(sent, &tags) else {
         panic!("a session_list_resp stays a session_list_resp");
     };
 

@@ -51,6 +51,9 @@ pub struct ActivityEvent {
     /// `activity::store::ActivityStore::ingest`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
+    /// The satellite this came from; `None` is the daemon's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 /// Global agent bus.  All views can subscribe to the receiver.
@@ -305,6 +308,7 @@ mod tests {
             tool_use_id: Some("tu-1".into()),
             cwd: Some("/tmp".into()),
             seq: Some(3),
+            host: None,
         };
         let json = serde_json::to_string(&ev).unwrap();
         let back: ActivityEvent = serde_json::from_str(&json).unwrap();

@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::devices::{
-    ct_eq, random_token, DeviceKind, PairOutcomeKind, PairRefusedReason, SatelliteAdmin,
+    ct_eq, random_token, DeviceKind, Egress, PairOutcomeKind, PairRefusedReason, SatelliteAdmin,
 };
 use super::protocol::ServerMsg;
 
@@ -29,6 +29,7 @@ struct Open {
     name_hint: Option<String>,
     kind: DeviceKind,
     admin: Option<SatelliteAdmin>,
+    egress: Option<Egress>,
     expires_at: Instant,
     /// The issuing connection's key.
     issuer: String,
@@ -77,6 +78,7 @@ pub struct Taken {
     pairing: Open,
     pub kind: DeviceKind,
     pub admin: Option<SatelliteAdmin>,
+    pub egress: Option<Egress>,
     pub name_hint: Option<String>,
     /// The active record the phone proved it holds, for `replace: true`.
     pub matched_device: Option<String>,
@@ -157,6 +159,7 @@ impl PairingTable {
         name_hint: Option<String>,
         kind: DeviceKind,
         admin: Option<SatelliteAdmin>,
+        egress: Option<Egress>,
         now: Instant,
     ) -> Started {
         self.prune(now);
@@ -177,6 +180,7 @@ impl PairingTable {
             name_hint,
             kind,
             admin,
+            egress,
             expires_at: now + self.ttl,
             issuer: issuer.to_string(),
             origin,
@@ -326,6 +330,7 @@ impl PairingTable {
         Ok(Taken {
             kind,
             admin: o.admin,
+            egress: o.egress,
             name_hint: o.name_hint.clone(),
             matched_device: matched,
             pairing: o,
@@ -398,6 +403,7 @@ mod tests {
             tx,
             Some("Kitchen".into()),
             DeviceKind::Iphone,
+            None,
             None,
             now,
         );
@@ -525,8 +531,16 @@ mod tests {
     fn a_wrong_code_counts_against_every_open_pairing() {
         let mut f = fixture();
         let (tx2, mut rx2) = mpsc::unbounded_channel();
-        f.table
-            .start("conn-b", None, tx2, None, DeviceKind::Ipad, None, f.now);
+        f.table.start(
+            "conn-b",
+            None,
+            tx2,
+            None,
+            DeviceKind::Ipad,
+            None,
+            None,
+            f.now,
+        );
         for _ in 0..5 {
             f.table.check("not-a-code", None, never, f.now);
         }
@@ -545,6 +559,7 @@ mod tests {
             Some("Tokyo".into()),
             DeviceKind::Satellite,
             Some(SatelliteAdmin::Full),
+            None,
             f.now,
         );
         assert_eq!(
@@ -645,7 +660,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let other = f
             .table
-            .start("c", None, tx, None, DeviceKind::Iphone, None, f.now);
+            .start("c", None, tx, None, DeviceKind::Iphone, None, None, f.now);
         let ch = |t: &mut PairingTable, code: &str, now| match t.check(code, None, never, now) {
             CheckAnswer::Offer { challenge, .. } => challenge,
             other => panic!("{other:?}"),

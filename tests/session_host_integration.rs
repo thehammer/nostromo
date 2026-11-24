@@ -79,6 +79,7 @@ async fn session_round_trip_drives_real_claude() {
             client_id: "it-client".into(),
             protocol_version: 3,
             client_kind: None,
+            role: None,
         },
     )
     .await;

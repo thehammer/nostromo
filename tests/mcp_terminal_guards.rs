@@ -316,6 +316,7 @@ impl Ipc {
             client_id: "mcp-terminal-guards".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: claim.map(str::to_string),
+            role: None,
         })
         .await;
         let welcome = ipc

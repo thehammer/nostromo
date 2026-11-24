@@ -1634,6 +1634,39 @@ pub enum ClaudeLoginActionKind {
     Discard,
 }
 
+/// The role a connection declares in its `Hello`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HelloRole {
+    Client,
+    Satellite {
+        host: String,
+        egress: crate::ipc::devices::Egress,
+    },
+}
+
+/// Why a routed request could not be sent to a host. A client must treat a
+/// reason it does not know as a generic "unavailable" (`Unavailable` is the
+/// decode fallback).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostUnavailableReason {
+    NotConnected,
+    EgressMetadata,
+    Busy,
+    #[serde(other)]
+    Unavailable,
+}
+
+/// One connected satellite, as `Hosts` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostInfo {
+    pub name: String,
+    pub egress: crate::ipc::devices::Egress,
+    pub connected_since: chrono::DateTime<chrono::Utc>,
+    pub last_seen: chrono::DateTime<chrono::Utc>,
+}
+
 /// Messages sent from a TUI client to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -1652,6 +1685,12 @@ pub enum ClientMsg {
         /// string (see [`FEATURE_MERGED_TURNS`]). Absent from older clients.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         capabilities: Vec<String>,
+        /// What this connection is for. Absent means an ordinary client. A
+        /// satellite's uplink says `Satellite`; the primary honours it only on
+        /// a WebSocket whose token belongs to a satellite record naming the
+        /// same host and egress (a claim alone grants nothing).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<HelloRole>,
     },
     Subscribe {
         #[serde(deserialize_with = "lenient_topics")]
@@ -2620,6 +2659,9 @@ pub enum ClientMsg {
         satellite: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         admin: Option<crate::ipc::devices::SatelliteAdmin>,
+        /// What an enrolled satellite may publish; only with `satellite`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        egress: Option<crate::ipc::devices::Egress>,
     },
     DevicePairCancel {
         request_id: String,
@@ -3131,6 +3173,9 @@ pub enum ServerMsg {
     Activity(ActivityEvent),
     MotherJobs {
         jobs: Vec<MotherJob>,
+        /// The satellite this frame came from; `None` is the daemon's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
     MotherStatusline(MotherStatus),
     /// Broadcast snapshot of Teri's active todos.
@@ -3172,6 +3217,9 @@ pub enum ServerMsg {
         /// for the Mac's host allowlist. Absent when none is configured.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         jira_site: Option<String>,
+        /// The satellite this frame came from; `None` is the daemon's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
 
     /// Broadcast snapshot of Fred's mailbox + calendar state. Re-sent whenever
@@ -3220,6 +3268,9 @@ pub enum ServerMsg {
     SessionState {
         tag: String,
         state: SessionState,
+        /// The satellite this frame came from; `None` is the daemon's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
 
     /// The session's `nostromo-mcp-bridge` connected to (or was lost from) the
@@ -3229,6 +3280,9 @@ pub enum ServerMsg {
     SessionBridge {
         tag: String,
         connected: bool,
+        /// The satellite this frame came from; `None` is the daemon's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
 
     /// Never constructed (superseded by `ApprovalRequest`; a test pins that).
@@ -3264,6 +3318,9 @@ pub enum ServerMsg {
     /// Response to `SessionList`.
     SessionListResp {
         sessions: Vec<SessionInfo>,
+        /// The satellite this frame came from; `None` is the daemon's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
 
     /// Auto-generated one-line summary derived from the first user message.
@@ -3277,10 +3334,16 @@ pub enum ServerMsg {
     /// Response to `FocusList`.
     FocusListResp {
         focuses: Vec<FocusMeta>,
+        /// The satellite this frame came from; `None` is the daemon's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
     /// Broadcast to all clients whenever the registry changes (push received).
     FocusRegistryUpdated {
         focuses: Vec<FocusMeta>,
+        /// The satellite this frame came from; `None` is the daemon's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
 
     /// Live peek snapshot for one active job. Polled every ~3 s while the
@@ -3332,6 +3395,9 @@ pub enum ServerMsg {
     /// connected client can add the new tab.
     FocusCreated {
         meta: FocusMeta,
+        /// The satellite this frame came from; `None` is the daemon's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
 
     /// A daemon-driven decision modal request (W6). An agent called
@@ -3348,6 +3414,9 @@ pub enum ServerMsg {
         /// A *reference* to a pane for context — never content itself (R7).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         context_pane_id: Option<String>,
+        /// The satellite this frame came from; `None` is the daemon's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
 
     /// A `DecisionRequest` has been resolved — answered, dismissed, timed
@@ -3364,6 +3433,9 @@ pub enum ServerMsg {
         resolution: DecisionResolution,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         choice_id: Option<String>,
+        /// The satellite this frame came from; `None` is the daemon's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
 
     // ── permission approvals (AP0b) ──────────────────────────────────────────
@@ -3422,6 +3494,9 @@ pub enum ServerMsg {
     ApprovalPending {
         tag: String,
         count: u32,
+        /// The satellite this frame came from; `None` is the daemon's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
     /// The production-shell guard blocked a call. `summary` is the tool name and
     /// the first command word only.
@@ -3805,6 +3880,9 @@ pub enum ServerMsg {
         tag: String,
         has_tracker: bool,
         counts: TrackerCounts,
+        /// The satellite this frame came from; `None` is the daemon's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
 
     // ── terminal panes (1a; all `LocalOnly`) ──────────────────────────────────
@@ -4063,6 +4141,25 @@ pub enum ServerMsg {
         request_id: String,
         reason: String,
     },
+
+    // ── satellites (W10) ──────────────────────────────────────────────────────
+    /// The satellites currently connected to this primary. `Open`: names,
+    /// egress and timestamps only.
+    Hosts {
+        hosts: Vec<HostInfo>,
+    },
+    /// A request naming `host` could not be routed.
+    HostUnavailable {
+        host: String,
+        reason: HostUnavailableReason,
+    },
+    /// What a satellite may do on the primary, and which hosts it may pair
+    /// from. Fixed vocabulary; written only to the one connection it is for
+    /// (never broadcast).
+    DeviceAdminLevel {
+        level: crate::ipc::devices::SatelliteAdmin,
+        pair_from: Vec<String>,
+    },
 }
 
 fn default_true() -> bool {
@@ -4236,6 +4333,7 @@ mod tests {
         round_trip_server(ServerMsg::SessionState {
             tag: "fred".into(),
             state: SessionState::MidTurn,
+            host: None,
         });
         round_trip_server(ServerMsg::SessionPermissionRequest {
             tag: "fred".into(),
@@ -4264,6 +4362,7 @@ mod tests {
                 activity_epoch: None,
                 last_problem: None,
             }],
+            host: None,
         });
     }
 
@@ -4438,6 +4537,7 @@ mod tests {
                 protocol_version,
                 client_kind,
                 capabilities,
+                ..
             } => {
                 assert_eq!(client_id, "old-app");
                 assert_eq!(protocol_version, 4);
@@ -4467,6 +4567,7 @@ mod tests {
             client_id: "c".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: None,
+            role: None,
         })
         .unwrap();
         assert!(
@@ -4482,12 +4583,14 @@ mod tests {
             client_id: "app".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: Some("mac_app".into()),
+            role: None,
         });
         let v = serde_json::to_value(ClientMsg::Hello {
             capabilities: Vec::new(),
             client_id: "app".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: Some("mac_app".into()),
+            role: None,
         })
         .unwrap();
         assert_eq!(v["client_kind"], "mac_app");
@@ -4730,9 +4833,11 @@ mod tests {
 
         round_trip_server(ServerMsg::FocusListResp {
             focuses: vec![meta.clone()],
+            host: None,
         });
         round_trip_server(ServerMsg::FocusRegistryUpdated {
             focuses: vec![meta],
+            host: None,
         });
     }
 
@@ -4799,6 +4904,7 @@ mod tests {
                 project_path: None,
                 select_for_client: None,
             },
+            host: None,
         });
     }
 
@@ -5145,6 +5251,7 @@ mod tests {
                 activity_epoch: None,
                 last_problem: None,
             }],
+            host: None,
         });
         // With no stop_reason.
         round_trip_server(ServerMsg::SessionListResp {
@@ -5164,6 +5271,7 @@ mod tests {
                 activity_epoch: None,
                 last_problem: None,
             }],
+            host: None,
         });
     }
 
@@ -5241,6 +5349,7 @@ mod tests {
             queue: vec![],
             current: None,
             jira_site: None,
+            host: None,
         });
     }
 
@@ -5292,6 +5401,7 @@ mod tests {
             queue: vec![item],
             current: Some(Box::new(snap)),
             jira_site: Some("carefeed.atlassian.net".into()),
+            host: None,
         });
     }
 
@@ -5302,6 +5412,7 @@ mod tests {
             queue: vec![],
             current: None,
             jira_site: None,
+            host: None,
         })
         .unwrap();
         assert_eq!(v["type"], "perri_state");
@@ -5324,6 +5435,7 @@ mod tests {
             queue: vec![],
             current: None,
             jira_site: Some("carefeed.atlassian.net".into()),
+            host: None,
         })
         .unwrap();
         assert_eq!(v["jira_site"], "carefeed.atlassian.net");
@@ -5514,6 +5626,7 @@ mod tests {
             tool_use_id: Some("tu-1".into()),
             cwd: Some("/tmp".into()),
             seq: Some(0),
+            host: None,
         }
     }
 
@@ -5785,6 +5898,7 @@ mod tests {
             detail: Some("This touches the production migration.".into()),
             choices: sample_decision_choices(),
             context_pane_id: Some("diff".into()),
+            host: None,
         });
     }
 
@@ -5797,6 +5911,7 @@ mod tests {
             detail: None,
             choices: sample_decision_choices(),
             context_pane_id: None,
+            host: None,
         })
         .unwrap();
         let obj = v.as_object().unwrap();
@@ -5817,6 +5932,7 @@ mod tests {
             detail: None,
             choices: sample_decision_choices(),
             context_pane_id: None,
+            host: None,
         });
     }
 
@@ -5829,6 +5945,7 @@ mod tests {
             detail: None,
             choices: sample_decision_choices(),
             context_pane_id: None,
+            host: None,
         })
         .unwrap();
         assert_eq!(v["type"], "decision_request");
@@ -5952,6 +6069,7 @@ mod tests {
             request_id: "req-6".into(),
             resolution: DecisionResolution::Answered,
             choice_id: Some("approve".into()),
+            host: None,
         });
     }
 
@@ -5962,6 +6080,7 @@ mod tests {
             request_id: "req-7".into(),
             resolution: DecisionResolution::Dismissed,
             choice_id: None,
+            host: None,
         });
     }
 
@@ -5975,6 +6094,7 @@ mod tests {
             request_id: "req-8".into(),
             resolution: DecisionResolution::Timeout,
             choice_id: None,
+            host: None,
         })
         .unwrap();
         let obj = v.as_object().unwrap();
@@ -5989,6 +6109,7 @@ mod tests {
             request_id: "req-8".into(),
             resolution: DecisionResolution::Timeout,
             choice_id: None,
+            host: None,
         });
     }
 
@@ -5999,6 +6120,7 @@ mod tests {
             request_id: "req-8b".into(),
             resolution: DecisionResolution::Answered,
             choice_id: Some("approve".into()),
+            host: None,
         })
         .unwrap();
         assert_eq!(v["choice_id"], "approve");
@@ -6011,6 +6133,7 @@ mod tests {
             request_id: "req-9".into(),
             resolution: DecisionResolution::Cancelled,
             choice_id: None,
+            host: None,
         })
         .unwrap();
         assert_eq!(v["type"], "decision_resolved");
@@ -7329,6 +7452,7 @@ mod work_wire_tests {
             tag: "cody-x".into(),
             has_tracker: true,
             counts,
+            host: None,
         });
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(
@@ -7341,6 +7465,7 @@ mod work_wire_tests {
                 tag,
                 has_tracker,
                 counts: back,
+                ..
             } => {
                 assert_eq!((tag.as_str(), has_tracker, back), ("cody-x", true, counts));
             }
@@ -7487,6 +7612,7 @@ mod work_wire_tests {
             tag: "t".into(),
             has_tracker: false,
             counts: TrackerCounts::default(),
+            host: None,
         };
         assert_eq!(
             serde_json::to_value(&summary).unwrap()["type"],
@@ -7510,6 +7636,7 @@ mod work_wire_tests {
                 tag,
                 has_tracker,
                 counts,
+                ..
             } => {
                 assert_eq!(tag, "t");
                 assert!(has_tracker);
@@ -8025,12 +8152,14 @@ mod work_wire_tests {
             ServerMsg::ApprovalPending {
                 tag: "cody-1".into(),
                 count: 2,
+                host: None,
             },
             r#"{"type":"approval_pending","tag":"cody-1","count":2}"#,
         );
         let v = serde_json::to_value(ServerMsg::ApprovalPending {
             tag: "cody-1".into(),
             count: 0,
+            host: None,
         })
         .unwrap();
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
@@ -10293,7 +10422,7 @@ mod no_codebase_wire_tests {
     fn an_older_apps_focus_push_reads_as_having_a_codebase_and_is_written_without_the_key() {
         let old = json!({"type": "focus_registry_updated", "focuses": [old_focus_frame()]});
         let msg: ServerMsg = serde_json::from_value(old.clone()).unwrap();
-        let ServerMsg::FocusRegistryUpdated { focuses } = &msg else {
+        let ServerMsg::FocusRegistryUpdated { focuses, .. } = &msg else {
             panic!("{msg:?}")
         };
         assert_eq!(focuses[0].no_codebase, None, "absent reads as not set");

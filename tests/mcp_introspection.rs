@@ -701,6 +701,7 @@ async fn mother_get_status_returns_counts() {
         queued: 3,
         failed: 1,
         awaiting: 1,
+        host: None,
     };
     let state = seeded_state(
         None,

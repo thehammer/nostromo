@@ -2,7 +2,7 @@
 //! data must stay byte-identical to what the daemon sent before the crew keys
 //! existed. The golden below was captured from the pre-MC1 code.
 //!
-//! Format: `serde_json::to_string_pretty` of `ServerMsg::MotherJobs { jobs }`
+//! Format: `serde_json::to_string_pretty` of `ServerMsg::MotherJobs { jobs, host: None }`
 //! (pretty, so a diff in review shows exactly which key moved), no trailing
 //! newline. `UPDATE_GOLDEN=1` rewrites the file instead of comparing; only do
 //! that deliberately, since the point of the file is that it does not change.
@@ -106,7 +106,8 @@ fn plain_frame() -> String {
         "golden must include a job with origin and phases"
     );
 
-    serde_json::to_string_pretty(&ServerMsg::MotherJobs { jobs }).expect("serialize frame")
+    serde_json::to_string_pretty(&ServerMsg::MotherJobs { jobs, host: None })
+        .expect("serialize frame")
 }
 
 #[test]

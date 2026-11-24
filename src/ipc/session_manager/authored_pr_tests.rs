@@ -986,7 +986,7 @@ impl Start {
     fn announced(&mut self) -> Vec<FocusMeta> {
         let mut out = Vec::new();
         while let Ok(m) = self.frames.try_recv() {
-            if let ServerMsg::FocusCreated { meta } = m {
+            if let ServerMsg::FocusCreated { meta, .. } = m {
                 out.push(meta);
             }
         }

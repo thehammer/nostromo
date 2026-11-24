@@ -318,6 +318,7 @@ fn summary_frames(frames: &[ServerMsg], tag: &str) -> Vec<(bool, TrackerCounts)>
                 tag: t,
                 has_tracker,
                 counts,
+                ..
             } if t == tag => Some((*has_tracker, *counts)),
             _ => None,
         })

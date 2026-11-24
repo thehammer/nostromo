@@ -529,6 +529,7 @@ impl Conn {
             client_id: "approvals-wire-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: client_kind.map(str::to_owned),
+            role: None,
         })
         .await;
         match self
@@ -688,7 +689,7 @@ impl Conn {
     async fn wait_pending(&mut self, tag: &str, count: u32) {
         let want = tag.to_owned();
         self.wait_seen(&format!("pending {count} for {tag}"), move |m| {
-            matches!(m, ServerMsg::ApprovalPending { tag, count: c } if *tag == want && *c == count)
+            matches!(m, ServerMsg::ApprovalPending { tag, count: c, .. } if *tag == want && *c == count)
         })
         .await;
     }
@@ -836,7 +837,7 @@ fn pending_counts(frames: &[ServerMsg], tag: &str) -> Vec<u32> {
     frames
         .iter()
         .filter_map(|m| match m {
-            ServerMsg::ApprovalPending { tag: t, count } if t == tag => Some(*count),
+            ServerMsg::ApprovalPending { tag: t, count, .. } if t == tag => Some(*count),
             _ => None,
         })
         .collect()

@@ -1011,6 +1011,7 @@ async fn an_answer_buffered_before_execing_the_pinned_app_is_refused_for_lacking
         client_id: "buffered-attack".into(),
         protocol_version: PROTOCOL_VERSION,
         client_kind: Some("mac_app".into()),
+        role: None,
     });
     bytes.extend(frame(&ClientMsg::Subscribe {
         topics: vec![Topic::Decision],

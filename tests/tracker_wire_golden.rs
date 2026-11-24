@@ -108,6 +108,7 @@ fn summary_frame() -> ServerMsg {
         tag: TAG.into(),
         has_tracker: true,
         counts: parsed().board.counts(),
+        host: None,
     }
 }
 
@@ -231,6 +232,7 @@ fn the_golden_summary_frame_decodes_back_to_the_same_frame() {
             tag,
             has_tracker,
             counts,
+            ..
         } => {
             assert_eq!(tag, TAG);
             assert!(*has_tracker);

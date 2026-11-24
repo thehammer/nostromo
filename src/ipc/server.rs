@@ -734,6 +734,7 @@ where
             protocol_version,
             ref client_kind,
             ref capabilities,
+            ..
         } => {
             if protocol_version < MIN_CLIENT_VERSION {
                 let err = ServerMsg::Error {
@@ -1124,6 +1125,8 @@ where
     // told once which topics are not shared.
     match trust {
         PeerTrust::Tcp => replay_messages(&mut writer, [withheld_msg()]).await,
+        // A satellite subscribes to the device list only; nothing is retained for it.
+        PeerTrust::Satellite { .. } => {}
         PeerTrust::Paired => {
             let frames = retained_matching(&retained, &topics, None)
                 .into_iter()
@@ -1295,7 +1298,7 @@ where
                             // Replay retained frames only for the topics this
                             // subscribe adds; a network peer gets none.
                             let mut frames = match trust {
-                                PeerTrust::Tcp => vec![],
+                                PeerTrust::Tcp | PeerTrust::Satellite { .. } => vec![],
                                 PeerTrust::Paired => retained_matching(&retained, &new_topics, Some(&topics))
                                     .into_iter()
                                     .filter_map(|m| outbound(trust, m, &sensitive))
@@ -2437,7 +2440,7 @@ fn handle_client_msg(
         ClientMsg::SessionList => {
             let mgr = session_mgr.lock().unwrap();
             let sessions = mgr.list();
-            let _ = targeted_tx.send(ServerMsg::SessionListResp { sessions });
+            let _ = targeted_tx.send(ServerMsg::SessionListResp { sessions, host: None });
         }
 
         ClientMsg::FocusRegistryPush { focuses } => {
@@ -2581,7 +2584,7 @@ fn handle_client_msg(
             }
 
             // Fan out to every connected, Focuses-subscribed client (incl. this one).
-            let _ = broadcast_tx.send(ServerMsg::FocusRegistryUpdated { focuses: updated });
+            let _ = broadcast_tx.send(ServerMsg::FocusRegistryUpdated { focuses: updated, host: None });
         }
 
         ClientMsg::FocusList => {
@@ -2589,7 +2592,7 @@ fn handle_client_msg(
                 let mgr = session_mgr.lock().unwrap();
                 mgr.focus_registry()
             };
-            let _ = targeted_tx.send(ServerMsg::FocusListResp { focuses });
+            let _ = targeted_tx.send(ServerMsg::FocusListResp { focuses, host: None });
         }
 
         ClientMsg::MotherAction { job_id, action } => {
@@ -2612,7 +2615,7 @@ fn handle_client_msg(
                         if let Some(book) = &origins {
                             book.annotate(&mut jobs);
                         }
-                        let _ = btx.send(ServerMsg::MotherJobs { jobs });
+                        let _ = btx.send(ServerMsg::MotherJobs { jobs, host: None });
                     }
                     Err(e) => tracing::warn!("MotherAction re-poll failed: {e:#}"),
                 }
@@ -2647,7 +2650,7 @@ fn handle_client_msg(
                         if let Some(book) = &origins {
                             book.annotate(&mut jobs);
                         }
-                        let _ = btx.send(ServerMsg::MotherJobs { jobs });
+                        let _ = btx.send(ServerMsg::MotherJobs { jobs, host: None });
                     }
                     Err(e) => tracing::warn!("MotherResume re-poll failed: {e:#}"),
                 }
@@ -3948,9 +3951,14 @@ fn deliverable_topics(mut topics: Vec<Topic>, trust: PeerTrust) -> Vec<Topic> {
     if trust != PeerTrust::OperatorApp {
         topics.retain(|t| *t != Topic::AuthoredPrs);
     }
-    // The device list is administration: never for a network peer.
-    if trust.is_network() {
-        topics.retain(|t| *t != Topic::Devices);
+    // The device list is administration: never for a network peer, except a
+    // satellite allowed at least `read_only`, which gets nothing else.
+    match trust {
+        // Never empty (empty means "everything"); `may_receive` drops what the
+        // level does not allow.
+        PeerTrust::Satellite { .. } => topics = vec![Topic::Devices],
+        _ if trust.is_network() => topics.retain(|t| *t != Topic::Devices),
+        _ => {}
     }
     topics
 }
@@ -4235,6 +4243,7 @@ fn peer_json(trust: PeerTrust, peer: Option<&PeerInfo>) -> serde_json::Value {
             PeerTrust::LocalOther => "local_other",
             PeerTrust::Tcp => "tcp",
             PeerTrust::Paired => "paired",
+            PeerTrust::Satellite { .. } => "satellite",
         },
     });
     if let Some(p) = peer {
@@ -4675,7 +4684,7 @@ async fn retain_broadcasts(
 async fn track_held_mother_jobs(mut rx: broadcast::Receiver<ServerMsg>, held: HeldMotherJobs) {
     loop {
         match rx.recv().await {
-            Ok(ServerMsg::MotherJobs { jobs }) => {
+            Ok(ServerMsg::MotherJobs { jobs, .. }) => {
                 let ids = jobs
                     .iter()
                     .filter(|j| j.open_decision().is_some())
@@ -4814,11 +4823,15 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::AuthoredPrs { .. } => wants_authored_prs(topics),
         // The device list: only to a client that names the topic.
         ServerMsg::Devices { .. } => topics.contains(&Topic::Devices),
+        // The connected-host list: every subscriber, whatever its topics.
+        ServerMsg::Hosts { .. } => true,
         // The other admin frames and the pairing replies are targeted, never broadcast.
         ServerMsg::DevicePairing { .. }
         | ServerMsg::DevicePairOutcome { .. }
         | ServerMsg::DeviceRevoked { .. }
         | ServerMsg::DeviceAdminError { .. }
+        | ServerMsg::DeviceAdminLevel { .. }
+        | ServerMsg::HostUnavailable { .. }
         | ServerMsg::PairOffer { .. }
         | ServerMsg::Paired { .. }
         | ServerMsg::PairRefused { .. }
@@ -5309,6 +5322,7 @@ mod tests {
                 },
             ],
             context_pane_id: None,
+            host: None,
         }
     }
 
@@ -5345,6 +5359,7 @@ mod tests {
             request_id: "req-1".into(),
             resolution: crate::ipc::protocol::DecisionResolution::Answered,
             choice_id: Some("approve".into()),
+            host: None,
         }
     }
 
@@ -5487,6 +5502,7 @@ mod tests {
             agent_id: None,
             parent_agent_id: None,
             seq: None,
+            host: None,
         });
 
         match activity_health_msg(&mgr, true) {
@@ -5932,6 +5948,63 @@ mod authored_prs_tests {
                 "{trust:?}"
             );
             assert!(deliverable_topics(vec![], trust).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_satellite_is_subscribed_to_the_device_list_only_whatever_it_asked_for() {
+        use crate::ipc::devices::SatelliteAdmin;
+        use crate::ipc::protocol::HostUnavailableReason;
+
+        for admin in [
+            SatelliteAdmin::Full,
+            SatelliteAdmin::RevokeOnly,
+            SatelliteAdmin::ReadOnly,
+            SatelliteAdmin::Off,
+        ] {
+            let trust = PeerTrust::Satellite { admin };
+            for asked in [
+                vec![],
+                vec![Topic::MotherJobs, Topic::Devices],
+                vec![Topic::MotherJobs, Topic::Perri, Topic::Focuses],
+                vec![Topic::Devices],
+            ] {
+                assert_eq!(
+                    deliverable_topics(asked.clone(), trust),
+                    vec![Topic::Devices],
+                    "{admin:?} asked for {asked:?}: never empty (that means everything)"
+                );
+            }
+        }
+
+        // Any other network peer still loses the device list.
+        for trust in [PeerTrust::Paired, PeerTrust::Tcp] {
+            assert_eq!(
+                deliverable_topics(vec![Topic::Perri, Topic::Devices], trust),
+                vec![Topic::Perri],
+                "{trust:?}"
+            );
+        }
+
+        // Satellite control frames are targeted, never matched by topic; the
+        // host list goes to every subscriber.
+        let level = ServerMsg::DeviceAdminLevel {
+            level: SatelliteAdmin::Full,
+            pair_from: vec![],
+        };
+        let unavailable = ServerMsg::HostUnavailable {
+            host: "kobe".into(),
+            reason: HostUnavailableReason::Busy,
+        };
+        let hosts = ServerMsg::Hosts { hosts: vec![] };
+        for topics in [
+            vec![],
+            vec![Topic::Devices],
+            vec![Topic::MotherJobs, Topic::Devices],
+        ] {
+            assert!(!message_matches_topics(&level, &topics), "{topics:?}");
+            assert!(!message_matches_topics(&unavailable, &topics), "{topics:?}");
+            assert!(message_matches_topics(&hosts, &topics), "{topics:?}");
         }
     }
 }

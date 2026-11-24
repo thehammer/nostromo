@@ -420,7 +420,7 @@ impl Env {
         self.frames()
             .into_iter()
             .filter_map(|m| match m {
-                ServerMsg::FocusCreated { meta } => Some(meta),
+                ServerMsg::FocusCreated { meta, .. } => Some(meta),
                 _ => None,
             })
             .collect()

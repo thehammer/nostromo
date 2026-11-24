@@ -1703,9 +1703,10 @@ async fn a_resumed_sensitive_conversation_is_sensitive_to_a_network_peer_from_it
     // already redacted.
     let mut meta = test_focus("cody-bbbb2222");
     meta.display_name = "SECRET TITLE".into();
-    let ServerMsg::FocusRegistryUpdated { focuses } = redact_for_network(
+    let ServerMsg::FocusRegistryUpdated { focuses, .. } = redact_for_network(
         ServerMsg::FocusRegistryUpdated {
             focuses: vec![meta],
+            host: None,
         },
         &rig.mgr.sensitive,
     ) else {
@@ -1729,9 +1730,10 @@ async fn a_resumed_sensitive_conversation_is_sensitive_to_a_network_peer_from_it
         activity_epoch: None,
         last_problem: None,
     };
-    let ServerMsg::SessionListResp { sessions } = redact_for_network(
+    let ServerMsg::SessionListResp { sessions, .. } = redact_for_network(
         ServerMsg::SessionListResp {
             sessions: vec![info],
+            host: None,
         },
         &rig.mgr.sensitive,
     ) else {

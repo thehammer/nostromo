@@ -66,6 +66,7 @@ fn session_bridge_has_the_exact_snake_case_wire_shape() {
     let down = serde_json::to_value(ServerMsg::SessionBridge {
         tag: "cody-core-1".into(),
         connected: false,
+        host: None,
     })
     .unwrap();
     assert_eq!(
@@ -76,6 +77,7 @@ fn session_bridge_has_the_exact_snake_case_wire_shape() {
     let up = serde_json::to_value(ServerMsg::SessionBridge {
         tag: "cody-core-1".into(),
         connected: true,
+        host: None,
     })
     .unwrap();
     assert_eq!(
@@ -90,7 +92,9 @@ fn session_bridge_decodes_from_the_wire_form() {
         let frame = json!({"type": "session_bridge", "tag": "perri", "connected": connected});
         let msg: ServerMsg = serde_json::from_value(frame).expect("decode session_bridge");
         match msg {
-            ServerMsg::SessionBridge { tag, connected: c } => {
+            ServerMsg::SessionBridge {
+                tag, connected: c, ..
+            } => {
                 assert_eq!(tag, "perri");
                 assert_eq!(c, connected);
             }
@@ -172,7 +176,7 @@ fn drain_bridge_frames(rx: &mut broadcast::Receiver<ServerMsg>) -> Vec<(String, 
     let mut out = Vec::new();
     loop {
         match rx.try_recv() {
-            Ok(ServerMsg::SessionBridge { tag, connected }) => out.push((tag, connected)),
+            Ok(ServerMsg::SessionBridge { tag, connected, .. }) => out.push((tag, connected)),
             Ok(other) => panic!("unexpected broadcast {other:?}"),
             Err(broadcast::error::TryRecvError::Empty) => return out,
             Err(e) => panic!("broadcast receiver failed: {e:?}"),
@@ -504,7 +508,7 @@ impl Harness {
         send(unix, &ClientMsg::SessionList).await;
         let frames = recv_until(unix, |m| matches!(m, ServerMsg::SessionListResp { .. })).await;
         match frames.into_iter().last() {
-            Some(ServerMsg::SessionListResp { sessions }) => sessions,
+            Some(ServerMsg::SessionListResp { sessions, .. }) => sessions,
             other => panic!("expected session_list_resp, got {other:?}"),
         }
     }
@@ -596,6 +600,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) {
             client_id: "session-bridge-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: Some(MAC_APP_CLIENT_KIND.into()),
+            role: None,
         },
     )
     .await;
@@ -645,7 +650,7 @@ async fn spawn_session(unix: &mut UnixStream, tag: &str) {
 }
 
 fn is_bridge(m: &ServerMsg, tag: &str, connected: bool) -> bool {
-    matches!(m, ServerMsg::SessionBridge { tag: t, connected: c } if t == tag && *c == connected)
+    matches!(m, ServerMsg::SessionBridge { tag: t, connected: c, .. } if t == tag && *c == connected)
 }
 
 fn bridge_frames_for<'a>(frames: &'a [ServerMsg], tag: &str) -> Vec<&'a ServerMsg> {
@@ -847,6 +852,7 @@ fn bridge_msg(tag: &str) -> ServerMsg {
     ServerMsg::SessionBridge {
         tag: tag.into(),
         connected: false,
+        host: None,
     }
 }
 

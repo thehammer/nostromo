@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::broadcast;
 
 use crate::ipc::client::{ConnectionState, DaemonClient};
-use crate::ipc::devices::{DeviceSummary, PairOutcomeKind, RevokedBy, SatelliteAdmin};
+use crate::ipc::devices::{DeviceSummary, Egress, PairOutcomeKind, RevokedBy, SatelliteAdmin};
 use crate::ipc::protocol::{default_socket_path, ClientMsg, ServerMsg};
 
 /// Ada's copy: mail, calendar and todos are not shared in this version.
@@ -375,6 +375,7 @@ pub async fn pair(
     name_hint: Option<String>,
     satellite: Option<String>,
     admin: Option<SatelliteAdmin>,
+    egress: Option<Egress>,
     out: &mut impl Write,
     cancel: impl std::future::Future<Output = ()>,
 ) -> Result<i32> {
@@ -387,6 +388,7 @@ pub async fn pair(
         name_hint,
         satellite,
         admin,
+        egress,
     })?;
     let (pairing_id, code, url, expires_at) = await_reply(&mut rx, &request_id, |m| match m {
         ServerMsg::DevicePairing {
@@ -467,6 +469,7 @@ mod tests {
             revoked_at: None,
             revoked_by: None,
             admin: None,
+            egress: None,
         }
     }
 

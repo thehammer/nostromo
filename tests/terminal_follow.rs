@@ -265,6 +265,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Client<S> {
             client_id: "terminal-follow-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: claim.map(str::to_string),
+            role: None,
         })
         .await;
         let (_, welcome) = c

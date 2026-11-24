@@ -78,7 +78,7 @@ See [`docs/ci.md`](ci.md) for how they run (a remote dispatch section is being a
 
 ## 6. `cargo fmt`
 
-`cargo fmt --check` fails on `main` today (137 files differ) and CI doesn't check formatting. Don't run a whole-tree `cargo fmt` in a feature PR. `rustfmt` is installed in the sandbox so it's there if a formatting gate is added later.
+CI checks formatting (the `Rust format` job runs `cargo fmt --check`, see [ci.md](ci.md)) and `main` is fmt-clean, so a branch that is not formatted fails the required `Build & Lint`. Run `cargo fmt` before pushing; it uses the pinned 1.100.0 toolchain, which `rustfmt` in the sandbox matches. Format only what you changed: the tree is already clean, so a whole-tree `cargo fmt` should touch nothing else.
 
 ## 7. TMPDIR
 

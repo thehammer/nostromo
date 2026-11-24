@@ -194,6 +194,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, topics: Va
             protocol_version: PROTOCOL_VERSION,
             // Claimed on every transport: the claim alone never lifts a peer.
             client_kind: Some(MAC_APP_CLIENT_KIND.into()),
+            role: None,
         },
     )
     .await;
@@ -508,6 +509,7 @@ async fn a_tcp_peer_never_receives_the_notice_state_live_whatever_it_subscribes_
     // Control: an ordinary Mother frame still reaches a TCP peer.
     env.server.broadcast(ServerMsg::MotherJobs {
         jobs: vec![plain_job("job-control")],
+        host: None,
     });
 
     for (what, s) in [("everything", &mut tcp_all), ("mother_jobs", &mut tcp_jobs)] {
@@ -737,6 +739,7 @@ async fn a_tcp_peer_gets_no_notice_record_for_a_job_of_a_sensitive_focus_and_the
             job_from("job-marked", "cody-secret-work"),
             job_from("job-plain", FOCUS),
         ],
+        host: None,
     });
     let app_frames = through_fence(&env, &mut app).await;
     let tcp_frames = through_fence(&env, &mut tcp).await;
@@ -768,13 +771,14 @@ fn redacting_for_the_network_drops_a_real_notice_record_only_for_a_sensitive_ori
     let tags = SensitiveTags::in_memory();
     tags.mark_tag("cody-secret-work");
 
-    let ServerMsg::MotherJobs { jobs } = redact_for_network(
+    let ServerMsg::MotherJobs { jobs, .. } = redact_for_network(
         ServerMsg::MotherJobs {
             jobs: vec![
                 job_from("sensitive-marked", "cody-secret-work"),
                 job_from("sensitive-teri", "teri"),
                 job_from("plain", FOCUS),
             ],
+            host: None,
         },
         &tags,
     ) else {

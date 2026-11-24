@@ -76,6 +76,63 @@ impl SatelliteAdmin {
     }
 }
 
+impl SatelliteAdmin {
+    /// How much a level allows: `Off` 0, `ReadOnly` 1, `RevokeOnly` 2, `Full` 3.
+    /// Not a derived `Ord`: the declaration order is the reverse.
+    pub fn rank(self) -> u8 {
+        match self {
+            SatelliteAdmin::Off => 0,
+            SatelliteAdmin::ReadOnly => 1,
+            SatelliteAdmin::RevokeOnly => 2,
+            SatelliteAdmin::Full => 3,
+        }
+    }
+
+    /// The lower of two levels (a local narrowing never widens a grant).
+    pub fn min_with(self, other: Self) -> Self {
+        if other.rank() < self.rank() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+/// What a satellite may publish upstream. `Work` (the default, and what a
+/// record without one reads as) sends fixed-vocabulary metadata only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Egress {
+    #[default]
+    Work,
+    Personal,
+}
+
+impl Egress {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Egress::Work => "work",
+            Egress::Personal => "personal",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "work" => Some(Egress::Work),
+            "personal" => Some(Egress::Personal),
+            _ => None,
+        }
+    }
+}
+
+/// An active satellite record as the uplink admission needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SatelliteInfo {
+    pub name: String,
+    pub admin: SatelliteAdmin,
+    pub egress: Egress,
+}
+
 /// Who revoked a record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,6 +161,9 @@ pub struct DeviceSummary {
     /// Satellites only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin: Option<SatelliteAdmin>,
+    /// Satellites only; absent on the wire means `work`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<Egress>,
 }
 
 /// Why a pairing code was refused.
@@ -138,6 +198,8 @@ struct DeviceRecord {
     token_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     admin: Option<SatelliteAdmin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    egress: Option<Egress>,
     paired_at: DateTime<Utc>,
     #[serde(default)]
     last_seen_at: Option<DateTime<Utc>>,
@@ -163,6 +225,10 @@ impl DeviceRecord {
             revoked_at: self.revoked_at,
             revoked_by: self.revoked_by,
             admin: self.admin,
+            egress: self
+                .kind
+                .is_satellite()
+                .then(|| self.egress.unwrap_or_default()),
         }
     }
 }
@@ -347,6 +413,19 @@ impl DeviceRegistry {
         admin: Option<SatelliteAdmin>,
         replace_device: Option<&str>,
     ) -> Result<Redeemed> {
+        self.redeem_with_egress(name, kind, admin, None, replace_device)
+    }
+
+    /// [`Self::redeem`] with the egress a satellite is enrolled with (`None`
+    /// reads as `work`). Ignored for a phone or iPad.
+    pub fn redeem_with_egress(
+        &self,
+        name: &str,
+        kind: DeviceKind,
+        admin: Option<SatelliteAdmin>,
+        egress: Option<Egress>,
+        replace_device: Option<&str>,
+    ) -> Result<Redeemed> {
         let token = random_token();
         let now = Utc::now();
         let (device_id, final_name, replaced) = {
@@ -373,6 +452,7 @@ impl DeviceRegistry {
                 admin: kind
                     .is_satellite()
                     .then(|| admin.unwrap_or(SatelliteAdmin::RevokeOnly)),
+                egress: kind.is_satellite().then(|| egress.unwrap_or_default()),
                 paired_at: now,
                 last_seen_at: None,
                 revoked_at: None,
@@ -390,6 +470,48 @@ impl DeviceRegistry {
             name: final_name,
             replaced,
         })
+    }
+
+    /// The record behind `device_id` when it is an active satellite.
+    pub fn satellite_info(&self, device_id: &str) -> Option<SatelliteInfo> {
+        let state = self.state.lock().unwrap();
+        state
+            .devices
+            .iter()
+            .find(|d| d.id == device_id && d.active() && d.kind.is_satellite())
+            .map(|d| SatelliteInfo {
+                name: d.name.clone(),
+                admin: d.admin.unwrap_or_default(),
+                egress: d.egress.unwrap_or_default(),
+            })
+    }
+
+    /// The kind of any record (active or not), for the admin arm that must
+    /// tell a phone from a satellite before it revokes.
+    pub fn kind_of(&self, device_id: &str) -> Option<DeviceKind> {
+        let state = self.state.lock().unwrap();
+        state
+            .devices
+            .iter()
+            .find(|d| d.id == device_id)
+            .map(|d| d.kind)
+    }
+
+    /// Names of the active satellites whose level is `full`.
+    pub fn full_hosts(&self) -> Vec<String> {
+        let state = self.state.lock().unwrap();
+        let mut v: Vec<String> = state
+            .devices
+            .iter()
+            .filter(|d| {
+                d.active()
+                    && d.kind.is_satellite()
+                    && d.admin.unwrap_or_default() == SatelliteAdmin::Full
+            })
+            .map(|d| d.name.clone())
+            .collect();
+        v.sort();
+        v
     }
 
     /// Which record `selector` names: an id, or the exact (case-insensitive)
@@ -672,6 +794,50 @@ pub fn proof_for_token(token: &str, challenge: &str, code: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rank_orders_most_power_last_and_min_with_never_widens() {
+        use SatelliteAdmin::*;
+        assert!(Off.rank() < ReadOnly.rank());
+        assert!(ReadOnly.rank() < RevokeOnly.rank());
+        assert!(RevokeOnly.rank() < Full.rank());
+        assert_eq!(Full.min_with(ReadOnly), ReadOnly);
+        assert_eq!(ReadOnly.min_with(Full), ReadOnly);
+        assert_eq!(RevokeOnly.min_with(Off), Off);
+        assert_eq!(Full.min_with(Full), Full);
+    }
+
+    #[test]
+    fn a_satellite_enrolled_without_egress_reads_as_work_and_personal_sticks() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = DeviceRegistry::load(dir.path().join("devices.json")).unwrap();
+        let a = reg
+            .redeem("kobe", DeviceKind::Satellite, None, None)
+            .unwrap();
+        let b = reg
+            .redeem_with_egress(
+                "sendai",
+                DeviceKind::Satellite,
+                Some(SatelliteAdmin::Full),
+                Some(Egress::Personal),
+                None,
+            )
+            .unwrap();
+        let ka = reg.satellite_info(&a.device_id).unwrap();
+        assert_eq!(ka.egress, Egress::Work);
+        assert_eq!(ka.admin, SatelliteAdmin::RevokeOnly);
+        let kb = reg.satellite_info(&b.device_id).unwrap();
+        assert_eq!(
+            (kb.egress, kb.admin),
+            (Egress::Personal, SatelliteAdmin::Full)
+        );
+        assert_eq!(reg.full_hosts(), vec!["sendai".to_string()]);
+        let phone = reg
+            .redeem("iPhone", DeviceKind::Iphone, None, None)
+            .unwrap();
+        assert!(reg.satellite_info(&phone.device_id).is_none());
+        assert_eq!(reg.kind_of(&phone.device_id), Some(DeviceKind::Iphone));
+    }
+
     use super::*;
 
     fn registry() -> (tempfile::TempDir, DeviceRegistry) {

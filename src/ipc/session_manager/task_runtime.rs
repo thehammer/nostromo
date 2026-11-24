@@ -599,6 +599,7 @@ pub(super) async fn forward_session_events_with(
                     SessionEvent::State(state) => ServerMsg::SessionState {
                         tag: tag.clone(),
                         state,
+                        host: None,
                     },
                     SessionEvent::Exited { exit_code } => ServerMsg::SessionExited {
                         tag: tag.clone(),
@@ -1032,7 +1033,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            matches!(next_frame(&mut out).await, ServerMsg::SessionState { tag, state: SessionState::MidTurn } if tag == "cody-1")
+            matches!(next_frame(&mut out).await, ServerMsg::SessionState { tag, state: SessionState::MidTurn, .. } if tag == "cody-1")
         );
         match next_frame(&mut out).await {
             ServerMsg::SessionTasks {

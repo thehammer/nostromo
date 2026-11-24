@@ -397,6 +397,7 @@ fn hello(kind: Option<&str>) -> ClientMsg {
         client_id: "notify-it".into(),
         protocol_version: PROTOCOL_VERSION,
         client_kind: kind.map(str::to_owned),
+        role: None,
     }
 }
 
@@ -870,7 +871,7 @@ async fn the_operator_app_starts_a_session_selected_for_it_whose_first_message_i
     let announced: Vec<&FocusMeta> = frames
         .iter()
         .filter_map(|m| match m {
-            ServerMsg::FocusCreated { meta } => Some(meta),
+            ServerMsg::FocusCreated { meta, .. } => Some(meta),
             _ => None,
         })
         .collect();

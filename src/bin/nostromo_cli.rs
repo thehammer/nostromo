@@ -6,7 +6,7 @@ use std::io::Write;
 
 use clap::{Parser, Subcommand};
 use nostromo::device_cli;
-use nostromo::ipc::devices::SatelliteAdmin;
+use nostromo::ipc::devices::{Egress, SatelliteAdmin};
 
 #[derive(Parser)]
 #[command(name = "nostromo", about = "Manage the local Nostromo daemon", version)]
@@ -34,6 +34,9 @@ enum Device {
         /// The satellite's device-admin level: full, revoke-only, read-only or off.
         #[arg(long, value_parser = parse_admin, requires = "satellite")]
         admin: Option<SatelliteAdmin>,
+        /// What the satellite may publish upstream: work (default) or personal.
+        #[arg(long, value_parser = parse_egress, requires = "satellite")]
+        egress: Option<Egress>,
     },
     /// List paired devices.
     List {
@@ -54,6 +57,10 @@ enum Device {
 fn parse_admin(s: &str) -> Result<SatelliteAdmin, String> {
     SatelliteAdmin::parse(s)
         .ok_or_else(|| format!("'{s}': expected full, revoke-only, read-only or off"))
+}
+
+fn parse_egress(s: &str) -> Result<Egress, String> {
+    Egress::parse(s).ok_or_else(|| format!("'{s}': expected work or personal"))
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -84,11 +91,12 @@ async fn run(device: Device) -> anyhow::Result<i32> {
             name,
             satellite,
             admin,
+            egress,
         } => {
             let cancel = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
-            device_cli::pair(&client, name, satellite, admin, &mut out, cancel).await
+            device_cli::pair(&client, name, satellite, admin, egress, &mut out, cancel).await
         }
         Device::List { all } => device_cli::list(&client, all, &mut out).await,
         Device::Revoke { device } => device_cli::revoke(&client, &device, &mut out).await,

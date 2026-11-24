@@ -171,6 +171,7 @@ fn hello(client_kind: Option<&str>) -> ClientMsg {
         client_id: "operator-app-it".into(),
         protocol_version: PROTOCOL_VERSION,
         client_kind: client_kind.map(str::to_string),
+        role: None,
     }
 }
 

@@ -38,6 +38,7 @@ pub fn build_perri_state(
         queue: queue_snap.map(|s| s.items.clone()).unwrap_or_default(),
         current: pr_snap.cloned().map(Box::new),
         jira_site: jira_site.and_then(bare_jira_host),
+        host: None,
     }
 }
 

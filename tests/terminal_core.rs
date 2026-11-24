@@ -279,6 +279,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Client<S> {
             client_id: "terminal-core-it".into(),
             protocol_version: PROTOCOL_VERSION,
             client_kind: claim.map(str::to_string),
+            role: None,
         })
         .await;
         let (_, welcome) = c
@@ -2711,6 +2712,7 @@ async fn frames_written_before_the_nonce_was_seen_are_refused_until_a_subscribe_
         client_id: "pre-exec".into(),
         protocol_version: PROTOCOL_VERSION,
         client_kind: Some("mac_app".into()),
+        role: None,
     })
     .await;
     c.send(&ClientMsg::Subscribe {

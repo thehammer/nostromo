@@ -612,6 +612,7 @@ async fn the_device_admin_verbs_are_refused_on_a_device_socket_and_change_nothin
                 name_hint: None,
                 satellite: None,
                 admin: None,
+                egress: None,
             },
         ),
         (
@@ -1438,7 +1439,7 @@ async fn run_device_pair(
     let named = host.is_none().then(|| "Kitchen iPad".to_string());
     let command = tokio::spawn(async move {
         let mut out = out;
-        device_cli::pair(&client, named, host, admin, &mut out, async {
+        device_cli::pair(&client, named, host, admin, None, &mut out, async {
             let _ = cancel.await;
         })
         .await

@@ -668,6 +668,7 @@ impl Conn {
             protocol_version: PROTOCOL_VERSION,
             // Claimed over every transport: the claim never lifts a network peer.
             client_kind: as_app.then(|| MAC_APP_CLIENT_KIND.to_string()),
+            role: None,
         }
     }
 
@@ -745,6 +746,7 @@ impl Conn {
             name_hint: name_hint.map(str::to_string),
             satellite: satellite.map(str::to_string),
             admin,
+            egress: None,
         })
         .await;
         let reply = self
