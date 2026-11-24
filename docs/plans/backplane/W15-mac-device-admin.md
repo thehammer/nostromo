@@ -154,11 +154,12 @@ coordination"):
 - **Human gesture.** The app's sensitive controls now pass through
   `HumanGesture.permit(NSApp.currentEvent, control:)`
   (`macOS/Nostromo/Security/HumanGesture.swift`, AP1). **Pair a Device…**'s
-  code issuance, the **Will see mail and todos** checkbox (turning it on),
-  each row's **Mail and todos** toggle (turning it on) and **Revoke** call it
-  first and do nothing on `.refused`, so app-control and synthetic input
-  cannot pair a device or widen a device's scope. No `keyEquivalent` on any
-  of them.
+  code issuance and **Revoke** call it first and do nothing on `.refused`, so
+  app-control and synthetic input cannot pair or revoke a device. No
+  `keyEquivalent` on either. (*2026-11-24:* this paragraph used to list a
+  **Will see mail and todos** checkbox and a per-row **Mail and todos**
+  toggle; Q2 removed both, so there is no device scope to widen in v1. See
+  "Sign-offs folded in".)
 - **Menu collisions.** AP3, BA3 and FV4 also edit `setupMenu`; do not run
   this wedge concurrently with them. New Mac files need `project.pbxproj`
   entries with ids prefixed `BP0000` (following the `AA0000…` style), so do
@@ -342,8 +343,8 @@ Technical criteria:
   in the PR body or a follow-up comment; not Cody gates):
   - On **Sendai** (enrolled `--admin full`), **Pair a Device…** → an iPhone
     scans → the window says "Paired: …" within 2 s (PRD-AC13).
-  - On **Kobe** (revoke-only, WireGuard split-tunnel up; only once the
-    operator has confirmed PRD open question 4): **Pair a Device…** shows the
+  - On **Kobe** (revoke-only, WireGuard split-tunnel up; PRD open question
+    4 answered yes on 2026-11-24): **Pair a Device…** shows the
     "Pairing new devices is turned off on this Mac" line; **Devices…** →
     **Revoke…** works; nothing listens off-loopback on Kobe (`lsof -iTCP
     -sTCP:LISTEN`) (PRD-AC12 as narrowed to "manage from Kobe", AC50).

@@ -1,5 +1,68 @@
 # W9 — Add an authenticated WebSocket transport and device pairing to nostromd
 
+**Status: merged.** PR #526 (`e21f891c`, 2026-11-24) and the follow-ups in
+PR #528 (`95f3f6e7`, 2026-11-24). This file is now the record of what was
+planned; the section below is what was built, and it wins where they differ.
+Job cost: $13.57 in total ($10.48 build, $2.60 fix round 1, $0.49
+follow-ups) against a $65 cap (memo, "Estimate").
+
+## As built (2026-11-24, checked against `origin/main` `4cafd5e8`)
+
+- **Eight verbs, not seven.** Ordinals 98–105: `PairCheck` 98, `Pair` 99,
+  `DeviceUnpairSelf` 100, `DevicePairStart` 101, `DevicePairCancel` 102,
+  `DeviceList` 103, `DeviceRevoke` 104 and **`DeviceSetAdmin` 105**
+  (`src/ipc/peer.rs:2685-2692`). `CLIENT_MSG_VARIANTS` is **106** (`:2582`,
+  asserted `:2738-2739`). `DeviceSetAdmin { request_id, host, admin }`
+  (`src/ipc/protocol.rs:2636-2641`) is what `nostromo device admin` sends;
+  the plan's "no new verb" for Q1 was a deliberate departure, recorded in
+  #526. Downstream ordinals move by one: W13 106–110, W16 111 (memo, "Wire
+  inventory").
+- **No `paired_extra_allowed`.** It was built in #526 and removed in #528.
+  `DeviceUnpairSelf` is `Refused` in `network_policy` (`peer.rs:1207-1220`)
+  and is acted on only in `DeviceHub::dispatch` for `(PeerTrust::Paired,
+  Some(device_id))` (`src/ipc/device_hub.rs:259-266`), called at the
+  pre-dispatch site in `handle_client` (`src/ipc/server.rs:1379-1395`)
+  before `handle_client_msg`. Future `Paired`-only verbs (W13's push verbs,
+  W16's `PushDetail`) are gated by a hook at that same site; see W13,
+  "Refreshed 2026-11-24".
+- **Satellite admin type:** `SatelliteAdmin { Full, RevokeOnly (default),
+  ReadOnly, Off }` (`src/ipc/devices.rs:46-78`), stored on satellite records,
+  unset = `revoke_only` (`:372-375`). No `egress` is stored (W10 adds it).
+- **WebSocket limits** (`src/ipc/ws.rs`, `WsLimits::default` `:89-97`): a
+  10 s handshake timeout; 64 unauthenticated sockets in total and **8 per
+  address** (IPv6 per /64, IPv4-mapped normalised; 32 in #526, lowered in
+  #528), a full cap refusing the newcomer rather than evicting; 8
+  authenticated sockets per device (the ninth closes 1008); a pairing frame
+  over **4 KiB** closes 1009 (`:68`; enforced after the library buffers up
+  to its accept-time limit); an upgrade with an `Origin` header gets **403**
+  (`:354-356`); **20 unauthenticated upgrades per address per minute**, then
+  429 (`:56-57`); a pairing-only socket lives 60 s (`:53`). The
+  unauthenticated slot is released when a device authenticates.
+- **Other differences from the plan:** WebSocket setup failure (busy port,
+  unreadable `devices.json`) logs an ERROR and disables the listener and the
+  device features instead of stopping the daemon; a redeem that cannot be
+  saved ends the pairing with a new outcome `failed`
+  (`PairOutcomeKind::Failed`, `devices.rs:126-127`); a revoke or admin change
+  that cannot be saved stays in effect in memory and answers
+  `DeviceAdminError { not_saved }`; `last_seen_at` is written at most once a
+  minute; device names are stripped of control, bidi and invisible format
+  characters and capped at 64 characters; the token is redacted in `Debug`.
+  Test (e) (retained `MotherJobs`/`ApprovalPending` replay) was reworded:
+  those frames are not retained, so it asserts the late joiner gets nothing
+  sensitive plus one `Withheld { not_shared }`.
+- **D6 proof pinned** in code (`the_proof_encoding_is_pinned_by_a_fixed_vector`,
+  `devices.rs:862-882`) and in "Pinned wire vector" at the end of this file; a
+  proof counts for `replace` only on the socket that answered it
+  (`src/ipc/pairing.rs:41-43`, `:321`).
+- **Operator decision recorded in #526 (2026-11-23):** any local process is
+  `LocalOther`, so a local agent session can pair a device and keep its token,
+  revoke devices, or set a satellite to `full`. Accepted; revisit if a paired
+  device's access ever grows beyond read-only.
+- **Follow-ups still open** (not blocking W10): no test pins
+  `WsLimits::default()`; evicting the oldest unauthenticated socket when the
+  global cap is full; a held-approval test over a `Paired` socket in
+  `tests/approvals_wire.rs`.
+
 ## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
 
 Read the memo's "Readiness", "What changed since 2026-10-18", bet **B11** and
@@ -13,7 +76,8 @@ down are history):
   `DeviceSetScope`).
   Each new verb also gets a fixture in `every_client_msg()`; none goes into
   `NETWORK_ALLOWED` (`:2461`), because `DeviceUnpairSelf` is admitted by
-  `paired_extra_allowed`, not by `network_policy`.
+  `DeviceHub::dispatch` for a `Paired` peer, not by `network_policy`. (*As
+  built:* eight verbs, 98–105, and 106; see "As built".)
 - **Unblocked.** AP2a, AP3 and MC4 are merged; the only exclusion left is "no
   other job editing the session wire at the same time" (memo, "Dispatch
   order").
@@ -204,8 +268,11 @@ Devices redeem codes over the WebSocket listener without a token.
     dispatch); `DeviceUnpairSelf` → `Refused` here and allowed by a
     `Paired`-only check in `handle_client_msg`; every `Device*` admin verb →
     `Refused` for every network peer (W10 adds the one satellite exception).
-    `NetworkPolicy` stays a two-value enum; the `Paired` special cases live
-    in one function, `peer::paired_extra_allowed(&ClientMsg) -> bool`.
+    `NetworkPolicy` stays a two-value enum; the `Paired` special case
+    (`DeviceUnpairSelf`) is handled in `DeviceHub::dispatch` for
+    `(PeerTrust::Paired, Some(device_id))` (*as built*: a
+    `paired_extra_allowed` function existed in #526 and was removed in
+    #528).
   - `withheld_msg` (`:1424`) takes a reason. Today's
     `requires_secure_connection` stays for `Tcp`. A `Paired` peer gets reason
     `not_shared` (Q2), so the phone says "Mail, calendar and todos stay on

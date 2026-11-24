@@ -1,5 +1,26 @@
 # W11 — iOS/iPadOS client over WebSocket with device pairing
 
+## Refreshed 2026-11-24 against `origin/main` `4cafd5e8` (W9 as built)
+
+W9 merged in #526 and #528. What the phone must fit, from the code:
+- **D6 proof: pinned.** Use the vector in the W9 plan's "Pinned wire vector"
+  section (checked in at `src/ipc/devices.rs:862-882`); details under
+  "Sign-offs folded in", D6. Nothing about the encoding is open.
+- **Same socket for proof and replace** (`src/ipc/pairing.rs:41-43`, `:321`):
+  see D6 below.
+- **Limits the client meets** (`src/ipc/ws.rs`): a pairing-only socket lives
+  60 s (`:53`) and closes with 1009 on a frame over 4 KiB (`:68`); 20
+  unauthenticated upgrades per address per minute, then HTTP 429 (`:56-57`);
+  a 10 s handshake timeout and at most 8 unauthenticated sockets per address
+  (`:89-97`); at most 8 authenticated sockets per device, the ninth closed
+  with 1008 "too many connections" (`:530-538`); an upgrade carrying an
+  `Origin` header gets HTTP 403 (`:354-356`), so the client must not set one
+  (`URLSessionWebSocketTask` does not by default). A revoked or unknown token
+  gets `Unauthorized { reason }` then close 4001 (`:50`).
+- **Ordinals:** the client sends only existing verbs (`PairCheck` 98, `Pair`
+  99, `DeviceUnpairSelf` 100); `CLIENT_MSG_VARIANTS` is 106
+  (`src/ipc/peer.rs:2582`). W11 adds no verb.
+
 ## Refreshed 2026-11-23 against `origin/main` `8f0328b9`
 
 Read the memo's "Readiness", bet **B11**, "CI prerequisites" and open
@@ -71,10 +92,18 @@ older body text, this section wins. Nothing here waits on anyone any more.
   address or `server_id` (both are unauthenticated). With a credential, after
   the first `PairCheck` returns `challenge`, the phone sends a second
   `PairCheck` with `proof = HMAC-SHA256(SHA-256(token), challenge ‖ code)`
-  (W9). It never sends the token or its hash to a pairing socket. The proof
-`PairCheck` and the later `Pair { replace: true }` MUST go over the SAME
-pairing socket (the daemon binds the verified proof to that connection); do not
-close or reopen it between them, or the old pairing is not replaced.
+  (W9). It never sends the token or its hash to a pairing socket. The
+  encoding is pinned, not open: use the exact vector in the W9 plan's
+  "Pinned wire vector: the re-pair proof (D6)" section, which W9 checked in as
+  `the_proof_encoding_is_pinned_by_a_fixed_vector` in `src/ipc/devices.rs`
+  (`:862-882`; `pairing_proof` `:661`, `proof_for_token` `:669`): key = the
+  raw SHA-256 of the token's base64url text, message = the challenge's
+  base64url text followed by the code's digits, proof = base64url without
+  padding. Copy that vector into `PairingClientTests` (W11-19). The proof
+  `PairCheck` and the later `Pair { replace: true }` MUST go over the SAME
+  pairing socket (the daemon binds the verified proof to that connection,
+  `src/ipc/pairing.rs:41-43`, `:321`); do not close or reopen it between
+  them, or the old pairing is not replaced.
   - **Same server** (`knows_device: true`): the confirmation adds **"This
     replaces this iPhone's current pairing. The old one will be revoked."**
     On **Pair**, stop the current `WebSocketClient` and send `Pair { …,
@@ -238,7 +267,8 @@ side).
 - `.../Transport/PairingClient.swift` (new) — opens a token-less WS and
   runs `check(code, proof?) -> PairOffer` and `pair(code, name, kind,
   replace) -> Paired`, plus `proof(token, challenge, code)` (pure, tested
-  against a fixed vector),
+  against W9's pinned vector: W9's token and challenge from that table, with code `123456`, give
+  `ONMjmbNsnby-4Laxp33owC99gferbRJQsDdW6Ofz4cA`),
   with typed errors `expired`, `invalid`, `unreachable` and
   `localNetworkDenied`. `kind` comes from `UIDevice.userInterfaceIdiom`.
 - `.../Transport/PairLink.swift` (new) — parse and validate
