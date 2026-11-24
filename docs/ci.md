@@ -14,7 +14,7 @@ instead; see "Skipping the Swift jobs" below.
 |---|---|---|---|---|
 | `Build & Lint` | ubuntu-latest | **the aggregate of the three Rust jobs below**: succeeds only if all three did. This is the required status check. | fmt, clippy and test together | the slowest of the three |
 | `Rust format` | ubuntu-latest | `cargo fmt --check` | same | ~15 s |
-| `Rust clippy` | ubuntu-latest | `cargo clippy --all-targets -- -D warnings` | same | ~2.5 min |
+| `Rust clippy` | ubuntu-latest | `cargo clippy --all-targets -- -D warnings`, then `systemd-analyze verify` on the rendered `dist/systemd/nostromd.service` (the Linux primary's unit) | same; the verify step needs a Linux host with systemd | ~2.5 min |
 | `Rust tests` | ubuntu-latest | `cargo test` (compiles and links the lib, the bins and every test binary) | same | see "Where the time goes" |
 | `Detect changed paths` | ubuntu-latest | `scripts/ci_changes.py` over the PR's changed paths | n/a | ~10 s |
 | `Python tooling tests` | macos-latest | `make python-test` (fails on any skip) | `make python-test` | ~4 min |
@@ -23,6 +23,11 @@ instead; see "Skipping the Swift jobs" below.
 | `Swift tests (NostromoKit)` | macos-26 | `make kit-test` — `swift test` over `Shared/NostromoKit`, ~570 tests | `make kit-test` | ~2.5 min |
 | `iOS simulator build` | macos-26 | `xcodebuild -scheme Nostromo -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build` (compile only; no device, no tests) | `make ios-build` is the device build; the simulator command is in the workflow | ~1.7 min |
 | `Launch smoke (advisory)` | macos-26 | see below (path-filtered, advisory) | `make mac-smoke` | ~5 min |
+
+The Linux Rust jobs are also the primary-host smoke: `tests/linux_startup.rs` starts the
+real `nostromd` with a tempdir `HOME`, an empty `PATH` and the documented primary
+`config.toml`, and asserts a clean startup (see README "Install (Linux)"). The unit check
+lives in `Rust clippy`, so the required `Build & Lint` check needs no change.
 
 Every job except the advisory launch smoke can also be dispatched by hand on a
 branch, alone or in groups; see "Running CI on a branch (dispatch)" below.

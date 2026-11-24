@@ -531,6 +531,10 @@ pub(crate) fn validate_job_id(id: &str) -> Result<()> {
 /// A `mother` CLI failure, split by what the caller can do about it.
 #[derive(Debug, thiserror::Error)]
 pub enum MotherCliError {
+    /// The `mother` binary is not on `PATH` (a host that runs no Mother, such
+    /// as a Linux primary). Callers should log once and back off.
+    #[error("mother CLI not found on PATH")]
+    MotherUnavailable,
     /// The call did not finish within the CLI timeout; the process was killed.
     #[error("mother {cmd} timed out after {millis} ms")]
     Timeout { cmd: String, millis: u128 },
@@ -582,7 +586,11 @@ fn mother_command_at(bin: impl AsRef<std::ffi::OsStr>) -> tokio::process::Comman
 async fn output_bounded(mut cmd: tokio::process::Command, label: &str) -> Result<Output> {
     let limit = cli_timeout();
     match tokio::time::timeout(limit, cmd.output()).await {
-        Ok(out) => Ok(out?),
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(MotherCliError::MotherUnavailable.into())
+        }
+        Ok(Err(e)) => Err(e.into()),
         Err(_) => {
             warn!("mother {label} timed out after {} ms", limit.as_millis());
             Err(MotherCliError::Timeout {

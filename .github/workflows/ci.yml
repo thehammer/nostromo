@@ -127,6 +127,18 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # The Linux primary's systemd user unit (dist/systemd). Render the template the way
+      # `make install-daemon-linux` does, against a stub binary so ExecStart resolves.
+      - name: Verify systemd unit
+        run: |
+          prefix="$(mktemp -d)"
+          mkdir -p "$prefix/bin"
+          printf '#!/bin/sh\n' > "$prefix/bin/nostromd"
+          chmod +x "$prefix/bin/nostromd"
+          sed -e "s|__PREFIX__|$prefix|g" -e "s|__HOME__|$HOME|g" \
+            dist/systemd/nostromd.service > "$prefix/nostromd.service"
+          systemd-analyze verify "$prefix/nostromd.service"
+
   rust-test:
     if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","rust"]'), inputs.only)
     name: ${{ github.event_name == 'workflow_dispatch' && 'Rust tests (dispatch)' || 'Rust tests' }}

@@ -1,0 +1,18 @@
+[Unit]
+Description=nostromd (Nostromo daemon)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=__PREFIX__/bin/nostromd
+Restart=always
+RestartSec=2
+Environment=RUST_LOG=info
+# Loopback only: the TCP listener is unauthenticated. See the macOS plist.
+Environment=NOSTROMD_TCP_ADDR=127.0.0.1:47100
+Environment=PATH=__HOME__/.local/bin:__HOME__/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+StandardOutput=append:%h/.cache/nostromd/log/stdout.log
+StandardError=append:%h/.cache/nostromd/log/stderr.log
+
+[Install]
+WantedBy=default.target
