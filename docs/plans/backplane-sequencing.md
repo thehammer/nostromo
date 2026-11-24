@@ -677,7 +677,9 @@ its record's name; only the host-carrying variants; no `LocalOnly`,
 `Welcome`, `Pong`, `Error`, `MotherPeek` or `MotherAwaitDetected`, whatever
 the egress; rate- and size-capped). The uplink socket carries a tagged
 `UplinkFrame` envelope (client verb, publish, routed reply), and a routed
-reply is accepted only for a request id the primary issued to that host. See
+reply is accepted only for a request id the primary issued to that host
+(verb-specific reply tables; replies and outstanding ids capped, `busy`
+beyond). See
 W10, "Trust boundary on the primary".
 
 | Message (direction) | Wedge | FND-1 class / policy | Notes |
@@ -690,7 +692,7 @@ W10, "Trust boundary on the primary".
 | `DevicePairing`, `DevicePairOutcome`, `Devices`, `DeviceRevoked` (d→c) | W9 | `ServerClass::Admin`: local peers yes; `Satellite` when its level is not `off` (W10); `Paired`, `Tcp`, `Routed` never | satellite `admin` levels `full \| revoke_only \| read_only \| off` (Q1; defined in W15) |
 | `DeviceAdminError` (d→c) | W9 (`Admin`); moves to `SatelliteControl` in W10 | targeted only; local peers and **every** `Satellite` (an `off` satellite's refused verb must get its answer); `Paired`, `Tcp`, `Routed` never | reasons are a fixed vocabulary |
 | `DeviceAdminLevel` (d→c) | W10 | new `ServerClass::SatelliteControl`: `may_receive` passes it for local peers and for `Satellite` at every level including `off`, refuses it for `Paired`, `Tcp`, `Routed`; written targeted to its own satellite's uplink only (never broadcast, so never to another satellite), then by the satellite to its local `devices` subscribers | `{level, pair_from}`; no ordinal (server frame) |
-| `Hosts`, `HostUnavailable` (d→c) | W10 | `Open` | host names and timestamps only |
+| `Hosts`, `HostUnavailable` (d→c) | W10 | `Open` | host names and timestamps only; `HostUnavailable.reason` is `not_connected \| egress_metadata \| busy` |
 | `MotherJobs.host`, `MotherStatusline.host`, `MotherAwaitDetected.host`, `Activity.host`, `FocusListResp.host`, `SessionListResp.host`, `ApprovalPending.host`, `PerriState.host`, `DecisionRequest.host`, `DecisionResolved.host` (fields) | W10 | class unchanged | `#[serde(default, skip_serializing_if = "Option::is_none")]` |
 | `Hello.role`, `Subscribe.resume` (fields) | W10, W12 | — | additive; `Hello` already has `client_kind` and `capabilities` (`protocol.rs:1638-1652`) |
 | `Hello.capabilities` on WebSocket (existing field) | W9, W10, W11 | — | parsed by the shared handshake; B11: network peers never count against the merge gate; iOS declares `merged_turns_v1`, the uplink declares nothing |

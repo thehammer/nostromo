@@ -241,11 +241,15 @@ broadcast channel; routed replies take the second path in A5):
    satellite over the limit for 30 s in a row is closed with 1008. (The
    library still accepts frames up to `MAX_FRAME_LEN * 2`, `ws.rs:330-336`,
    because the limit is chosen at accept time; the cap is applied on read in
-   `run_paired`.) `reply` frames are bounded by the outstanding requests (A5)
-   and capped at `MAX_FRAME_LEN` (`src/ipc/protocol.rs:52`), since a
-   transcript snapshot can be large. A test drives 1,000 frames in a second
-   and a 300 KiB frame from a crafted satellite and asserts the drops and that
-   a phone subscriber sees no lag beyond the bucket.
+   `run_paired`.) Malformed envelopes and wrong-direction envelopes
+   (`server`/`request` sent by a satellite) are dropped **and charged to the
+   same bucket** (Q2), so a stream of junk also ends in the 1008 close.
+   `reply` frames are capped at `MAX_FRAME_LEN` (`src/ipc/protocol.rs:52`),
+   since a transcript snapshot can be large, and have their **own** bucket
+   and id caps (A5). A test drives 1,000 frames in a second, 1,000 junk
+   envelopes in a second and a 300 KiB frame from a crafted satellite and
+   asserts the drops, the 1008 close for sustained junk, and that a phone
+   subscriber sees no lag beyond the bucket.
 1. **Only host-carrying variants, and host is the record's name, always
    (M1, R5).** The allow-list is exactly the variants that carry `host`:
    `MotherJobs`, `MotherStatusline`, `Activity`, `FocusListResp`,
@@ -256,9 +260,12 @@ broadcast channel; routed replies take the second path in A5):
    `host` because the per-topic publish table publishes them. Any other
    variant is dropped (so a host-less open frame such as `Withheld`,
    `DaemonReconnected` or `ModelCatalog` never enters from a satellite).
-   Transcript and other per-focus content of a `personal` host reaches the
-   primary only as routed replies to a routed `SessionAttach` (A5), not as
-   broadcasts (it carries no host and could not be attributed). If the frame's `host` is not
+   Transcript and pane content of a `personal` host (`SessionTurns`,
+   `SessionTurnDelta`, `PaneContent` and the rest of the transcript family)
+   reaches the primary only as routed replies to a routed `SessionAttach`
+   (A5), not as broadcasts (it carries no host and could not be attributed);
+   the host-carrying per-focus frames above (`SessionState`, `SessionBridge`,
+   `TrackerSummary`, …) are still published. If the frame's `host` is not
    exactly `Some(<record name>)` (absent counts as a mismatch), drop it and
    count it (one WARN per variant per hour). Never trust a satellite's
    `host` to key `retain_broadcasts`: otherwise Kobe could publish
@@ -304,10 +311,39 @@ broadcast channel; routed replies take the second path in A5):
    `work` host is never routed to, so it can never hold an id); `msg`'s
    variant is in the verb's allowed set (derived from what
    `handle_client_msg`'s arms send for that verb; a test pins the table); and
-   it passes steps 1–2 (host = record name, drop list). Then it is written to
-   the requester's targeted sender, whose `outbound` still runs. Anything
-   else (unknown, expired, foreign host, wrong variant) is dropped and
-   counted. Single-answer verbs (`SessionList`, `FocusList`,
+   it passes the **reply checks** below. Then it is written to the
+   requester's targeted sender, whose `outbound` still runs. Anything else
+   (unknown, expired, foreign host, wrong variant) is dropped and counted.
+   **Reply checks (M6), for replies only; publish frames keep steps 1–3
+   unchanged:**
+   - The verb's allowed-variant table **replaces step 1's host-carrying
+     list**: the request id already says which host the reply comes from, so
+     a transcript frame without a `host` field can pass. Step 1 is not
+     relaxed for `publish` (that would reopen M1).
+   - The `host == Some(<record name>)` rule still applies to any reply variant
+     that **has** a `host` field (absent is a mismatch), and the satellite
+     stamps `host` on replies too.
+   - The verb tables never contain a `LocalOnly`, `Admin` or
+     `SatelliteControl` variant, the five W9 pairing replies, `Hosts`,
+     `HostUnavailable`, `Welcome`, `Pong`, `MotherPeek` or
+     `MotherAwaitDetected`; a unit test iterates every table and asserts it.
+   - **Refusals are allowed as replies:** `Error` and `Withheld` are in every
+     verb's table, so a refused routed read (for example a sensitive tag on
+     Sendai) reaches the requester instead of leaving it waiting; they are
+     delivered only to the requester, never broadcast or retained.
+   - **Defence in depth (step 3 for replies):** a reply must survive
+     `peer::outbound(PeerTrust::Tcp, …)` unchanged, which drops whole
+     sensitive classes (the primary cannot know Sendai's sensitive focus
+     tags, so the per-tag check stays on Sendai).
+   **Limits (Q1).** Replies have their own token bucket per satellite
+   connection (**200 per second, burst 400**; excess dropped and counted;
+   over the limit for 30 s in a row closes the uplink with 1008), separate
+   from `publish`. Outstanding ids are capped at **32 per requesting
+   connection** and **32 per host**; beyond either cap the router answers
+   `HostUnavailable { reason: busy }` and routes nothing. Without the caps a
+   requester, including an unauthenticated LAN `Tcp` peer, could open
+   unlimited attaches to Sendai, and one live `SessionAttach` id could carry
+   unlimited deltas. Single-answer verbs (`SessionList`, `FocusList`,
    `SessionModelGet`, `ActivitySnapshotRequest`, `SessionDetach`) retire the
    id on the first accepted reply or after 10 s. A `SessionAttach` id stays
    live, carrying that attach's snapshot and live deltas, until the requester
@@ -672,7 +708,8 @@ the operator's own host.
   (`Client` default | `Satellite { host, egress }`), and `ServerMsg::Hosts {
   hosts: Vec<HostInfo> }` (`{name, egress, connected_since, last_seen}`)
   plus `ServerMsg::HostUnavailable { host, reason }` (`not_connected |
-  egress_metadata`). Classify the new frames per the memo's wire inventory
+  egress_metadata | busy`; `busy` is the outstanding-id cap, "Trust boundary
+  on the primary", A5). Classify the new frames per the memo's wire inventory
   (`Hosts`, `HostUnavailable`: `Open`). Add `"hosts"` and `"uplink"` to
   `Welcome.features` on the primary. W9's admin frames (`DevicePairing`,
   `DevicePairOutcome`, `DeviceRevoked`, `DeviceAdminError`) gain an
@@ -915,7 +952,16 @@ the operator's own host.
    verb's set → dropped, and no phone's targeted channel receives it; a
    `reply` from a `work` satellite → dropped (it never holds an id); an honest
    `personal` satellite's reply to a routed `SessionList` reaches only the
-   requesting connection. **Shape:** an honest `work` satellite's
+   requesting connection; an honest routed `SessionAttach` delivers its
+   snapshot and then a live delta (neither carries `host`) to the requester
+   only; a routed read refused on the satellite (sensitive tag) delivers the
+   refusal `Error`/`Withheld` to the requester; a reply variant with a `host`
+   field whose host is not the record's name → dropped. **Reply limits:** a
+   crafted satellite sending 2,000 deltas in a second on one attach id → the
+   excess is dropped and the phone's channel is not flooded; a requester
+   opening a 33rd routed attach (per connection), and a 33rd outstanding id
+   for one host across requesters → `HostUnavailable { reason: busy }`, and
+   the satellite receives no 33rd request. **Shape:** an honest `work` satellite's
    `MotherJobs`, `DecisionRequest` and `SessionState` survive ingest
    (round trip through `redact_for_uplink_metadata` and
    `is_uplink_metadata_shape`). **Flood:** 1,000 `publish` frames in one
@@ -953,7 +999,11 @@ the operator's own host.
   `swift-tests-kit` on GitHub Actions (`make ci-remote ONLY=kit` to
   re-run). **No local `cargo` or `swift`** (toolchain guard). No existing
   test is modified except to add fixtures with `host` present;
-  `tests/fixtures/mother-contract/*.golden.json` are byte-identical.
+  `tests/fixtures/mother-contract/*.golden.json` are byte-identical, and so
+  are the fixtures the five newly host-carrying frames touch when `host` is
+  `None` (`skip_serializing_if`): `tests/fixtures/tracker/frame-tracker-summary.json`,
+  the frames asserted in `tests/ipc_session_bridge.rs`, and
+  `Shared/NostromoKit/Tests/NostromoKitTests/SessionBridgeWireTests.swift`.
 - [ ] **W10-2** `tests/uplink_egress.rs` covers every `ServerMsg` variant and passes; a
   `work` satellite never emits a planted marker string.
 - [ ] **W10-3** In `satellite` mode, `lsof -iTCP -sTCP:LISTEN -p <pid>` shows only
@@ -1056,8 +1106,18 @@ the operator's own host.
   routed `reply` is accepted only for an outstanding id issued for a request
   routed to that same `personal` host and with an allowed variant, and goes
   only to the requesting connection (an unsolicited, expired, foreign-host,
-  `work`-host or wrong-variant reply is dropped and counted); `publish`
-  frames over 256 KiB or above 50/s (burst 200) are dropped and counted.
+  `work`-host or wrong-variant reply is dropped and counted); replies use the
+  verb's table instead of the host-carrying list (an honest routed
+  `SessionAttach` delivers its snapshot and a delta), any reply variant with
+  a `host` field must carry the record's name, no verb table contains a
+  `LocalOnly`, `Admin`, `SatelliteControl` or pairing-reply variant (unit
+  test), refusal `Error`/`Withheld` replies reach only the requester, and a
+  reply must survive `outbound(Tcp)` unchanged; `publish` frames over
+  256 KiB or above 50/s (burst 200), and malformed or wrong-direction
+  envelopes (same bucket), are dropped and counted, with a 1008 close after
+  30 s over the limit; replies have their own 200/s (burst 400) bucket, and
+  outstanding ids are capped at 32 per requester and 32 per host
+  (`HostUnavailable { busy }` beyond).
 
 ## Mother crew: gates, lenses, checklist and calibration
 
