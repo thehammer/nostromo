@@ -13678,7 +13678,14 @@ async fn a_paired_device_subscribed_to_everything_never_receives_a_local_only_fr
         assert_eq!(classify_server_msg(msg), ServerClass::LocalOnly, "{name}");
     }
     for (name, msg) in &admin {
-        assert_eq!(classify_server_msg(msg), ServerClass::Admin, "{name}");
+        // W10: the refusal a satellite's uplink must still receive moved to
+        // its own class; a paired device still never sees it (gate below).
+        let expected = if *name == "device_admin_error" {
+            ServerClass::SatelliteControl
+        } else {
+            ServerClass::Admin
+        };
+        assert_eq!(classify_server_msg(msg), expected, "{name}");
     }
     // The gate itself, frame by frame (the sockets below cover what topics let through).
     for (name, msg) in local_only.iter().chain(admin.iter()) {
