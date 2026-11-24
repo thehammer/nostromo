@@ -1,7 +1,7 @@
 # PRD: Pair a phone or iPad with Nostromo, and take it back
 
 **Author:** Ada
-**Status:** Signed off by Ada 2026-11-23. Design loop closed for Archie (D1–D7 signed; the operator answered Q1, Q2, Q4, Q7 and Q8 of Ada's memo). Open questions 3 and 5 were answered by the operator on 2026-11-23. One operator question stays open, open question 4, whose v1 default is permissive and must be confirmed before W10 ships. See "Sign-off and decision log" at the end.
+**Status:** Signed off by Ada 2026-11-23. Design loop closed for Archie (D1–D7 signed; the operator answered Q1, Q2, Q4, Q7 and Q8 of Ada's memo). Open questions 3 and 5 were answered by the operator on 2026-11-23, and open question 4 on 2026-11-24 (yes: the employer's policy allows Kobe's fixed-vocabulary metadata to leave Kobe). No operator question is open. See "Sign-off and decision log" at the end.
 **Answers:** Q1 in `docs/plans/backplane-sequencing.md`
 **Unblocks:** W11 `ios-ws-client`, W15 `mac-device-admin`, and the device verbs in W9/W10.
 **Consistent with:** `docs/visions/iphone.md`, `docs/visions/ipad.md` (both amended 2026-11-23 to match this sequence)
@@ -810,10 +810,9 @@ start at 38.
 ## Open questions
 
 The draft's two questions were answered on 2026-11-23 (1 and 2), and so
-were questions 3 and 5 (below). One question remains open for the operator,
-**question 4, whose default is permissive**: v1 assumes yes, and a "no"
-closes things. Nothing waits on the answer to build W9; it must be
-confirmed before W10 ships.
+were questions 3 and 5 (below). Question 4 was answered **yes** by the
+operator on 2026-11-24, confirming the permissive v1 default. No question is
+open, and nothing here waits on the operator.
 
 1. ~~**Should mail and todos be on by default for a newly paired device?**~~
    **Answered: mail and todos stay on the Macs in v1, for every host** (so
@@ -830,20 +829,25 @@ confirmed before W10 ships.
    whether any of the Google accounts is a Carefeed Google account; Carefeed
    uses Microsoft 365, so they are assumed personal. Confirm that when
    opening mail or calendar up to devices later.
-4. **Open: does the employer's policy allow Kobe's job states, short
+4. ~~**Does the employer's policy allow Kobe's job states, short
    references and host name to leave Kobe** for the operator's personal
-   server, the push relay and Apple, and to show on a personal phone?
-   *v1 default (permissive):* yes. Kobe sends only fixed-vocabulary
-   metadata, never Carefeed text. The default is permissive because without
-   Kobe's metadata the backplane has little purpose: most jobs run there.
-   **It must be confirmed against the employer's policy before W10 (the
-   satellite uplink) ships.** If the answer is no, Kobe sends nothing to
-   the server: the phone shows no Kobe rows, sends no Kobe pushes, and
-   Kobe's revoke-only device administration also goes, since it travels
-   over the same uplink. Specifically, these lapse: criterion 12 (manage
-   from Kobe), the "works from Kobe" part of criterion 24, criterion 50, and
-   the lost-phone-at-work path. Revoking then happens from Sendai or the
-   server's terminal.
+   server, the push relay and Apple, and to show on a personal phone?~~
+   **Answered 2026-11-24: yes.** The employer's policy allows it for
+   fixed-vocabulary metadata only (job states, short references, the host
+   name), never Carefeed text. That is exactly what v1 already sends from
+   Kobe, so the permissive v1 default stands and nothing in this PRD
+   changes: Kobe is enrolled as a `work` satellite, its rows and pushes
+   appear in the push vocabulary, and criteria 12, 24 (including "works from
+   Kobe"), 50 and the lost-phone-at-work path all apply. W10 (the satellite
+   uplink) is no longer gated on this answer.
+   *If the policy ever changes* to forbid it, Kobe sends nothing to the
+   server: the phone shows no Kobe rows, sends no Kobe pushes, and Kobe's
+   revoke-only device administration also goes, since it travels over the
+   same uplink. Specifically, these would lapse: criterion 12 (manage from
+   Kobe), the "works from Kobe" part of criterion 24, criterion 50, and the
+   lost-phone-at-work path. Revoking would then happen from Sendai or the
+   server's terminal. The code is the same either way: the change is not
+   enrolling Kobe (or revoking its satellite record).
 5. ~~**Does calendar stay home too?**~~ **Answered 2026-11-23: yes.**
    Calendar stays on the Macs with mail and todos in v1, and the copy says
    "Mail, calendar and todos…". Fred's calendar comes from the same Google
@@ -1037,9 +1041,10 @@ over the new connection. No criterion changes.
 questions and the sequencing memo's Q3 (multi-host presentation) were
 answered by the operator on 2026-11-23. He took the recommendation on every
 question and called v1 "a conservative first step; things can open up
-later". All of it is written into the sections above.
+later". All of it is written into the sections above. Open question 4
+was answered yes on 2026-11-24 (last row of the table below).
 
-### Operator decisions (2026-11-23)
+### Operator decisions (2026-11-23; open question 4 on 2026-11-24)
 
 Numbers are the operator-question numbers in Ada's sign-off memo (Q1–Q8).
 The push PRD's log uses the same numbering.
@@ -1053,6 +1058,7 @@ The push PRD's log uses the same numbering.
 | Q7 (= D7) | **Nothing from the message queue on a device**: no text, count or take-back. | Nothing; this is today's behaviour. | A count, "2 messages waiting", on the session row. |
 | Open question 3 | **Fred on Sendai reads Google** (the operator did not mention Microsoft 365). Mail, calendar and todos still stay home in v1. | Replaces Ada's working assumption that Fred's mail on Sendai is probably Carefeed's Microsoft 365 tenant; Microsoft 365 on Sendai is unconfirmed either way. | Open mail and calendar to devices, after confirming no Google account is Carefeed's. |
 | Open question 5 | **Calendar stays home in v1**, with mail and todos. | Nothing (confirms Ada's default). | A calendar quick-view on the phone, if the source is personal. |
+| Open question 4 (2026-11-24) | **Yes: the employer's policy allows Kobe's job states, short references and host name to leave Kobe** for the operator's personal server, the push relay and Apple, and to show on a personal phone: fixed-vocabulary metadata only, never Carefeed text. | Nothing; confirms the permissive v1 default. W10 is no longer gated on it. | If the policy ever changes, Kobe is not enrolled (or its satellite record is revoked); criteria 12, 24's "works from Kobe", 50 and the lost-phone-at-work path then lapse. |
 
 ### Ada's sign-offs
 
@@ -1062,10 +1068,10 @@ The push PRD's log uses the same numbering.
   the server; calendar stays home (the operator confirmed this 2026-11-23, open question 5); Kobe rows use per-kind references (criterion 53).
 - **Answered 2026-11-23:** open question 3 (Fred on Sendai reads Google
   accounts) and open question 5 (calendar stays home).
-- **Still open for the operator:** open question 4 (employer policy on
-  Kobe metadata leaving Kobe). The loop is closed for Archie: it has a v1
-  default, which is permissive and must be confirmed against the employer's
-  policy before W10 ships.
+- **Answered 2026-11-24:** open question 4 (yes: the employer's policy
+  allows Kobe's fixed-vocabulary metadata to leave Kobe; never Carefeed
+  text). The permissive v1 default stands.
+- **Still open for the operator:** nothing in this PRD.
 
 - **D1, Local Network on home Wi-Fi: accepted, with changes.** AC2 rewritten;
   first-screen wording changed; a fifth failure state in Ada's words, with

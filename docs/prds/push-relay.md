@@ -1,7 +1,7 @@
 # PRD: Tell the operator what needs them, without telling anyone else
 
 **Author:** Ada
-**Status:** Signed off by Ada 2026-11-23. Design loop closed for Archie (S1–S8 signed, S4 withdrawn, new S7a specified; the operator answered Q3–Q7 of Ada's memo). One operator question is still open, listed in `docs/prds/daemon-pairing-flow.md` as open question 4 (employer policy on Kobe metadata): it has a permissive default and must be confirmed before W10 ships. Open questions 3 and 5 were answered 2026-11-23 (Fred on Sendai reads Google accounts; calendar stays home). See "Sign-off and decision log" at the end.
+**Status:** Signed off by Ada 2026-11-23. Design loop closed for Archie (S1–S8 signed, S4 withdrawn, new S7a specified; the operator answered Q3–Q7 of Ada's memo). Open questions 3 and 5 were answered 2026-11-23 (Fred on Sendai reads Google accounts; calendar stays home), and open question 4 of `docs/prds/daemon-pairing-flow.md` (employer policy on Kobe metadata) on 2026-11-24: yes, Kobe's fixed-vocabulary metadata may leave Kobe for the server, this relay, Apple and a personal phone. No operator question is open. See "Sign-off and decision log" at the end.
 **Answers:** Q2 in `docs/plans/backplane-sequencing.md`
 **Unblocks wedge:** W13 `push-relay` (`docs/plans/backplane/W13-push-relay.md`) and W16 `ios-push-enrichment`
 **Surface:** iPhone (and iPad, same app) notifications; the operator's own machines; the hosted relay as seen from outside.
@@ -671,10 +671,15 @@ Both answered by the operator on 2026-10-10. Answer 2 was partly reversed on
 and 5): Fred on Sendai reads Google accounts, and calendar stays home
 (calendar is not a push kind either way).
 
-**Still open for the operator** (`docs/prds/daemon-pairing-flow.md`, open
-question 4): whether the employer's policy allows Kobe's job states,
+**Answered 2026-11-24** (`docs/prds/daemon-pairing-flow.md`, open
+question 4): **yes**, the employer's policy allows Kobe's job states, short
 references and host name to leave Kobe for the server, this relay, Apple and
-a personal phone (v1 assumes yes; if not, Kobe sends no pushes).
+a personal phone, as fixed-vocabulary metadata only and never Carefeed text.
+That is what this PRD's Kobe notifications already carry (Q5), so Kobe pushes
+stay in v1 as specified. If the policy ever changes, Kobe is not enrolled and
+sends no pushes.
+
+No question in this PRD is open for the operator.
 
 ---
 
@@ -952,6 +957,7 @@ into the sections above.
 | 2026-11-23 | Q5 | **A Kobe notification says kind, host, short reference and a fixed reason.** The per-kind fields in the payload contract (a decision's agent name, choice count and time left, with no reference; a review's size phrase and waiting count; a Summary's counts and oldest age) are Ada's contract, covered by his blanket acceptance of Ada's recommendations. He did not review each field. | Nothing; confirms the contract. | — |
 | 2026-11-23 | Q6 | **The relay runs in a new, dedicated personal AWS account, or a member account in the operator's personal AWS Organization.** Never a Carefeed account. | Narrows "the operator's own cloud account" to a dedicated one. | — |
 | 2026-11-23 | Q7 | **Nothing from the message queue**, in notifications or in the app. | Nothing (today's behaviour). | A count in the app, "2 messages waiting". |
+| 2026-11-24 | Pairing PRD open question 4 | **Yes: Kobe's job states, short references and host name may leave Kobe** for the server, this relay, Apple and a personal phone (fixed-vocabulary metadata only, never Carefeed text; the employer's policy allows it). | Nothing; confirms the permissive v1 default. | If the policy ever changes, Kobe is not enrolled and sends no pushes. |
 | 2026-11-23 | S8 amendment (Ada) | **Personal-host decisions show the first line of the prompt, read-only**, ending "· answer on your Mac". This is **Ada's sign-off choice**, made within the operator's 2026-11-23 acceptance of Ada's recommendations; it is not one of his explicit decisions. His explicit reversal is Q3 (Kobe, work and PHI detail). | Reverses Archie's turn-2 proposal (no decision enrichment). | — |
 | 2026-11-23 | Ada default | **Repository names gated on owner for every kind**, not only reviews, and **an unknown owner counts as a work owner**: Ada's conservative default, which the operator may open up. | Tightens the draft's Mother row (host class only). | Open up if Mother runs on personally owned repositories and the operator wants their names. |
 | 2026-11-23 | Ada default | **Enrichment gated on owner too**: items (including decisions) from employer-owned or unknown-owner repositories show only contract text, even from a personal host. Ada's conservative default, which the operator may open up. | Narrows personal-host enrichment (the draft gated on host class only). | Open up per owner if the operator wants it. |
