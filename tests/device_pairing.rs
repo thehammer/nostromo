@@ -55,7 +55,7 @@ fn paired(reply: ServerMsg) -> PairedReply {
             replaced,
         } => PairedReply {
             device_id,
-            token,
+            token: token.0,
             name,
             server_id,
             replaced,

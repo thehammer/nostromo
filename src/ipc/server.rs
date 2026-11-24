@@ -332,6 +332,26 @@ impl Server {
         perri_state_dir: PathBuf,
         decisions: Arc<Mutex<DecisionRegistry>>,
     ) {
+        self.bind_ws_with_limits(
+            listener,
+            hub,
+            session_mgr,
+            perri_state_dir,
+            decisions,
+            super::ws::WsLimits::default(),
+        );
+    }
+
+    /// [`Server::bind_ws`] with explicit connection limits (tests shorten them).
+    pub fn bind_ws_with_limits(
+        &self,
+        listener: TcpListener,
+        hub: Arc<DeviceHub>,
+        session_mgr: Arc<Mutex<SessionManager>>,
+        perri_state_dir: PathBuf,
+        decisions: Arc<Mutex<DecisionRegistry>>,
+        limits: super::ws::WsLimits,
+    ) {
         hub.set_broadcast(self.tx.clone());
         let _ = self.hub.set(Arc::clone(&hub));
         let shared = super::ws::WsShared {
@@ -345,7 +365,7 @@ impl Server {
             hub_slot: Arc::clone(&self.hub),
         };
         tokio::spawn(async move {
-            if let Err(e) = super::ws::accept_loop_ws(listener, hub, shared).await {
+            if let Err(e) = super::ws::accept_loop_ws(listener, hub, shared, limits).await {
                 warn!("WebSocket accept loop exited: {e:#}");
             }
         });
@@ -383,7 +403,9 @@ pub(super) enum PeerOrigin {
     },
     Tcp,
     /// A WebSocket peer that presented a valid device token.
-    Ws { device_id: String },
+    Ws {
+        device_id: String,
+    },
 }
 
 impl PeerOrigin {

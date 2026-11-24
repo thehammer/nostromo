@@ -25,6 +25,12 @@ struct Daemon {
 
 impl Daemon {
     fn start(config_toml: Option<&str>) -> Self {
+        Self::start_with(config_toml, "127.0.0.1:0", |_| {})
+    }
+
+    /// `ws_addr` is the WebSocket listener's address; `prepare` runs on the
+    /// hermetic HOME before the daemon starts.
+    fn start_with(config_toml: Option<&str>, ws_addr: &str, prepare: impl FnOnce(&Path)) -> Self {
         let home = tempfile::tempdir().expect("home tempdir");
         let empty_path = tempfile::tempdir().expect("empty PATH tempdir");
 
@@ -34,6 +40,8 @@ impl Daemon {
             std::fs::write(dir.join("config.toml"), cfg).unwrap();
         }
 
+        prepare(home.path());
+
         let child = Command::new(env!("CARGO_BIN_EXE_nostromd"))
             .env_clear()
             .env("HOME", home.path())
@@ -41,7 +49,7 @@ impl Daemon {
             .env("RUST_LOG", "info")
             .env("NOSTROMD_TCP_ADDR", "127.0.0.1:0")
             // Parallel daemons must not fight over the default WebSocket port.
-            .env("NOSTROMD_WS_ADDR", "127.0.0.1:0")
+            .env("NOSTROMD_WS_ADDR", ws_addr)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -349,4 +357,49 @@ fn unit_file_restarts_always_after_two_seconds() {
         "unit must set Restart=always:\n{unit}"
     );
     assert!(has("RestartSec=2"), "unit must set RestartSec=2:\n{unit}");
+}
+
+#[test]
+fn a_busy_websocket_port_does_not_take_the_daemon_down() {
+    let squatter = std::net::TcpListener::bind("127.0.0.1:0").expect("a port to occupy");
+    let busy = squatter.local_addr().unwrap().to_string();
+    let mut d = Daemon::start_with(None, &busy, |_| {});
+    d.run_startup_window();
+
+    assert_socket_exists(&d.socket_path());
+    let lines = d.wait_for_logs(Duration::from_secs(5), |l| {
+        l.iter()
+            .any(|(lvl, m)| lvl.eq_ignore_ascii_case("ERROR") && mentions(m, "WebSocket listener"))
+    });
+    assert!(
+        lines
+            .iter()
+            .any(|(lvl, m)| lvl.eq_ignore_ascii_case("ERROR")
+                && mentions(m, "WebSocket listener")
+                && mentions(m, "disabled")),
+        "the failure is logged as an ERROR: {lines:?}"
+    );
+    drop(squatter);
+}
+
+#[test]
+fn an_unreadable_device_registry_does_not_take_the_daemon_down() {
+    let mut d = Daemon::start_with(None, "127.0.0.1:0", |home| {
+        let dir = home.join(".nostromo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("devices.json"), "{ this is not json").unwrap();
+    });
+    d.run_startup_window();
+
+    assert_socket_exists(&d.socket_path());
+    let lines = d.wait_for_logs(Duration::from_secs(5), |l| {
+        l.iter()
+            .any(|(lvl, m)| lvl.eq_ignore_ascii_case("ERROR") && mentions(m, "device features"))
+    });
+    assert!(
+        lines
+            .iter()
+            .any(|(lvl, m)| lvl.eq_ignore_ascii_case("ERROR") && mentions(m, "device features")),
+        "the failure is logged as an ERROR: {lines:?}"
+    );
 }

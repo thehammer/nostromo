@@ -38,6 +38,9 @@ struct Open {
     challenge: String,
     proof_answered: bool,
     matched_device: Option<String>,
+    /// The socket that answered the proof: only it may use the match to replace
+    /// a device, so someone else holding the code cannot pre-empt it.
+    proof_socket: Option<u64>,
     wrong: u32,
 }
 
@@ -86,6 +89,13 @@ impl Taken {
             PairOutcomeKind::Paired,
             Some((final_name, self.kind, replaced)),
         );
+    }
+}
+
+impl Taken {
+    /// Tell the issuer the code was redeemed but the device could not be saved.
+    pub fn notify_failed(&self) {
+        self.pairing.finish(PairOutcomeKind::Failed, None);
     }
 }
 
@@ -174,6 +184,7 @@ impl PairingTable {
             challenge: random_token(),
             proof_answered: false,
             matched_device: None,
+            proof_socket: None,
             wrong: 0,
         });
         Started {
@@ -238,6 +249,18 @@ impl PairingTable {
         proof_matcher: impl FnOnce(&str, &str, &str) -> Option<String>,
         now: Instant,
     ) -> CheckAnswer {
+        self.check_from(0, code, proof, proof_matcher, now)
+    }
+
+    /// [`PairingTable::check`] from the socket `socket`.
+    pub fn check_from(
+        &mut self,
+        socket: u64,
+        code: &str,
+        proof: Option<&str>,
+        proof_matcher: impl FnOnce(&str, &str, &str) -> Option<String>,
+        now: Instant,
+    ) -> CheckAnswer {
         self.sweep(now);
         let Some(i) = self.find(code) else {
             return self.wrong_code(code);
@@ -247,6 +270,7 @@ impl PairingTable {
         if let Some(proof) = proof {
             if !o.proof_answered {
                 o.proof_answered = true;
+                o.proof_socket = Some(socket);
                 o.matched_device = proof_matcher(&o.challenge, &normalize_code(code), proof);
                 knows_device = Some(o.matched_device.is_some());
             }
@@ -267,6 +291,19 @@ impl PairingTable {
         replace: bool,
         now: Instant,
     ) -> Result<Taken, PairRefusedReason> {
+        self.take_from(0, code, kind, replace, now)
+    }
+
+    /// [`PairingTable::take`] from the socket `socket`: a proof answered on
+    /// another socket does not count for `replace`.
+    pub fn take_from(
+        &mut self,
+        socket: u64,
+        code: &str,
+        kind: DeviceKind,
+        replace: bool,
+        now: Instant,
+    ) -> Result<Taken, PairRefusedReason> {
         self.sweep(now);
         let Some(i) = self.find(code) else {
             return Err(match self.wrong_code(code) {
@@ -281,7 +318,7 @@ impl PairingTable {
             return Err(PairRefusedReason::Invalid);
         }
         let o = self.open.remove(i);
-        let matched = if replace {
+        let matched = if replace && o.proof_socket == Some(socket) {
             o.matched_device.clone()
         } else {
             None
@@ -555,6 +592,39 @@ mod tests {
             .take(&code, DeviceKind::Iphone, true, f.now)
             .unwrap();
         assert_eq!(taken.matched_device.as_deref(), Some("dev_1"));
+    }
+
+    #[test]
+    fn only_the_socket_that_proved_a_device_may_replace_it() {
+        let mut f = fixture();
+        let code = f.started.code.clone();
+        f.table.check_from(
+            1,
+            &code,
+            Some("p"),
+            |_, _, _| Some("dev_1".to_string()),
+            f.now,
+        );
+        let other = f
+            .table
+            .take_from(2, &code, DeviceKind::Iphone, true, f.now)
+            .unwrap();
+        assert_eq!(other.matched_device, None, "another socket holds the code");
+
+        let mut f = fixture();
+        let code = f.started.code.clone();
+        f.table.check_from(
+            1,
+            &code,
+            Some("p"),
+            |_, _, _| Some("dev_1".to_string()),
+            f.now,
+        );
+        let same = f
+            .table
+            .take_from(1, &code, DeviceKind::Iphone, true, f.now)
+            .unwrap();
+        assert_eq!(same.matched_device.as_deref(), Some("dev_1"));
     }
 
     #[test]

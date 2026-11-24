@@ -223,7 +223,10 @@ async fn a_network_peer_detaching_or_dropping_recounts_the_gate() {
     let mgr = &mut reap.0;
     mgr.attach("t", "old").unwrap();
     mgr.attach_network("t", "phone").unwrap();
-    assert!(!shared.queue.merge_allowed(), "the local legacy client closes it");
+    assert!(
+        !shared.queue.merge_allowed(),
+        "the local legacy client closes it"
+    );
     mgr.detach("t", "phone");
     assert!(!shared.queue.merge_allowed());
     mgr.on_client_disconnect("old");

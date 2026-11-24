@@ -514,17 +514,38 @@ impl Config {
     /// Resolution order: `NOSTROMD_WS_ADDR` → `config.toml ws_addr` →
     /// `DEFAULT_WS_ADDR`. The value `off` disables the listener.
     pub fn ws_listen_addr(&self) -> Option<SocketAddr> {
-        let raw = std::env::var(WS_ADDR_ENV)
+        parse_ws_addr(self.raw_ws_addr().as_deref()).0
+    }
+
+    /// Why the configured WebSocket address is not being used, when it is
+    /// unparseable (the listener then falls back to loopback). For the daemon
+    /// to log at startup.
+    pub fn ws_addr_warning(&self) -> Option<String> {
+        parse_ws_addr(self.raw_ws_addr().as_deref()).1
+    }
+
+    fn raw_ws_addr(&self) -> Option<String> {
+        std::env::var(WS_ADDR_ENV)
             .ok()
-            .or_else(|| self.ws_addr.clone());
-        match raw.as_deref().map(str::trim) {
-            Some(v) if v.eq_ignore_ascii_case("off") => None,
-            Some(v) => Some(
-                v.parse()
-                    .unwrap_or_else(|_| DEFAULT_WS_ADDR.parse().expect("valid default WS addr")),
-            ),
-            None => Some(DEFAULT_WS_ADDR.parse().expect("valid default WS addr")),
-        }
+            .or_else(|| self.ws_addr.clone())
+    }
+
+    /// A warning for the startup log when the WebSocket listener is reachable
+    /// beyond this machine but no `pair_host` is set: the default host is the
+    /// default-route address (usually Wi-Fi/LAN, not WireGuard), so long-lived
+    /// bearer tokens would cross it as plaintext `ws://`.
+    pub fn plaintext_transport_warning(&self, bound: SocketAddr) -> Option<String> {
+        let pair_host_set = self
+            .pair_host
+            .as_deref()
+            .is_some_and(|h| !h.trim().is_empty());
+        (!bound.ip().is_loopback() && !pair_host_set).then(|| {
+            format!(
+                "WebSocket listener {bound} is reachable beyond this machine and pair_host is not set. \
+                 The transport is plaintext ws:// carrying long-lived bearer tokens: bind it to a \
+                 WireGuard address only, and set pair_host to that address, not a Wi-Fi/LAN one."
+            )
+        })
     }
 
     /// The host devices are told to connect to: `pair_host`, else the bound
@@ -558,6 +579,24 @@ impl Config {
 
     pub fn pr_diff_poll_interval(&self) -> Duration {
         Duration::from_secs(self.pr_diff_poll_secs)
+    }
+}
+
+/// The WebSocket address a raw setting means, and a warning when it is unusable.
+fn parse_ws_addr(raw: Option<&str>) -> (Option<SocketAddr>, Option<String>) {
+    let default = || DEFAULT_WS_ADDR.parse().expect("valid default WS addr");
+    match raw.map(str::trim) {
+        Some(v) if v.eq_ignore_ascii_case("off") => (None, None),
+        Some(v) => match v.parse() {
+            Ok(addr) => (Some(addr), None),
+            Err(_) => (
+                Some(default()),
+                Some(format!(
+                    "ws_addr {v:?} is not a socket address (host:port); listening on {DEFAULT_WS_ADDR} instead"
+                )),
+            ),
+        },
+        None => (Some(default()), None),
     }
 }
 
@@ -992,6 +1031,38 @@ mod ws_addr_tests {
             Some("0.0.0.0:47101".parse().unwrap())
         );
         assert_eq!(parse("ws_addr = \"off\"").ws_listen_addr(), None);
+    }
+
+    #[test]
+    fn a_bad_ws_addr_warns_and_falls_back_to_loopback() {
+        let (addr, warning) = parse_ws_addr(Some("not-an-address"));
+        assert_eq!(addr, Some(DEFAULT_WS_ADDR.parse().unwrap()));
+        assert!(warning.unwrap().contains("not-an-address"));
+        assert_eq!(parse_ws_addr(Some("off")), (None, None));
+        let good = parse_ws_addr(Some("10.0.0.2:47101"));
+        assert_eq!(good, (Some("10.0.0.2:47101".parse().unwrap()), None));
+        assert_eq!(
+            parse_ws_addr(None),
+            (Some(DEFAULT_WS_ADDR.parse().unwrap()), None)
+        );
+    }
+
+    #[test]
+    fn a_non_loopback_bind_without_a_pair_host_warns_about_plaintext() {
+        let wide: SocketAddr = "0.0.0.0:47101".parse().unwrap();
+        let loopback: SocketAddr = "127.0.0.1:47101".parse().unwrap();
+        let warning = parse("").plaintext_transport_warning(wide).unwrap();
+        assert!(warning.contains("WireGuard"), "{warning}");
+        assert!(parse("")
+            .plaintext_transport_warning("127.0.0.1:47101".parse().unwrap())
+            .is_none());
+        assert!(parse("pair_host = \"10.9.0.1\"")
+            .plaintext_transport_warning(wide)
+            .is_none());
+        assert!(parse("pair_host = \"  \"")
+            .plaintext_transport_warning(wide)
+            .is_some());
+        assert!(parse("").plaintext_transport_warning(loopback).is_none());
     }
 
     #[test]

@@ -4010,8 +4010,8 @@ pub enum ServerMsg {
     },
     Paired {
         device_id: String,
-        /// The token's only appearance.
-        token: String,
+        /// The token's only appearance. Prints as `Secret(<redacted>)`.
+        token: crate::ipc::devices::Secret,
         name: String,
         server_id: String,
         #[serde(default)]

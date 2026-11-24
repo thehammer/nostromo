@@ -383,38 +383,39 @@ async fn main() -> Result<()> {
     // ── IPC server (WebSocket — paired devices and satellite Macs) ────────────
     // Authenticated by a per-device bearer token; devices are paired with
     // `nostromo device pair`. Loopback unless the operator opts in.
+    if let Some(warning) = config.ws_addr_warning() {
+        warn!("{warning}");
+    }
     match config.ws_listen_addr() {
         None => info!("WebSocket listener disabled (NOSTROMD_WS_ADDR=off)"),
         Some(ws_addr) => {
-            let ws_listener = tokio::net::TcpListener::bind(ws_addr)
-                .await
-                .with_context(|| format!("binding WebSocket listener at {ws_addr}"))?;
-            let bound_ws_addr = ws_listener.local_addr()?;
-            let pair_host = config.resolve_pair_host(bound_ws_addr);
-            let registry = nostromo::ipc::devices::DeviceRegistry::load(
+            // A busy port or an unreadable device registry must not take down
+            // approvals and sessions: log it and run without device features.
+            match nostromo::ipc::ws::setup_listener(
+                &config,
+                ws_addr,
                 nostromo::ipc::devices::default_devices_path(),
             )
-            .context("loading the device registry")?;
-            let hub = nostromo::ipc::device_hub::DeviceHub::new(
-                Arc::new(registry),
-                nostromo::ipc::pairing::PAIRING_TTL,
-                pair_host.clone(),
-                bound_ws_addr.port(),
-            );
-            info!(addr = %bound_ws_addr, pair_host = %pair_host, "IPC WebSocket listener bound");
-            if !bound_ws_addr.ip().is_loopback() {
-                info!(
-                    addr = %bound_ws_addr,
-                    "WebSocket listener is reachable beyond this machine; devices need a paired token"
-                );
+            .await
+            {
+                Ok(setup) => {
+                    info!(addr = %setup.bound, pair_host = %setup.pair_host, "IPC WebSocket listener bound");
+                    if let Some(warning) = config.plaintext_transport_warning(setup.bound) {
+                        warn!("{warning}");
+                    }
+                    server.bind_ws(
+                        setup.listener,
+                        setup.hub,
+                        Arc::clone(&session_mgr),
+                        config.perri_state_dir(),
+                        Arc::clone(&decisions),
+                    );
+                }
+                Err(e) => error!(
+                    addr = %ws_addr,
+                    "WebSocket listener and device features are disabled: {e:#}"
+                ),
             }
-            server.bind_ws(
-                ws_listener,
-                hub,
-                Arc::clone(&session_mgr),
-                config.perri_state_dir(),
-                Arc::clone(&decisions),
-            );
         }
     }
 

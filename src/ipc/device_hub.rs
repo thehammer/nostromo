@@ -5,6 +5,7 @@
 //! Nothing here logs a code, a proof or a token.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 
 use super::devices::{
-    DeviceKind, DeviceRegistry, PairRefusedReason, RevokeError, RevokedBy, SatelliteAdmin,
+    DeviceKind, DeviceRegistry, PairRefusedReason, RevokeError, RevokedBy, SatelliteAdmin, Secret,
 };
 use super::pairing::{CheckAnswer, PairingTable};
 use super::peer::PeerTrust;
@@ -30,6 +31,7 @@ pub struct DeviceHub {
     pair_host: String,
     ws_port: u16,
     broadcast: OnceLock<broadcast::Sender<ServerMsg>>,
+    socket_ids: AtomicU64,
 }
 
 /// Holds a device's connection open in the hub's table; dropping it records
@@ -80,6 +82,7 @@ impl DeviceHub {
             pair_host,
             ws_port,
             broadcast: OnceLock::new(),
+            socket_ids: AtomicU64::new(1),
         })
     }
 
@@ -96,7 +99,26 @@ impl DeviceHub {
         self.conns.lock().unwrap().contains_key(device_id)
     }
 
-    /// Record an authenticated connection of `device_id`.
+    /// A fresh id for a pairing-only socket (see `PairingTable::check_from`).
+    pub fn next_socket_id(&self) -> u64 {
+        self.socket_ids.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Record an authenticated connection of `device_id`, unless it already
+    /// has `max` sockets open.
+    pub fn try_connected(self: &Arc<Self>, device_id: &str, max: usize) -> Option<ConnGuard> {
+        {
+            let mut conns = self.conns.lock().unwrap();
+            let n = conns.entry(device_id.to_string()).or_insert(0);
+            if *n >= max {
+                return None;
+            }
+            *n += 1;
+        }
+        Some(self.connected_guard(device_id))
+    }
+
+    /// Record an authenticated connection of `device_id` (no limit).
     pub fn connected(self: &Arc<Self>, device_id: &str) -> ConnGuard {
         *self
             .conns
@@ -104,6 +126,10 @@ impl DeviceHub {
             .unwrap()
             .entry(device_id.to_string())
             .or_insert(0) += 1;
+        self.connected_guard(device_id)
+    }
+
+    fn connected_guard(self: &Arc<Self>, device_id: &str) -> ConnGuard {
         self.registry.touch(device_id);
         self.broadcast_devices();
         ConnGuard {
@@ -127,8 +153,9 @@ impl DeviceHub {
     // ── device side ───────────────────────────────────────────────────────────
 
     /// Answer a `PairCheck`. Never uses the code up.
-    pub fn pair_check(&self, code: &str, proof: Option<&str>) -> ServerMsg {
-        let answer = self.pairing.lock().unwrap().check(
+    pub fn pair_check(&self, socket: u64, code: &str, proof: Option<&str>) -> ServerMsg {
+        let answer = self.pairing.lock().unwrap().check_from(
+            socket,
             code,
             proof,
             |challenge, code, proof| self.registry.match_proof(challenge, code, proof),
@@ -150,12 +177,19 @@ impl DeviceHub {
     }
 
     /// Redeem a code: the one thing that uses it up.
-    pub fn pair(&self, code: &str, name: &str, kind: DeviceKind, replace: bool) -> ServerMsg {
-        let taken = self
-            .pairing
-            .lock()
-            .unwrap()
-            .take(code, kind, replace, Instant::now());
+    pub fn pair(
+        &self,
+        socket: u64,
+        code: &str,
+        name: &str,
+        kind: DeviceKind,
+        replace: bool,
+    ) -> ServerMsg {
+        let taken =
+            self.pairing
+                .lock()
+                .unwrap()
+                .take_from(socket, code, kind, replace, Instant::now());
         let taken = match taken {
             Ok(t) => t,
             Err(reason) => return ServerMsg::PairRefused { reason },
@@ -166,26 +200,27 @@ impl DeviceHub {
         } else {
             name
         };
-        let redeemed = match self.registry.redeem(
-            proposed,
-            kind,
-            taken.admin,
-            taken.matched_device.as_deref(),
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("could not save a new device: {e:#}");
-                return ServerMsg::PairRefused {
-                    reason: PairRefusedReason::Invalid,
-                };
-            }
-        };
+        let redeemed =
+            match self
+                .registry
+                .redeem(proposed, kind, taken.admin, taken.matched_device.as_deref())
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("could not save a new device: {e:#}");
+                    // The issuer must not wait for ever on a code that is gone.
+                    taken.notify_failed();
+                    return ServerMsg::PairRefused {
+                        reason: PairRefusedReason::Invalid,
+                    };
+                }
+            };
         taken.notify_paired(&redeemed.name, redeemed.replaced);
         info!(device = %redeemed.device_id, kind = ?kind, replaced = redeemed.replaced, "device paired");
         self.broadcast_devices();
         ServerMsg::Paired {
             device_id: redeemed.device_id,
-            token: redeemed.token,
+            token: Secret(redeemed.token),
             name: redeemed.name,
             server_id: self.registry.server_id(),
             replaced: redeemed.replaced,
@@ -286,25 +321,23 @@ impl DeviceHub {
                 admin_error(request_id, "unknown_pairing")
             }
             ClientMsg::DeviceList { .. } => self.devices_msg(),
-            ClientMsg::DeviceRevoke { request_id, device } => {
-                match self.registry.resolve(device) {
-                    Err(e) => admin_error(request_id, revoke_reason(e)),
-                    Ok(target) => {
-                        let was_connected = self.is_connected(&target.id);
-                        match self.registry.revoke(&target.id, RevokedBy::Operator) {
-                            Ok(_) => {
-                                self.broadcast_devices();
-                                ServerMsg::DeviceRevoked {
-                                    request_id: request_id.clone(),
-                                    device_id: target.id,
-                                    was_connected,
-                                }
+            ClientMsg::DeviceRevoke { request_id, device } => match self.registry.resolve(device) {
+                Err(e) => admin_error(request_id, revoke_reason(e)),
+                Ok(target) => {
+                    let was_connected = self.is_connected(&target.id);
+                    match self.registry.revoke(&target.id, RevokedBy::Operator) {
+                        Ok(_) => {
+                            self.broadcast_devices();
+                            ServerMsg::DeviceRevoked {
+                                request_id: request_id.clone(),
+                                device_id: target.id,
+                                was_connected,
                             }
-                            Err(e) => admin_error(request_id, revoke_reason(e)),
                         }
+                        Err(e) => admin_error(request_id, revoke_reason(e)),
                     }
                 }
-            }
+            },
             ClientMsg::DeviceSetAdmin {
                 request_id,
                 host,
@@ -343,6 +376,7 @@ fn revoke_reason(e: RevokeError) -> &'static str {
     match e {
         RevokeError::Unknown => "unknown_device",
         RevokeError::Ambiguous => "ambiguous_name",
+        RevokeError::NotSaved => "not_saved",
     }
 }
 
@@ -350,5 +384,100 @@ fn admin_error(request_id: &str, reason: &str) -> ServerMsg {
     ServerMsg::DeviceAdminError {
         request_id: request_id.to_string(),
         reason: reason.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::devices::RevokeError;
+
+    fn hub() -> (tempfile::TempDir, Arc<DeviceHub>) {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(DeviceRegistry::load(dir.path().join("devices.json")).unwrap());
+        let hub = DeviceHub::new(registry, Duration::from_secs(300), "127.0.0.1".into(), 1);
+        (dir, hub)
+    }
+
+    #[test]
+    fn a_device_connection_cap_counts_and_releases() {
+        let (_d, hub) = hub();
+        let first = hub.try_connected("dev_a", 1).expect("the first");
+        assert!(hub.try_connected("dev_a", 1).is_none(), "over the cap");
+        assert!(hub.try_connected("dev_b", 1).is_some(), "another device");
+        drop(first);
+        assert!(hub.try_connected("dev_a", 1).is_some(), "a freed place");
+    }
+
+    #[tokio::test]
+    async fn a_revoke_that_cannot_be_saved_tells_the_operator() {
+        let (dir, hub) = hub();
+        let phone = hub
+            .registry()
+            .redeem("iPhone", DeviceKind::Iphone, None, None)
+            .unwrap();
+        // Saving needs `devices.json.tmp`; a directory there makes every save fail.
+        std::fs::create_dir(dir.path().join("devices.json.tmp")).unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handled = hub.dispatch(
+            &ClientMsg::DeviceRevoke {
+                request_id: "r1".into(),
+                device: phone.device_id.clone(),
+            },
+            PeerTrust::LocalOther,
+            None,
+            "admin",
+            &tx,
+        );
+        assert_eq!(handled, Dispatched::Handled);
+        match rx.recv().await.unwrap() {
+            ServerMsg::DeviceAdminError { request_id, reason } => {
+                assert_eq!(request_id, "r1");
+                assert_eq!(reason, "not_saved");
+            }
+            other => panic!("the operator was told {other:?}, not that the revoke is not durable"),
+        }
+        // The revoke is still in effect for this run.
+        assert_eq!(
+            hub.registry().validate(&phone.token),
+            crate::ipc::devices::TokenCheck::Revoked
+        );
+        assert_eq!(
+            hub.registry().revoke("ghost", RevokedBy::Operator),
+            Err(RevokeError::Unknown)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redeem_that_cannot_be_saved_reports_failure_to_the_issuer() {
+        let (dir, hub) = hub();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        hub.dispatch(
+            &ClientMsg::DevicePairStart {
+                request_id: "p1".into(),
+                name_hint: None,
+                satellite: None,
+                admin: None,
+            },
+            PeerTrust::LocalOther,
+            None,
+            "admin",
+            &tx,
+        );
+        let started = match rx.recv().await.unwrap() {
+            ServerMsg::DevicePairing { code, .. } => code,
+            other => panic!("expected a code, got {other:?}"),
+        };
+        std::fs::create_dir(dir.path().join("devices.json.tmp")).unwrap();
+
+        let reply = hub.pair(7, &started, "Phone", DeviceKind::Iphone, false);
+        assert!(matches!(reply, ServerMsg::PairRefused { .. }), "{reply:?}");
+        match rx.recv().await.unwrap() {
+            ServerMsg::DevicePairOutcome { outcome, .. } => {
+                assert_eq!(outcome, crate::ipc::devices::PairOutcomeKind::Failed);
+            }
+            other => panic!("the issuer heard {other:?}"),
+        }
     }
 }

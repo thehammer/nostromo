@@ -201,6 +201,11 @@ impl Rig {
         Self::build(ttl, false).await
     }
 
+    /// A rig with explicit WebSocket connection limits.
+    pub async fn with_limits(limits: nostromo::ipc::ws::WsLimits) -> Self {
+        Self::build_with(Duration::from_secs(300), false, limits).await
+    }
+
     /// A rig that can run sessions: it owns the process environment for the
     /// test (`HOME`, the approvals directory, the guard binary).
     pub async fn with_sessions() -> Self {
@@ -208,6 +213,14 @@ impl Rig {
     }
 
     async fn build(ttl: Duration, sessions: bool) -> Self {
+        Self::build_with(ttl, sessions, nostromo::ipc::ws::WsLimits::default()).await
+    }
+
+    async fn build_with(
+        ttl: Duration,
+        sessions: bool,
+        limits: nostromo::ipc::ws::WsLimits,
+    ) -> Self {
         install_log_capture();
         let env = if sessions {
             EnvGuard::Exclusive(ENV.write().await)
@@ -260,12 +273,13 @@ impl Rig {
         let registry_path = tmp.path().join("devices.json");
         let registry = Arc::new(DeviceRegistry::load(&registry_path).expect("a new registry"));
         let hub = DeviceHub::new(Arc::clone(&registry), ttl, "127.0.0.1".into(), ws_port);
-        server.bind_ws(
+        server.bind_ws_with_limits(
             ws,
             Arc::clone(&hub),
             Arc::clone(&session_mgr),
             perri,
             decisions,
+            limits,
         );
 
         Rig {
@@ -384,7 +398,7 @@ impl Rig {
                 ..
             } => Minted {
                 device_id,
-                token,
+                token: token.0,
                 name,
             },
             other => panic!("expected Paired, got {other:?}"),
@@ -482,6 +496,28 @@ impl Conn {
                 HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
             );
         }
+        let (ws, _resp) = tokio_tungstenite::connect_async(req).await?;
+        Ok(Conn::new(Io::Ws(Box::new(ws))))
+    }
+
+    /// Like [`Conn::try_ws`] with an extra request header.
+    #[allow(clippy::result_large_err)] // tungstenite's own error type
+    pub async fn try_ws_with_header(
+        port: u16,
+        token: Option<&str>,
+        header: (&'static str, &str),
+    ) -> Result<Conn, tokio_tungstenite::tungstenite::Error> {
+        let mut req = format!("ws://127.0.0.1:{port}/")
+            .into_client_request()
+            .expect("a request");
+        if let Some(token) = token {
+            req.headers_mut().insert(
+                "Authorization",
+                HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            );
+        }
+        req.headers_mut()
+            .insert(header.0, HeaderValue::from_str(header.1).unwrap());
         let (ws, _resp) = tokio_tungstenite::connect_async(req).await?;
         Ok(Conn::new(Io::Ws(Box::new(ws))))
     }

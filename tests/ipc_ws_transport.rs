@@ -1006,3 +1006,171 @@ async fn a_device_that_declared_merged_turns_does_not_stop_queued_messages_mergi
 async fn a_device_that_declared_nothing_does_not_stop_queued_messages_merging() {
     queued_messages_merge_with_a_device_attached(&[]).await;
 }
+
+// ── pre-auth resource limits ──────────────────────────────────────────────────
+
+fn short_limits() -> nostromo::ipc::ws::WsLimits {
+    nostromo::ipc::ws::WsLimits {
+        handshake_timeout: Duration::from_millis(300),
+        ..Default::default()
+    }
+}
+
+/// True once the peer has closed `stream` (EOF or a reset) within `within`.
+async fn closed_within(stream: &mut tokio::net::TcpStream, within: Duration) -> bool {
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 64];
+    match tokio::time::timeout(within, stream.read(&mut buf)).await {
+        Err(_) => false,
+        Ok(Ok(0)) | Ok(Err(_)) => true,
+        Ok(Ok(_)) => false,
+    }
+}
+
+#[tokio::test]
+async fn a_socket_that_sends_nothing_is_closed_after_the_handshake_timeout() {
+    let rig = Rig::with_limits(short_limits()).await;
+    let mut idle = tokio::net::TcpStream::connect(("127.0.0.1", rig.ws_port))
+        .await
+        .unwrap();
+    assert!(
+        closed_within(&mut idle, Duration::from_secs(3)).await,
+        "an idle connection was left open"
+    );
+}
+
+#[tokio::test]
+async fn a_socket_that_trickles_a_request_is_closed_after_the_handshake_timeout() {
+    use tokio::io::AsyncWriteExt;
+    let rig = Rig::with_limits(short_limits()).await;
+    let mut slow = tokio::net::TcpStream::connect(("127.0.0.1", rig.ws_port))
+        .await
+        .unwrap();
+    slow.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n")
+        .await
+        .unwrap();
+    assert!(
+        closed_within(&mut slow, Duration::from_secs(3)).await,
+        "a half-sent request was left open"
+    );
+}
+
+#[tokio::test]
+async fn a_timed_out_handshake_releases_its_slot() {
+    let limits = nostromo::ipc::ws::WsLimits {
+        max_unauthenticated: 1,
+        ..short_limits()
+    };
+    let rig = Rig::with_limits(limits).await;
+    let mut idle = tokio::net::TcpStream::connect(("127.0.0.1", rig.ws_port))
+        .await
+        .unwrap();
+    assert!(closed_within(&mut idle, Duration::from_secs(3)).await);
+    // The only slot is free again.
+    Conn::try_ws(rig.ws_port, None, "/")
+        .await
+        .expect("the slot was released");
+}
+
+#[tokio::test]
+async fn the_unauthenticated_cap_refuses_the_next_connection_and_a_device_still_gets_in() {
+    let limits = nostromo::ipc::ws::WsLimits {
+        max_unauthenticated: 3,
+        max_unauthenticated_per_ip: 3,
+        ..Default::default()
+    };
+    let rig = Rig::with_limits(limits).await;
+    let dev = rig.mint_device("iPhone");
+
+    let mut open = Vec::new();
+    for _ in 0..3 {
+        open.push(
+            Conn::try_ws(rig.ws_port, None, "/")
+                .await
+                .expect("within the cap"),
+        );
+    }
+    assert!(
+        Conn::try_ws(rig.ws_port, None, "/").await.is_err(),
+        "the fourth unauthenticated connection was admitted"
+    );
+    // Once a slot is free, the next is admitted.
+    drop(open.pop());
+    let mut admitted = false;
+    for _ in 0..50 {
+        if Conn::try_ws(rig.ws_port, None, "/").await.is_ok() {
+            admitted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(admitted, "a released slot was not reusable");
+    drop(open);
+    // An authenticated device frees its slot after the upgrade, so strangers
+    // holding every slot cannot keep it out once connected.
+    let mut device = rig.device(&dev.token, &[], vec![]).await;
+    device.sync().await;
+}
+
+#[tokio::test]
+async fn the_per_address_cap_applies_before_the_global_one() {
+    let limits = nostromo::ipc::ws::WsLimits {
+        max_unauthenticated: 10,
+        max_unauthenticated_per_ip: 2,
+        ..Default::default()
+    };
+    let rig = Rig::with_limits(limits).await;
+    let _a = Conn::try_ws(rig.ws_port, None, "/").await.unwrap();
+    let _b = Conn::try_ws(rig.ws_port, None, "/").await.unwrap();
+    assert!(Conn::try_ws(rig.ws_port, None, "/").await.is_err());
+}
+
+#[tokio::test]
+async fn a_device_may_hold_only_so_many_sockets() {
+    let limits = nostromo::ipc::ws::WsLimits {
+        max_sockets_per_device: 2,
+        ..Default::default()
+    };
+    let rig = Rig::with_limits(limits).await;
+    let dev = rig.mint_device("iPhone");
+    let mut one = rig.device(&dev.token, &[], vec![]).await;
+    let mut two = rig.device(&dev.token, &[], vec![]).await;
+    one.sync().await;
+    two.sync().await;
+    let mut three = rig.device_raw(&dev.token).await;
+    assert_eq!(three.expect_close().await, Some(1008), "the third socket");
+    // The first two are untouched.
+    one.sync().await;
+    two.sync().await;
+}
+
+#[tokio::test]
+async fn an_upgrade_carrying_an_origin_header_is_refused_even_with_a_valid_token() {
+    let rig = Rig::new().await;
+    let dev = rig.mint_device("iPhone");
+    for token in [None, Some(dev.token.as_str())] {
+        match Conn::try_ws_with_header(rig.ws_port, token, ("Origin", "https://evil.example")).await
+        {
+            Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+                assert_eq!(resp.status().as_u16(), 403, "token: {token:?}");
+            }
+            Err(other) => panic!("expected HTTP 403, got {other:?}"),
+            Ok(_) => panic!("a browser-origin upgrade was admitted (token: {token:?})"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_pairing_socket_refuses_a_message_over_a_few_kib() {
+    let rig = Rig::new().await;
+    let mut sock = rig.pairing_socket().await;
+    sock.try_send_text("x".repeat(nostromo::ipc::ws::PAIRING_MAX_MESSAGE + 1))
+        .await;
+    assert_eq!(sock.expect_close().await, Some(1009));
+
+    // A real pairing frame is nowhere near the cap.
+    let mut sock = rig.pairing_socket().await;
+    sock.send(&Conn::hello(&[], true)).await;
+    sock.next_matching("the Welcome", |m| matches!(m, ServerMsg::Welcome { .. }))
+        .await;
+}

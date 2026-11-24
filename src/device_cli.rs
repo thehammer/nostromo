@@ -24,6 +24,7 @@ pub const EXPIRED_LINE: &str = "Code expired. Run the command again for a new on
 pub const LOCKED_OUT_LINE: &str =
     "Too many wrong attempts. This code is no longer valid. Run the command again for a new one.";
 pub const CANCELLED_LINE: &str = "Cancelled. The code no longer works.";
+pub const FAILED_LINE: &str = "The device presented the code but the server could not save it. This code no longer works. Check the server log and run the command again.";
 pub const LOST_CONNECTION_LINE: &str = "Lost the connection to the server. This code no longer works. Run the command again when you're connected.";
 
 /// Exit codes.
@@ -40,6 +41,7 @@ pub fn outcome_report(outcome: PairOutcomeKind, name: Option<&str>) -> (String, 
         PairOutcomeKind::LockedOut => (LOCKED_OUT_LINE.to_string(), EXIT_FAILED),
         PairOutcomeKind::Cancelled => (CANCELLED_LINE.to_string(), EXIT_CANCELLED),
         PairOutcomeKind::ConnectionLost => (LOST_CONNECTION_LINE.to_string(), EXIT_FAILED),
+        PairOutcomeKind::Failed => (FAILED_LINE.to_string(), EXIT_FAILED),
     }
 }
 
@@ -226,6 +228,7 @@ pub fn admin_error_text(reason: &str) -> String {
         "unknown_device" => "No such device.".to_string(),
         "ambiguous_name" => "More than one device has that name; use its id.".to_string(),
         "unknown_pairing" => "No such pairing.".to_string(),
+        "not_saved" => "The change took effect now but could not be saved, so it will be undone when the daemon restarts. Check the disk and the daemon log, then repeat it.".to_string(),
         "devices_unavailable" => {
             "This daemon has no device listener. Set ws_addr (or unset NOSTROMD_WS_ADDR=off) and restart it.".to_string()
         }
@@ -478,6 +481,7 @@ mod tests {
             (PairOutcomeKind::LockedOut, LOCKED_OUT_LINE, 1),
             (PairOutcomeKind::Cancelled, CANCELLED_LINE, 130),
             (PairOutcomeKind::ConnectionLost, LOST_CONNECTION_LINE, 1),
+            (PairOutcomeKind::Failed, FAILED_LINE, 1),
         ] {
             assert_eq!(outcome_report(outcome, None), (line.to_string(), code));
         }

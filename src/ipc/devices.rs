@@ -123,6 +123,8 @@ pub enum PairOutcomeKind {
     Cancelled,
     LockedOut,
     ConnectionLost,
+    /// The code was redeemed but the device could not be saved.
+    Failed,
 }
 
 // ── records ───────────────────────────────────────────────────────────────────
@@ -188,8 +190,20 @@ pub enum DeviceStanding {
     Revoked(RevokedBy),
 }
 
+/// A secret that never prints: its `Debug` is redacted, so a stray `{:?}` of a
+/// message or struct holding a token cannot leak it. Serialises as the bare string.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
+}
+
 /// The result of redeeming a pairing.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Redeemed {
     pub device_id: String,
     /// The token's only plaintext. Goes into the `Paired` reply and nowhere else.
@@ -198,10 +212,24 @@ pub struct Redeemed {
     pub replaced: bool,
 }
 
+impl std::fmt::Debug for Redeemed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Redeemed")
+            .field("device_id", &self.device_id)
+            .field("token", &"<redacted>")
+            .field("name", &self.name)
+            .field("replaced", &self.replaced)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RevokeError {
     Unknown,
     Ambiguous,
+    /// The change is in effect in memory (live sockets are closed) but could
+    /// not be written to disk, so it would be undone by a restart.
+    NotSaved,
 }
 
 /// The device a revoke hit.
@@ -217,7 +245,14 @@ pub struct DeviceRegistry {
     path: PathBuf,
     state: Mutex<RegistryFile>,
     epoch: watch::Sender<u64>,
+    /// When `last_seen_at` was last written to disk, and how often it may be.
+    touch_saved: Mutex<Option<std::time::Instant>>,
+    touch_save_every: std::time::Duration,
 }
+
+/// `last_seen_at` is kept in memory on every connect and disconnect but written
+/// to disk at most this often, so a client cannot make the daemon hammer the disk.
+const TOUCH_SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// `~/.nostromo/devices.json`, or `NOSTROMO_DEVICES_PATH`.
 pub fn default_devices_path() -> PathBuf {
@@ -249,11 +284,19 @@ impl DeviceRegistry {
             path,
             state: Mutex::new(file),
             epoch,
+            touch_saved: Mutex::new(None),
+            touch_save_every: TOUCH_SAVE_EVERY,
         };
         if minted {
             registry.save(&registry.state.lock().unwrap())?;
         }
         Ok(registry)
+    }
+
+    /// How often `last_seen_at` may be written to disk (tests shorten it).
+    pub fn with_touch_save_every(mut self, every: std::time::Duration) -> Self {
+        self.touch_save_every = every;
+        self
     }
 
     pub fn server_id(&self) -> String {
@@ -393,13 +436,20 @@ impl DeviceRegistry {
                 id: rec.id.clone(),
                 name: rec.name.clone(),
             };
-            if let Err(e) = self.save(&state) {
-                tracing::warn!("could not save the device registry: {e:#}");
-            }
-            revoked
+            let saved = self.save(&state);
+            (revoked, saved)
         };
+        // The revoke is in effect either way: live sockets close now.
         self.bump();
-        Ok(revoked)
+        match revoked {
+            (revoked, Ok(())) => Ok(revoked),
+            (_, Err(e)) => {
+                tracing::error!(
+                    "could not save the device registry; a revoke is not durable: {e:#}"
+                );
+                Err(RevokeError::NotSaved)
+            }
+        }
     }
 
     /// Set a satellite's device-admin level, by id or active name.
@@ -428,23 +478,37 @@ impl DeviceRegistry {
                 id: rec.id.clone(),
                 name: rec.name.clone(),
             };
-            if let Err(e) = self.save(&state) {
-                tracing::warn!("could not save the device registry: {e:#}");
-            }
-            done
+            let saved = self.save(&state);
+            (done, saved)
         };
         self.bump();
-        Ok(done)
+        match done {
+            (done, Ok(())) => Ok(done),
+            (_, Err(e)) => {
+                tracing::error!(
+                    "could not save the device registry; a change is not durable: {e:#}"
+                );
+                Err(RevokeError::NotSaved)
+            }
+        }
     }
 
-    /// Record that a device was just seen.
+    /// Record that a device was just seen. The time is kept in memory at once
+    /// and written to disk at most once per `touch_save_every`.
     pub fn touch(&self, id: &str) {
         let mut state = self.state.lock().unwrap();
-        if let Some(rec) = state.devices.iter_mut().find(|d| d.id == id) {
-            rec.last_seen_at = Some(Utc::now());
-            if let Err(e) = self.save(&state) {
-                tracing::warn!("could not save the device registry: {e:#}");
-            }
+        let Some(rec) = state.devices.iter_mut().find(|d| d.id == id) else {
+            return;
+        };
+        rec.last_seen_at = Some(Utc::now());
+        let mut saved = self.touch_saved.lock().unwrap();
+        let now = std::time::Instant::now();
+        if saved.is_some_and(|t| now.duration_since(t) < self.touch_save_every) {
+            return;
+        }
+        *saved = Some(now);
+        if let Err(e) = self.save(&state) {
+            tracing::warn!("could not save the device registry: {e:#}");
         }
     }
 
@@ -517,15 +581,24 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Invisible format characters that can hide or reorder text in a terminal:
+/// soft hyphen, Arabic letter mark, Mongolian vowel separator, zero-width and
+/// directional marks and overrides, word joiner and invisible operators, the
+/// BOM, interlinear annotation, and the tag characters.
+fn is_invisible_format(c: char) -> bool {
+    matches!(c,
+        '\u{00ad}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}'
+        | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}'
+        | '\u{fff9}'..='\u{fffb}' | '\u{e0000}'..='\u{e007f}')
+}
+
 /// `name`, or `name 2`, `name 3`, … the first free among active devices.
 fn unique_name(devices: &[DeviceRecord], name: &str) -> String {
     // Device-supplied: drop control characters (ESC, bidi overrides) and cap
     // the length so the name is safe to print in a terminal.
     let cleaned: String = name
         .chars()
-        .filter(|c| {
-            !c.is_control() && !matches!(*c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-        })
+        .filter(|c| !c.is_control() && !is_invisible_format(*c))
         .take(64)
         .collect();
     let name = cleaned.trim();
@@ -783,5 +856,117 @@ mod tests {
             Some(SatelliteAdmin::ReadOnly)
         );
         assert_eq!(SatelliteAdmin::parse("bogus"), None);
+    }
+
+    #[test]
+    fn the_proof_encoding_is_pinned_by_a_fixed_vector() {
+        // Copy this vector into the Kit side (W11); see docs/plans/backplane/W9-ws-transport.md.
+        let token = "dG9rZW4tZm9yLXRoZS1maXhlZC12ZWN0b3ItMDAwMDAwMDA";
+        let challenge = "Y2hhbGxlbmdlLWZvci10aGUtZml4ZWQtdmVjdG9yLTAwMDA";
+        // The key is the raw SHA-256 of the token's base64url text.
+        let key = Sha256::digest(token.as_bytes());
+        assert_eq!(
+            key.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            "6ea97a4459aa83bb2f9776d280a02605de0d9614bb35991db08c6173e40fc47c"
+        );
+        // The message is the challenge's base64url text, then the code as digits.
+        // base64url, no padding.
+        assert_eq!(
+            proof_for_token(token, challenge, "123456"),
+            "ONMjmbNsnby-4Laxp33owC99gferbRJQsDdW6Ofz4cA"
+        );
+        assert_eq!(
+            pairing_proof(&key, challenge, "123456"),
+            "ONMjmbNsnby-4Laxp33owC99gferbRJQsDdW6Ofz4cA"
+        );
+    }
+
+    #[test]
+    fn the_proof_uses_the_code_as_digits_whatever_its_spacing() {
+        let (_d, reg) = registry();
+        let r = reg
+            .redeem("iPhone", DeviceKind::Iphone, None, None)
+            .unwrap();
+        let proof = proof_for_token(&r.token, "chal", "123456");
+        assert_eq!(
+            reg.match_proof("chal", "123456", &proof).as_deref(),
+            Some(r.device_id.as_str())
+        );
+    }
+
+    #[test]
+    fn last_seen_is_written_to_disk_at_most_once_per_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let reg = DeviceRegistry::load(&path)
+            .unwrap()
+            .with_touch_save_every(std::time::Duration::from_secs(3600));
+        let r = reg
+            .redeem("iPhone", DeviceKind::Iphone, None, None)
+            .unwrap();
+        reg.touch(&r.device_id);
+        let after_first = std::fs::read(&path).unwrap();
+        reg.touch(&r.device_id);
+        reg.touch(&r.device_id);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            after_first,
+            "a later touch rewrote the file"
+        );
+        // The listing still sees the newest time.
+        let (devices, _) = reg.summaries(|_| false);
+        assert!(devices[0].last_seen_at.is_some());
+
+        // With no interval every touch is written.
+        let eager = DeviceRegistry::load(dir.path().join("eager.json"))
+            .unwrap()
+            .with_touch_save_every(std::time::Duration::ZERO);
+        let e = eager.redeem("iPad", DeviceKind::Ipad, None, None).unwrap();
+        eager.touch(&e.device_id);
+        let first = std::fs::read(dir.path().join("eager.json")).unwrap();
+        eager.touch(&e.device_id);
+        assert_ne!(std::fs::read(dir.path().join("eager.json")).unwrap(), first);
+    }
+
+    #[test]
+    fn invisible_format_characters_are_dropped_from_names() {
+        let (_d, reg) = registry();
+        let evil =
+            "A\u{200b}B\u{200f}C\u{061c}D\u{feff}E\u{202e}F\u{2060}G\u{e0041}H\u{00ad}I\u{1b}J";
+        let r = reg.redeem(evil, DeviceKind::Iphone, None, None).unwrap();
+        assert_eq!(r.name, "ABCDEFGHIJ");
+    }
+
+    #[test]
+    fn a_token_never_prints_in_debug_output() {
+        let (_d, reg) = registry();
+        let r = reg
+            .redeem("iPhone", DeviceKind::Iphone, None, None)
+            .unwrap();
+        assert!(!format!("{r:?}").contains(&r.token));
+        let msg = crate::ipc::protocol::ServerMsg::Paired {
+            device_id: r.device_id.clone(),
+            token: Secret(r.token.clone()),
+            name: r.name.clone(),
+            server_id: "s".into(),
+            replaced: false,
+        };
+        assert!(!format!("{msg:?}").contains(&r.token));
+        // The wire form still carries it.
+        assert!(serde_json::to_string(&msg).unwrap().contains(&r.token));
+    }
+
+    #[test]
+    fn a_revoke_that_cannot_be_saved_is_reported_but_stays_in_effect() {
+        let (dir, reg) = registry();
+        let r = reg
+            .redeem("iPhone", DeviceKind::Iphone, None, None)
+            .unwrap();
+        std::fs::create_dir(dir.path().join("devices.json.tmp")).unwrap();
+        assert_eq!(
+            reg.revoke(&r.device_id, RevokedBy::Operator),
+            Err(RevokeError::NotSaved)
+        );
+        assert_eq!(reg.validate(&r.token), TokenCheck::Revoked);
     }
 }

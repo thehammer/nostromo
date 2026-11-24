@@ -16,7 +16,7 @@
 //!   reach the server".
 
 use std::collections::{HashMap, VecDeque};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,7 +24,7 @@ use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
@@ -34,7 +34,7 @@ use tracing::{debug, info, warn};
 
 use super::codec::read_frame;
 use super::decisions::DecisionRegistry;
-use super::device_hub::{ConnGuard, DeviceHub, HubSlot};
+use super::device_hub::{DeviceHub, HubSlot};
 use super::devices::{DeviceStanding, RevokedBy, TokenCheck};
 use super::protocol::{ClientMsg, ServerMsg, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION};
 use super::server::{handle_client, HeldMotherJobs, PeerOrigin, RetainedCache};
@@ -58,6 +58,100 @@ const UPGRADE_WINDOW: Duration = Duration::from_secs(60);
 
 /// How often a connected device's `last_seen_at` is persisted.
 const TOUCH_EVERY: Duration = Duration::from_secs(60);
+
+/// A pairing frame (`Hello`, `PairCheck`, `Pair`) is well under 1 KiB; a
+/// pairing-only socket refuses anything beyond a few KiB.
+pub const PAIRING_MAX_MESSAGE: usize = 4 * 1024;
+
+/// Limits on connections that have not authenticated yet, and on devices.
+#[derive(Debug, Clone)]
+pub struct WsLimits {
+    /// How long the HTTP upgrade may take, from accept to a complete handshake.
+    pub handshake_timeout: Duration,
+    /// Connections in the unauthenticated stage (handshake, or a pairing-only
+    /// socket), all addresses together.
+    pub max_unauthenticated: usize,
+    /// The same, per source address (IPv6: per /64).
+    pub max_unauthenticated_per_ip: usize,
+    /// Concurrent authenticated sockets of one device.
+    pub max_sockets_per_device: usize,
+}
+
+impl Default for WsLimits {
+    fn default() -> Self {
+        Self {
+            handshake_timeout: Duration::from_secs(10),
+            max_unauthenticated: 64,
+            max_unauthenticated_per_ip: 32,
+            max_sockets_per_device: 8,
+        }
+    }
+}
+
+/// Counts connections in the unauthenticated stage, globally and per address.
+struct UnauthSlots {
+    global: Arc<Semaphore>,
+    per_ip: Mutex<HashMap<IpAddr, usize>>,
+    max_per_ip: usize,
+}
+
+/// A held slot; dropping it releases both counts.
+pub(super) struct UnauthSlot {
+    slots: Arc<UnauthSlots>,
+    key: IpAddr,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl UnauthSlots {
+    fn new(limits: &WsLimits) -> Arc<Self> {
+        Arc::new(Self {
+            global: Arc::new(Semaphore::new(limits.max_unauthenticated)),
+            per_ip: Mutex::new(HashMap::new()),
+            max_per_ip: limits.max_unauthenticated_per_ip,
+        })
+    }
+
+    fn try_acquire(self: &Arc<Self>, ip: IpAddr) -> Option<UnauthSlot> {
+        let key = ip_key(ip);
+        let permit = Arc::clone(&self.global).try_acquire_owned().ok()?;
+        let mut per_ip = self.per_ip.lock().unwrap();
+        let n = per_ip.entry(key).or_insert(0);
+        if *n >= self.max_per_ip {
+            return None;
+        }
+        *n += 1;
+        Some(UnauthSlot {
+            slots: Arc::clone(self),
+            key,
+            _permit: permit,
+        })
+    }
+}
+
+impl Drop for UnauthSlot {
+    fn drop(&mut self) {
+        let mut per_ip = self.slots.per_ip.lock().unwrap();
+        if let Some(n) = per_ip.get_mut(&self.key) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                per_ip.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// The key an address is limited under: IPv6 by its /64 (one subscriber or
+/// host owns a whole /64, so per-address limits would be free to dodge).
+fn ip_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => {
+            let mut o = v6.octets();
+            o[8..].fill(0);
+            IpAddr::V6(Ipv6Addr::from(o))
+        }
+        v4 => v4,
+    }
+}
 
 /// Everything `handle_client` needs, bundled for the accept loop.
 pub(super) struct WsShared {
@@ -95,6 +189,7 @@ impl UpgradeLimiter {
 
     /// Record an unauthenticated upgrade from `ip`; false once over the limit.
     pub fn allow(&self, ip: IpAddr, now: Instant) -> bool {
+        let ip = ip_key(ip);
         let mut hits = self.hits.lock().unwrap();
         hits.retain(|_, q| {
             while q
@@ -130,6 +225,13 @@ fn bearer(req: &Request) -> Option<&str> {
         .filter(|t| !t.is_empty())
 }
 
+fn forbidden() -> ErrorResponse {
+    tokio_tungstenite::tungstenite::http::Response::builder()
+        .status(403)
+        .body(None)
+        .expect("a static response")
+}
+
 fn too_many_requests() -> ErrorResponse {
     tokio_tungstenite::tungstenite::http::Response::builder()
         .status(429)
@@ -137,20 +239,72 @@ fn too_many_requests() -> ErrorResponse {
         .expect("a static response")
 }
 
+/// A bound WebSocket listener and the device hub behind it.
+pub struct WsSetup {
+    pub listener: TcpListener,
+    pub hub: Arc<DeviceHub>,
+    pub bound: std::net::SocketAddr,
+    pub pair_host: String,
+}
+
+/// Bind the WebSocket listener and load the device registry. An error here
+/// (a busy port, an unreadable `devices.json`) is for the daemon to log and
+/// carry on without device features, never to die of.
+pub async fn setup_listener(
+    config: &crate::config::Config,
+    addr: std::net::SocketAddr,
+    devices_path: std::path::PathBuf,
+) -> Result<WsSetup> {
+    use anyhow::Context;
+    let listener = TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("binding WebSocket listener at {addr}"))?;
+    let bound = listener.local_addr()?;
+    let pair_host = config.resolve_pair_host(bound);
+    let registry = super::devices::DeviceRegistry::load(devices_path)
+        .context("loading the device registry")?;
+    let hub = DeviceHub::new(
+        Arc::new(registry),
+        super::pairing::PAIRING_TTL,
+        pair_host.clone(),
+        bound.port(),
+    );
+    Ok(WsSetup {
+        listener,
+        hub,
+        bound,
+        pair_host,
+    })
+}
+
 pub(super) async fn accept_loop_ws(
     listener: TcpListener,
     hub: Arc<DeviceHub>,
     shared: WsShared,
+    limits: WsLimits,
 ) -> Result<()> {
     let shared = Arc::new(shared);
     let limiter = Arc::new(UpgradeLimiter::default());
+    let slots = UnauthSlots::new(&limits);
+    let limits = Arc::new(limits);
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
-                let (hub, shared, limiter) =
-                    (Arc::clone(&hub), Arc::clone(&shared), Arc::clone(&limiter));
+                // Over the cap: drop the socket without reading a byte.
+                let Some(slot) = slots.try_acquire(addr.ip()) else {
+                    debug!(%addr, "WebSocket connection refused: too many unauthenticated connections");
+                    continue;
+                };
+                let (hub, shared, limiter, limits) = (
+                    Arc::clone(&hub),
+                    Arc::clone(&shared),
+                    Arc::clone(&limiter),
+                    Arc::clone(&limits),
+                );
                 tokio::spawn(async move {
-                    if let Err(e) = serve(stream, addr.ip(), hub, shared, limiter).await {
+                    if let Err(e) =
+                        serve(stream, addr.ip(), slot, hub, shared, limiter, limits).await
+                    {
                         debug!(%addr, "WebSocket client ended: {e:#}");
                     }
                 });
@@ -173,15 +327,22 @@ fn ws_config() -> WebSocketConfig {
 async fn serve(
     stream: TcpStream,
     ip: IpAddr,
+    slot: UnauthSlot,
     hub: Arc<DeviceHub>,
     shared: Arc<WsShared>,
     limiter: Arc<UpgradeLimiter>,
+    limits: Arc<WsLimits>,
 ) -> Result<()> {
     let admission: Arc<Mutex<Option<Admission>>> = Arc::new(Mutex::new(None));
-    let slot = Arc::clone(&admission);
+    let decided_slot = Arc::clone(&admission);
     let registry = Arc::clone(hub.registry());
     #[allow(clippy::result_large_err)] // the callback's `ErrorResponse` is fixed by tungstenite
     let callback = move |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
+        // Browsers always send `Origin` on a WebSocket upgrade and native apps
+        // never do: refuse a page that tries to reach this port.
+        if req.headers().contains_key("origin") {
+            return Err(forbidden());
+        }
         let decided = match bearer(req).map(|t| registry.validate(t)) {
             Some(TokenCheck::Active { id }) => Admission::Paired(id),
             Some(TokenCheck::Revoked) => Admission::Rejected("revoked"),
@@ -192,14 +353,25 @@ async fn serve(
         if !matches!(decided, Admission::Paired(_)) && !limiter.allow(ip, Instant::now()) {
             return Err(too_many_requests());
         }
-        *slot.lock().unwrap() = Some(decided);
+        *decided_slot.lock().unwrap() = Some(decided);
         Ok(resp)
     };
-    let ws = accept_hdr_async_with_config(stream, callback, Some(ws_config())).await?;
+    // A client that opens the socket and says nothing (or trickles bytes) must
+    // not hold a task and a descriptor for ever.
+    let ws = tokio::time::timeout(
+        limits.handshake_timeout,
+        accept_hdr_async_with_config(stream, callback, Some(ws_config())),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("the WebSocket handshake timed out"))??;
     let admitted = admission.lock().unwrap().take();
     match admitted {
-        Some(Admission::Paired(id)) => run_paired(ws, id, hub, shared).await,
-        Some(Admission::PairingOnly) => run_pairing_only(ws, hub).await,
+        Some(Admission::Paired(id)) => {
+            // Authenticated: no longer counted against the unauthenticated caps.
+            drop(slot);
+            run_paired(ws, id, hub, shared, limits.max_sockets_per_device).await
+        }
+        Some(Admission::PairingOnly) => run_pairing_only(ws, hub, slot).await,
         Some(Admission::Rejected(reason)) => {
             reject(ws, reason).await;
             Ok(())
@@ -254,7 +426,12 @@ fn pairing_welcome() -> ServerMsg {
     }
 }
 
-async fn run_pairing_only(mut ws: WebSocketStream<TcpStream>, hub: Arc<DeviceHub>) -> Result<()> {
+async fn run_pairing_only(
+    mut ws: WebSocketStream<TcpStream>,
+    hub: Arc<DeviceHub>,
+    _slot: UnauthSlot,
+) -> Result<()> {
+    let socket_id = hub.next_socket_id();
     let deadline = tokio::time::Instant::now() + PAIRING_SOCKET_LIFETIME;
     loop {
         let next = tokio::time::timeout_at(deadline, ws.next()).await;
@@ -272,6 +449,10 @@ async fn run_pairing_only(mut ws: WebSocketStream<TcpStream>, hub: Arc<DeviceHub
         };
         if let Some(close) = close_for_bad_frame(&frame) {
             let _ = ws.send(close).await;
+            return Ok(());
+        }
+        if matches!(&frame, Message::Text(t) if t.len() > PAIRING_MAX_MESSAGE) {
+            let _ = ws.send(close_msg(1009, "frame too large")).await;
             return Ok(());
         }
         let body = match frame {
@@ -295,14 +476,16 @@ async fn run_pairing_only(mut ws: WebSocketStream<TcpStream>, hub: Arc<DeviceHub
                 }
                 pairing_welcome()
             }
-            Ok(ClientMsg::PairCheck { code, proof }) => hub.pair_check(&code, proof.as_deref()),
+            Ok(ClientMsg::PairCheck { code, proof }) => {
+                hub.pair_check(socket_id, &code, proof.as_deref())
+            }
             Ok(ClientMsg::Pair {
                 code,
                 name,
                 kind,
                 replace,
             }) => {
-                let reply = hub.pair(&code, &name, kind, replace);
+                let reply = hub.pair(socket_id, &code, &name, kind, replace);
                 // One `Pair` per socket: reply, then close.
                 let _ = ws.send(text(&reply)).await;
                 let _ = ws.send(close_msg(1000, "done")).await;
@@ -336,8 +519,14 @@ async fn run_paired(
     device_id: String,
     hub: Arc<DeviceHub>,
     shared: Arc<WsShared>,
+    max_sockets: usize,
 ) -> Result<()> {
-    let _conn: ConnGuard = hub.connected(&device_id);
+    let Some(_conn) = hub.try_connected(&device_id, max_sockets) else {
+        let mut ws = ws;
+        let _ = ws.send(close_msg(1008, "too many connections")).await;
+        let _ = ws.flush().await;
+        return Ok(());
+    };
     info!(device = %device_id, "device connected");
     let registry = Arc::clone(hub.registry());
     let mut epoch = registry.subscribe_epoch();
@@ -473,6 +662,35 @@ mod tests {
         assert!(!limiter.allow(a, t0));
         assert!(limiter.allow(b, t0), "another address has its own budget");
         assert!(limiter.allow(a, t0 + Duration::from_secs(61)));
+    }
+
+    #[test]
+    fn an_ipv6_address_is_limited_by_its_slash_64() {
+        let limiter = UpgradeLimiter::new(2, Duration::from_secs(60));
+        let a: IpAddr = "2001:db8:1:2::1".parse().unwrap();
+        let same_64: IpAddr = "2001:db8:1:2:ffff::9".parse().unwrap();
+        let other_64: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        let t0 = Instant::now();
+        assert!(limiter.allow(a, t0));
+        assert!(limiter.allow(same_64, t0));
+        assert!(!limiter.allow(a, t0), "the whole /64 shares one budget");
+        assert!(limiter.allow(other_64, t0));
+    }
+
+    #[test]
+    fn the_unauthenticated_slots_are_counted_per_slash_64_and_released() {
+        let limits = WsLimits {
+            max_unauthenticated: 10,
+            max_unauthenticated_per_ip: 1,
+            ..Default::default()
+        };
+        let slots = UnauthSlots::new(&limits);
+        let a: IpAddr = "2001:db8:1:2::1".parse().unwrap();
+        let same_64: IpAddr = "2001:db8:1:2::2".parse().unwrap();
+        let held = slots.try_acquire(a).expect("the first");
+        assert!(slots.try_acquire(same_64).is_none());
+        drop(held);
+        assert!(slots.try_acquire(same_64).is_some());
     }
 
     #[test]

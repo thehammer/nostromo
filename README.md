@@ -125,7 +125,9 @@ identity: it can be revoked on its own.
 | Setting | Meaning |
 | --- | --- |
 | `ws_addr` in `config.toml` / `NOSTROMD_WS_ADDR` | Where to listen. Default `127.0.0.1:47101` (loopback). The primary opts in with `0.0.0.0:47101` or its VPN/LAN address; `off` disables the listener. |
-| `pair_host` | The host devices are told to use (it goes in the pairing QR). Default: the bound address if specific, otherwise this host's first non-loopback IPv4 address. Logged at start. |
+| `pair_host` | The host devices are told to use (it goes in the pairing QR). Default: the bound address if specific, otherwise this host's first non-loopback IPv4 address (the default route, usually Wi-Fi/LAN). Logged at start; a startup warning fires when the listener is non-loopback and `pair_host` is unset. |
+
+**WireGuard only.** The transport is plaintext `ws://` carrying long-lived bearer tokens. Bind it to a loopback or WireGuard address and set `pair_host` to the WireGuard address; never expose it on Wi-Fi or the open LAN. An unparseable `ws_addr` logs a warning and falls back to loopback.
 
 Pair and manage devices with the `nostromo` command (installed with the daemon;
 it talks to the local daemon over the Unix socket):

@@ -39,11 +39,11 @@ pub mod perri_state;
 pub mod protocol;
 pub mod scrollback;
 pub mod server;
-pub mod ws;
 pub mod session_manager;
 pub mod stream_json;
 pub mod task_output;
 pub mod tasks;
+pub mod ws;
 
 pub use client::{ConnectionState, DaemonClient};
 pub use protocol::{default_socket_path, ClientMsg, ServerMsg, Topic};
