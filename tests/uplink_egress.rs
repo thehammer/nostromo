@@ -804,6 +804,113 @@ fn metadata_shape_rejects_frames_that_still_carry_text() {
     }
 }
 
+/// Set every string under `key`, at any depth, to `bad`; returns how many.
+fn overwrite_key(v: &mut Value, key: &str, bad: &str) -> usize {
+    let mut n = 0;
+    match v {
+        Value::Object(map) => {
+            for (k, child) in map.iter_mut() {
+                if k == key && child.is_string() {
+                    *child = json!(bad);
+                    n += 1;
+                } else {
+                    n += overwrite_key(child, key, bad);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                n += overwrite_key(item, key, bad);
+            }
+        }
+        _ => {}
+    }
+    n
+}
+
+#[test]
+fn metadata_shape_accepts_what_redaction_makes_and_rejects_any_other_tag_ref_or_request_id_format()
+{
+    // Controls first: every redacted frame passes, so a rejection below is
+    // down to the one field we spoiled and nothing else.
+    let mut exercised = std::collections::BTreeMap::<&str, usize>::new();
+    for (name, input) in allowed_frames() {
+        let redacted = redact_for_uplink_metadata(input, &KEY).expect(name);
+        assert!(is_uplink_metadata_shape(&redacted), "{name}: control");
+        let base = serde_json::to_value(&redacted).unwrap();
+
+        // Tags: `f-` plus exactly eight lower-case hex.
+        for bad in [
+            "",
+            "f-",
+            "f-abc",
+            "f-0123456",
+            "f-012345678",
+            "f-ABCDEF12",
+            "f-zzzzzzzz",
+            "x-01234567",
+            "01234567",
+            "cody-core-1",
+        ] {
+            let mut v = base.clone();
+            let n = overwrite_key(&mut v, "tag", bad);
+            if n == 0 {
+                continue;
+            }
+            *exercised.entry("tag").or_default() += 1;
+            let spoiled: ServerMsg = serde_json::from_value(v).unwrap();
+            assert!(
+                !is_uplink_metadata_shape(&spoiled),
+                "{name}: tag {bad:?} must fail the shape check"
+            );
+        }
+
+        // Request ids: short and plain, never free text.
+        for bad in ["", "has space", "semi;colon", &"a".repeat(65)] {
+            let mut v = base.clone();
+            if overwrite_key(&mut v, "request_id", bad) == 0 {
+                continue;
+            }
+            *exercised.entry("request_id").or_default() += 1;
+            let spoiled: ServerMsg = serde_json::from_value(v).unwrap();
+            assert!(
+                !is_uplink_metadata_shape(&spoiled),
+                "{name}: request_id {bad:?} must fail the shape check"
+            );
+        }
+
+        // Job refs: exactly eight lower-case hex.
+        if name == "mother_jobs" {
+            for bad in [
+                "",
+                "abc",
+                "abcdef123",
+                "ABCDEF12",
+                "zzzzzzzz",
+                "job-1234",
+                "my-secret-job",
+            ] {
+                let mut v = base.clone();
+                let jobs = v["jobs"].as_array_mut().expect("jobs");
+                assert!(!jobs.is_empty(), "the control frame lists a job");
+                jobs[0]["id"] = json!(bad);
+                *exercised.entry("job_ref").or_default() += 1;
+                let spoiled: ServerMsg = serde_json::from_value(v).unwrap();
+                assert!(
+                    !is_uplink_metadata_shape(&spoiled),
+                    "mother_jobs: job ref {bad:?} must fail the shape check"
+                );
+            }
+        }
+    }
+    for kind in ["tag", "request_id", "job_ref"] {
+        assert!(
+            exercised.get(kind).copied().unwrap_or(0) > 0,
+            "no frame exercised the {kind} check"
+        );
+    }
+}
+
 // ── W10-18: the redaction match is exhaustive ────────────────────────────────
 
 fn server_msg_variants() -> Vec<String> {
@@ -1059,9 +1166,7 @@ fn mothers_real_job_shape_publishes_metadata_and_no_text() {
     let decision = &jobs[2]["decision"];
     assert_eq!(decision["kind"], "gate_hold");
     assert!(
-        decision["options"]
-            .as_array()
-            .is_none_or(|o| o.is_empty()),
+        decision["options"].as_array().is_none_or(|o| o.is_empty()),
         "option text must go"
     );
 }
