@@ -1,7 +1,7 @@
 # PRD: Tell the operator what needs them, without telling anyone else
 
 **Author:** Ada
-**Status:** Signed off by Ada 2026-11-23. Design loop closed for Archie (S1–S8 signed, S4 withdrawn, new S7a specified; the operator answered Q3–Q7 of Ada's memo). Operator questions still open, each with a v1 default, are listed in `docs/prds/daemon-pairing-flow.md`, open questions 3–5; open question 4 (employer policy on Kobe metadata) has a permissive default and must be confirmed before W10 ships. See "Sign-off and decision log" at the end.
+**Status:** Signed off by Ada 2026-11-23. Design loop closed for Archie (S1–S8 signed, S4 withdrawn, new S7a specified; the operator answered Q3–Q7 of Ada's memo). One operator question is still open, listed in `docs/prds/daemon-pairing-flow.md` as open question 4 (employer policy on Kobe metadata): it has a permissive default and must be confirmed before W10 ships. Open questions 3 and 5 were answered 2026-11-23 (Fred on Sendai reads Google accounts; calendar stays home). See "Sign-off and decision log" at the end.
 **Answers:** Q2 in `docs/plans/backplane-sequencing.md`
 **Unblocks wedge:** W13 `push-relay` (`docs/plans/backplane/W13-push-relay.md`) and W16 `ios-push-enrichment`
 **Surface:** iPhone (and iPad, same app) notifications; the operator's own machines; the hosted relay as seen from outside.
@@ -667,13 +667,14 @@ Both answered by the operator on 2026-10-10. Answer 2 was partly reversed on
    enriched, and the phone answers nothing. Carefeed content stays off the
    phone's screen in v1 except as fixed-vocabulary metadata.
 
-**Still open for the operator** (each with a conservative v1 default, listed
-in `docs/prds/daemon-pairing-flow.md`, open questions 3–5): whose Microsoft
-365 mail Fred reads on Sendai; whether the employer's policy allows Kobe's
-job states, references and host name to leave Kobe for the server, this
-relay, Apple and a personal phone (v1 assumes yes; if not, Kobe sends no
-pushes); and whether calendar stays home too (v1: yes; calendar is not a
-push kind either way).
+**Answered 2026-11-23** (`docs/prds/daemon-pairing-flow.md`, open questions 3
+and 5): Fred on Sendai reads Google accounts, and calendar stays home
+(calendar is not a push kind either way).
+
+**Still open for the operator** (`docs/prds/daemon-pairing-flow.md`, open
+question 4): whether the employer's policy allows Kobe's job states,
+references and host name to leave Kobe for the server, this relay, Apple and
+a personal phone (v1 assumes yes; if not, Kobe sends no pushes).
 
 ---
 
