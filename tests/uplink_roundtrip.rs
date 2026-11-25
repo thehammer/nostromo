@@ -1275,7 +1275,8 @@ async fn a_tag_key_at_the_wrong_mode_stops_the_uplink_from_ever_dialing() {
             std::fs::set_permissions(key, std::fs::Permissions::from_mode(0o600)).unwrap();
         },
     );
-    fake.wait_for("hello", |f| f["msg"]["type"] == "hello").await;
+    fake.wait_for("hello", |f| f["msg"]["type"] == "hello")
+        .await;
 }
 
 #[tokio::test]

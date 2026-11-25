@@ -2096,8 +2096,10 @@ mod tests {
             .refresh_registry(&[focus("cody-b", "/code/blog")]);
         assert!(broadcast_one(&mut sh, pending("cody-b")).is_some());
         sh.forwarder.refresh_registry(&[]);
-        assert!(sh.replay().is_empty());
+        // Evicted as the registry changes, not only when a reconnect replays.
+        sh.evict_dead_tags();
         assert!(sh.cache.is_empty());
+        assert!(sh.replay().is_empty());
     }
 
     #[tokio::test(start_paused = true)]
