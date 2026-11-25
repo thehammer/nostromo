@@ -306,7 +306,21 @@ IOS_DEVICE_ID   ?= 195907F5-56CB-5334-B012-6F71CFA5EB21# Hammer's iPhone Pro
 IPAD_DEVICE_ID  ?= BA38C738-E848-5694-B1C4-7D5DB4C631EE# Hammer's iPad Pro
 IOS_APP_RELEASE  = iOS/build/Build/Products/Release-iphoneos/Nostromo.app
 
-.PHONY: mac mac-test mac-load-test mac-run mac-kill mac-icon mac-release mac-install mac-pin mac-verify-install kit-test ios-build ios-install ios-install-ipad ios-install-all mac-smoke mac-smoke-validate
+# `make ios-test` (L5, docs/ios-verification.md). The simulator is named, not pinned by OS, so it
+# follows whichever runtime the selected Xcode ships. `iPhone 17` exists on every iOS runtime of
+# the macos-26 runner image (26.2, 26.4, 26.5); on another Mac list yours with
+# `xcrun simctl list devices available` and pass IOS_SIM_NAME=<name>. Derived data goes on the
+# scratch volume when it is mounted (docs/ci.md, "Local build scratch volume"), one directory per
+# checkout, so a simulator build never fills the system volume; everywhere else (CI, other
+# machines) it stays under the gitignored iOS/build/.
+IOS_SIM_NAME ?= iPhone 17
+ifneq ($(wildcard /Volumes/Scratch/.),)
+IOS_TEST_DERIVED ?= /Volumes/Scratch/xcode-derived/ios-test/$(notdir $(CURDIR))
+else
+IOS_TEST_DERIVED ?= iOS/build/ios-test-derived
+endif
+
+.PHONY: mac mac-test mac-load-test mac-run mac-kill mac-icon mac-release mac-install mac-pin mac-verify-install kit-test ios-build ios-test ios-install ios-install-ipad ios-install-all mac-smoke mac-smoke-validate
 
 # Release build uses an explicit derived-data path so the product location is
 # predictable (no DerivedData hash dependency). Ad-hoc signed so the arm64
@@ -405,10 +419,9 @@ mac-release: $(if $(SKIP_DOCTOR),,doctor)
 	@test -d "$(APP_RELEASE)" && echo "built → $(APP_RELEASE)" || { echo "release build failed"; exit 1; }
 
 ## Run the shared NostromoKit logic test suite (SwiftPM, headless). This is
-## the L1 layer of iOS's three-layer verification model
-## (docs/ios-verification.md): the suite that runs with no paired iOS device
-## and no simulator, because it's a plain `swift test` over pure value types,
-## not an app target.
+## the L1 layer of iOS's verification model (docs/ios-verification.md): the
+## suite that runs with no paired iOS device and no simulator, because it's a
+## plain `swift test` over pure value types, not an app target.
 kit-test:
 	swift test --package-path Shared/NostromoKit
 
@@ -431,6 +444,23 @@ ios-build:
 	  build 2>&1 | grep -E "error:|warning:|BUILD|SUCCEEDED|FAILED"
 	@test -d "$(IOS_APP_RELEASE)" || { echo "iOS build failed — .app not found"; exit 1; }
 	@echo "built → $(IOS_APP_RELEASE)"
+
+## L5 (docs/ios-verification.md): the hosted NostromoTests bundle, run inside the Nostromo app on
+## an iOS Simulator. Only for what needs an iOS process; everything else is L1 (`make kit-test`)
+## or L2 (`make python-test`). Needs an installed iOS Simulator runtime (Xcode > Settings >
+## Components); the macos-26 CI image has them. `set -o pipefail` for the same reason as
+## `ios-build`. The full log is kept in iOS/build/ios-test-full.log. The final check fails the
+## target when no test executed: a hosted run whose bundle silently lost its tests prints
+## `Executed 0 tests` and `** TEST SUCCEEDED **`, which the grep filter alone would pass.
+ios-test:
+	set -o pipefail; mkdir -p iOS/build; \
+	xcodebuild test -project iOS/Nostromo.xcodeproj -scheme Nostromo \
+	  -destination 'platform=iOS Simulator,name=$(IOS_SIM_NAME)' \
+	  -derivedDataPath "$(IOS_TEST_DERIVED)" \
+	  -test-timeouts-enabled YES -default-test-execution-time-allowance 120 \
+	  CODE_SIGNING_ALLOWED=NO 2>&1 | tee iOS/build/ios-test-full.log \
+	  | grep --line-buffered -E "error:|Executed [0-9]+ tests|Test Case .* failed|\*\* TEST|exceeded its execution time"
+	@grep -Eq "Executed [1-9][0-9]* tests?" iOS/build/ios-test-full.log || { echo "ios-test: no tests executed (see iOS/build/ios-test-full.log)"; exit 1; }
 
 ## Build and install to the paired iPhone.
 ios-install: ios-build

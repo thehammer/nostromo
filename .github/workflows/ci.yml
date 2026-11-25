@@ -13,9 +13,9 @@ on:
       only:
         description: >-
           Which jobs to run. all = every job; rust = Build & Lint (and its three parts); python = Python
-          tooling tests; swift = Mac app + NostromoKit + iOS simulator build; mac =
-          Swift tests (Mac app); kit = Swift tests (NostromoKit); ios = iOS simulator
-          build.
+          tooling tests; swift = Mac app + NostromoKit + iOS simulator build and
+          hosted tests; mac = Swift tests (Mac app); kit = Swift tests (NostromoKit);
+          ios = iOS simulator build and hosted tests (L5).
         type: choice
         options: [all, rust, python, swift, mac, kit, ios]
         default: all
@@ -547,7 +547,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  # Runs after `swift-tests-kit` (needs) so the two share one macOS slot at a time: GitHub Free
+  # Build and test of the iOS app (the job name is a required check, so it keeps "build"). Runs
+  # after `swift-tests-kit` (needs) so the two share one macOS slot at a time: GitHub Free
   # allows 5 concurrent macOS jobs across the account (3 Mac shards + this chain + Python
   # tooling = 5). `!cancelled()` because the jobs are independent: a failed or dispatch-skipped
   # Kit job must not skip this one (a cancelled run should not start it).
@@ -575,8 +576,9 @@ jobs:
           xcodebuild -version
           sw_vers
 
-      # Compile check only: no device, no signing, no tests. Catches iOS
-      # compile breaks (the iOS app is not part of `make mac-test`).
+      # Compile check: no device, no signing. Catches iOS compile breaks (the iOS app is not part
+      # of `make mac-test`) for every simulator architecture. Kept as its own step: the test step
+      # below builds for one named simulator only.
       - name: Build for iOS Simulator
         if: needs.changes.outputs.swift == 'true'
         run: |
@@ -587,11 +589,20 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/ios-derived" \
             CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$RUNNER_TEMP/ios-build.log" | grep -E "error:|warning:|\*\* BUILD"
 
-      - name: Upload build log
+      # L5 (docs/ios-verification.md): the hosted NostromoTests bundle, run inside the app on an
+      # iOS Simulator. The same command a developer runs locally; the job keeps its name so the
+      # required check does not change. Only backplane runtime behaviour belongs in it.
+      - name: iOS hosted tests (make ios-test)
+        if: needs.changes.outputs.swift == 'true'
+        run: make ios-test
+
+      - name: Upload build and test logs
         if: needs.changes.outputs.swift == 'true' && failure()
         uses: actions/upload-artifact@v4
         with:
           name: ios-simulator-build-log
-          path: ${{ runner.temp }}/ios-build.log
+          path: |
+            ${{ runner.temp }}/ios-build.log
+            iOS/build/ios-test-full.log
           if-no-files-found: warn
           retention-days: 14

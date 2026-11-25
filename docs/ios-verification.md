@@ -1,21 +1,24 @@
 # iOS verification
 
-`iOS/Nostromo.xcodeproj` has exactly one target — the application itself.
-There is no `ios-test` make target, no `swift test` invocation for the app,
-and no `xcodebuild`/`swift test` job in `.github/workflows/`. Before
-`ios-curated-view-parity` W2, the iOS app's own view code (12 Swift files,
-~2,300 lines, all view code — the store, transport, and wire types live in
-`Shared/NostromoKit`, consumed by both platforms) had no test coverage at
-all. Its recent history is three reactive switch-exhaustiveness fixes, each
-landing as a comment explaining after the fact why a particular case was a
-stub — a target maintained by the compiler complaining, one incident at a
-time.
+`iOS/Nostromo.xcodeproj` has two targets: the application, and `NostromoTests`,
+a unit-test bundle hosted inside the app (`iOS/NostromoTests/`, run by `make
+ios-test`, layer L5 below). The test target is deliberately small and
+deliberately last in line: almost everything about the iOS app is verified
+without it. Before `ios-curated-view-parity` W2, the iOS app's own view code
+(12 Swift files, ~2,300 lines, all view code — the store, transport, and
+wire types live in `Shared/NostromoKit`, consumed by both platforms) had no
+test coverage at all. Its recent history is three reactive
+switch-exhaustiveness fixes, each landing as a comment explaining after the
+fact why a particular case was a stub — a target maintained by the compiler
+complaining, one incident at a time.
 
 That gap is what this doc is about, and why it's split into layers rather
 than one. Run L1–L3 before considering an iOS change to pane rendering,
 addressing, or queue marking complete. L4 (below) is macOS-only — it exists
 because the same "compiles" vs. "actually runs" gap this doc names for iOS
-turned out to have a macOS instance too, discovered the hard way.
+turned out to have a macOS instance too, discovered the hard way. L5 is the
+iOS simulator layer, and it is for the backplane runtime only: see its rule
+and its reviewer checklist before adding a test to it.
 
 ## L1 — logic
 
@@ -125,12 +128,13 @@ file.
 **What it cannot verify:** anything about behavior at all — it's a compile
 check, not a test run.
 
-**Why this is local-only.** `IOS_DEVICE_ID` names a specific paired
-physical iPhone. That's not incidental — it's the whole reason this layer
-exists separately from L2: this repo does not run iOS unit tests against a
-simulator, anywhere, ever (see below), so the only way to get L3's
-signal — "does this actually compile for the real target" — is against
-real hardware, which CI doesn't have.
+**Where it runs.** `make ios-build` is local-only: `IOS_DEVICE_ID` names a
+specific paired physical iPhone, and a release build against real hardware
+is the one compile signal CI cannot give. CI runs the same compile for the
+simulator, as the first step of the `iOS simulator build` job (generic
+`iOS Simulator` destination, no signing), so a compile break or a project-file
+mistake is caught on every PR that touches the app; the same job then runs
+L5.
 
 ## L4 — does the thing actually run (macOS)
 
@@ -196,17 +200,107 @@ proof" line carries, restated for geometry instead of source text. **A green
 here means "it launched and exercised a live multi-pane split for 15
 seconds," not "the GUI is fine."**
 
-**Why this one is not deferred the way L3's `xcodebuild` CI job is (for
-iOS).** The "why no simulator, anywhere" section below stops at one
-load-bearing argument: *a check nobody can run locally without attaching
-hardware is a check that silently stops being checked.* That argument does
-not apply to this check. It needs no simulator and no paired device — the
-identical command runs on the Mac a developer is already developing on and
-(from W2) on a stock GitHub-hosted macOS runner, because GitHub's macOS
-runner images auto-login into a real, live Aqua/WindowServer session. The
-incidental objection for iOS (a hand-edited test target, no committed
-scheme) is also not in play — this needs no test target at all, just a
-built `.app` and a socket.
+**Why this check needs no device.** It needs no simulator and no paired
+device — the identical command runs on the Mac a developer is already
+developing on and (from W2) on a stock GitHub-hosted macOS runner, because
+GitHub's macOS runner images auto-login into a real, live Aqua/WindowServer
+session. It also needs no test target at all, just a built `.app` and a
+socket.
+
+## L5 — iOS simulator (backplane runtime only)
+
+**What:** `NostromoTests`, an XCTest bundle hosted by the iOS app
+(`iOS/NostromoTests/`), run in an iOS Simulator process.
+
+**Run:**
+
+```
+make ios-test
+```
+
+which is `xcodebuild test` of the shared `Nostromo` scheme (it includes the
+`NostromoTests` target) against `IOS_SIM_NAME` (default `iPhone 17`, a device
+every iOS runtime on the `macos-26` runner image ships), `CODE_SIGNING_ALLOWED=NO`.
+Derived data goes on `/Volumes/Scratch` when it is mounted (otherwise
+`iOS/build/`); see `docs/ci.md`. It also runs as the second build step of the
+`iOS simulator build` PR check (`make ci-remote ONLY=ios` dispatches it). It
+fails if no test executed, so a bundle that silently lost its tests cannot pass.
+It needs an iOS Simulator runtime installed (Xcode > Settings > Components); on
+a Mac without one, rely on `make ci-remote ONLY=ios`.
+
+**The rule.** *Only what needs an iOS process goes in L5; everything else
+stays L1 or L2.* "Needs an iOS process" means behaviour whose answer depends
+on iOS itself and that no value-type test or text scan can observe:
+
+- Keychain access groups (the backplane's device credential store, W11);
+- URL handling: `onOpenURL` / the `nostromo://pair` handler (W11);
+- the file protection class of the encrypted content cache (W11);
+- extension and App Group wiring: the Notification Service Extension's
+  shared container (W16), APNs registration state (W13);
+- the hosted harness itself (the smoke tests that keep L5 from going vacuous).
+
+Everything else — decoding, state machines, retry and backoff, pairing
+protocol logic, cache encryption and eviction logic, enrichment policy, row
+models, layout plans — is a pure function of its inputs and belongs in L1
+(`Shared/NostromoKit`, `make kit-test`). Wiring and source-shape rules belong
+in L2 (`tests/ios_policy`). What a human has to look at (rendering, motion,
+legibility) is device-only, as before.
+
+**Why the rule is this strict.** The reason is discipline, not cost. L1 and
+L2 stay fast, headless and runnable by anyone with no simulator installed
+only while they remain the default home for a check. The moment a
+simulator-bound target exists, the temptation is to route every "is this
+actually going to work" question through it whether or not the answer needs a
+simulator, and a layer that boots a simulator is slower, flakier and harder
+to run locally than the layers beneath it. So the target is for the
+backplane's runtime surface only, and the rule is made visible and checked:
+
+- every file under `iOS/NostromoTests/` starts with an `// L5:` header line
+  naming the iOS-only behaviour it needs, and a policy test
+  (`tests/ios_policy/test_ios_l5_headers.py`, part of `make python-test`)
+  fails on a file without one;
+- the same policy test fails if a file in `iOS/NostromoTests/` is not
+  compiled by the `NostromoTests` target (a hand-listed source that is not in
+  the project file is never run);
+- review applies the checklist below.
+
+**Reviewer checklist for a change that touches `iOS/NostromoTests/`:**
+
+1. Does the file's `// L5:` header name an iOS-only behaviour from the list
+   above (or a new one the PR argues for), not "tests the thing"?
+2. Could the same assertion run in `make kit-test` if the logic moved into
+   `NostromoKit`? If yes, it belongs there, and the iOS side should be a thin
+   caller that L2 can scan.
+3. Does it fail without iOS? Delete the iOS-specific call (the Keychain
+   access group, the URL, the protection attribute) and check the assertion
+   still bites. A test that passes either way is an L1 test in the wrong place.
+4. Does it avoid the network, the real Keychain contents of the developer, and
+   wall-clock sleeps? L5 runs on a stock runner with no daemon.
+5. Does the PR body say what L5 does *not* show (for example, behaviour that
+   differs on a real device, such as Keychain on a locked phone or APNs
+   delivery)? The simulator is not a device.
+
+**What it can verify:** that code which needs an iOS process behaves as
+intended in one (Keychain with an access group, a URL delivered to the
+app, a file's protection attribute, the App Group container resolving), and
+that the app itself launches under a test host.
+
+**What it cannot verify:** anything a real device decides — APNs delivery,
+data protection while locked, Face ID, the Simulator's own Keychain being a
+softer approximation of the device's — and anything perceptual (see the
+worked example below). A green L5 means "this iOS-process behaviour holds on
+the Simulator," not "the app works on the phone."
+
+**What is in it today:** two smoke tests. `NostromoSmokeTests` proves the
+launch path runs: the app is a SwiftUI `@main App` with no hand-written app
+delegate, so the honest equivalent of "the app delegate launches" is that
+UIKit's delegate for the app is live and that the calls `NostromoApp` makes
+at launch (load `ConnectionSettings`, construct `NetworkClient`) succeed.
+`HostedHarnessTests` proves the bundle really runs hosted in the app inside
+an iOS process (main bundle is `com.hammer.nostromo.ios`, `UIApplication`
+exists, the test case lives in an `.xctest` bundle). Both carry `// L5:`
+headers. Nothing else is in L5 until W11 adds the first real runtime
+behaviour.
 
 ## Worked example: ambient activity (W4)
 
@@ -422,7 +516,7 @@ plan on a real device and writing the observations into the PR body:
 | Criterion | Why nothing automated can see it |
 |---|---|
 | Two regions are **actually on screen at once**, visibly proportioned to the ratios the daemon sent | L1 proves the plan says `0.6/0.4`; only an eye confirms the pixels do |
-| The **live rotation transition** preserves both regions' frontmost tabs and both surfaces' scroll positions, with nothing reloading and nothing jumping to the top | A claim about a live view hierarchy mid-transition; there is no test target on this platform and no simulator in CI |
+| The **live rotation transition** preserves both regions' frontmost tabs and both surfaces' scroll positions, with nothing reloading and nothing jumping to the top | A claim about a live view hierarchy mid-transition; L5 hosts tests in the app but is scoped to iOS-process behaviour, not to judging a live transition, and the Simulator is not the device |
 | The same transition arriving by **dragging a Split View divider** rather than rotating | Same, by a second route that exercises different SwiftUI machinery |
 | **Per-region unread legibility** — that a mark in the region the operator is *not* looking at is noticeable from a normal viewing distance without hunting | An unread dot's existence is testable; its peripheral-vision legibility is a perceptual property |
 | The divider **does not look draggable** and nothing happens when you try | L2 proves no gesture is attached; only looking confirms it doesn't invite the attempt |
@@ -685,34 +779,40 @@ on real hardware and looking. A green `make kit-test`/`make python-test`/
 this table; the device-only column is what a PR body must still report on
 by hand.
 
-## Why no simulator, anywhere
+## Why L5 is a backplane-only layer
 
-It would be easy to ask: why not add an `xcodebuild test -destination
-'platform=iOS Simulator'` target and get real Swift test execution instead
-of a Python text scan? Two reasons, one load-bearing and one incidental.
+This section replaces the earlier "Why no simulator, anywhere" argument. That
+section said the repo does not run iOS unit tests against a simulator,
+anywhere, ever. The operator reversed that on 2026-11-25 (open question 12 in
+`docs/plans/backplane-sequencing.md`), because the backplane changes the
+balance: W11 adds a Keychain credential store, a `nostromo://pair` URL handler,
+an encrypted content cache and the pairing screens; W13 adds APNs registration;
+W16 adds a Notification Service Extension. The logic of all of those lives in
+`NostromoKit` and is tested at L1 (`WebSocketClientTests`, `PairingClientTests`,
+`DeviceCredentialTests`, `ContentCacheTests`, `EnrichmentPolicyTests`,
+`PushDetailFetcherTests`). What cannot be tested there is what only runs in an
+iOS process: Keychain access groups, the URL handler, the cache's file
+protection class, the extension's App Group wiring. With no backplane yet, the
+operator also cannot test those on a device. L5 exists for exactly that.
 
-The load-bearing one: the whole point of splitting verification into layers
-that don't need a device is that a check nobody can run locally without
-attaching hardware is a check that silently stops being checked the moment
-a contributor doesn't have that hardware handy. A simulator sidesteps the
-*device* requirement, but not the discipline problem — the moment a
-simulator-bound test target exists, the temptation is to route "is this
-actually going to work" questions through it whether or not the answer
-needs a simulator, and now everything as fast as it is slow. L1 and L2 stay
-fast, headless, and CI-eligible by construction: only real behavior that
-`xcodebuild build` (L3) or a device (never automated) can answer is allowed
-to require either.
+What the earlier argument got right, and what is kept as the rule: a check that
+needs special hardware or a heavy runtime is a check that silently stops being
+checked when a contributor does not have it handy, and once a simulator-bound
+target exists the temptation is to route "is this actually going to work"
+questions through it whether or not they need a simulator. That is why L5 is
+scoped by what needs an iOS process (see the rule in L5 above), why the scope
+is stated in a header on every file and checked by `tests/ios_policy`, and why
+L1 and L2 stay the default home for every other check.
 
-The incidental one, recorded here so it isn't rediscovered by someone
-re-opening this question: `iOS/Nostromo.xcodeproj` lists its sources
-through explicit `PBXBuildFile`/`PBXFileReference`/`PBXGroup` entries rather
-than a `PBXFileSystemSynchronizedRootGroup`, and has no checked-in shared
-scheme (`make ios-build`'s `-scheme Nostromo` resolves via Xcode
-autocreation, not a committed `.xcscheme`). Adding a test target means
-hand-editing four `project.pbxproj` sections and committing a scheme — real
-cost, for a capability (simulator-bound `XCTest`) this doc has already
-argued against wanting.
+What changed with the reversal: a simulator no longer needs special hardware
+(CI runs it on a stock macOS runner, and a developer needs only an installed
+Simulator runtime), and the cost the earlier argument called incidental is
+paid: `iOS/Nostromo.xcodeproj` now has a hand-edited `NostromoTests` target
+(sources are listed explicitly in the project file, not in a
+`PBXFileSystemSynchronizedRootGroup`, which is why the policy test checks
+membership) and a committed shared `Nostromo` scheme that includes it. The
+`iOS simulator build` CI job builds and tests; it keeps its name because it is a
+required check.
 
-Adding an `xcodebuild` job to CI at all — simulator or device — remains a
-deliberate deferral, tracked in `.claude/prds/ios-curated-view-parity.md`,
-not an oversight.
+If the target stops earning its keep (no L5 file for a release or two, or L5
+tests that pass without iOS), delete it: this layer is meant to stay small.

@@ -8,10 +8,12 @@ python3 -m unittest discover -s tests/ios_policy -v
 
 These are source-scanning policy tests over `iOS/Nostromo/**/*.swift` — not
 tests of app behaviour, tests of what the source *looks like*. They exist
-because `iOS/Nostromo.xcodeproj` has exactly one target (the app itself), so
-nothing runs an iOS unit test with no paired device and no simulator. This
-directory is what fills that gap for the properties that matter and can be
-checked as text.
+because almost nothing about the iOS app can be unit-tested without a paired
+device or a simulator: the only iOS test target is the small, backplane-only L5
+bundle (`iOS/NostromoTests`). This directory is what fills that gap for the
+properties that matter and can be checked as text, and it also polices L5 itself
+(`test_ios_l5_headers.py`: every L5 test file carries an `// L5:` header naming
+the iOS-only behaviour it needs, and is compiled by the target).
 
 ## Why this exists (ios-curated-view-parity, W2)
 
@@ -24,7 +26,7 @@ complaining, one incident at a time. W2 through W9 add four real content
 renderers on top of that plumbing; without a harness, every one of them is a
 renderer that can break silently on the next wire change.
 
-## The three-layer verification model
+## The layered verification model
 
 See `docs/ios-verification.md` for the full picture. In short:
 
@@ -33,15 +35,19 @@ See `docs/ios-verification.md` for the full picture. In short:
 - **L2 — wiring and policy.** This directory. Runs as part of
   `make python-test`, which already runs in CI (`.github/workflows/ci.yml`,
   the `python-tooling` job) on `macos-latest`.
-- **L3 — compile.** `make ios-build`. Device-bound (the `Makefile`'s
-  `IOS_DEVICE_ID` targets a paired physical iPhone), so it is local-only —
-  it does not run in CI and this suite cannot substitute for it.
+- **L3 — compile.** `make ios-build` is the device build (the `Makefile`'s
+  `IOS_DEVICE_ID` targets a paired physical iPhone), so it is local-only. CI
+  runs the same compile for the simulator in the `iOS simulator build` job.
+- **L5 — iOS simulator (backplane runtime only).** `make ios-test`: the
+  `NostromoTests` bundle hosted by the app, run in an iOS Simulator, in the same
+  CI job. Only what needs an iOS process (Keychain access groups, URL handling,
+  file protection, extension or App Group wiring) goes there; everything else
+  stays in L1 or L2. This directory enforces the visible half of that rule.
 
-No iOS unit-test target or scheme is added to `Nostromo.xcodeproj`, and no
-`xcodebuild`/`swift test` job is added to CI. Both are deliberate — see
-`docs/ios-verification.md` for why — and this directory (a Python source
-scan, not a Swift test bundle) is the mechanism that makes the L2 layer
-possible without either.
+The target and the CI step were added to run the backplane's iOS-process
+behaviour (see `docs/ios-verification.md`, "Why L5 is a backplane-only layer");
+this directory (a Python source scan, not a Swift test bundle) remains the
+mechanism for every property that can be checked as text.
 
 ## A policy is added by the wedge that makes it true
 

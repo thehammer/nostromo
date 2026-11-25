@@ -6,7 +6,7 @@ history is three reactive switch-exhaustiveness fixes with comments
 explaining why the case is a stub — a target maintained by the compiler
 complaining, one incident at a time. Adding real renderers on top of that
 regime (W4, W5, W7, W8, W9) produces renderers that break silently on the
-next wire change. This suite is the L2 layer of the three-layer verification
+next wire change. This suite is the L2 layer of the layered verification
 model described in docs/ios-verification.md — wiring and policy, checked by
 scanning `iOS/Nostromo/**/*.swift` as text.
 

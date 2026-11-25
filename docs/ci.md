@@ -21,7 +21,7 @@ instead; see "Skipping the Swift jobs" below.
 | `Mac tests shard 1/3`, `2/3`, `3/3` | macos-26 (x3, parallel) | `make mac-test SHARD=<n>`: one third of the `NostromoTests` classes (~10,450 tests in all, serial inside a shard); shard 1 also runs the compile gate | `make mac-test` (all classes) or `make mac-test SHARD=<n>` | see "Where the time goes" |
 | `Swift tests (Mac app)` | ubuntu-latest | **the aggregate of the three Mac shards** (`scripts/ci_mac_aggregate.py`): green only if every shard ran, passed and reported tests, and the total reaches the floor in `macOS/ci/mac-shards.json`. Takes no macOS slot. | n/a | seconds after the last shard |
 | `Swift tests (NostromoKit)` | macos-26 | `make kit-test` — `swift test` over `Shared/NostromoKit`, ~570 tests | `make kit-test` | ~2.5 min |
-| `iOS simulator build` | macos-26 | `xcodebuild -scheme Nostromo -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build` (compile only; no device, no tests) | `make ios-build` is the device build; the simulator command is in the workflow | ~1.7 min |
+| `iOS simulator build` | macos-26 | two steps: the generic-simulator compile (`xcodebuild -scheme Nostromo -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build`), then `make ios-test`, the hosted `NostromoTests` bundle (L5, `docs/ios-verification.md`) on the `iPhone 17` simulator. The name is a required check, so it keeps "build". | `make ios-test` (needs an installed Simulator runtime); `make ios-build` is the device build | compile ~1.7 min; the test step's time is in "iOS L5 timing" below |
 | `Launch smoke (advisory)` | macos-26 | see below (path-filtered, advisory) | `make mac-smoke` | ~5 min |
 
 The Linux Rust jobs are also the primary-host smoke: `tests/linux_startup.rs` starts the
@@ -127,8 +127,8 @@ everything else for ~2 min of gain.
   `xcodebuild` rejects without `-skipPackagePluginValidation`: do not upgrade
   it without deciding that flag's place in `make mac`, CI and the smoke.
 - On failure the jobs upload the `.xcresult` bundle (`swift-tests-mac-xcresult`),
-  the NostromoKit log (`swift-tests-kit-log`) or the iOS build log
-  (`ios-simulator-build-log`) for 14 days. The Makefile filters
+  the NostromoKit log (`swift-tests-kit-log`) or the iOS build and test logs
+  (`ios-simulator-build-log`: the compile log and `iOS/build/ios-test-full.log`) for 14 days. The Makefile filters
   `xcodebuild` output down to a few lines, so the xcresult is where per-test
   detail lives.
 - Reproduce a failure locally with `make mac-test` / `make kit-test`.
@@ -422,7 +422,7 @@ own `permissions:` stay `contents: read`).
 | `swift` | `Swift tests (Mac app)` (and its three shards), `Swift tests (NostromoKit)`, `iOS simulator build` |
 | `mac` | `Swift tests (Mac app)` (and its three shards) |
 | `kit` | `Swift tests (NostromoKit)` |
-| `ios` | `iOS simulator build` |
+| `ios` | `iOS simulator build` (compile and the hosted L5 tests) |
 
 Push and pull-request events always run every job (on a pull request the Swift jobs still start but skip their work when `Detect changed paths` says so; a dispatch never skips them).
 
@@ -604,6 +604,10 @@ What uses it, with no environment variables to set and nothing for the daemon to
   there. Everywhere else (CI, other machines, a volume that is not mounted) it stays `target/`. An explicit
   `CARGO_TARGET_DIR` always wins. The first `make install-daemon` after the change is a full rebuild; the old
   `target/` can then be deleted.
-- Not covered here: Xcode derived data (`-derivedDataPath build`, inside each worktree), Mother's worktree
+- **`make ios-test`** (L5): when the volume is mounted, derived data goes to
+  `/Volumes/Scratch/xcode-derived/ios-test/<checkout directory name>`; otherwise `iOS/build/ios-test-derived`
+  (gitignored). `IOS_TEST_DERIVED=<path>` overrides it. The simulator itself keeps its devices under
+  `~/Library/Developer/CoreSimulator`, which this does not move.
+- Not covered here: the other Xcode derived data (`-derivedDataPath build`, inside each worktree), Mother's worktree
   location, and the `~/.claude` review scratch (those files live outside this repo; they use `/Volumes/Scratch/perri-shared`
   when the volume is mounted).
