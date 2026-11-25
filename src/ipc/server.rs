@@ -1636,6 +1636,9 @@ where
             // The host is gone (or revoked, which closes its socket): what it
             // published is not replayed to a later subscriber. A replaced
             // uplink leaves the newer one's frames alone.
+            if let PeerOrigin::Ws { admitted, .. } = &origin {
+                admitted.store(false, Ordering::SeqCst);
+            }
             if h.router().unregister(name, *conn_id) {
                 purge_host_retained(&retained, name);
             }

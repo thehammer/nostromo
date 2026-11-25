@@ -42,7 +42,9 @@ use super::protocol::{ClientMsg, ServerMsg, MAX_FRAME_LEN, MIN_CLIENT_VERSION, P
 use super::router::{
     ingest_from_satellite, Bucket, Router, SatelliteRecord, UplinkLimits, Verdict,
 };
-use super::server::{handle_client, HeldMotherJobs, PeerOrigin, RetainedCache, SatelliteLink};
+use super::server::{
+    handle_client, purge_host_retained, HeldMotherJobs, PeerOrigin, RetainedCache, SatelliteLink,
+};
 use super::session_manager::SessionManager;
 use super::uplink_wire::{wrap_server_bytes, UplinkFrame};
 use crate::terminal::TerminalManager;
@@ -932,6 +934,13 @@ async fn run_paired(
     drop(bridge_wr);
     reader.abort();
     let _ = handler.await;
+    // A frame read between the handler's own purge and this socket closing
+    // may have been kept; with no uplink for the host now, drop it too.
+    if let Some(sat) = &satellite {
+        if !hub.router().is_connected(&sat.name) {
+            purge_host_retained(&shared.retained, &sat.name);
+        }
+    }
     info!(device = %device_id, "device disconnected");
     Ok(())
 }
