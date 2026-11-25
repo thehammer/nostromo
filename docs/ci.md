@@ -98,9 +98,13 @@ tests (dispatch run 45630865581 on the `feat/ios-test-target` branch, `make ci-r
 2026-11-25): job 6 min 41 s; the unchanged generic-simulator compile step 71 s; the
 `make ios-test` step 320 s, of which the 5 tests (2 smoke, 3 harness) executed in 0.04 s, so
 the cost is the arm64 simulator build, simulator boot and app install, not the tests. Before
-L5 the job was 90-289 s (`docs/test-time-audit.md`). One run, one runner: treat it as the order
-of magnitude. The job still runs after `Swift tests (NostromoKit)` in one macOS slot, so the
-chain is roughly 9-10 min, well under the Mac shards (about 22 min), which stay the critical path.
+L5 the job was 90-289 s (`docs/test-time-audit.md`). A second dispatch run (45640886579, same
+day, while another full Swift dispatch was queued behind the same macOS slots) took 12 min 21 s with the `make ios-test` step at 592 s and
+the compile step at 127 s, again with 5 tests in 0.02 s: the step is dominated by runner
+speed and contention, 5-10 min. Two runs: treat it as an order of magnitude. The job still
+runs after `Swift tests (NostromoKit)` in one macOS slot, so the Kit-then-iOS chain is roughly
+9-15 min against the Mac shards' ~22 min, which stay the critical path unless the runner is
+contended, as in the second run.
 If it needs trimming later, the first lever is dropping the generic compile step, since
 `make ios-test` already compiles the app for a simulator; it is kept for now because it also
 covers every simulator architecture.
