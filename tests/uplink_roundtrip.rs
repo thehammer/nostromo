@@ -81,7 +81,21 @@ fn start(
     local: SatelliteAdmin,
     device_id: String,
 ) -> Sat {
+    start_with_key(url, token, name, egress, local, device_id, |_| {})
+}
+
+/// [`start`], after `prepare` has had a look at where the tag key will live.
+fn start_with_key(
+    url: String,
+    token: &str,
+    name: &str,
+    egress: Egress,
+    local: SatelliteAdmin,
+    device_id: String,
+    prepare: impl FnOnce(&std::path::Path),
+) -> Sat {
     let tmp = TempDir::new().unwrap();
+    prepare(&tmp.path().join("tag-key"));
     let socket = tmp.path().join("sat.sock");
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
         tmp.path().join("ids.json"),
@@ -1167,4 +1181,138 @@ async fn uplink_pair_warns_when_the_enrolled_name_differs_from_host_name() {
         printed.contains("Enrolled as kobe 2, but host_name is kobe"),
         "{printed}"
     );
+}
+
+// ── fix round 1 ───────────────────────────────────────────────────────────────
+
+fn focus_json(tag: &str, path: &str) -> nostromo::ipc::protocol::FocusMeta {
+    serde_json::from_value(json!({
+        "tag": tag, "display_name": "x", "agent_name": "cody", "is_built_in": false,
+        "project_path": path,
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_tag_the_daemons_live_sensitive_set_holds_never_leaves_through_the_real_uplink() {
+    let primary = Rig::new().await;
+    let sat = join(
+        &primary,
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::Full,
+        SatelliteAdmin::Full,
+    )
+    .await;
+    let mut watcher = primary.unix(vec![], false).await;
+    sat.session_mgr.lock().unwrap().set_focus_registry(vec![
+        focus_json("cody-s", "/code/blog"),
+        focus_json("cody-ok", "/code/blog"),
+    ]);
+    // Marked on the daemon's own set, after the uplink was wired: the
+    // forwarder must see it through the shared handle.
+    let tags = sat.session_mgr.lock().unwrap().sensitive_tags();
+    tags.mark_tag("cody-s");
+    for (tag, count) in [("cody-s", 7), ("cody-ok", 1)] {
+        sat.server.broadcast(ServerMsg::ApprovalPending {
+            tag: tag.into(),
+            count,
+            host: None,
+        });
+    }
+    let m = watcher
+        .next_matching("the ordinary count", |m| {
+            matches!(m, ServerMsg::ApprovalPending { .. })
+        })
+        .await;
+    match m {
+        ServerMsg::ApprovalPending { tag, .. } => assert_eq!(tag, "cody-ok"),
+        _ => unreachable!(),
+    }
+    watcher.sync().await;
+    for m in watcher.take_all() {
+        assert!(
+            !matches!(&m, ServerMsg::ApprovalPending { tag, .. } if tag == "cody-s"),
+            "{m:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_tag_key_at_the_wrong_mode_stops_the_uplink_from_ever_dialing() {
+    use std::os::unix::fs::PermissionsExt;
+    let fake = fake_primary(&["uplink", "hosts"]).await;
+    let bad = start_with_key(
+        format!("ws://127.0.0.1:{}", fake.port),
+        "tok",
+        "kobe",
+        Egress::Work,
+        SatelliteAdmin::Full,
+        String::new(),
+        |key| {
+            std::fs::write(key, [3u8; 32]).unwrap();
+            std::fs::set_permissions(key, std::fs::Permissions::from_mode(0o644)).unwrap();
+        },
+    );
+    bad.server.broadcast(jobs_frame("0123456789abcdef"));
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        fake.frames().is_empty(),
+        "nothing is dialled or published: {:?}",
+        fake.frames()
+    );
+    // The same setup with a private key does dial (the test can tell).
+    let _good = start_with_key(
+        format!("ws://127.0.0.1:{}", fake.port),
+        "tok",
+        "kobe",
+        Egress::Work,
+        SatelliteAdmin::Full,
+        String::new(),
+        |key| {
+            std::fs::write(key, [3u8; 32]).unwrap();
+            std::fs::set_permissions(key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        },
+    );
+    fake.wait_for("hello", |f| f["msg"]["type"] == "hello").await;
+}
+
+#[tokio::test]
+async fn a_routed_attach_is_a_network_peer_so_it_can_never_close_a_merge_gate() {
+    let primary = Rig::new().await;
+    let sat = join(
+        &primary,
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::Full,
+        SatelliteAdmin::Full,
+    )
+    .await;
+    {
+        let mut mgr = sat.session_mgr.lock().unwrap();
+        mgr.set_focus_registry(vec![focus_json("cody-x", "/code/blog")]);
+        mgr.spawn_program_for_test("cody-x", "/bin/sleep".into(), vec!["30".into()])
+            .expect("a stand-in session");
+    }
+    let mut asker = primary.unix(vec![], false).await;
+    asker
+        .send(&ClientMsg::SessionAttach {
+            tag: "cody-x".into(),
+            host: Some("sat".into()),
+        })
+        .await;
+    let start = Instant::now();
+    loop {
+        let ids = sat
+            .session_mgr
+            .lock()
+            .unwrap()
+            .network_client_ids_for_test();
+        if ids.iter().any(|k| k.starts_with("uplink:")) {
+            break;
+        }
+        assert!(start.elapsed() < READ_TIMEOUT, "network peers: {ids:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
