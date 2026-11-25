@@ -150,7 +150,7 @@ impl FredCalendarNativeSource {
         tx: watch::Sender<Option<CalendarSnapshot>>,
         dirty_rx: &mut mpsc::UnboundedReceiver<()>,
     ) {
-        let mut backoff = ThrottleBackoff::default();
+        let mut backoff = ThrottleBackoff::with_base(self.timing.backoff_base);
         loop {
             let previous = tx.borrow().clone();
             let (next, throttled_for) = self.refresh(&graph, &mut backoff, previous.as_ref()).await;

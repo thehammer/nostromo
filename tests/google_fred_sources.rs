@@ -476,6 +476,7 @@ fn timing(poll: Duration, unread_count_ttl: Duration) -> FredTiming {
         calendar_poll: poll,
         unread_count_ttl,
         day_offset: Some(noon_offset()),
+        ..FredTiming::default()
     }
 }
 

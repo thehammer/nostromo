@@ -39,8 +39,11 @@ pub fn throttle_of(e: &anyhow::Error) -> Option<Option<std::time::Duration>> {
 /// The wait after a throttle is the server's `Retry-After` when there is one,
 /// otherwise exponential backoff: 2 s, 4 s, 8 s … capped at 15 min, plus up
 /// to 25 % jitter.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ThrottleBackoff {
+    /// The first step of the exponential wait ([`BACKOFF_BASE`] in
+    /// production; tests inject a shorter one through `FredTiming`).
+    base: std::time::Duration,
     consecutive: u32,
     /// Consecutive non-throttle failures (see [`persistent`](Self::persistent)).
     failures: u32,
@@ -49,9 +52,25 @@ pub struct ThrottleBackoff {
 /// Longest quiet period for a persistent non-throttle failure.
 const MAX_PERSISTENT_WAIT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
-const BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(2);
+/// The first step of the throttle backoff (then 4 s, 8 s ...).
+pub const BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl Default for ThrottleBackoff {
+    fn default() -> Self {
+        Self::with_base(BACKOFF_BASE)
+    }
+}
 
 impl ThrottleBackoff {
+    /// A backoff whose first step is `base` (production: [`BACKOFF_BASE`]).
+    pub fn with_base(base: std::time::Duration) -> Self {
+        Self {
+            base,
+            consecutive: 0,
+            failures: 0,
+        }
+    }
+
     /// A fetch succeeded: the next throttle starts again at the first step.
     pub fn succeeded(&mut self) {
         self.consecutive = 0;
@@ -74,7 +93,8 @@ impl ThrottleBackoff {
     /// quiet; otherwise `None` (and the backoff is left alone).
     pub fn throttled(&mut self, e: &anyhow::Error) -> Option<std::time::Duration> {
         let retry_after = throttle_of(e)?;
-        let step = BACKOFF_BASE
+        let step = self
+            .base
             .saturating_mul(1u32.checked_shl(self.consecutive).unwrap_or(u32::MAX))
             .min(MAX_RETRY_AFTER);
         self.consecutive = self.consecutive.saturating_add(1);
@@ -139,6 +159,51 @@ mod tests {
         assert_eq!(b.persistent(poll), Some(MAX_PERSISTENT_WAIT));
         b.succeeded();
         assert_eq!(b.persistent(poll), None);
+    }
+
+    fn throttle_without_retry_after() -> anyhow::Error {
+        GraphHttpError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            url: "u".into(),
+            body: String::new(),
+            retry_after: None,
+        }
+        .into()
+    }
+
+    /// The user-approved production values (no waiting: the backoff only
+    /// computes the wait): at least 2 s after the first throttle, then 4 s,
+    /// each with at most 25% jitter. The timing tests inject a shorter base;
+    /// this is the one place that pins the real constant.
+    #[test]
+    fn the_production_backoff_is_at_least_2_then_4_seconds_with_bounded_jitter() {
+        assert_eq!(BACKOFF_BASE, std::time::Duration::from_secs(2));
+        let mut b = ThrottleBackoff::default();
+        let first = b.throttled(&throttle_without_retry_after()).unwrap();
+        let second = b.throttled(&throttle_without_retry_after()).unwrap();
+        assert!(
+            (std::time::Duration::from_secs(2)..=std::time::Duration::from_millis(2500))
+                .contains(&first),
+            "{first:?}"
+        );
+        assert!(
+            (std::time::Duration::from_secs(4)..=std::time::Duration::from_secs(5))
+                .contains(&second),
+            "{second:?}"
+        );
+    }
+
+    #[test]
+    fn an_injected_base_scales_every_step() {
+        let base = std::time::Duration::from_millis(100);
+        let mut b = ThrottleBackoff::with_base(base);
+        let first = b.throttled(&throttle_without_retry_after()).unwrap();
+        let second = b.throttled(&throttle_without_retry_after()).unwrap();
+        assert!((base..=base.mul_f64(1.25)).contains(&first), "{first:?}");
+        assert!(
+            (base * 2..=(base * 2).mul_f64(1.25)).contains(&second),
+            "{second:?}"
+        );
     }
 
     #[test]

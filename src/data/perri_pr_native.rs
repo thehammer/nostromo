@@ -721,7 +721,18 @@ impl PerriPrNativeSource {
             // local `wiremock` server, so `run()`'s publish path can be
             // exercised end to end instead of only `fetch_pr` in isolation.
             if let Some(base) = TEST_OCTOCRAB_BASE_OVERRIDE.with(|c| c.borrow().clone()) {
-                return GithubClient::new_for_test(self.config.github_token_path.as_deref(), &base);
+                // A test may also shorten the overall request timeout, so a
+                // stalled-fetch test need not wait out the production 20 s.
+                return match TEST_HTTP_TIMEOUT_OVERRIDE.with(|c| *c.borrow()) {
+                    Some(timeout) => GithubClient::new_for_test_with_timeout(
+                        self.config.github_token_path.as_deref(),
+                        &base,
+                        timeout,
+                    ),
+                    None => {
+                        GithubClient::new_for_test(self.config.github_token_path.as_deref(), &base)
+                    }
+                };
             }
         }
         GithubClient::new(self.config.github_token_path.as_deref())
@@ -736,6 +747,11 @@ thread_local! {
     /// in-crate unit tests, so it's fine to gate it on `cfg(test)` the same
     /// way `GithubClient::new_for_test` is.
     static TEST_OCTOCRAB_BASE_OVERRIDE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// With `TEST_OCTOCRAB_BASE_OVERRIDE` set: the overall request timeout
+    /// `build_client` gives the client instead of `GITHUB_HTTP_TIMEOUT_SECS`.
+    static TEST_HTTP_TIMEOUT_OVERRIDE: std::cell::RefCell<Option<std::time::Duration>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -3544,15 +3560,23 @@ mod tests {
     // for GitHub, so both code paths are driven through the exact same
     // `GithubClient` a real fetch would use.
 
+    /// The overall request timeout the stalled-fetch tests give the client,
+    /// instead of the production `GITHUB_HTTP_TIMEOUT_SECS` (20 s): the
+    /// assertions are the same, in ratio form (a stall is `T + 30 s`, a slow
+    /// but fine response `T / 2`, the hard deadline `T + 15 s`). The real 20 s
+    /// is pinned by `github_client::tests::the_production_request_timeout_is_twenty_seconds`.
+    const STALL_TEST_TIMEOUT_SECS: u64 = 2;
+
     /// Build a `GithubClient` whose `octocrab` *and* raw `http` client both
-    /// point at `server_uri` — `octocrab`'s base URI has to be set at
-    /// construction time (there's no post-build setter), which is exactly
-    /// what [`GithubClient::new_for_test`] is for. Callers must also set
-    /// `perri_queue_native::API_BASE_OVERRIDE` to the same `server_uri` so
-    /// `fetch_diff`'s raw-`http` call (routed through `api_base()`) is
-    /// redirected too — one override per transport, both needed for a full
-    /// `fetch_pr` cycle to hit the mock server end to end.
-    fn make_test_client_for_server(server_uri: &str) -> GithubClient {
+    /// point at `server_uri`, with `timeout` as the overall request timeout.
+    /// Callers must also set `perri_queue_native::API_BASE_OVERRIDE` to the
+    /// same `server_uri` so `fetch_diff`'s raw-`http` call (routed through
+    /// `api_base()`) is redirected too: one override per transport, both
+    /// needed for a full `fetch_pr` cycle to hit the mock server end to end.
+    fn make_test_client_with_timeout(
+        server_uri: &str,
+        timeout: std::time::Duration,
+    ) -> GithubClient {
         let dir = tempfile::tempdir().unwrap();
         let hosts_path = dir.path().join("hosts.yml");
         std::fs::write(
@@ -3561,8 +3585,9 @@ mod tests {
         )
         .unwrap();
         std::env::remove_var("GITHUB_TOKEN");
-        let client = GithubClient::new_for_test(Some(&hosts_path), server_uri)
-            .expect("client should build from hosts.yml fixture, pointed at the mock server");
+        let client =
+            GithubClient::new_for_test_with_timeout(Some(&hosts_path), server_uri, timeout)
+                .expect("client should build from hosts.yml fixture, pointed at the mock server");
         std::mem::forget(dir);
         client
     }
@@ -3657,18 +3682,19 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_string("diff that never fully arrives")
-                    .set_delay(Duration::from_secs(
-                        crate::config::GITHUB_HTTP_TIMEOUT_SECS + 30,
-                    )),
+                    .set_delay(Duration::from_secs(STALL_TEST_TIMEOUT_SECS + 30)),
             )
             .with_priority(1)
             .mount(&server)
             .await;
 
-        let client = make_test_client_for_server(&server.uri());
+        let client = make_test_client_with_timeout(
+            &server.uri(),
+            Duration::from_secs(STALL_TEST_TIMEOUT_SECS),
+        );
         let source = test_source();
 
-        let hard_deadline = Duration::from_secs(crate::config::GITHUB_HTTP_TIMEOUT_SECS + 15);
+        let hard_deadline = Duration::from_secs(STALL_TEST_TIMEOUT_SECS + 15);
         let outcome =
             tokio::time::timeout(hard_deadline, source.fetch_pr(&client, "acme/web", 7)).await;
 
@@ -3723,18 +3749,19 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_string(diff_body.clone())
-                    .set_delay(Duration::from_secs(
-                        crate::config::GITHUB_HTTP_TIMEOUT_SECS / 2,
-                    )),
+                    .set_delay(Duration::from_secs(STALL_TEST_TIMEOUT_SECS / 2)),
             )
             .with_priority(1)
             .mount(&server)
             .await;
 
-        let client = make_test_client_for_server(&server.uri());
+        let client = make_test_client_with_timeout(
+            &server.uri(),
+            Duration::from_secs(STALL_TEST_TIMEOUT_SECS),
+        );
         let source = test_source();
 
-        let hard_deadline = Duration::from_secs(crate::config::GITHUB_HTTP_TIMEOUT_SECS + 15);
+        let hard_deadline = Duration::from_secs(STALL_TEST_TIMEOUT_SECS + 15);
         let snap = tokio::time::timeout(hard_deadline, source.fetch_pr(&client, "acme/web", 7))
             .await
             .expect("must not hang")
@@ -3777,6 +3804,8 @@ mod tests {
         crate::data::perri_queue_native::API_BASE_OVERRIDE
             .with(|c| *c.borrow_mut() = Some(server.uri()));
         TEST_OCTOCRAB_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+        TEST_HTTP_TIMEOUT_OVERRIDE
+            .with(|c| *c.borrow_mut() = Some(Duration::from_secs(STALL_TEST_TIMEOUT_SECS)));
 
         let hosts_dir = tempfile::tempdir().unwrap();
         let hosts_path = hosts_dir.path().join("hosts.yml");
@@ -3811,9 +3840,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_string("diff that never fully arrives")
-                    .set_delay(Duration::from_secs(
-                        crate::config::GITHUB_HTTP_TIMEOUT_SECS + 30,
-                    )),
+                    .set_delay(Duration::from_secs(STALL_TEST_TIMEOUT_SECS + 30)),
             )
             .with_priority(1)
             .up_to_n_times(1)
@@ -3864,7 +3891,7 @@ mod tests {
         // timeout ends. Reuse the headline test's generous hard-deadline for
         // every cycle rather than a tighter one, so that doesn't make this
         // flaky.
-        let generous_deadline = Duration::from_secs(crate::config::GITHUB_HTTP_TIMEOUT_SECS + 15);
+        let generous_deadline = Duration::from_secs(STALL_TEST_TIMEOUT_SECS + 15);
 
         // Cycle 1: the initial fetch fires immediately on loop entry.
         tokio::time::timeout(generous_deadline, rx.changed())

@@ -1,0 +1,46 @@
+# Deep seed counts for the randomised oracles, off the PR path. The PR run (ci.yml) uses
+# TRACKER_FUZZ_COUNT=100 for the tracker lost-edit oracle and the default 1000 queue race seeds;
+# this runs 5000 of each. A failure prints the failing seed: pin it as a named-seed test (see the
+# `a_flooded_board_*_seed_*` tests in tests/tracker_concurrency.rs) so it runs on every PR.
+# Run it by hand on a branch with `gh workflow run deep-fuzz.yml --ref <branch>`.
+name: deep-fuzz
+
+on:
+  schedule:
+    # Nightly, 07:17 UTC (an off-peak minute).
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+    inputs:
+      count:
+        description: Seeds for the tracker oracle and each queue race test
+        default: "5000"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  deep-fuzz:
+    name: Deep fuzz (${{ inputs.count || '5000' }} seeds)
+    # Pinned, not ubuntu-latest (see ci.yml).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      TRACKER_FUZZ_COUNT: ${{ inputs.count || '5000' }}
+      QUEUE_RACE_SEEDS: ${{ inputs.count || '5000' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.100.0
+
+      - name: Tracker lost-edit oracle
+        run: cargo test --test tracker_concurrency -- --nocapture
+
+      - name: Queue race tests
+        if: always()
+        run: cargo test --lib ipc::session_manager::queue_tests -- --nocapture

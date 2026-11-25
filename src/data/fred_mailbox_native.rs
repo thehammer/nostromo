@@ -33,6 +33,7 @@ use crate::{
         fred_detail::GraphFredDetail,
         fred_mailbox::{MailboxItem, MailboxSnapshot},
         graph_client::{failure_reason, GraphClient, ThrottleBackoff},
+        http_backoff::BACKOFF_BASE,
         work::model::SourceState,
         work::service::install_fred_detail_service,
     },
@@ -54,6 +55,9 @@ pub struct FredTiming {
     /// The zone that defines "today" for the calendar. `None` = the Mac's
     /// local zone; tests pin one.
     pub day_offset: Option<chrono::FixedOffset>,
+    /// The first step of the exponential wait after a throttle without
+    /// `Retry-After` (2 s in production, then 4 s, 8 s ...). Tests shorten it.
+    pub backoff_base: Duration,
 }
 
 impl Default for FredTiming {
@@ -63,6 +67,7 @@ impl Default for FredTiming {
             calendar_poll: Duration::from_secs(30),
             unread_count_ttl: Duration::from_secs(30),
             day_offset: None,
+            backoff_base: BACKOFF_BASE,
         }
     }
 }
@@ -208,7 +213,7 @@ impl FredMailboxNativeSource {
         // In-memory message store: id -> item.
         let mut store: HashMap<String, GraphMessage> = HashMap::new();
         let mut unread = UnreadCount::default();
-        let mut backoff = ThrottleBackoff::default();
+        let mut backoff = ThrottleBackoff::with_base(self.timing.backoff_base);
 
         loop {
             let previous = tx.borrow().clone();
@@ -499,4 +504,16 @@ fn home_dir() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+
+    /// Production keeps the user-approved 2 s first backoff step; only tests
+    /// inject a shorter one.
+    #[test]
+    fn the_default_timing_keeps_the_two_second_backoff_base() {
+        assert_eq!(FredTiming::default().backoff_base, Duration::from_secs(2));
+    }
 }
