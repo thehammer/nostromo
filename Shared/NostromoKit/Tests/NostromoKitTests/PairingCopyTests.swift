@@ -121,4 +121,45 @@ final class PairingCopyTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Address form (App Transport Security) and a malformed address
+
+    func testTheLocalNetworkingFormsAreRecognised() {
+        let allowed = ["10.0.0.5", "192.168.1.20", "255.255.255.255", "[::1]", "::1", "[fd00::1]", "fe80::1",
+                       "kobe.local", "KOBE.LOCAL", "kobe.local.", "kobe", "localhost", ""]
+        for host in allowed {
+            XCTAssertTrue(PairingAddress.isLocalNetworkingForm(host), "\"\(host)\" is reachable under NSAllowsLocalNetworking")
+        }
+    }
+
+    func testAFullDomainNameOrAMalformedIPv4IsNotALocalNetworkingForm() {
+        let blocked = ["mac.tailnet.ts.net", "mac.example.com", "300.1.1.1", "1.2.3", "10.0.0.5.example.com"]
+        for host in blocked {
+            XCTAssertFalse(PairingAddress.isLocalNetworkingForm(host), "\"\(host)\" is blocked by App Transport Security")
+        }
+    }
+
+    func testTheAddressHintIsOnlyOfferedForAnAddressThatWillBeBlocked() {
+        XCTAssertNil(PairingCopy.addressFormHint(address: "10.0.0.5"))
+        XCTAssertNil(PairingCopy.addressFormHint(address: "[::1]"))
+        XCTAssertNil(PairingCopy.addressFormHint(address: "kobe.local"))
+        XCTAssertEqual(PairingCopy.addressFormHint(address: "mac.example.com"), PairingCopy.addressHint)
+        XCTAssertEqual(PairingCopy.addressFormHint(address: "mac.tailnet.ts.net"), PairingCopy.addressHint)
+    }
+
+    func testTheAddressHintSaysWhatToTypeInstead() {
+        let hint = PairingCopy.addressHint
+        XCTAssertTrue(hint.contains("IP address"), hint)
+        XCTAssertTrue(hint.contains(".local"), hint)
+        XCTAssertTrue(hint.contains("full domain name"), hint)
+    }
+
+    func testBadAddressNamesTheRealAddressAndWhatWouldWork() {
+        for address in ["bad host", "a/b"] {
+            let text = PairingCopy.badAddress(address: address)
+            XCTAssertTrue(text.contains(address), text)
+            XCTAssertTrue(text.contains("IP address"), text)
+            XCTAssertTrue(text.contains(".local"), text)
+        }
+    }
 }

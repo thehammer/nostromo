@@ -326,7 +326,7 @@ final class WebSocketClientTests: XCTestCase {
 
     func testTheOutboundPolicyRefusesTheMessageQueueVerbs() {
         for type in ["session_queue_watch", "session_queue_take_back", "session_queue_remove"] {
-            XCTAssertTrue(OutboundPolicy.refusedTypes.contains(type), "\(type) must be refused (W11-16)")
+            XCTAssertFalse(OutboundPolicy.allowedTypes.contains(type), "\(type) must be refused (W11-16)")
             XCTAssertFalse(OutboundPolicy.allows(type: type))
         }
     }
@@ -362,6 +362,89 @@ final class WebSocketClientTests: XCTestCase {
         let types = texts(of: server).map { wireType($0) }
         XCTAssertEqual(types, ["hello", "subscribe", "session_list"],
                        "Only the allowed verb may reach the server after the handshake")
+    }
+
+    // MARK: - The allow-list: a network peer is read-only
+
+    /// The verbs the daemon's `NETWORK_ALLOWED` list lets a network peer send; nothing else leaves the phone.
+    private let allowedWireTypes = [
+        "activity_snapshot_request", "focus_list", "hello", "model_catalog_request", "model_defaults_request",
+        "ping", "pty_detach", "pty_list", "session_attach", "session_detach", "session_list",
+        "session_model_get", "subscribe",
+    ]
+
+    /// Every state-changing verb the phone has a button for, the pairing verbs (never sent on this
+    /// socket), and a verb nobody has invented yet: an allow-list refuses all of them.
+    private let refusedWireTypes = [
+        "perri_action", "session_send", "session_interrupt", "close_pane", "session_model_set",
+        "session_control", "session_spawn", "approval_answer", "decision_answer", "mother_action",
+        "mother_resume", "session_queue_watch", "session_queue_take_back", "session_queue_remove",
+        "device_unpair_self", "pair", "pair_check", "some_future_verb",
+    ]
+
+    func testOnlyTheThirteenReadOnlyVerbsAreAllowed() {
+        XCTAssertEqual(OutboundPolicy.allowedTypes, Set(allowedWireTypes))
+        XCTAssertEqual(OutboundPolicy.allowedTypes.count, 13)
+        for type in allowedWireTypes {
+            XCTAssertTrue(OutboundPolicy.allows(type: type), "\(type) is read-only and must be allowed")
+        }
+    }
+
+    func testEveryOtherVerbIsRefusedByThePolicyAndNeverEncodedForSending() {
+        let client = makeClient(port: 1)
+        for type in refusedWireTypes {
+            XCTAssertFalse(OutboundPolicy.allows(type: type), "\(type) must be refused")
+            XCTAssertNil(client.encodeForSend(WireStandIn(type: type)), "\(type) must not be encoded for the socket")
+        }
+    }
+
+    func testAnUnknownOrEmptyVerbIsRefused() {
+        for type in ["", " ", "SESSION_LIST", "session_list ", "perri_action2"] {
+            XCTAssertFalse(OutboundPolicy.allows(type: type), "\"\(type)\" is not an allowed verb")
+        }
+    }
+
+    func testEveryAllowedVerbIsEncodedForSendingWithItsType() {
+        let client = makeClient(port: 1)
+        for type in allowedWireTypes {
+            XCTAssertEqual(encodedType(client.encodeForSend(WireStandIn(type: type))), type)
+        }
+    }
+
+    func testPerriActionsAndSessionSendsAreNeverEncodedForSending() {
+        let client = makeClient(port: 1)
+        XCTAssertNil(client.encodeForSend(ClientPerriAction(action: "approve", prNumber: 1, repo: "r")))
+        XCTAssertNil(client.encodeForSend(ClientPerriAction(action: "load_pr", prNumber: 1, repo: "r", tag: "perri")))
+        XCTAssertNil(client.encodeForSend(ClientSessionSend(tag: "t", text: "x", images: [])))
+    }
+
+    func testSendingAMutatingOrUnknownVerbPutsNothingOnTheWire() async throws {
+        let server = try await startServer()
+        let client = makeClient(port: server.port)
+        client.start()
+        await assertEventually("the client is connected and has sent its handshake") {
+            client.connected && self.texts(of: server).count >= 2
+        }
+
+        client.send(ClientPerriAction(action: "approve", prNumber: 1, repo: "r"))
+        client.send(ClientSessionSend(tag: "t", text: "x", images: []))
+        client.send(WireStandIn(type: "session_interrupt"))
+        client.send(WireStandIn(type: "close_pane"))
+        client.send(WireStandIn(type: "session_model_set"))
+        client.send(WireStandIn(type: "pair"))
+        client.send(WireStandIn(type: "some_future_verb"))
+        client.send(ClientSessionList())
+
+        await assertEventually("the allowed frame arrives") { self.texts(of: server).count >= 3 }
+        await observationWindow(0.2)
+        XCTAssertEqual(texts(of: server).map { wireType($0) }, ["hello", "subscribe", "session_list"],
+                       "Only the allowed verb may reach the server after the handshake")
+    }
+
+    func testTheWebSocketTransportCannotMutate() {
+        let client = makeClient(port: 1)
+        XCTAssertFalse(client.canMutate)
+        XCTAssertFalse((client as any DaemonTransport).canMutate, "Through the protocol too, not just the concrete type")
     }
 
     // MARK: - Reconfiguration

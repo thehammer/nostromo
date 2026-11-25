@@ -79,4 +79,38 @@ final class DeviceCredentialTests: XCTestCase {
         XCTAssertTrue(keys.isDisjoint(with: ["host", "port", "address", "url", "hostname"]),
                       "A credential tied to an address would not survive an address change: \(keys)")
     }
+
+    // MARK: - Resuming at launch (an orphaned credential is discarded)
+
+    func testACredentialWithNoSavedAddressIsAnOrphanAndIsDeletedFromTheStore() throws {
+        let store = InMemoryDeviceCredentialStore(credential())
+
+        XCTAssertNil(store.resumeOrDiscardOrphan(address: nil))
+        XCTAssertNil(store.load(), "An orphan must not stay in the Keychain for a pairing link to ask for")
+    }
+
+    func testACredentialWithAnEmptySavedAddressIsAnOrphanAndIsDeletedFromTheStore() throws {
+        let store = InMemoryDeviceCredentialStore(credential())
+
+        XCTAssertNil(store.resumeOrDiscardOrphan(address: ""))
+        XCTAssertNil(store.load())
+    }
+
+    func testACredentialWithASavedAddressResumesWithBothAndIsKept() throws {
+        let store = InMemoryDeviceCredentialStore(credential())
+
+        let resumed = try XCTUnwrap(store.resumeOrDiscardOrphan(address: "10.0.0.5"))
+
+        XCTAssertEqual(resumed.credential, credential())
+        XCTAssertEqual(resumed.address, "10.0.0.5")
+        XCTAssertEqual(store.load(), credential(), "A real pairing is left alone")
+    }
+
+    func testResumingWithNoCredentialIsNilWhateverTheAddress() throws {
+        let store = InMemoryDeviceCredentialStore()
+
+        XCTAssertNil(store.resumeOrDiscardOrphan(address: "10.0.0.5"))
+        XCTAssertNil(store.resumeOrDiscardOrphan(address: nil))
+        XCTAssertNil(store.load())
+    }
 }

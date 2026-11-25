@@ -465,6 +465,28 @@ final class DaemonStoreBackplaneTests: XCTestCase {
         XCTAssertTrue(legacy.canMutate)
     }
 
+    func testATransportThatDoesNotSayItCanMutateCannotMutate() async throws {
+        XCTAssertFalse(FakeDaemonTransport().canMutate, "The protocol default fails safe")
+    }
+
+    func testTheWebSocketTransportBehindADaemonStoreCannotMutate() async throws {
+        let credential = DeviceCredential(token: "t", deviceId: "d", serverId: "s", name: "n")
+        let webSocket = WebSocketClient(host: "127.0.0.1", port: 1, credential: credential,
+                                        probe: FakeLocalNetworkProbe())
+
+        XCTAssertFalse(DaemonStore(client: webSocket).canMutate)
+    }
+
+    func testATranscriptStoreCanMutateOnlyOverTheLegacyTransport() async throws {
+        let credential = DeviceCredential(token: "t", deviceId: "d", serverId: "s", name: "n")
+        let webSocket = WebSocketClient(host: "127.0.0.1", port: 1, credential: credential,
+                                        probe: FakeLocalNetworkProbe())
+
+        XCTAssertFalse(TranscriptStore(client: webSocket).canMutate, "No composer, answers or Stop over the WebSocket")
+        XCTAssertFalse(TranscriptStore(client: FakeDaemonTransport()).canMutate)
+        XCTAssertTrue(TranscriptStore(client: NetworkClient()).canMutate)
+    }
+
     func testConnectionStateFollowsTheTransportsStatePublisher() async throws {
         let (store, transport) = await makeStore(cache: makeCache())
 
@@ -486,5 +508,116 @@ final class DaemonStoreBackplaneTests: XCTestCase {
         await deliver(Sample.jobs([Sample.job("k1")], host: "kobe"), via: transport)
 
         XCTAssertTrue(store.hasLastKnownContent, "A satellite's last-known rows are content too")
+    }
+
+    // MARK: - A frame in flight after wipeAll
+
+    func testAFrameThatArrivesAfterWipeAllNeitherRefillsTheStoreNorTheCache() async throws {
+        let cache = makeCache()
+        let (store, transport) = await makeStore(cache: cache)
+        transport.connectedSubject.send(true)
+        await letMainLoopTurn()
+        for frame in [Sample.motherJobs, Sample.sessionList, Sample.focusList] {
+            await deliver(frame, via: transport)
+        }
+        cache.flush()
+        XCTAssertFalse(store.motherJobs.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cacheURL.path))
+
+        store.wipeAll()
+        XCTAssertTrue(store.motherJobs.isEmpty)
+        XCTAssertTrue(store.sessions.isEmpty)
+        XCTAssertTrue(store.focuses.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cacheURL.path))
+
+        // The socket was not yet closed: more frames arrive, with no new connected event in between.
+        await deliver(Sample.motherJobs, via: transport)
+        await deliver(Sample.sessionList, via: transport)
+        await deliver(Sample.focusList, via: transport)
+        await deliver(Sample.jobs([Sample.job("k1")], host: "kobe"), via: transport)
+
+        XCTAssertTrue(store.motherJobs.isEmpty, "A wiped store stays wiped")
+        XCTAssertTrue(store.sessions.isEmpty)
+        XCTAssertTrue(store.focuses.isEmpty)
+        XCTAssertTrue(store.hostedMotherJobs.isEmpty)
+        XCTAssertFalse(store.motherJobsReceived)
+        XCTAssertFalse(store.hasLastKnownContent)
+        cache.flush()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cacheURL.path),
+                       "A late frame must not put the revoked server's content back on disk")
+    }
+
+    func testANewConnectionAfterWipeAllAcceptsFramesAgain() async throws {
+        let cache = makeCache()
+        let (store, transport) = await makeStore(cache: cache)
+        transport.connectedSubject.send(true)
+        await letMainLoopTurn()
+        await deliver(Sample.motherJobs, via: transport)
+        store.wipeAll()
+        await deliver(Sample.motherJobs, via: transport)
+        XCTAssertTrue(store.motherJobs.isEmpty)
+
+        // Pairing again: the new client connects, which lifts the guard.
+        transport.connectedSubject.send(false)
+        await letMainLoopTurn()
+        transport.connectedSubject.send(true)
+        await letMainLoopTurn()
+        await deliver(Sample.jobs([Sample.job("fresh")]), via: transport)
+
+        XCTAssertEqual(store.motherJobs.map(\.id), ["fresh"])
+        XCTAssertTrue(store.hasLastKnownContent)
+        cache.flush()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cacheURL.path), "The new pairing's content is cached again")
+    }
+
+    // MARK: - Duplicate keys in a frame must not trap
+
+    func testDuplicateTopicsInAWithheldFrameAreCollapsed() async throws {
+        let (store, transport) = await makeStore(cache: makeCache())
+        transport.connectedSubject.send(true)
+        await letMainLoopTurn()
+
+        await deliver(#"{"type":"withheld","topics":["fred","fred","teri"],"reason":"not_shared"}"#, via: transport)
+
+        XCTAssertEqual(store.withheldReasons, ["fred": "not_shared", "teri": "not_shared"])
+        XCTAssertEqual(store.withheldTopics, ["fred", "teri"])
+        XCTAssertTrue(store.isNotShared("fred"))
+    }
+
+    func testDuplicateTagsInASessionListKeepTheLastEntry() async throws {
+        let (store, transport) = await makeStore(cache: makeCache())
+        transport.connectedSubject.send(true)
+        await letMainLoopTurn()
+        func session(_ tag: String, agent: String) -> String {
+            #"{"tag":"\#(tag)","agent_name":"\#(agent)","view_name":"v","session_id":"s","alive":true,"remote_control":false,"state":"idle"}"#
+        }
+
+        let entries = [session("cody-1", agent: "first"), session("perri-1", agent: "other"),
+                       session("cody-1", agent: "last")].joined(separator: ",")
+        await deliver(#"{"type":"session_list_resp","sessions":[\#(entries)]}"#, via: transport)
+
+        XCTAssertEqual(Set(store.sessions.keys), ["cody-1", "perri-1"])
+        XCTAssertEqual(store.sessions["cody-1"]?.agentName, "last")
+        XCTAssertEqual(store.sessions["perri-1"]?.agentName, "other")
+    }
+
+    func testDuplicateTagsInAFocusListKeepTheLastEntryForBothListFrames() async throws {
+        let (store, transport) = await makeStore(cache: makeCache())
+        transport.connectedSubject.send(true)
+        await letMainLoopTurn()
+        func focus(_ tag: String, name: String) -> String {
+            #"{"tag":"\#(tag)","display_name":"\#(name)","agent_name":"cody","is_built_in":false}"#
+        }
+
+        let listed = [focus("f1", name: "First"), focus("f2", name: "Other"),
+                      focus("f1", name: "Last")].joined(separator: ",")
+        await deliver(#"{"type":"focus_list_resp","focuses":[\#(listed)]}"#, via: transport)
+        XCTAssertEqual(Set(store.focuses.keys), ["f1", "f2"])
+        XCTAssertEqual(store.focuses["f1"]?.displayName, "Last")
+
+        let updated = [focus("g1", name: "A"), focus("g1", name: "B")].joined(separator: ",")
+        await deliver(#"{"type":"focus_registry_updated","focuses":[\#(updated)]}"#, via: transport)
+        XCTAssertEqual(Set(store.focuses.keys), ["g1"])
+        XCTAssertEqual(store.focuses["g1"]?.displayName, "B")
     }
 }

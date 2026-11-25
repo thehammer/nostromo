@@ -231,4 +231,56 @@ final class ContentCacheTests: XCTestCase {
         let frames = try XCTUnwrap(makeCache().load()).frames
         XCTAssertEqual(frames.map(\.type), ["session_list_resp"], "Only what arrived after the wipe is kept")
     }
+
+    // MARK: - A file with two frames for one slot
+
+    /// Writes a cache file by hand, the way an older or damaged build could have left it.
+    private func writeFile(frames: [ContentCache.Frame]) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(ContentCache.Snapshot(savedAt: savedAt, frames: frames)).write(to: url)
+    }
+
+    func testAFileHoldingTwoFramesForOneSlotLoadsAndTheLastOneWins() throws {
+        let first = #"{"type":"mother_jobs","jobs":[{"id":"first","state":"running","title":"T"}]}"#
+        let last = #"{"type":"mother_jobs","jobs":[{"id":"last","state":"running","title":"T"}]}"#
+        try writeFile(frames: [
+            .init(type: "mother_jobs", host: nil, key: nil, json: first),
+            .init(type: "session_list_resp", host: nil, key: nil, json: sessions),
+            .init(type: "mother_jobs", host: nil, key: nil, json: last),
+        ])
+
+        let cache = makeCache()
+        let snapshot = try XCTUnwrap(cache.load(), "Duplicate slots must not make the file unreadable, or crash")
+        XCTAssertEqual(snapshot.frames.count, 3, "The snapshot is what the file said")
+
+        // The live set is what a later write extends: one frame per slot, the last one kept.
+        cache.flush()
+        let rewritten = try XCTUnwrap(makeCache().load()).frames
+        XCTAssertEqual(rewritten.filter { $0.type == "mother_jobs" }.map(\.json), [last])
+        XCTAssertEqual(rewritten.filter { $0.type == "session_list_resp" }.map(\.json), [sessions])
+        XCTAssertEqual(rewritten.count, 2)
+    }
+
+    func testDuplicatesAreCollapsedPerHostAndPerPerriTagNotAcrossThem() throws {
+        try writeFile(frames: [
+            .init(type: "mother_jobs", host: "kobe", key: nil, json: "k-old"),
+            .init(type: "mother_jobs", host: nil, key: nil, json: motherJobs),
+            .init(type: "perri_state", host: nil, key: "perri", json: perri("perri", marker: "old")),
+            .init(type: "perri_state", host: nil, key: "other", json: perri("other")),
+            .init(type: "mother_jobs", host: "kobe", key: nil, json: "k-new"),
+            .init(type: "perri_state", host: nil, key: "perri", json: perri("perri", marker: "new")),
+        ])
+
+        let cache = makeCache()
+        XCTAssertNotNil(cache.load())
+        cache.flush()
+
+        let rewritten = try XCTUnwrap(makeCache().load()).frames
+        XCTAssertEqual(rewritten.count, 4, "kobe jobs, primary jobs, and one perri_state per tag")
+        XCTAssertEqual(rewritten.first { $0.host == "kobe" }?.json, "k-new")
+        XCTAssertEqual(rewritten.first { $0.key == "perri" }?.json, perri("perri", marker: "new"))
+        XCTAssertEqual(rewritten.first { $0.key == "other" }?.json, perri("other"))
+        XCTAssertEqual(rewritten.first { $0.type == "mother_jobs" && $0.host == nil }?.json, motherJobs)
+    }
 }

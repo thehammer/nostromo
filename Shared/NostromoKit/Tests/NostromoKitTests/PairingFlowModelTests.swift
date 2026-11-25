@@ -305,7 +305,8 @@ final class PairingFlowModelTests: XCTestCase {
     func testWithAStoredCredentialTheSecondCheckCarriesAProofAndNeverTheTokenOrItsHash() async throws {
         let store = InMemoryDeviceCredentialStore(oldCredential)
         let h = harness(store: store,
-                        checks: [.success(offer(challenge: "chal-1")), .success(offer(challenge: "chal-2", knows: true))])
+                        checks: [.success(offer(challenge: "chal-1")), .success(offer(challenge: "chal-2", knows: true))],
+                        currentServer: ("10.0.0.5", 47101))   // a pairing exists only with a saved address
 
         await h.model.begin(address: address, port: port, code: code)
 
@@ -390,7 +391,7 @@ final class PairingFlowModelTests: XCTestCase {
     func testAFailedPairOnTheSameServerRestartsTheOldClientAndKeepsTheOldCredential() async throws {
         let store = InMemoryDeviceCredentialStore(oldCredential)
         let h = harness(store: store, checks: [.success(offer()), .success(offer(knows: true))],
-                        pair: .failure(PairingError.unreachable))
+                        pair: .failure(PairingError.unreachable), currentServer: ("10.0.0.5", 47101))
         await h.model.begin(address: address, port: port, code: code)
         let shown = try confirmation(of: h.model)
 
@@ -422,7 +423,8 @@ final class PairingFlowModelTests: XCTestCase {
 
     func testASameServerConfirmOnADeadSocketFailsAsUnreachableWithoutPairing() async throws {
         let store = InMemoryDeviceCredentialStore(oldCredential)
-        let h = harness(store: store, checks: [.success(offer()), .success(offer(knows: true))])
+        let h = harness(store: store, checks: [.success(offer()), .success(offer(knows: true))],
+                        currentServer: ("10.0.0.5", 47101))
         await h.model.begin(address: address, port: port, code: code)
         let shown = try confirmation(of: h.model)
         h.server.isOpen = false
@@ -467,5 +469,99 @@ final class PairingFlowModelTests: XCTestCase {
         await h.model.begin(address: address, port: port, code: code)
         h.model.reset()
         XCTAssertEqual(h.model.step, .idle)
+    }
+
+    // MARK: - (i) The old token never goes to an address it was not issued for
+
+    /// The reinstall case: the Keychain outlived the app, the saved address did not, and a pairing link
+    /// (anyone can send one) names a server. With no saved address there is no old pairing, so the
+    /// link's server must not be handed a proof over the old token, told "you are replaced", or asked
+    /// to forget the device.
+    func testALinkedAddressWithNoSavedServerNeverGetsAProofOrTheOldCredential() async throws {
+        let store = InMemoryDeviceCredentialStore(oldCredential)
+        let h = harness(store: store,
+                        checks: [.success(offer(challenge: "hostile-challenge")), .success(offer(knows: true))],
+                        currentServer: nil)
+
+        await h.model.begin(address: "hostile.local", port: 4444, code: code)
+
+        XCTAssertEqual(h.server.checkCalls, [.init(code: code, proof: nil)],
+                       "Only the proof-less check: a proof over the old token must never be computed for a link")
+        XCTAssertEqual(h.makeServerCalls.calls.count, 1)
+        XCTAssertEqual(h.makeServerCalls.calls.first?.0, "hostile.local")
+        let shown = try confirmation(of: h.model)
+        XCTAssertEqual(shown.existing, .none, "No saved address means no existing pairing to replace or warn about")
+        XCTAssertEqual(shown.address, "hostile.local")
+
+        let beforeConfirm = h.log.events.count
+        await h.model.confirm()
+
+        XCTAssertEqual(Array(h.log.events.dropFirst(beforeConfirm)), ["server.pair(replace: false)", "effects.didPair"],
+                       "Nothing is stopped, wiped or sent to an old server")
+        XCTAssertEqual(h.server.pairCalls.map(\.replace), [false])
+        XCTAssertTrue(h.effects.unpaired.isEmpty, "No unpair call to any address, least of all the link's")
+        XCTAssertEqual(h.log.count("effects.unpairFromOldServer"), 0)
+        XCTAssertEqual(h.log.count("effects.wipeContent"), 0)
+        XCTAssertEqual(h.log.count("effects.stopCurrentClient"), 0)
+        XCTAssertEqual(h.model.step, .succeeded(name: "Paired Name"))
+    }
+
+    func testWithNoSavedServerNoCallCarriesTheOldTokenOrAnythingDerivedFromIt() async throws {
+        let store = InMemoryDeviceCredentialStore(oldCredential)
+        let h = harness(store: store, currentServer: nil)
+
+        await h.model.begin(address: "hostile.local", port: 4444, code: code)
+        await h.model.confirm()
+
+        let handedOver = h.server.checkCalls.flatMap { [$0.code, $0.proof ?? ""] }
+            + h.server.pairCalls.flatMap { [$0.code, $0.name] }
+        XCTAssertFalse(handedOver.contains { $0.contains(oldCredential.token) })
+        XCTAssertTrue(h.server.checkCalls.allSatisfy { $0.proof == nil })
+    }
+
+    func testWithASavedServerALinkToAnotherAddressStillProvesAndWarnsAboutTheSavedServerNotTheLink() async throws {
+        let store = InMemoryDeviceCredentialStore(oldCredential)
+        let h = harness(store: store, checks: [.success(offer()), .success(offer(knows: false))],
+                        currentServer: ("192.168.1.9", 47100))
+
+        await h.model.begin(address: "link.local", port: 4444, code: code)
+
+        XCTAssertEqual(h.server.checkCalls.count, 2)
+        XCTAssertNil(h.server.checkCalls[0].proof)
+        XCTAssertNotNil(h.server.checkCalls[1].proof, "The saved pairing exists, so the proof is still asked for (D6)")
+        XCTAssertEqual(try confirmation(of: h.model).existing,
+                       .differentServer(oldAddress: "192.168.1.9", oldPort: 47100),
+                       "The old pairing is the saved address, never the link's")
+
+        await h.model.confirm()
+
+        XCTAssertEqual(h.effects.unpaired.count, 1)
+        XCTAssertEqual(h.effects.unpaired.first?.address, "192.168.1.9")
+        XCTAssertEqual(h.effects.unpaired.first?.port, 47100)
+        XCTAssertEqual(h.effects.unpaired.first?.credential, oldCredential)
+        XCTAssertEqual(h.effects.didPairCalls.first?.address, "link.local", "The new pairing is the link's")
+    }
+
+    func testASavedServerWithNoStoredCredentialIsAFreshPairingWithNoProof() async throws {
+        let h = harness(store: InMemoryDeviceCredentialStore(), currentServer: ("192.168.1.9", 47100))
+
+        await h.model.begin(address: address, port: port, code: code)
+
+        XCTAssertEqual(h.server.checkCalls, [.init(code: code, proof: nil)])
+        XCTAssertEqual(try confirmation(of: h.model).existing, .none)
+    }
+
+    // MARK: - (j) A malformed address
+
+    func testABadAddressFailsTheCheckAsBadAddressWithNoConfirmationAndNoPair() async throws {
+        let h = harness(checks: [.failure(PairingError.badAddress)])
+        let steps = recordSteps(h.model)
+
+        await h.model.begin(address: "bad host", port: port, code: code)
+
+        XCTAssertEqual(h.model.step, .failed(.badAddress, address: "bad host", confirmation: nil))
+        XCTAssertFalse(steps.confirmingSeen)
+        XCTAssertTrue(h.server.pairCalls.isEmpty)
+        XCTAssertGreaterThanOrEqual(h.server.closeCount, 1)
     }
 }
