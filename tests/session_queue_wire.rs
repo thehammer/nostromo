@@ -591,8 +591,11 @@ fn snap_of(m: &ServerMsg) -> Option<Snap> {
 
 impl Conn {
     async fn attach(&mut self, tag: &str) {
-        self.send(&ClientMsg::SessionAttach { tag: tag.into() })
-            .await;
+        self.send(&ClientMsg::SessionAttach {
+            tag: tag.into(),
+            host: None,
+        })
+        .await;
         self.sync().await;
     }
 

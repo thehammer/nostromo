@@ -1809,11 +1809,17 @@ pub enum ClientMsg {
     /// to the same tag (broadcast fan-out — mirroring).
     SessionAttach {
         tag: String,
+        /// The satellite to ask; absent is this daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
 
     /// Stop receiving deltas for a session without stopping the child.
     SessionDetach {
         tag: String,
+        /// The satellite to ask; absent is this daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
 
     /// Enqueue a user message; the daemon writes it to the child's stdin.
@@ -1891,7 +1897,11 @@ pub enum ClientMsg {
     },
 
     /// Request a snapshot of all daemon-hosted sessions.
-    SessionList,
+    SessionList {
+        /// The satellite to ask; absent is this daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+    },
 
     /// The Mac app publishes its full focus registry to the daemon. Replaces the
     /// daemon's in-memory registry wholesale.
@@ -1899,7 +1909,11 @@ pub enum ClientMsg {
         focuses: Vec<FocusMeta>,
     },
     /// Request a snapshot of the current focus registry.
-    FocusList,
+    FocusList {
+        /// The satellite to ask; absent is this daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+    },
 
     /// Request a Mother job action (cancel / retry / force-start).
     /// The daemon shells out to `mother <action> <job_id>` and re-broadcasts
@@ -2126,6 +2140,9 @@ pub enum ClientMsg {
     /// The daemon replies with `ServerMsg::ActivitySnapshot`.
     ActivitySnapshotRequest {
         tag: String,
+        /// The satellite to ask; absent is this daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
 
     /// A client's report of which pane ids one of its windows has actually
@@ -2219,6 +2236,9 @@ pub enum ClientMsg {
     /// Read one focus's model. Answered with `ServerMsg::SessionModelState`.
     SessionModelGet {
         tag: String,
+        /// The satellite to ask; absent is this daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
     /// Switch a focus's model and/or effort (refused over TCP). `None` keeps
     /// the current value. Answered with `ServerMsg::ModelRequestResult`.
@@ -2662,10 +2682,20 @@ pub enum ClientMsg {
         /// What an enrolled satellite may publish; only with `satellite`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         egress: Option<crate::ipc::devices::Egress>,
+        /// Set by a satellite's uplink: the local connection that asked, so
+        /// the primary can keep one local client from cancelling another's
+        /// pairing. Absent from every other peer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
     },
     DevicePairCancel {
         request_id: String,
         pairing_id: String,
+        /// Set by a satellite's uplink: the local connection that asked, so
+        /// the primary can keep one local client from cancelling another's
+        /// pairing. Absent from every other peer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
     },
     DeviceList {
         request_id: String,
@@ -4253,8 +4283,14 @@ mod tests {
             remote_control: true,
             no_codebase: false,
         });
-        round_trip_client(ClientMsg::SessionAttach { tag: "fred".into() });
-        round_trip_client(ClientMsg::SessionDetach { tag: "fred".into() });
+        round_trip_client(ClientMsg::SessionAttach {
+            tag: "fred".into(),
+            host: None,
+        });
+        round_trip_client(ClientMsg::SessionDetach {
+            tag: "fred".into(),
+            host: None,
+        });
         round_trip_client(ClientMsg::SessionInterrupt { tag: "fred".into() });
         round_trip_client(ClientMsg::ClosePane {
             tag: "perri".into(),
@@ -4281,7 +4317,7 @@ mod tests {
             request_id: "r1".into(),
             decision: PermissionDecision::Allow,
         });
-        round_trip_client(ClientMsg::SessionList);
+        round_trip_client(ClientMsg::SessionList { host: None });
     }
 
     #[test]
@@ -4829,7 +4865,7 @@ mod tests {
         round_trip_client(ClientMsg::FocusRegistryPush {
             focuses: vec![meta.clone()],
         });
-        round_trip_client(ClientMsg::FocusList);
+        round_trip_client(ClientMsg::FocusList { host: None });
 
         round_trip_server(ServerMsg::FocusListResp {
             focuses: vec![meta.clone()],
@@ -5677,6 +5713,7 @@ mod tests {
     fn activity_snapshot_request_round_trips() {
         round_trip_client(ClientMsg::ActivitySnapshotRequest {
             tag: "cody-1".into(),
+            host: None,
         });
     }
 

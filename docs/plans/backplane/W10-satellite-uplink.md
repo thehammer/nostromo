@@ -338,7 +338,7 @@ broadcast channel; routed replies take the second path in A5):
    **Limits (Q1).** Replies have their own token bucket per satellite
    connection (**200 per second, burst 400**; excess dropped and counted;
    over the limit for 30 s in a row closes the uplink with 1008), separate
-   from `publish`. Outstanding ids are capped at **32 per requesting
+   from `publish`. Outstanding ids are capped at **8 per requesting
    connection** and **32 per host**; beyond either cap the router answers
    `HostUnavailable { reason: busy }` and routes nothing. Without the caps a
    requester, including an unauthenticated LAN `Tcp` peer, could open
@@ -1060,7 +1060,7 @@ the operator's own host.
   pairing and admin frames returning `None`; the egress test's constructor
   list includes `TrackerSummary`, `SessionBridge`, `SessionTurnOrigin`,
   every `LocalOnly` frame added since 2026-10-18, and W9's ten frames.
-- [ ] **W10-19** Nothing about a sensitive focus leaves a `work` host:
+- [ ] **W10-22** Nothing about a sensitive focus leaves a `work` host:
   `redact_for_uplink_metadata` takes the daemon's `SensitiveTags` and returns
   `None` for `PerriState`, `SessionState`, `SessionBridge`, `ApprovalPending`,
   `DecisionRequest`, `DecisionResolved`, `TrackerSummary` and `FocusCreated`
@@ -1131,7 +1131,7 @@ the operator's own host.
   256 KiB or above 50/s (burst 200), and malformed or wrong-direction
   envelopes (same bucket), are dropped and counted, with a 1008 close after
   30 s over the limit; replies have their own 200/s (burst 400) bucket, and
-  outstanding ids are capped at 32 per requester and 32 per host
+  outstanding ids are capped at 8 per requester and 32 per host
   (`HostUnavailable { busy }` beyond).
 
 ## Mother crew: gates, lenses, checklist and calibration
@@ -1156,7 +1156,7 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   merged since this was first written); the repo default is all four lenses
   (`.mother/crew.yml:61`), so only a `remove` entry changes anything.
 - **Review depth:** **Manual Perri pass is still required** (the `perri` entry below at xhigh, then the operator's review). Lens findings are input to it, not a substitute: a lens sees only the diff (patch input is capped at 120 KB, so a large wedge will report `coverage_gap` findings), and Mother's `phi-security` checklist is written for care data, so it does not know this repo's trust tiers (B9, B10). Egress filter on a managed laptop; routed frames into a satellite.
-- **Checklist:** the acceptance items above carry ids (`W10-1` to `W10-21`) so
+- **Checklist:** the acceptance items above carry ids (`W10-1` to `W10-22`) so
   `mother add` seeds Mother's checklist and the progress figure can use it. The
   worker ticks each with `mother check <job> --done --evidence <short ref>` only
   when its test or check has passed.
@@ -1217,3 +1217,26 @@ lenses:
   "own record only" step lands in W10b.
 - The forwarder passes the daemon's `SensitiveTags` to
   `redact_for_uplink_metadata` (W10c; step (2) above).
+
+## Carry-forward from W10b (for W10c)
+
+- A refusal sent to a satellite must be `SatelliteControl` or pass
+  `is_refusal`, or `may_receive` drops it. The primary's own rate-limit
+  refusal (`Error { message: "rate_limited" }`) is sent wrapped as `server`
+  and passes it.
+- Clients must treat an unknown `HostUnavailable.reason` as a generic
+  "unavailable", so a reason added later does not break an older client.
+- When the router retires an attach id on a refusal, nothing sends
+  `SessionDetach` down to the satellite: a mid-attach `Error` leaves the
+  satellite attached and its later deltas are dropped as `UnknownId`. W10c
+  sends the detach (the satellite side owns the cleanup).
+- Limits added in the fix round: a satellite's own `client` frames have a
+  token bucket (10/s, burst 30; excess answered `rate_limited`, 1008 after
+  30 s over); a satellite connection holds at most 16 open pairings and 4 per
+  local client behind it (`too_many_pairings`). A bucket's over-limit run
+  restarts after 5 s with no drop, so an honest sender that overran once is
+  never closed for a later burst.
+- What a satellite published is forgotten (all `host:<name>:` retained keys)
+  when its last uplink ends or it is revoked. Finished focuses are not
+  pruned from the retained cache before then: the per-host cap (512) bounds
+  them.

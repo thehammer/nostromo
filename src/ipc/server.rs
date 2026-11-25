@@ -19,6 +19,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
@@ -32,27 +33,30 @@ use super::{
     codec::{read_frame, write_frame},
     decisions::{AnswerOutcome, DecisionRegistry},
     device_hub::{DeviceHub, Dispatched, HubSlot},
+    devices::SatelliteInfo,
     peer::{
-        outbound, refuse_for_network, withheld_msg, withheld_msg_for, within_work_send, PeerTrust,
-        SensitiveTags, Transport,
+        outbound, refuse_for_network, satellite_allowed, withheld_msg, withheld_msg_for,
+        within_work_send, PeerTrust, SensitiveTags, Transport,
     },
     peer_verify::{
         claim_diagnostic, classify_peer, still_same_operator, PeerInfo, PeerVerifier,
         MAC_APP_CLIENT_KIND,
     },
     protocol::{
-        ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, QueueResultCode,
-        QueueReturnedEntry, ServerMsg, SessionAction, Topic, TrackerEditError,
-        FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_MERGE, FEATURE_AUTHORED_PRS_MERGE_QUEUE,
-        FEATURE_AUTHORED_PRS_NOTIFY, FEATURE_AUTHORED_PRS_PERRI, FEATURE_CONVERSATION_HISTORY,
-        FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_MERGED_TURNS, FEATURE_SESSION_MCP,
-        FEATURE_SESSION_QUEUE, FEATURE_SLASH_COMMANDS, FEATURE_TERMINAL_STAGING_ONLY,
-        FEATURE_TRACKER_ACK_DROPPED, FEATURE_TRACKER_CONFLICT_IDS, FEATURE_TRACKER_EDIT,
-        MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
+        ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, HelloRole, HostUnavailableReason,
+        MotherActionKind, QueueResultCode, QueueReturnedEntry, ServerMsg, SessionAction, Topic,
+        TrackerEditError, FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_MERGE,
+        FEATURE_AUTHORED_PRS_MERGE_QUEUE, FEATURE_AUTHORED_PRS_NOTIFY, FEATURE_AUTHORED_PRS_PERRI,
+        FEATURE_CONVERSATION_HISTORY, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_MERGED_TURNS,
+        FEATURE_SESSION_MCP, FEATURE_SESSION_QUEUE, FEATURE_SLASH_COMMANDS,
+        FEATURE_TERMINAL_STAGING_ONLY, FEATURE_TRACKER_ACK_DROPPED, FEATURE_TRACKER_CONFLICT_IDS,
+        FEATURE_TRACKER_EDIT, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
+    router::{client_host, Routed},
     session_manager::{
         AppLabel, ModelRequestOutcome, QueueVerb, ResendTrigger, SessionManager, SwitchRequest,
     },
+    uplink_wire::UplinkFrame,
 };
 use crate::approvals::broker::ApprovalBroker;
 use crate::approvals::wire::{AnswerRefusal, RefusalChannel};
@@ -132,7 +136,9 @@ const MOTHER_HOLD_NEEDS_OPERATOR: &str =
 
 /// The optional capabilities the WebSocket transport and device pairing add to
 /// `Welcome.features` (on every transport).
-pub(super) use super::ws::{FEATURE_DEVICES, FEATURE_PAIR, FEATURE_WS};
+pub(super) use super::ws::{
+    FEATURE_DEVICES, FEATURE_HOSTS, FEATURE_PAIR, FEATURE_UPLINK, FEATURE_WS,
+};
 
 /// Handle to the running IPC server.  Drop to shut down.
 pub struct Server {
@@ -405,15 +411,45 @@ pub(super) enum PeerOrigin {
     /// A WebSocket peer that presented a valid device token.
     Ws {
         device_id: String,
+        /// Set when the token belongs to a satellite record: what the record
+        /// says, and the channel the primary's routed reads travel on.
+        satellite: Option<SatelliteLink>,
+        /// Set when the connection ended because its `Hello` claimed a role
+        /// its token may not have, so the socket closes 4001 rather than 1000.
+        role_refused: Arc<AtomicBool>,
+        /// Set once a satellite's `Hello` was accepted and it is registered
+        /// with the router; until then `run_paired` drops its `publish` and
+        /// `reply` frames.
+        admitted: Arc<AtomicBool>,
     },
 }
+
+/// What `run_paired` knows about an uplink before its `Hello`.
+pub(super) struct SatelliteLink {
+    /// The record as read at admission (a snapshot: a level change closes the
+    /// uplink with 1012).
+    pub info: SatelliteInfo,
+    /// The primary's routed reads for this satellite.
+    /// Taken at registration: the router then holds the only sender, so
+    /// replacing or ending the uplink closes the socket's request channel.
+    pub req_tx: Option<mpsc::UnboundedSender<UplinkFrame>>,
+}
+
+/// A `Hello` named a role the connection's token does not allow.
+pub(super) struct RoleRefused;
 
 impl PeerOrigin {
     /// Settle the connection's trust from the peer and its `Hello` claim. The
     /// verifier runs off the async workers (it is synchronous, and a slow one
     /// must not hold up other connections), and runs the code-signing check
     /// only when the `Hello` claims to be the Mac app.
-    async fn resolve(&mut self, client_kind: Option<&str>) -> PeerTrust {
+    async fn resolve(
+        &mut self,
+        client_kind: Option<&str>,
+        role: Option<&HelloRole>,
+    ) -> Result<PeerTrust, RoleRefused> {
+        // A role claim on a Unix or TCP connection is ignored: those origins
+        // never yield `Satellite`.
         match self {
             PeerOrigin::Unix {
                 verifier,
@@ -434,17 +470,42 @@ impl PeerOrigin {
                         None
                     }
                 };
-                classify_peer(info.as_ref(), client_kind, *qa_mode)
+                Ok(classify_peer(info.as_ref(), client_kind, *qa_mode))
             }
-            PeerOrigin::Tcp => PeerTrust::from_transport(Transport::Tcp),
-            PeerOrigin::Ws { .. } => PeerTrust::from_transport(Transport::Ws),
+            PeerOrigin::Tcp => Ok(PeerTrust::from_transport(Transport::Tcp)),
+            PeerOrigin::Ws { satellite, .. } => match (satellite.as_ref(), role) {
+                // A satellite record, a `Hello` naming that record's host and egress.
+                (Some(link), Some(HelloRole::Satellite { host, egress }))
+                    if *host == link.info.name && *egress == link.info.egress =>
+                {
+                    Ok(PeerTrust::Satellite {
+                        admin: link.info.admin,
+                    })
+                }
+                // A satellite token without the role, or with another host or
+                // egress; a phone or iPad token claiming the role.
+                (Some(_), _) | (None, Some(HelloRole::Satellite { .. })) => Err(RoleRefused),
+                (None, _) => Ok(PeerTrust::from_transport(Transport::Ws)),
+            },
+        }
+    }
+
+    /// For an uplink: the record, and the channel to register with the router
+    /// (once: the router keeps the only sender).
+    fn take_uplink(&mut self) -> Option<(SatelliteInfo, mpsc::UnboundedSender<UplinkFrame>)> {
+        match self {
+            PeerOrigin::Ws {
+                satellite: Some(link),
+                ..
+            } => link.req_tx.take().map(|tx| (link.info.clone(), tx)),
+            _ => None,
         }
     }
 
     /// The device id of a WebSocket peer.
     fn ws_device(&self) -> Option<&str> {
         match self {
-            PeerOrigin::Ws { device_id } => Some(device_id),
+            PeerOrigin::Ws { device_id, .. } => Some(device_id),
             _ => None,
         }
     }
@@ -728,13 +789,17 @@ where
     // `conn_key` is a server-minted UUID used as the registry routing key so
     // that a malicious client cannot hijack another connection's targeted
     // channel by sending a pre-known client_id.
+    let hello_role = match &hello {
+        ClientMsg::Hello { role, .. } => role.clone(),
+        _ => None,
+    };
     let (claimed_id, conn_key, client_kind, merge_capable) = match hello {
         ClientMsg::Hello {
             ref client_id,
             protocol_version,
             ref client_kind,
             ref capabilities,
-            ..
+            role: _,
         } => {
             if protocol_version < MIN_CLIENT_VERSION {
                 let err = ServerMsg::Error {
@@ -764,7 +829,27 @@ where
         }
     };
 
-    let trust = origin.resolve(client_kind.as_deref()).await;
+    let trust = match origin
+        .resolve(client_kind.as_deref(), hello_role.as_ref())
+        .await
+    {
+        Ok(trust) => trust,
+        Err(RoleRefused) => {
+            // The socket closes 4001 (see `run_paired`).
+            if let PeerOrigin::Ws { role_refused, .. } = &origin {
+                role_refused.store(true, Ordering::SeqCst);
+            }
+            let refusal = ServerMsg::Unauthorized {
+                reason: "role".to_string(),
+            };
+            let _ = write_frame(&mut writer, &serde_json::to_vec(&refusal)?).await;
+            warn!(
+                claimed_id,
+                conn_key, "a connection claimed a role its token does not allow"
+            );
+            return Ok(());
+        }
+    };
     // Issued only once the peer is verified as the operator app, and required
     // in every `DecisionAnswer`: bytes written before verification (say, by a
     // process that then `exec`s the app) cannot contain it.
@@ -778,7 +863,12 @@ where
     // When the peer behind the cap was last inspected and found unchanged.
     let mut cap_checked_at = std::time::Instant::now();
 
-    let welcome = welcome_msg(&session_mgr.lock().unwrap(), operator_nonce.clone());
+    let mut welcome = welcome_msg(&session_mgr.lock().unwrap(), operator_nonce.clone());
+    // A daemon that serves device pairing is a primary: satellites may uplink.
+    if let (ServerMsg::Welcome { features, .. }, Some(_)) = (&mut welcome, hub.get()) {
+        features.push(FEATURE_HOSTS.to_string());
+        features.push(FEATURE_UPLINK.to_string());
+    }
     write_frame(&mut writer, &serde_json::to_vec(&welcome)?).await?;
     // Never log the nonce.
     let peer_pid = origin.info().map(|i| i.pid);
@@ -922,6 +1012,49 @@ where
         if trust == PeerTrust::OperatorApp {
             session_mgr.lock().unwrap().mark_operator_conn(&conn_key);
         }
+    }
+
+    // ── Satellite admission ───────────────────────────────────────────────────
+    // The uplink is entered in the host table under the *record's* name (never
+    // what the `Hello` claimed), and told its level and where it may pair from:
+    // targeted to this connection, never broadcast.
+    let mut uplink: Option<(String, u64)> = None;
+    let mut sat_level = None;
+    // Subscribed before `full_hosts` is read, so a change between the read and
+    // the first `changed()` is not missed.
+    let mut sat_epoch = match (&trust, hub.get()) {
+        (PeerTrust::Satellite { .. }, Some(h)) => {
+            let mut e = h.registry().subscribe_epoch();
+            e.borrow_and_update();
+            Some(e)
+        }
+        _ => None,
+    };
+    if let (PeerTrust::Satellite { admin }, Some(h)) = (trust, hub.get()) {
+        if let Some((info, req_tx)) = origin.take_uplink() {
+            let conn_id = h.router().register(&info.name, info.egress, req_tx);
+            if let PeerOrigin::Ws { admitted, .. } = &origin {
+                admitted.store(true, Ordering::SeqCst);
+            }
+            uplink = Some((info.name, conn_id));
+            let pair_from = h.registry().full_hosts();
+            let _ = targeted_tx.send(ServerMsg::DeviceAdminLevel {
+                level: admin,
+                pair_from: pair_from.clone(),
+            });
+            sat_level = Some((admin, pair_from));
+        }
+    }
+    if sat_level.is_none() {
+        sat_epoch = None;
+    }
+    // A local client of a primary that follows the device list is on the
+    // operator's own machine: it may do everything.
+    if !trust.is_network() && hub.get().is_some() && topics.contains(&Topic::Devices) {
+        let _ = targeted_tx.send(ServerMsg::DeviceAdminLevel {
+            level: crate::ipc::devices::SatelliteAdmin::Full,
+            pair_from: vec![],
+        });
     }
 
     // ── Terminal stream ───────────────────────────────────────────────────────
@@ -1184,6 +1317,7 @@ where
                         let Some(msg) = outbound(trust, msg, &sensitive) else {
                             continue;
                         };
+                        let msg = for_satellite(msg, trust, origin.ws_device());
                         let bytes = match serde_json::to_vec(&msg) {
                             Ok(b) => b,
                             Err(e) => { warn!("serialise error: {e}"); continue; }
@@ -1236,12 +1370,44 @@ where
                 let Some(msg) = without_notes_unless_model(msg, &topics, trust) else {
                     continue;
                 };
+                let msg = for_satellite(msg, trust, origin.ws_device());
                 let bytes = match serde_json::to_vec(&msg) {
                     Ok(b) => b,
                     Err(e) => { warn!("serialise targeted msg: {e}"); continue; }
                 };
                 if write_outbound(&mut writer, &bytes, &conn_key).await.is_err() {
                     break Ok(());
+                }
+            }
+
+            // A satellite's registry changed: a change in who the `full` hosts
+            // are is sent to it (its own level changing closes the uplink
+            // instead, see `run_paired`).
+            changed = async {
+                match sat_epoch.as_mut() {
+                    Some(e) => e.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed.is_err() {
+                    sat_epoch = None;
+                    continue;
+                }
+                if let (Some((level, last)), Some(h), Some(id)) =
+                    (sat_level.as_mut(), hub.get(), origin.ws_device())
+                {
+                    let still_level = h
+                        .registry()
+                        .satellite_info(id)
+                        .is_some_and(|rec| rec.admin == *level);
+                    let now = h.registry().full_hosts();
+                    if still_level && now != *last {
+                        *last = now.clone();
+                        let _ = targeted_tx.send(ServerMsg::DeviceAdminLevel {
+                            level: *level,
+                            pair_from: now,
+                        });
+                    }
                 }
             }
 
@@ -1256,6 +1422,13 @@ where
                                 continue;
                             }
                         };
+                        // A satellite publishes; it does not consume. Everything but
+                        // its handshake, topics, `Ping` and the device-admin verbs is
+                        // refused here, before any other gate and never routed.
+                        if matches!(trust, PeerTrust::Satellite { .. }) && !satellite_allowed(&msg) {
+                            refuse_over_network(&msg, &targeted_tx);
+                            continue;
+                        }
                         // A later `Subscribe` replaces the topic list: a client
                         // that learned from `Welcome.features` that the daemon
                         // serves `work` adds it this way.
@@ -1313,6 +1486,17 @@ where
                                         .into_iter()
                                         .filter_map(|m| outbound(trust, m, &sensitive)),
                                 );
+                            }
+                            // A local client that now follows the device list is told it may do everything.
+                            if !trust.is_network()
+                                && hub.get().is_some()
+                                && new_topics.contains(&Topic::Devices)
+                                && !topics.contains(&Topic::Devices)
+                            {
+                                frames.push(ServerMsg::DeviceAdminLevel {
+                                    level: crate::ipc::devices::SatelliteAdmin::Full,
+                                    pair_from: vec![],
+                                });
                             }
                             topics = new_topics;
                             replay_messages(&mut writer, frames).await;
@@ -1398,6 +1582,32 @@ where
                             }
                             None => {}
                         }
+                        // A routable read that names a host goes to that satellite,
+                        // after the requesting peer's own refusal rules (FND-1) ran.
+                        if let Some(host) = client_host(&msg) {
+                            let refused = trust.is_network() && refuse_for_network(&msg, &sensitive);
+                            if !refused {
+                                let routed = match hub.get() {
+                                    Some(h) => h.router().route(
+                                        host,
+                                        msg.clone(),
+                                        &targeted_tx,
+                                        &conn_key,
+                                        std::time::Instant::now(),
+                                    ),
+                                    None => Routed::Unavailable(HostUnavailableReason::NotConnected),
+                                };
+                                if let Routed::Unavailable(reason) = routed {
+                                    let _ = targeted_tx.send(ServerMsg::HostUnavailable {
+                                        host: host.to_string(),
+                                        reason,
+                                    });
+                                }
+                                if routed != Routed::NotRoutable {
+                                    continue;
+                                }
+                            }
+                        }
                         handle_client_msg(msg, trust, origin.info(), answer_check, &sensitive, &conn_key, &claimed_id, &session_mgr, &targeted_tx, &broadcast_tx, &perri_state_dir, &decisions, &held_mother_jobs, cap.as_ref(), &terminals);
                     }
                     Err(_) => {
@@ -1419,6 +1629,20 @@ where
     // A pairing never outlives the window or command that shows its code.
     if let Some(h) = hub.get() {
         h.drop_connection(&conn_key);
+        // What this connection asked a satellite for, and (for an uplink) the
+        // host itself: its requests, and every pairing it relayed, end here.
+        h.router().drop_requester(&conn_key);
+        if let Some((name, conn_id)) = &uplink {
+            // The host is gone (or revoked, which closes its socket): what it
+            // published is not replayed to a later subscriber. A replaced
+            // uplink leaves the newer one's frames alone.
+            if let PeerOrigin::Ws { admitted, .. } = &origin {
+                admitted.store(false, Ordering::SeqCst);
+            }
+            if h.router().unregister(name, *conn_id) {
+                purge_host_retained(&retained, name);
+            }
+        }
     }
     {
         let mut mgr = session_mgr.lock().unwrap();
@@ -1767,7 +1991,7 @@ fn handle_client_msg(
             }
         }
 
-        ClientMsg::SessionAttach { tag } => {
+        ClientMsg::SessionAttach { tag, .. } => {
             let result = {
                 let mut mgr = session_mgr.lock().unwrap();
                 if trust.is_network() {
@@ -1783,7 +2007,7 @@ fn handle_client_msg(
             }
         }
 
-        ClientMsg::SessionDetach { tag } => {
+        ClientMsg::SessionDetach { tag, .. } => {
             let mut mgr = session_mgr.lock().unwrap();
             mgr.detach(&tag, conn_key);
         }
@@ -2437,7 +2661,7 @@ fn handle_client_msg(
             );
         }
 
-        ClientMsg::SessionList => {
+        ClientMsg::SessionList { .. } => {
             let mgr = session_mgr.lock().unwrap();
             let sessions = mgr.list();
             let _ = targeted_tx.send(ServerMsg::SessionListResp { sessions, host: None });
@@ -2587,7 +2811,7 @@ fn handle_client_msg(
             let _ = broadcast_tx.send(ServerMsg::FocusRegistryUpdated { focuses: updated, host: None });
         }
 
-        ClientMsg::FocusList => {
+        ClientMsg::FocusList { .. } => {
             let focuses = {
                 let mgr = session_mgr.lock().unwrap();
                 mgr.focus_registry()
@@ -2778,7 +3002,7 @@ fn handle_client_msg(
             }
         }
 
-        ClientMsg::ActivitySnapshotRequest { tag } => {
+        ClientMsg::ActivitySnapshotRequest { tag, .. } => {
             let streams = {
                 let mgr = session_mgr.lock().unwrap();
                 activity_streams_wire(&mgr, &tag)
@@ -2921,7 +3145,7 @@ fn handle_client_msg(
             });
         }
 
-        ClientMsg::SessionModelGet { tag } => {
+        ClientMsg::SessionModelGet { tag, .. } => {
             let state = session_mgr.lock().unwrap().session_model_state(&tag);
             let _ = targeted_tx.send(ServerMsg::SessionModelState(state));
         }
@@ -3986,6 +4210,22 @@ fn device_admin_request_id(msg: &ClientMsg) -> String {
     }
 }
 
+/// What a satellite's connection is written: `Devices.hosts` cut to the
+/// satellite's own record (it lists and revokes phones and iPads, and has no
+/// business seeing other hosts' ids, levels or last-seen times).
+fn for_satellite(msg: ServerMsg, trust: PeerTrust, device_id: Option<&str>) -> ServerMsg {
+    if !matches!(trust, PeerTrust::Satellite { .. }) {
+        return msg;
+    }
+    match msg {
+        ServerMsg::Devices { devices, mut hosts } => {
+            hosts.retain(|h| Some(h.id.as_str()) == device_id);
+            ServerMsg::Devices { devices, hosts }
+        }
+        other => other,
+    }
+}
+
 fn wants_authored_prs(topics: &[Topic]) -> bool {
     topics.contains(&Topic::AuthoredPrs)
 }
@@ -4585,7 +4825,32 @@ fn network_refusal_reply(msg: &ClientMsg) -> ServerMsg {
 /// Key under which a broadcast frame is remembered, or `None` if it is not
 /// retained. Only the latest frame per key is kept.
 fn retain_key(msg: &ServerMsg) -> Option<String> {
+    // What a satellite published is kept per host (and per focus where the
+    // frame is), so one host's snapshot never replaces another's. The daemon's
+    // own frames (no host) are not retained here.
+    let tagged = |kind: &str, host: &Option<String>, tag: Option<&str>| {
+        host.as_ref()
+            .map(|h| format!("host:{h}:{kind}:{}", tag.unwrap_or("")))
+    };
     match msg {
+        ServerMsg::MotherJobs { host, .. } => return tagged("mother_jobs", host, None),
+        ServerMsg::MotherStatusline(s) => return tagged("mother_status", &s.host, None),
+        ServerMsg::PerriState { tag, host, .. } => return tagged("perri", host, Some(tag)),
+        ServerMsg::SessionState { tag, host, .. } => {
+            return tagged("session_state", host, Some(tag))
+        }
+        ServerMsg::SessionBridge { tag, host, .. } => {
+            return tagged("session_bridge", host, Some(tag))
+        }
+        ServerMsg::ApprovalPending { tag, host, .. } => {
+            return tagged("approvals", host, Some(tag))
+        }
+        ServerMsg::TrackerSummary { tag, host, .. } => return tagged("tracker", host, Some(tag)),
+        ServerMsg::FocusRegistryUpdated { host, .. } => return tagged("focuses", host, None),
+        _ => {}
+    }
+    match msg {
+        ServerMsg::Hosts { .. } => Some("hosts".to_string()),
         ServerMsg::FredState { .. } => Some("fred".to_string()),
         ServerMsg::TeriState { .. } => Some("teri".to_string()),
         ServerMsg::WorkSourceStatus { status } => {
@@ -4642,9 +4907,30 @@ fn apply_retention(cache: &mut BTreeMap<String, ServerMsg>, msg: ServerMsg) {
         _ => {}
     }
     if let Some(key) = retain_key(&msg) {
+        // A satellite's frames are bounded per host: past the cap a new key
+        // is not kept (an existing one is still replaced).
+        if let Some(rest) = key.strip_prefix("host:") {
+            let prefix = format!("host:{}:", rest.split(':').next().unwrap_or(""));
+            let held = cache.keys().filter(|k| k.starts_with(&prefix)).count();
+            if held >= MAX_RETAINED_PER_HOST && !cache.contains_key(&key) {
+                return;
+            }
+        }
         cache.insert(key, msg);
     }
 }
+
+/// Forget every retained frame a satellite published.
+pub(super) fn purge_host_retained(retained: &RetainedCache, host: &str) {
+    let prefix = format!("host:{host}:");
+    retained
+        .lock()
+        .unwrap()
+        .retain(|key, _| !key.starts_with(&prefix));
+}
+
+/// Retained frames kept for one satellite.
+const MAX_RETAINED_PER_HOST: usize = 512;
 
 /// Remember the latest retained frame per key until the broadcast channel closes.
 ///
@@ -4684,7 +4970,8 @@ async fn retain_broadcasts(
 async fn track_held_mother_jobs(mut rx: broadcast::Receiver<ServerMsg>, held: HeldMotherJobs) {
     loop {
         match rx.recv().await {
-            Ok(ServerMsg::MotherJobs { jobs, .. }) => {
+            // Only the daemon's own jobs: a satellite's are not held here.
+            Ok(ServerMsg::MotherJobs { jobs, host: None }) => {
                 let ids = jobs
                     .iter()
                     .filter(|j| j.open_decision().is_some())
@@ -6006,5 +6293,101 @@ mod authored_prs_tests {
             assert!(!message_matches_topics(&unavailable, &topics), "{topics:?}");
             assert!(message_matches_topics(&hosts, &topics), "{topics:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod satellite_retention_tests {
+    //! What the retained cache keeps of the frames a satellite published, and
+    //! what it forgets when the satellite goes.
+
+    use super::*;
+    use crate::ipc::stream_json::SessionState;
+
+    fn jobs(host: &str) -> ServerMsg {
+        ServerMsg::MotherJobs {
+            jobs: vec![],
+            host: Some(host.to_string()),
+        }
+    }
+
+    fn session(host: &str, tag: &str, state: SessionState) -> ServerMsg {
+        ServerMsg::SessionState {
+            tag: tag.to_string(),
+            state,
+            host: Some(host.to_string()),
+        }
+    }
+
+    fn keys_of(cache: &BTreeMap<String, ServerMsg>, host: &str) -> usize {
+        let prefix = format!("host:{host}:");
+        cache.keys().filter(|k| k.starts_with(&prefix)).count()
+    }
+
+    #[test]
+    fn purging_a_host_forgets_its_frames_and_only_its_frames() {
+        let mut cache = BTreeMap::new();
+        apply_retention(&mut cache, jobs("kobe"));
+        apply_retention(&mut cache, session("kobe", "cody-1", SessionState::Idle));
+        apply_retention(&mut cache, session("kobe", "cody-2", SessionState::Idle));
+        apply_retention(&mut cache, jobs("kobe2"));
+        apply_retention(&mut cache, ServerMsg::Hosts { hosts: vec![] });
+        assert_eq!(keys_of(&cache, "kobe"), 3);
+        let retained: RetainedCache = Arc::new(Mutex::new(cache));
+
+        purge_host_retained(&retained, "kobe");
+
+        let cache = retained.lock().unwrap();
+        assert_eq!(keys_of(&cache, "kobe"), 0, "{:?}", cache.keys());
+        assert_eq!(
+            keys_of(&cache, "kobe2"),
+            1,
+            "a host whose name starts with the purged one's is left alone"
+        );
+        assert!(cache.contains_key("hosts"), "the daemon's own frames stay");
+        drop(cache);
+
+        purge_host_retained(&retained, "never-connected");
+        assert_eq!(retained.lock().unwrap().len(), 2, "nothing else went");
+    }
+
+    #[test]
+    fn a_host_keeps_at_most_512_retained_frames_and_a_new_key_past_that_is_not_kept() {
+        let mut cache = BTreeMap::new();
+        for i in 0..512 {
+            apply_retention(
+                &mut cache,
+                session("kobe", &format!("cody-{i}"), SessionState::Idle),
+            );
+        }
+        assert_eq!(keys_of(&cache, "kobe"), 512);
+
+        // A 513th distinct focus is not kept.
+        apply_retention(&mut cache, session("kobe", "cody-512", SessionState::Idle));
+        assert_eq!(keys_of(&cache, "kobe"), 512);
+        assert!(
+            !cache
+                .values()
+                .any(|m| matches!(m, ServerMsg::SessionState { tag, .. } if tag == "cody-512")),
+            "the 513th key was kept"
+        );
+
+        // A key already held is still replaced by its newer frame.
+        apply_retention(&mut cache, session("kobe", "cody-0", SessionState::MidTurn));
+        assert_eq!(keys_of(&cache, "kobe"), 512);
+        let newest = cache.values().find_map(|m| match m {
+            ServerMsg::SessionState { tag, state, .. } if tag == "cody-0" => Some(*state),
+            _ => None,
+        });
+        assert_eq!(newest, Some(SessionState::MidTurn));
+
+        // Another host's frames, one whose name starts with this one's
+        // included, are counted on their own.
+        apply_retention(&mut cache, session("sendai", "cody-0", SessionState::Idle));
+        apply_retention(&mut cache, session("kobe2", "cody-0", SessionState::Idle));
+        apply_retention(&mut cache, jobs("sendai"));
+        assert_eq!(keys_of(&cache, "sendai"), 2);
+        assert_eq!(keys_of(&cache, "kobe2"), 1);
+        assert_eq!(keys_of(&cache, "kobe"), 512);
     }
 }

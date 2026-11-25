@@ -505,7 +505,7 @@ impl Harness {
     }
 
     async fn list(&self, unix: &mut UnixStream) -> Vec<SessionInfo> {
-        send(unix, &ClientMsg::SessionList).await;
+        send(unix, &ClientMsg::SessionList { host: None }).await;
         let frames = recv_until(unix, |m| matches!(m, ServerMsg::SessionListResp { .. })).await;
         match frames.into_iter().last() {
             Some(ServerMsg::SessionListResp { sessions, .. }) => sessions,
@@ -796,7 +796,7 @@ async fn the_list_wire_omits_the_key_for_a_session_that_never_had_a_bridge() {
     let mut app = h.unix().await;
     spawn_session(&mut app, "cody-no-bridge").await;
 
-    send(&mut app, &ClientMsg::SessionList).await;
+    send(&mut app, &ClientMsg::SessionList { host: None }).await;
     let frames = recv_until(&mut app, |m| matches!(m, ServerMsg::SessionListResp { .. })).await;
     let wire = serde_json::to_value(frames.last().unwrap()).unwrap();
     let entry = wire["sessions"]
@@ -824,6 +824,7 @@ async fn attaching_replays_the_current_bridge_state_only_when_it_is_known() {
         &mut late,
         &ClientMsg::SessionAttach {
             tag: "cody-known".into(),
+            host: None,
         },
     )
     .await;
@@ -836,6 +837,7 @@ async fn attaching_replays_the_current_bridge_state_only_when_it_is_known() {
         &mut late,
         &ClientMsg::SessionAttach {
             tag: "cody-unknown".into(),
+            host: None,
         },
     )
     .await;

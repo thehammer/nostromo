@@ -1987,7 +1987,7 @@ follow_test! {
         // The network peer attaches to both before the output, so it would see
         // the delivery turns start live.
         for tag in ["cody-a", "fred-x"] {
-            tcp.send(&ClientMsg::SessionAttach { tag: tag.into() }).await;
+            tcp.send(&ClientMsg::SessionAttach { tag: tag.into(), host: None }).await;
         }
         tcp.sync().await;
         app.type_line(&t1.terminal_id, "printf 'ORDINARY-OUTPUT\\n'").await;

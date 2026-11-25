@@ -389,6 +389,7 @@ pub async fn pair(
         satellite,
         admin,
         egress,
+        origin: None,
     })?;
     let (pairing_id, code, url, expires_at) = await_reply(&mut rx, &request_id, |m| match m {
         ServerMsg::DevicePairing {
@@ -440,6 +441,7 @@ pub async fn pair(
                 let _ = client.send(ClientMsg::DevicePairCancel {
                     request_id: new_request_id(),
                     pairing_id: pairing_id.clone(),
+                    origin: None,
                 });
                 let (line, exit) = outcome_report(PairOutcomeKind::Cancelled, None);
                 writeln!(out, "\r{line}          ")?;

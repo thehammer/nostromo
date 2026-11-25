@@ -327,6 +327,7 @@ fn typed_messages_queued_behind_a_turn_reach_the_cli_as_one_frame_and_show_as_tw
         let mut conn = rig.connect(true).await;
         conn.send(&ClientMsg::SessionAttach {
             tag: "cody-1".into(),
+            host: None,
         })
         .await;
         conn.sync().await;
@@ -372,6 +373,7 @@ fn typed_messages_queued_behind_a_turn_reach_the_cli_as_one_frame_and_show_as_tw
         let mut late = rig.connect(true).await;
         late.send(&ClientMsg::SessionAttach {
             tag: "cody-1".into(),
+            host: None,
         })
         .await;
         let snapshot = late
@@ -404,6 +406,7 @@ fn a_connection_without_the_capability_closes_the_gate_until_its_socket_drops() 
         legacy
             .send(&ClientMsg::SessionAttach {
                 tag: "cody-1".into(),
+                host: None,
             })
             .await;
         legacy.sync().await;

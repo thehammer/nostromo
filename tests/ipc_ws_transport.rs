@@ -214,7 +214,7 @@ async fn a_valid_token_gets_a_welcome_and_receives_broadcasts() {
     .await;
 
     // The same connection answers requests like any other.
-    ws.send(&ClientMsg::SessionList).await;
+    ws.send(&ClientMsg::SessionList { host: None }).await;
     ws.next_matching("SessionListResp", |m| {
         matches!(m, ServerMsg::SessionListResp { .. })
     })
@@ -617,7 +617,10 @@ async fn a_socket_with_no_token_that_sends_anything_else_is_unauthorized_not_pai
     let attempts: Vec<(&str, String)> = vec![
         ("a ping", json_of(&ClientMsg::Ping)),
         ("a subscribe", json_of(&Conn::subscribe(vec![]))),
-        ("a session list", json_of(&ClientMsg::SessionList)),
+        (
+            "a session list",
+            json_of(&ClientMsg::SessionList { host: None }),
+        ),
         (
             "a session send",
             json_of(&ClientMsg::SessionSend {
@@ -642,6 +645,7 @@ async fn a_socket_with_no_token_that_sends_anything_else_is_unauthorized_not_pai
                 satellite: None,
                 admin: None,
                 egress: None,
+                origin: None,
             }),
         ),
         ("garbage", "this is not json".to_string()),
@@ -752,6 +756,7 @@ async fn a_legacy_tcp_peer_is_refused_every_pairing_and_device_verb() {
                 satellite: None,
                 admin: None,
                 egress: None,
+                origin: None,
             },
         ),
         (
@@ -946,6 +951,7 @@ async fn queued_messages_merge_with_a_device_attached(device_caps: &[&str]) {
     local
         .send(&ClientMsg::SessionAttach {
             tag: "cody-1".into(),
+            host: None,
         })
         .await;
     local.sync().await;
@@ -955,6 +961,7 @@ async fn queued_messages_merge_with_a_device_attached(device_caps: &[&str]) {
     device
         .send(&ClientMsg::SessionAttach {
             tag: "cody-1".into(),
+            host: None,
         })
         .await;
     device.sync().await;

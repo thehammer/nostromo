@@ -107,6 +107,7 @@ async fn activity_snapshot_request_yields_an_activity_snapshot() {
         &mut stream,
         &ClientMsg::ActivitySnapshotRequest {
             tag: "cody-1".into(),
+            host: None,
         },
     )
     .await;
