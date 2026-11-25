@@ -93,6 +93,18 @@ runs for, which queues briefly. A second overlapping run (or a `make ci-remote`
 dispatch) queues behind. Five shards are deliberately not used: they would starve
 everything else for ~2 min of gain.
 
+**iOS L5 timing.** First measured run of the `iOS simulator build` job with the hosted
+tests (dispatch run 45630865581 on the `feat/ios-test-target` branch, `make ci-remote ONLY=ios`,
+2026-11-25): job 6 min 41 s; the unchanged generic-simulator compile step 71 s; the
+`make ios-test` step 320 s, of which the 5 tests (2 smoke, 3 harness) executed in 0.04 s, so
+the cost is the arm64 simulator build, simulator boot and app install, not the tests. Before
+L5 the job was 90-289 s (`docs/test-time-audit.md`). One run, one runner: treat it as the order
+of magnitude. The job still runs after `Swift tests (NostromoKit)` in one macOS slot, so the
+chain is roughly 9-10 min, well under the Mac shards (about 22 min), which stay the critical path.
+If it needs trimming later, the first lever is dropping the generic compile step, since
+`make ios-test` already compiles the app for a simulator; it is kept for now because it also
+covers every simulator architecture.
+
 ### The Swift jobs
 
 - Same pins as the launch smoke: `macos-26` and

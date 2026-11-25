@@ -440,6 +440,10 @@ largest, and the PRD says so itself:
 > *rendering* isn't — but it is a partial mitigation, and the regular-width
 > presentation is the part of this PRD most likely to be quietly half-working.
 
+(The PRD predates L5. A test target now exists, but it is scoped to behaviour
+that needs an iOS process, not to layout or rendering, so the rendering half
+below is still device-only.)
+
 This section is the honest accounting of which half is which. Treat it as a
 warning about where to spend review attention, not as a formality.
 
