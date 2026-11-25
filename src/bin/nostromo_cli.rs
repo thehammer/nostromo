@@ -137,10 +137,17 @@ async fn run_uplink(uplink: Uplink) -> anyhow::Result<i32> {
     } = uplink;
     let config = nostromo::config::Config::load(None)?;
     let host = config.satellite_setup().map(|s| s.host).or_else(|_| {
-        config
+        let name = config
             .host_name
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("set host_name in config.toml first"))
+            .ok_or_else(|| anyhow::anyhow!("set host_name in config.toml first"))?;
+        if nostromo::config::valid_host_name(&name) {
+            Ok(name)
+        } else {
+            Err(anyhow::anyhow!(
+                "host_name {name:?} is not a valid host name (^[a-z][a-z0-9-]{{0,15}}$); fix config.toml first"
+            ))
+        }
     })?;
     let token_path = token_path
         .or_else(|| config.uplink.as_ref().map(|u| u.token_path.clone()))

@@ -35,7 +35,9 @@ use crate::ipc::peer::{
     outbound, redact_for_uplink_metadata, withheld_msg, PeerTrust, SensitiveTags,
 };
 use crate::ipc::protocol::{ClientMsg, HelloRole, ServerMsg, Topic, PROTOCOL_VERSION};
-use crate::ipc::router::{ingest_from_satellite, server_msg_host, SatelliteRecord};
+use crate::ipc::router::{
+    ingest_from_satellite, server_msg_host, server_msg_tag, MsgTag, SatelliteRecord,
+};
 use crate::ipc::server::{message_matches_topics, LocalDispatch};
 use crate::ipc::uplink_wire::UplinkFrame;
 
@@ -57,6 +59,18 @@ const ROUTED_TTL: Duration = Duration::from_secs(10);
 const LIST_TTL: Duration = Duration::from_secs(10);
 /// Most frames kept to replay on reconnect.
 const MAX_CACHED: usize = 512;
+/// Frames queued for the socket while connected: published state, and
+/// verbs and routed replies. Publishing is paced at 40/s, so a full queue
+/// means the socket is stuck; a frame that does not fit is dropped (state
+/// frames are re-sent on change and replayed on reconnect), never waited for.
+const PUBLISH_QUEUE: usize = 1024;
+const OUT_QUEUE: usize = 256;
+/// Routed reads one uplink serves at once; a further one is refused.
+const MAX_ROUTED: usize = 32;
+/// The longest routed-request id accepted.
+const MAX_ROUTED_ID: usize = 128;
+/// A session must have stayed up this long before the reconnect backoff resets.
+const STABLE_AFTER: Duration = Duration::from_secs(30);
 
 /// The refusal a verb gets when the effective level does not allow it, and
 /// when the uplink is down.
@@ -118,14 +132,19 @@ impl PhiScope {
             .any(|c| self.name_is_phi(c))
     }
 
+    /// What is matched, plainly: a focus is PHI when its project path has a
+    /// component naming a PHI repo (or a checkout or worktree named after
+    /// one), its project name does, or its path is a git worktree whose
+    /// `.git` file points into a PHI repo's `.git/worktrees/`. A checkout that
+    /// is a PHI repo under another name, with no such pointer, is NOT matched:
+    /// list it in `phi_repos` by that name.
     fn focus_is_phi(&self, meta: &crate::ipc::protocol::FocusMeta) -> bool {
-        meta.project_path
+        meta.project_path.as_deref().is_some_and(|p| {
+            self.path_is_phi(p) || gitdir_of(p).is_some_and(|g| self.path_is_phi(&g))
+        }) || meta
+            .project_name
             .as_deref()
-            .is_some_and(|p| self.path_is_phi(p))
-            || meta
-                .project_name
-                .as_deref()
-                .is_some_and(|n| self.name_is_phi(n))
+            .is_some_and(|n| self.name_is_phi(n))
     }
 
     /// Replace what is known with the registry's focuses.
@@ -155,12 +174,36 @@ impl PhiScope {
 
     /// May a frame or read about this tag leave? Only a tag the registry
     /// holds, and which is not PHI-scoped.
+    pub fn is_known(&self, tag: &str) -> bool {
+        self.known.contains(tag)
+    }
+
     pub fn tag_is_shareable(&self, tag: &str) -> bool {
         self.known.contains(tag) && !self.phi.contains(tag)
     }
 
+    /// A Mother job is PHI by its repo, its plan path, its pull-request URL
+    /// (host and path components), or the focus that queued it (its tag, or
+    /// its name). A job queued from a focus the registry does not hold cannot
+    /// be classified, so it is withheld too.
     fn job_is_phi(&self, job: &crate::mother::MotherJob) -> bool {
+        let origin_phi = job.origin.as_ref().is_some_and(|o| {
+            o.focus
+                .as_deref()
+                .is_some_and(|t| !self.known.contains(t) || self.phi.contains(t))
+                || o.focus_name
+                    .as_deref()
+                    .is_some_and(|n| self.name_is_phi(n))
+        });
         self.path_is_phi(&job.repo)
+            || job.plan_path.as_deref().is_some_and(|p| self.path_is_phi(p))
+            || job.pr_url.as_deref().is_some_and(|u| self.path_is_phi(u))
+            || origin_phi
+    }
+
+    /// Is this focus PHI, by its tag in the registry or by its own fields?
+    fn meta_is_phi(&self, meta: &crate::ipc::protocol::FocusMeta) -> bool {
+        self.phi.contains(&meta.tag) || self.focus_is_phi(meta)
     }
 
     /// `msg` without its PHI-scoped or unclassifiable content; `None` when
@@ -176,7 +219,7 @@ impl PhiScope {
             ServerMsg::FocusListResp { focuses, host } => Some(ServerMsg::FocusListResp {
                 focuses: focuses
                     .into_iter()
-                    .filter(|f| !self.focus_is_phi(f))
+                    .filter(|f| !self.meta_is_phi(f))
                     .collect(),
                 host,
             }),
@@ -184,13 +227,13 @@ impl PhiScope {
                 Some(ServerMsg::FocusRegistryUpdated {
                     focuses: focuses
                         .into_iter()
-                        .filter(|f| !self.focus_is_phi(f))
+                        .filter(|f| !self.meta_is_phi(f))
                         .collect(),
                     host,
                 })
             }
             ServerMsg::FocusCreated { meta, host } => {
-                (!self.focus_is_phi(&meta)).then_some(ServerMsg::FocusCreated { meta, host })
+                (!self.meta_is_phi(&meta)).then_some(ServerMsg::FocusCreated { meta, host })
             }
             ServerMsg::SessionListResp { sessions, host } => Some(ServerMsg::SessionListResp {
                 sessions: sessions
@@ -199,19 +242,39 @@ impl PhiScope {
                     .collect(),
                 host,
             }),
-            other => match frame_tag(&other) {
-                Some(tag) if !self.tag_is_shareable(&tag) => None,
-                _ => Some(other),
-            },
+            other => {
+                match server_msg_tag(&other) {
+                    MsgTag::Tag(tag) if !self.tag_is_shareable(tag) => return None,
+                    // A focus-scoped frame with no tag cannot be classified.
+                    MsgTag::Missing => return None,
+                    MsgTag::Tag(_) | MsgTag::Untagged => {}
+                }
+                // A working directory in the frame must itself be outside the
+                // PHI scope, whatever tag the frame claims.
+                let cwd = match &other {
+                    ServerMsg::Activity(e) => e.cwd.as_deref(),
+                    ServerMsg::TerminalState { terminal } => terminal.cwd.as_deref(),
+                    _ => None,
+                };
+                if cwd.is_some_and(|c| self.path_is_phi(c) || gitdir_of(c).is_some_and(|g| self.path_is_phi(&g))) {
+                    return None;
+                }
+                Some(other)
+            }
         }
     }
 }
 
-/// The focus tag a frame carries, if it has one.
-fn frame_tag(msg: &ServerMsg) -> Option<String> {
-    serde_json::to_value(msg)
-        .ok()
-        .and_then(|v| v.get("tag").and_then(|t| t.as_str().map(String::from)))
+/// The `gitdir:` a git worktree's `.git` file points at, if `dir` is one.
+fn gitdir_of(dir: &str) -> Option<String> {
+    let meta = std::fs::metadata(Path::new(dir).join(".git")).ok()?;
+    if !meta.is_file() || meta.len() > 4096 {
+        return None;
+    }
+    let text = std::fs::read_to_string(Path::new(dir).join(".git")).ok()?;
+    text.lines()
+        .find_map(|l| l.strip_prefix("gitdir:"))
+        .map(|g| g.trim().to_string())
 }
 
 /// Set the `host` field of a host-carrying frame. `None` when the variant has
@@ -285,6 +348,17 @@ impl Forwarder {
     /// nothing is sent that the primary would drop.
     pub fn publish(&mut self, msg: ServerMsg) -> Option<ServerMsg> {
         self.phi.observe(&msg);
+        self.shape(msg)
+    }
+
+    /// [`Self::publish`] without learning from the frame: for a retained frame
+    /// replayed later, which must be judged against the registry as it is now
+    /// and must not overwrite it with what it said then.
+    pub fn republish(&self, msg: ServerMsg) -> Option<ServerMsg> {
+        self.shape(msg)
+    }
+
+    fn shape(&self, msg: ServerMsg) -> Option<ServerMsg> {
         server_msg_host(&msg)?;
         if let Some(topics) = &self.publish_topics {
             if !message_matches_topics(&msg, topics) {
@@ -361,23 +435,25 @@ fn is_routable_read(msg: &ClientMsg) -> bool {
 
 /// Load the satellite's random HMAC key for pseudonymous tags, creating it
 /// (mode 0600) the first time. It never falls back to a default: with no key
-/// the uplink does not publish.
+/// the uplink does not publish. A key file at any other mode, or that is not
+/// 32 bytes, is refused (it is never regenerated: this process did not create
+/// it, and replacing it would silently change every pseudonymous tag).
 pub fn load_or_create_tag_key(path: &Path) -> std::io::Result<[u8; 32]> {
     use std::io::Write;
-    if let Ok(bytes) = std::fs::read(path) {
-        if let Ok(key) = <[u8; 32]>::try_from(bytes.as_slice()) {
-            return Ok(key);
-        }
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "uplink tag key is not 32 bytes",
-        ));
+    if path.exists() {
+        return read_tag_key(path);
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
+    // Written whole under a temporary name, then linked into place, so the key
+    // file is never visible empty or partial, and never replaces another.
+    let mut tmp_name = path.as_os_str().to_owned();
+    tmp_name.push(format!(".tmp{}", std::process::id()));
+    let tmp = std::path::PathBuf::from(tmp_name);
+    let _ = std::fs::remove_file(&tmp);
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -385,23 +461,54 @@ pub fn load_or_create_tag_key(path: &Path) -> std::io::Result<[u8; 32]> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    match opts.open(path) {
-        Ok(mut f) => {
-            f.write_all(&key)?;
-            Ok(key)
-        }
+    let mut f = opts.open(&tmp)?;
+    let written = f.write_all(&key).and_then(|_| f.sync_all());
+    drop(f);
+    let linked = written.and_then(|_| std::fs::hard_link(&tmp, path));
+    let _ = std::fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => Ok(key),
         // Another start created it first.
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let bytes = std::fs::read(path)?;
-            <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "uplink tag key is not 32 bytes",
-                )
-            })
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read_tag_key(path),
         Err(e) => Err(e),
     }
+}
+
+fn read_tag_key(path: &Path) -> std::io::Result<[u8; 32]> {
+    require_private(path, "uplink tag key")?;
+    let bytes = std::fs::read(path)?;
+    <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "the uplink tag key {} is not 32 bytes ({}); remove it by hand to make a new one",
+                path.display(),
+                bytes.len()
+            ),
+        )
+    })
+}
+
+/// Refuse a secret file that is not exactly mode 0600.
+fn require_private(path: &Path, what: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "the {what} {} has mode {mode:o}, not 600; run `chmod 600 {}`",
+                    path.display(),
+                    path.display()
+                ),
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (path, what);
+    Ok(())
 }
 
 // ── the device-admin relay ────────────────────────────────────────────────────
@@ -412,11 +519,14 @@ struct RelayedRequest {
     conn_key: String,
     original_id: String,
     tx: LocalTx,
+    /// For a relayed `DevicePairCancel`: the pairing it cancels. The primary
+    /// answers a cancel with the pairing's outcome, not under the request id.
+    cancel_of: Option<String>,
 }
 
 #[derive(Default)]
 struct RelayState {
-    up: Option<mpsc::UnboundedSender<UplinkFrame>>,
+    up: Option<mpsc::Sender<UplinkFrame>>,
     next_request: u64,
     /// Relayed verbs awaiting their answer, by the id sent upward.
     requests: HashMap<String, RelayedRequest>,
@@ -502,6 +612,10 @@ impl UplinkRelay {
             ClientMsg::DeviceList { .. } => {}
             _ => return refuse(NOT_PERMITTED),
         }
+        let cancel_of = match &msg {
+            ClientMsg::DevicePairCancel { pairing_id, .. } => Some(pairing_id.clone()),
+            _ => None,
+        };
         if matches!(msg, ClientMsg::DeviceList { .. }) {
             let now = Instant::now();
             st.lists
@@ -514,10 +628,14 @@ impl UplinkRelay {
                     conn_key: conn_key.to_string(),
                     original_id: original_id.clone(),
                     tx: tx.clone(),
+                    cancel_of,
                 },
             );
         }
-        if up.send(UplinkFrame::Client { msg }).is_err() {
+        if up.try_send(UplinkFrame::Client { msg }).is_err() {
+            // Down, or its queue is full: either way the verb did not leave.
+            let sent = format!("s{}", st.next_request);
+            st.requests.remove(&sent);
             drop(st);
             refuse(SERVER_UNREACHABLE);
         }
@@ -554,7 +672,7 @@ impl UplinkRelay {
             st.next_request += 1;
             let request_id = format!("s{}", st.next_request);
             if let Some(up) = &st.up {
-                let _ = up.send(UplinkFrame::Client {
+                let _ = up.try_send(UplinkFrame::Client {
                     msg: ClientMsg::DevicePairCancel {
                         request_id,
                         pairing_id,
@@ -568,7 +686,7 @@ impl UplinkRelay {
     /// The uplink is connected (`Some`) or not (`None`). When it drops, every
     /// relayed open pairing is told `connection_lost` and every verb still
     /// waiting is answered `server_unreachable`.
-    pub fn set_up(&self, up: Option<mpsc::UnboundedSender<UplinkFrame>>) {
+    pub fn set_up(&self, up: Option<mpsc::Sender<UplinkFrame>>) {
         let mut st = self.state.lock().unwrap();
         let connected = up.is_some();
         st.up = up;
@@ -626,6 +744,9 @@ impl UplinkRelay {
                 kind,
                 replaced,
             } => {
+                // The pairing ended, so a cancel aimed at it is answered.
+                st.requests
+                    .retain(|_, r| r.cancel_of.as_deref() != Some(pairing_id.as_str()));
                 if let Some((_, tx)) = st.pairings.remove(&pairing_id) {
                     let _ = tx.send(ServerMsg::DevicePairOutcome {
                         pairing_id,
@@ -718,8 +839,37 @@ pub(super) struct Env {
 /// frame is either in the replay or sent live, never both and never neither.
 struct Shared {
     forwarder: Forwarder,
+    /// The retained frames as broadcast (unfiltered), by [`cache_key`].
     cache: BTreeMap<String, ServerMsg>,
-    publish: Option<mpsc::UnboundedSender<UplinkFrame>>,
+    publish: Option<mpsc::Sender<UplinkFrame>>,
+}
+
+impl Shared {
+    /// Forget retained frames about a tag the registry no longer holds.
+    fn evict_dead_tags(&mut self) {
+        let phi = self.forwarder.phi();
+        self.cache.retain(|_, raw| match server_msg_tag(raw) {
+            MsgTag::Tag(t) => phi.is_known(t),
+            MsgTag::Untagged | MsgTag::Missing => true,
+        });
+    }
+
+    /// The frames to send on a fresh connection: every retained frame, judged
+    /// again now. One that is no longer shareable (its focus became sensitive
+    /// or PHI while the uplink was down) is dropped from the cache too.
+    fn replay(&mut self) -> Vec<ServerMsg> {
+        self.evict_dead_tags();
+        let forwarder = &self.forwarder;
+        let mut out = Vec::new();
+        self.cache.retain(|_, raw| match forwarder.republish(raw.clone()) {
+            Some(m) => {
+                out.push(m);
+                true
+            }
+            None => false,
+        });
+        out
+    }
 }
 
 /// Start the uplink: a task that filters this daemon's broadcasts as they
@@ -771,22 +921,24 @@ async fn filter_task(
                 let registry = dispatch.focus_registry();
                 let mut sh = shared.lock().unwrap();
                 sh.forwarder.refresh_registry(&registry);
-                match sh.forwarder.publish(msg) {
-                    Some(out) => {
-                        if let Some(k) = key {
-                            if sh.cache.len() < MAX_CACHED || sh.cache.contains_key(&k) {
-                                sh.cache.insert(k, out.clone());
-                            }
-                        }
-                        if let Some(p) = &sh.publish {
-                            let _ = p.send(UplinkFrame::Publish { msg: out });
-                        }
+                // The replay keeps the frame as it was broadcast, not as it was
+                // filtered: it is judged again when it is replayed, against the
+                // registry and the sensitive tags of that moment.
+                let raw = key.is_some().then(|| msg.clone());
+                let out = sh.forwarder.publish(msg);
+                sh.evict_dead_tags();
+                if let (Some(k), Some(raw)) = (key, raw) {
+                    if out.is_some() && (sh.cache.len() < MAX_CACHED || sh.cache.contains_key(&k))
+                    {
+                        sh.cache.insert(k, raw);
+                    } else if out.is_none() {
+                        // Kept home now: it must not linger in the replay.
+                        sh.cache.remove(&k);
                     }
-                    None => {
-                        // A frame that is now kept home must not linger in the replay.
-                        if let Some(k) = key {
-                            sh.cache.remove(&k);
-                        }
+                }
+                if let (Some(out), Some(p)) = (out, &sh.publish) {
+                    if p.try_send(UplinkFrame::Publish { msg: out }).is_err() {
+                        note_dropped("a published frame (the uplink's queue is full)");
                     }
                 }
             }
@@ -806,24 +958,43 @@ fn next_backoff(current: Duration) -> Duration {
 enum SessionEnd {
     /// The primary does not advertise `"uplink"`.
     NoUplink,
-    /// The connection ran (it was admitted) and then ended.
-    Ended,
+    /// The connection was admitted and then ended, after this long.
+    Ended { up_for: Duration },
     /// It never got going.
     Failed(String),
 }
 
 async fn connection_loop(env: Env, shared: Arc<Mutex<Shared>>) {
+    reconnect_loop(|| run_session(&env, &shared)).await;
+}
+
+/// Run sessions forever, waiting between them. The wait grows after every
+/// session that did not stay up for [`STABLE_AFTER`], admitted or not: a
+/// primary that welcomes this satellite and then closes it (a revoked token,
+/// two satellites sharing one) would otherwise be redialled, and the replay
+/// resent, every second.
+async fn reconnect_loop<F, Fut>(mut run: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = SessionEnd>,
+{
     let mut backoff = BACKOFF_START;
     loop {
-        let wait = match run_session(&env, &shared).await {
+        let wait = match run().await {
             SessionEnd::NoUplink => {
                 warn!("the primary does not advertise uplink support; trying again in 10 minutes");
                 NO_UPLINK_RETRY
             }
-            SessionEnd::Ended => {
+            SessionEnd::Ended { up_for } if up_for >= STABLE_AFTER => {
                 info!("uplink to the primary closed; reconnecting");
                 backoff = BACKOFF_START;
                 backoff
+            }
+            SessionEnd::Ended { up_for } => {
+                warn!("uplink closed after {up_for:?}; retrying in {backoff:?}");
+                let w = backoff;
+                backoff = next_backoff(backoff);
+                w
             }
             SessionEnd::Failed(why) => {
                 warn!("uplink could not connect: {why}; retrying in {backoff:?}");
@@ -837,6 +1008,13 @@ async fn connection_loop(env: Env, shared: Arc<Mutex<Shared>>) {
 }
 
 fn read_token(path: &Path) -> Result<String, String> {
+    require_private(path, "uplink token").map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!("cannot read the token at {}: {e}", path.display())
+        } else {
+            e.to_string()
+        }
+    })?;
     let raw = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read the token at {}: {e}", path.display()))?;
     let token = raw.trim().to_string();
@@ -955,17 +1133,21 @@ async fn run_session(env: &Env, shared: &Arc<Mutex<Shared>>) -> SessionEnd {
         return SessionEnd::Failed(e);
     }
 
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<UplinkFrame>();
-    let (pub_tx, mut pub_rx) = mpsc::unbounded_channel::<UplinkFrame>();
+    let (out_tx, mut out_rx) = mpsc::channel::<UplinkFrame>(OUT_QUEUE);
+    let (pub_tx, mut pub_rx) = mpsc::channel::<UplinkFrame>(PUBLISH_QUEUE);
     {
         // Replay what is retained, then go live, atomically.
+        // The registry is read before the lock, as everywhere else.
+        let registry = env.dispatch.focus_registry();
         let mut sh = shared.lock().unwrap();
-        for msg in sh.cache.values() {
-            let _ = pub_tx.send(UplinkFrame::Publish { msg: msg.clone() });
+        sh.forwarder.refresh_registry(&registry);
+        for msg in sh.replay() {
+            let _ = pub_tx.try_send(UplinkFrame::Publish { msg });
         }
         sh.publish = Some(pub_tx.clone());
     }
     env.relay.set_up(Some(out_tx.clone()));
+    let admitted_at = tokio::time::Instant::now();
     info!(host = %env.setup.host, "uplink connected");
 
     let mut routed = RoutedReads::default();
@@ -1011,12 +1193,11 @@ async fn run_session(env: &Env, shared: &Arc<Mutex<Shared>>) -> SessionEnd {
     env.relay.set_up(None);
     routed.close_all(&env.dispatch);
     let _ = ws.close(None).await;
-    match reason {
-        Ok(()) => SessionEnd::Ended,
-        Err(e) => {
-            debug!("uplink ended: {e}");
-            SessionEnd::Ended
-        }
+    if let Err(e) = reason {
+        debug!("uplink ended: {e}");
+    }
+    SessionEnd::Ended {
+        up_for: admitted_at.elapsed(),
     }
 }
 
@@ -1064,7 +1245,7 @@ fn handle_request(
     env: &Env,
     shared: &Arc<Mutex<Shared>>,
     routed: &mut RoutedReads,
-    out: &mpsc::UnboundedSender<UplinkFrame>,
+    out: &mpsc::Sender<UplinkFrame>,
     personal: bool,
     id: String,
     msg: ClientMsg,
@@ -1077,6 +1258,20 @@ fn handle_request(
     }
     // A closed id's finished tasks are forgotten.
     routed.live.retain(|_, t| !t.is_finished());
+    // A bounded id, and a bounded number of open reads. A refusal is answered
+    // under the id (a primary that sent a hostile id is not told it back if it
+    // is too long to be an id of ours).
+    if id.is_empty() || id.len() > MAX_ROUTED_ID {
+        note_dropped("a routed request with an unusable id");
+        return;
+    }
+    if routed.live.len() >= MAX_ROUTED && !routed.live.contains_key(&id) {
+        let _ = out.try_send(UplinkFrame::Reply {
+            id,
+            msg: withheld_msg(),
+        });
+        return;
+    }
     let key = format!("uplink:{id}");
     if matches!(msg, ClientMsg::SessionDetach { .. }) {
         env.dispatch
@@ -1126,10 +1321,15 @@ fn handle_request(
                 sh.forwarder.reply(m)
             };
             if let Some(m) = filtered {
-                let _ = out.send(UplinkFrame::Reply {
-                    id: reply_id.clone(),
-                    msg: m,
-                });
+                if out
+                    .try_send(UplinkFrame::Reply {
+                        id: reply_id.clone(),
+                        msg: m,
+                    })
+                    .is_err()
+                {
+                    note_dropped("a routed reply (the uplink's queue is full)");
+                }
             }
             // A refusal ends the read: nothing more will be asked of it.
             if is_refusal || is_refused {
@@ -1153,12 +1353,12 @@ mod tests {
         local: SatelliteAdmin,
     ) -> (
         Arc<UplinkRelay>,
-        mpsc::UnboundedReceiver<UplinkFrame>,
+        mpsc::Receiver<UplinkFrame>,
         LocalTx,
         mpsc::UnboundedReceiver<ServerMsg>,
     ) {
         let relay = UplinkRelay::new(local);
-        let (up_tx, up_rx) = mpsc::unbounded_channel();
+        let (up_tx, up_rx) = mpsc::channel(64);
         relay.set_up(Some(up_tx));
         let (tx, rx) = mpsc::unbounded_channel();
         (relay, up_rx, tx, rx)
