@@ -191,12 +191,13 @@ impl PhiScope {
             o.focus
                 .as_deref()
                 .is_some_and(|t| !self.known.contains(t) || self.phi.contains(t))
-                || o.focus_name
-                    .as_deref()
-                    .is_some_and(|n| self.name_is_phi(n))
+                || o.focus_name.as_deref().is_some_and(|n| self.name_is_phi(n))
         });
         self.path_is_phi(&job.repo)
-            || job.plan_path.as_deref().is_some_and(|p| self.path_is_phi(p))
+            || job
+                .plan_path
+                .as_deref()
+                .is_some_and(|p| self.path_is_phi(p))
             || job.pr_url.as_deref().is_some_and(|u| self.path_is_phi(u))
             || origin_phi
     }
@@ -256,7 +257,9 @@ impl PhiScope {
                     ServerMsg::TerminalState { terminal } => terminal.cwd.as_deref(),
                     _ => None,
                 };
-                if cwd.is_some_and(|c| self.path_is_phi(c) || gitdir_of(c).is_some_and(|g| self.path_is_phi(&g))) {
+                if cwd.is_some_and(|c| {
+                    self.path_is_phi(c) || gitdir_of(c).is_some_and(|g| self.path_is_phi(&g))
+                }) {
                     return None;
                 }
                 Some(other)
@@ -861,13 +864,14 @@ impl Shared {
         self.evict_dead_tags();
         let forwarder = &self.forwarder;
         let mut out = Vec::new();
-        self.cache.retain(|_, raw| match forwarder.republish(raw.clone()) {
-            Some(m) => {
-                out.push(m);
-                true
-            }
-            None => false,
-        });
+        self.cache
+            .retain(|_, raw| match forwarder.republish(raw.clone()) {
+                Some(m) => {
+                    out.push(m);
+                    true
+                }
+                None => false,
+            });
         out
     }
 }
@@ -928,8 +932,7 @@ async fn filter_task(
                 let out = sh.forwarder.publish(msg);
                 sh.evict_dead_tags();
                 if let (Some(k), Some(raw)) = (key, raw) {
-                    if out.is_some() && (sh.cache.len() < MAX_CACHED || sh.cache.contains_key(&k))
-                    {
+                    if out.is_some() && (sh.cache.len() < MAX_CACHED || sh.cache.contains_key(&k)) {
                         sh.cache.insert(k, raw);
                     } else if out.is_none() {
                         // Kept home now: it must not linger in the replay.
@@ -1920,5 +1923,406 @@ mod tests {
         );
         let lo: std::net::SocketAddr = "127.0.0.1:47101".parse().unwrap();
         assert_eq!(crate::config::loopback_only(lo), lo);
+    }
+
+    // ── fix round 1 ──────────────────────────────────────────────────────────
+
+    fn activity(tag: Option<&str>, cwd: Option<&str>) -> ServerMsg {
+        let mut v = serde_json::json!({
+            "type": "activity", "ts": "2026-01-01T00:00:00Z", "agent": "cody",
+            "kind": "tool_use", "summary": "MARKER-summary", "tool_name": "MARKER-tool",
+        });
+        if let Some(t) = tag {
+            v["focus_tag"] = t.into();
+        }
+        if let Some(c) = cwd {
+            v["cwd"] = c.into();
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn registry_forwarder(egress: Egress) -> Forwarder {
+        let mut f = forwarder(egress);
+        f.refresh_registry(&[
+            focus("cody-a", "/code/admin-portal"),
+            focus("cody-b", "/code/blog"),
+        ]);
+        f
+    }
+
+    #[test]
+    fn a_personal_satellites_activity_frames_are_judged_by_their_focus_tag_and_cwd() {
+        let mut f = registry_forwarder(Egress::Personal);
+        assert!(
+            f.publish(activity(Some("cody-a"), Some("/code/admin-portal/app")))
+                .is_none(),
+            "a PHI focus's activity stays home"
+        );
+        assert!(
+            f.publish(activity(Some("ghost"), None)).is_none(),
+            "a tag the registry does not hold is not shared"
+        );
+        assert!(
+            f.publish(activity(None, None)).is_none(),
+            "an unattributed activity cannot be classified"
+        );
+        assert!(
+            f.publish(activity(Some("cody-b"), Some("/code/admin-portal/app")))
+                .is_none(),
+            "a cwd inside a PHI repo keeps the frame home whatever tag it claims"
+        );
+        let out = f
+            .publish(activity(Some("cody-b"), Some("/code/blog")))
+            .expect("an ordinary focus's activity is published");
+        assert_eq!(server_msg_host(&out), Some(Some("kobe")));
+    }
+
+    #[test]
+    fn every_frame_variant_the_forwarder_can_see_yields_a_tag_or_is_untagged() {
+        let tagged = |v: serde_json::Value| -> ServerMsg { serde_json::from_value(v).unwrap() };
+        let cases: Vec<(ServerMsg, MsgTag<'_>)> = vec![
+            (activity(Some("t1"), None), MsgTag::Tag("t1")),
+            (activity(None, None), MsgTag::Missing),
+            (
+                tagged(serde_json::json!({"type":"approval_pending","tag":"t2","count":1})),
+                MsgTag::Tag("t2"),
+            ),
+            (
+                tagged(serde_json::json!({"type":"session_bridge","tag":"t3","connected":true})),
+                MsgTag::Tag("t3"),
+            ),
+            (jobs_msg(vec![]), MsgTag::Untagged),
+            (ServerMsg::Pong, MsgTag::Untagged),
+            (
+                ServerMsg::Error {
+                    message: "x".into(),
+                },
+                MsgTag::Untagged,
+            ),
+            (
+                tagged(serde_json::json!({"type":"focus_registry_updated","focuses":[]})),
+                MsgTag::Untagged,
+            ),
+        ];
+        for (msg, want) in &cases {
+            assert_eq!(&server_msg_tag(msg), want, "{msg:?}");
+        }
+    }
+
+    fn shared_for(egress: Egress, tags: &SensitiveTags) -> Shared {
+        let forwarder = Forwarder::new(
+            "kobe".into(),
+            egress,
+            key(),
+            tags.clone(),
+            vec!["admin-portal".into()],
+            None,
+        );
+        Shared {
+            forwarder,
+            cache: BTreeMap::new(),
+            publish: None,
+        }
+    }
+
+    /// What `filter_task` does with one broadcast.
+    fn broadcast_one(sh: &mut Shared, msg: ServerMsg) -> Option<ServerMsg> {
+        let key = cache_key(&msg);
+        let raw = msg.clone();
+        let out = sh.forwarder.publish(msg);
+        if let (Some(k), true) = (key, out.is_some()) {
+            sh.cache.insert(k, raw);
+        }
+        out
+    }
+
+    fn pending(tag: &str) -> ServerMsg {
+        ServerMsg::ApprovalPending {
+            tag: tag.into(),
+            count: 1,
+            host: None,
+        }
+    }
+
+    #[test]
+    fn a_focus_that_became_sensitive_while_the_uplink_was_down_is_not_replayed() {
+        let tags = SensitiveTags::default();
+        let mut sh = shared_for(Egress::Work, &tags);
+        sh.forwarder
+            .refresh_registry(&[focus("cody-x", "/code/blog")]);
+        assert!(broadcast_one(&mut sh, pending("cody-x")).is_some());
+        assert_eq!(sh.cache.len(), 1);
+        assert_eq!(sh.replay().len(), 1, "still shareable: replayed");
+        tags.mark_tag("cody-x");
+        let replayed = sh.replay();
+        assert!(
+            replayed.is_empty(),
+            "a now-sensitive focus must not replay: {replayed:?}"
+        );
+        assert!(sh.cache.is_empty(), "and is forgotten");
+    }
+
+    #[test]
+    fn a_focus_that_became_phi_while_the_uplink_was_down_is_not_replayed() {
+        let tags = SensitiveTags::default();
+        let mut sh = shared_for(Egress::Personal, &tags);
+        sh.forwarder
+            .refresh_registry(&[focus("cody-a", "/code/blog")]);
+        // A registry frame (stale by replay time) and a count are retained.
+        let reg = ServerMsg::FocusRegistryUpdated {
+            focuses: vec![focus("cody-a", "/code/blog")],
+            host: None,
+        };
+        assert!(broadcast_one(&mut sh, reg).is_some());
+        assert!(broadcast_one(&mut sh, pending("cody-a")).is_some());
+        assert_eq!(sh.cache.len(), 2);
+        // The registry now says cody-a is in a PHI repo.
+        sh.forwarder
+            .refresh_registry(&[focus("cody-a", "/code/admin-portal")]);
+        let replayed = sh.replay();
+        let json = serde_json::to_string(&replayed).unwrap();
+        assert!(!json.contains("cody-a"), "{json}");
+        assert!(
+            sh.forwarder.publish(pending("cody-a")).is_none(),
+            "replaying the stale registry frame did not undo what is known"
+        );
+    }
+
+    #[test]
+    fn a_retained_frame_for_a_tag_the_registry_dropped_is_evicted() {
+        let tags = SensitiveTags::default();
+        let mut sh = shared_for(Egress::Personal, &tags);
+        sh.forwarder
+            .refresh_registry(&[focus("cody-b", "/code/blog")]);
+        assert!(broadcast_one(&mut sh, pending("cody-b")).is_some());
+        sh.forwarder.refresh_registry(&[]);
+        assert!(sh.replay().is_empty());
+        assert!(sh.cache.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_reconnect_loop_backs_off_after_sessions_that_close_straight_after_welcome() {
+        let starts = Arc::new(Mutex::new(Vec::<tokio::time::Instant>::new()));
+        let seen = Arc::clone(&starts);
+        let task = tokio::spawn(reconnect_loop(move || {
+            seen.lock().unwrap().push(tokio::time::Instant::now());
+            async {
+                SessionEnd::Ended {
+                    up_for: Duration::ZERO,
+                }
+            }
+        }));
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        task.abort();
+        let starts = starts.lock().unwrap();
+        // Waits of 1, 2, 4, 8 s: attempts at 0, 1, 3, 7 and 15 s.
+        assert_eq!(starts.len(), 5, "{starts:?}");
+        let gaps: Vec<u64> = starts.windows(2).map(|w| (w[1] - w[0]).as_secs()).collect();
+        assert_eq!(gaps, [1, 2, 4, 8]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_reconnect_loop_resets_only_after_a_session_that_stayed_up() {
+        let starts = Arc::new(Mutex::new(Vec::<tokio::time::Instant>::new()));
+        let seen = Arc::clone(&starts);
+        let script = Arc::new(Mutex::new(VecDeque::from(vec![
+            SessionEnd::Failed("x".into()),
+            SessionEnd::Failed("x".into()),
+            SessionEnd::Ended {
+                up_for: STABLE_AFTER,
+            },
+            SessionEnd::Ended {
+                up_for: Duration::ZERO,
+            },
+            SessionEnd::Ended {
+                up_for: Duration::ZERO,
+            },
+        ])));
+        let task = tokio::spawn(reconnect_loop(move || {
+            seen.lock().unwrap().push(tokio::time::Instant::now());
+            let next = script.lock().unwrap().pop_front();
+            async move { next.unwrap_or(SessionEnd::NoUplink) }
+        }));
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        task.abort();
+        let starts = starts.lock().unwrap();
+        let gaps: Vec<u64> = starts.windows(2).map(|w| (w[1] - w[0]).as_secs()).collect();
+        // 1 and 2 (failures), then 1 (reset by the long session), 1, 2.
+        assert_eq!(gaps, [1, 2, 1, 1, 2]);
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tag_key_that_is_not_mode_0600_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tag-key");
+        std::fs::write(&path, [9u8; 32]).unwrap();
+        set_mode(&path, 0o644);
+        let err = load_or_create_tag_key(&path).expect_err("a world-readable key is refused");
+        assert!(err.to_string().contains("tag-key"), "{err}");
+        set_mode(&path, 0o600);
+        assert_eq!(load_or_create_tag_key(&path).unwrap(), [9u8; 32]);
+    }
+
+    #[test]
+    fn an_empty_or_short_tag_key_is_refused_and_left_alone_never_regenerated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tag-key");
+        for content in [&b""[..], &b"short"[..]] {
+            std::fs::write(&path, content).unwrap();
+            #[cfg(unix)]
+            set_mode(&path, 0o600);
+            let err = load_or_create_tag_key(&path).expect_err("not a key");
+            assert!(err.to_string().contains("tag-key"), "{err}");
+            assert_eq!(std::fs::read(&path).unwrap(), content);
+        }
+    }
+
+    #[test]
+    fn creating_the_tag_key_leaves_no_temporary_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tag-key");
+        load_or_create_tag_key(&path).unwrap();
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, ["tag-key"]);
+        assert_eq!(std::fs::read(&path).unwrap().len(), 32);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_token_file_that_is_not_mode_0600_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("uplink-token");
+        std::fs::write(&path, "tok\n").unwrap();
+        set_mode(&path, 0o644);
+        let err = read_token(&path).expect_err("a world-readable token is refused");
+        assert!(err.contains("uplink-token"), "{err}");
+        set_mode(&path, 0o600);
+        assert_eq!(read_token(&path).unwrap(), "tok");
+    }
+
+    #[test]
+    fn a_job_is_phi_by_its_plan_path_pr_url_or_origin_not_only_its_repo() {
+        let mut f = forwarder(Egress::Personal);
+        f.refresh_registry(&[
+            focus("cody-a", "/code/admin-portal"),
+            focus("cody-b", "/code/blog"),
+        ]);
+        let with = |id: &str, extra: serde_json::Value| {
+            let mut j = job(id, "/code/blog");
+            j["plan_path"] = "/code/blog/plan.md".into();
+            for (k, v) in extra.as_object().unwrap() {
+                j[k] = v.clone();
+            }
+            j
+        };
+        let out = f
+            .publish(jobs_msg(vec![
+                with(
+                    "plan0000",
+                    serde_json::json!({"plan_path": "/code/admin-portal-feat/plan.md"}),
+                ),
+                with(
+                    "pr000000",
+                    serde_json::json!({"pr_url": "https://github.com/o/referral-monitor/pull/3"}),
+                ),
+                with(
+                    "orig-phi0",
+                    serde_json::json!({"origin": {"focus": "cody-a"}}),
+                ),
+                with(
+                    "orig-unk0",
+                    serde_json::json!({"origin": {"focus": "ghost"}}),
+                ),
+                with(
+                    "orig-name",
+                    serde_json::json!({"origin": {"focus_name": "admin-portal"}}),
+                ),
+                with(
+                    "okok0000",
+                    serde_json::json!({"origin": {"focus": "cody-b"}}),
+                ),
+            ]))
+            .unwrap();
+        match out {
+            ServerMsg::MotherJobs { jobs, .. } => assert_eq!(
+                jobs.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(),
+                ["okok0000"]
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_worktree_whose_git_file_points_into_a_phi_repo_is_phi() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("scratch-checkout");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            "gitdir: /code/admin-portal/.git/worktrees/scratch-checkout\n",
+        )
+        .unwrap();
+        let mut f = forwarder(Egress::Personal);
+        f.refresh_registry(&[focus("cody-w", wt.to_str().unwrap())]);
+        assert!(f.publish(pending("cody-w")).is_none());
+        // The same shape pointing elsewhere is not PHI.
+        std::fs::write(wt.join(".git"), "gitdir: /code/blog/.git/worktrees/x\n").unwrap();
+        f.refresh_registry(&[focus("cody-w", wt.to_str().unwrap())]);
+        assert!(f.publish(pending("cody-w")).is_some());
+    }
+
+    #[test]
+    fn a_cancel_request_is_forgotten_once_its_pairing_has_ended() {
+        let (relay, mut up, tx, _rx) = relay_pair(SatelliteAdmin::Full);
+        level(&relay, SatelliteAdmin::Full);
+        relay.relay_verb(
+            ClientMsg::DevicePairCancel {
+                request_id: "c".into(),
+                pairing_id: "p9".into(),
+                origin: None,
+            },
+            "conn-1",
+            &tx,
+        );
+        assert!(up.try_recv().is_ok());
+        assert_eq!(relay.state.lock().unwrap().requests.len(), 1);
+        relay.from_primary(ServerMsg::DevicePairOutcome {
+            pairing_id: "p9".into(),
+            outcome: crate::ipc::devices::PairOutcomeKind::Cancelled,
+            name: None,
+            kind: None,
+            replaced: false,
+        });
+        assert!(relay.state.lock().unwrap().requests.is_empty());
+    }
+
+    #[test]
+    fn a_full_uplink_queue_refuses_a_verb_instead_of_growing() {
+        let relay = UplinkRelay::new(SatelliteAdmin::Full);
+        let (up_tx, _up_rx) = mpsc::channel(1);
+        relay.set_up(Some(up_tx));
+        level(&relay, SatelliteAdmin::Full);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let list = || ClientMsg::DeviceList {
+            request_id: "l".into(),
+        };
+        relay.relay_verb(list(), "c", &tx);
+        relay.relay_verb(list(), "c", &tx);
+        match rx.try_recv() {
+            Ok(ServerMsg::DeviceAdminError { reason, .. }) => {
+                assert_eq!(reason, SERVER_UNREACHABLE)
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

@@ -165,29 +165,49 @@ pub fn server_msg_tag(msg: &ServerMsg) -> MsgTag<'_> {
         t.as_deref().map_or(MsgTag::Missing, MsgTag::Tag)
     }
     match msg {
-        ServerMsg::PerriState { tag, .. } | ServerMsg::SessionSpawned { tag, .. } |
-        ServerMsg::SessionTurns { tag, .. } | ServerMsg::SessionTurnDelta { tag, .. } |
-        ServerMsg::SessionTurnOrigin { tag, .. } | ServerMsg::SessionState { tag, .. } |
-        ServerMsg::SessionBridge { tag, .. } | ServerMsg::SessionPermissionRequest { tag, .. } |
-        ServerMsg::SessionExited { tag, .. } | ServerMsg::SessionDown { tag, .. } |
-        ServerMsg::SessionSummaryUpdate { tag, .. } | ServerMsg::FocusLayout { tag, .. } |
-        ServerMsg::PaneContent { tag, .. } | ServerMsg::DecisionRequest { tag, .. } |
-        ServerMsg::DecisionResolved { tag, .. } | ServerMsg::ApprovalRequest { tag, .. } |
-        ServerMsg::ApprovalPreview { tag, .. } | ServerMsg::ApprovalResolved { tag, .. } |
-        ServerMsg::ApprovalSessionRules { tag, .. } | ServerMsg::ApprovalPending { tag, .. } |
-        ServerMsg::ApprovalGuardBlocked { tag, .. } | ServerMsg::PaneActionResult { tag, .. } |
-        ServerMsg::Notification { tag, .. } | ServerMsg::ActivitySnapshot { tag, .. } |
-        ServerMsg::SessionQueue { tag, .. } | ServerMsg::SessionQueueResult { tag, .. } |
-        ServerMsg::SessionQueueReturned { tag, .. } | ServerMsg::SessionTasks { tag, .. } |
-        ServerMsg::SessionTaskDetail { tag, .. } | ServerMsg::SessionCommands { tag, .. } |
-        ServerMsg::ConversationResumeFailed { tag, .. } | ServerMsg::SessionTaskStopResult { tag, .. } |
-        ServerMsg::SessionMcpResult { tag, .. } | ServerMsg::SessionTaskOutputResult { tag, .. } |
-        ServerMsg::TrackerBoard { tag, .. } | ServerMsg::TrackerEditResult { tag, .. } |
-        ServerMsg::TrackerSummary { tag, .. } => MsgTag::Tag(tag),
+        ServerMsg::PerriState { tag, .. }
+        | ServerMsg::SessionSpawned { tag, .. }
+        | ServerMsg::SessionTurns { tag, .. }
+        | ServerMsg::SessionTurnDelta { tag, .. }
+        | ServerMsg::SessionTurnOrigin { tag, .. }
+        | ServerMsg::SessionState { tag, .. }
+        | ServerMsg::SessionBridge { tag, .. }
+        | ServerMsg::SessionExited { tag, .. }
+        | ServerMsg::SessionDown { tag, .. }
+        | ServerMsg::SessionSummaryUpdate { tag, .. }
+        | ServerMsg::FocusLayout { tag, .. }
+        | ServerMsg::PaneContent { tag, .. }
+        | ServerMsg::DecisionRequest { tag, .. }
+        | ServerMsg::DecisionResolved { tag, .. }
+        | ServerMsg::ApprovalRequest { tag, .. }
+        | ServerMsg::ApprovalPreview { tag, .. }
+        | ServerMsg::ApprovalResolved { tag, .. }
+        | ServerMsg::ApprovalSessionRules { tag, .. }
+        | ServerMsg::ApprovalPending { tag, .. }
+        | ServerMsg::ApprovalGuardBlocked { tag, .. }
+        | ServerMsg::PaneActionResult { tag, .. }
+        | ServerMsg::Notification { tag, .. }
+        | ServerMsg::ActivitySnapshot { tag, .. }
+        | ServerMsg::SessionQueue { tag, .. }
+        | ServerMsg::SessionQueueResult { tag, .. }
+        | ServerMsg::SessionQueueReturned { tag, .. }
+        | ServerMsg::SessionTasks { tag, .. }
+        | ServerMsg::SessionTaskDetail { tag, .. }
+        | ServerMsg::SessionCommands { tag, .. }
+        | ServerMsg::ConversationResumeFailed { tag, .. }
+        | ServerMsg::SessionTaskStopResult { tag, .. }
+        | ServerMsg::SessionMcpResult { tag, .. }
+        | ServerMsg::SessionTaskOutputResult { tag, .. }
+        | ServerMsg::TrackerBoard { tag, .. }
+        | ServerMsg::TrackerEditResult { tag, .. }
+        | ServerMsg::TrackerSummary { tag, .. } => MsgTag::Tag(tag),
         ServerMsg::TerminalStagingList { owner_tag, .. } => MsgTag::Tag(owner_tag),
         ServerMsg::ConversationResumeResult { tag, .. }
         | ServerMsg::RemoteShellConfirmRequest { tag, .. } => opt(tag),
         ServerMsg::Activity(event) => opt(&event.focus_tag),
+        // LocalOnly, and pinned by a source scan to appear only as `{ .. }`:
+        // never forwarded, and unclassifiable here.
+        ServerMsg::SessionPermissionRequest { .. } => MsgTag::Missing,
         ServerMsg::SessionModelState(state) => MsgTag::Tag(&state.tag),
         ServerMsg::TerminalState { terminal } => MsgTag::Tag(&terminal.tag),
         ServerMsg::TerminalClosed(closed) => MsgTag::Tag(&closed.tag),
@@ -201,24 +221,59 @@ pub fn server_msg_tag(msg: &ServerMsg) -> MsgTag<'_> {
         | ServerMsg::MotherStatusline(_)
         | ServerMsg::MotherAwaitDetected(_) => MsgTag::Untagged,
         // Daemon-wide, administrative or bookkeeping: no focus.
-        ServerMsg::Welcome { .. } | ServerMsg::TeriState { .. } | ServerMsg::FredState { .. } |
-        ServerMsg::Pong | ServerMsg::Error { .. } | ServerMsg::MotherPeek { .. } |
-        ServerMsg::ApprovalsSnapshot { .. } | ServerMsg::ApprovalRules { .. } | ServerMsg::ApprovalsLogPage { .. } |
-        ServerMsg::ApprovalsLogDetail { .. } | ServerMsg::ApprovalsLogRefused { .. } | ServerMsg::ApprovalAnswerRefused { .. } |
-        ServerMsg::ClaudeLoginState { .. } | ServerMsg::ActivityHealth { .. } | ServerMsg::WorkSourceStatus { .. } |
-        ServerMsg::WorkSnapshot { .. } | ServerMsg::TeriPicks { .. } | ServerMsg::WorkDetail { .. } |
-        ServerMsg::WorkSendPreview { .. } | ServerMsg::WorkSendResult { .. } | ServerMsg::Withheld { .. } |
-        ServerMsg::ModelCatalog { .. } | ServerMsg::ModelDefaults { .. } | ServerMsg::ModelRequestResult { .. } |
-        ServerMsg::ConversationHistory { .. } | ServerMsg::ConversationHistoryChanged { .. } | ServerMsg::TerminalList { .. } |
-        ServerMsg::TerminalReplay { .. } | ServerMsg::TerminalOutput { .. } | ServerMsg::TerminalRefused { .. } |
-        ServerMsg::TerminalRemoteSummary { .. } | ServerMsg::RemoteShellTargets { .. } | ServerMsg::RemoteShellResolved { .. } |
-        ServerMsg::DaemonReconnected | ServerMsg::AuthoredPrPreview { .. } | ServerMsg::AuthoredPrNotifyResult { .. } |
-        ServerMsg::AuthoredPrStartSessionResult { .. } | ServerMsg::AuthoredPrLinkResult { .. } | ServerMsg::AuthoredPrMergeResult { .. } |
-        ServerMsg::AuthoredPrs { .. } | ServerMsg::PairOffer { .. } | ServerMsg::Paired { .. } |
-        ServerMsg::PairRefused { .. } | ServerMsg::Unauthorized { .. } | ServerMsg::DeviceUnpaired |
-        ServerMsg::DevicePairing { .. } | ServerMsg::DevicePairOutcome { .. } | ServerMsg::Devices { .. } |
-        ServerMsg::DeviceRevoked { .. } | ServerMsg::DeviceAdminError { .. } | ServerMsg::Hosts { .. } |
-        ServerMsg::HostUnavailable { .. } | ServerMsg::DeviceAdminLevel { .. } => MsgTag::Untagged,
+        ServerMsg::Welcome { .. }
+        | ServerMsg::TeriState { .. }
+        | ServerMsg::FredState { .. }
+        | ServerMsg::Pong
+        | ServerMsg::Error { .. }
+        | ServerMsg::MotherPeek { .. }
+        | ServerMsg::ApprovalsSnapshot { .. }
+        | ServerMsg::ApprovalRules { .. }
+        | ServerMsg::ApprovalsLogPage { .. }
+        | ServerMsg::ApprovalsLogDetail { .. }
+        | ServerMsg::ApprovalsLogRefused { .. }
+        | ServerMsg::ApprovalAnswerRefused { .. }
+        | ServerMsg::ClaudeLoginState { .. }
+        | ServerMsg::ActivityHealth { .. }
+        | ServerMsg::WorkSourceStatus { .. }
+        | ServerMsg::WorkSnapshot { .. }
+        | ServerMsg::TeriPicks { .. }
+        | ServerMsg::WorkDetail { .. }
+        | ServerMsg::WorkSendPreview { .. }
+        | ServerMsg::WorkSendResult { .. }
+        | ServerMsg::Withheld { .. }
+        | ServerMsg::ModelCatalog { .. }
+        | ServerMsg::ModelDefaults { .. }
+        | ServerMsg::ModelRequestResult { .. }
+        | ServerMsg::ConversationHistory { .. }
+        | ServerMsg::ConversationHistoryChanged { .. }
+        | ServerMsg::TerminalList { .. }
+        | ServerMsg::TerminalReplay { .. }
+        | ServerMsg::TerminalOutput { .. }
+        | ServerMsg::TerminalRefused { .. }
+        | ServerMsg::TerminalRemoteSummary { .. }
+        | ServerMsg::RemoteShellTargets { .. }
+        | ServerMsg::RemoteShellResolved { .. }
+        | ServerMsg::DaemonReconnected
+        | ServerMsg::AuthoredPrPreview { .. }
+        | ServerMsg::AuthoredPrNotifyResult { .. }
+        | ServerMsg::AuthoredPrStartSessionResult { .. }
+        | ServerMsg::AuthoredPrLinkResult { .. }
+        | ServerMsg::AuthoredPrMergeResult { .. }
+        | ServerMsg::AuthoredPrs { .. }
+        | ServerMsg::PairOffer { .. }
+        | ServerMsg::Paired { .. }
+        | ServerMsg::PairRefused { .. }
+        | ServerMsg::Unauthorized { .. }
+        | ServerMsg::DeviceUnpaired
+        | ServerMsg::DevicePairing { .. }
+        | ServerMsg::DevicePairOutcome { .. }
+        | ServerMsg::Devices { .. }
+        | ServerMsg::DeviceRevoked { .. }
+        | ServerMsg::DeviceAdminError { .. }
+        | ServerMsg::Hosts { .. }
+        | ServerMsg::HostUnavailable { .. }
+        | ServerMsg::DeviceAdminLevel { .. } => MsgTag::Untagged,
     }
 }
 
@@ -769,9 +824,7 @@ impl Router {
             // A reply that names a focus names the one the request asked about.
             if let Some(asked) = entry.tag.as_deref() {
                 match server_msg_tag(&msg) {
-                    MsgTag::Tag(answered) if answered != asked => {
-                        return Err(ReplyDrop::WrongTag)
-                    }
+                    MsgTag::Tag(answered) if answered != asked => return Err(ReplyDrop::WrongTag),
                     MsgTag::Missing => return Err(ReplyDrop::WrongTag),
                     _ => {}
                 }
