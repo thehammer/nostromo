@@ -130,11 +130,7 @@ public final class ContentCache: @unchecked Sendable {
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
-            var options: Data.WritingOptions = [.atomic]
-            #if os(iOS)
-            options.insert(.completeFileProtection)
-            #endif
-            try data.write(to: url, options: options)
+            try data.write(to: url, options: Self.writeOptions)
             var values = URLResourceValues()
             values.isExcludedFromBackup = true
             var target = url
@@ -142,6 +138,17 @@ public final class ContentCache: @unchecked Sendable {
         } catch {
             // A cache that cannot be written is only a missed optimisation; the live data is unaffected.
         }
+    }
+
+    /// How the file is written: atomically, and on iOS with the `complete` data-protection class (the
+    /// file is unreadable while the phone is locked). Exposed so the iOS-hosted test can check that
+    /// the iOS build asks for it, since the Simulator does not report the class back.
+    public static var writeOptions: Data.WritingOptions {
+        var options: Data.WritingOptions = [.atomic]
+        #if os(iOS)
+        options.insert(.completeFileProtection)
+        #endif
+        return options
     }
 
     private static func slot(_ frame: Frame) -> String {
