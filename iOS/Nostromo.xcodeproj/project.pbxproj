@@ -48,6 +48,9 @@
 		B10000000000000000000117 /* MergedQueueList.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000116 /* MergedQueueList.swift */; };
 		B10000000000000000000119 /* AppSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000118 /* AppSession.swift */; };
 		B20000000000000000000202 /* KeychainCredentialStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000201 /* KeychainCredentialStoreTests.swift */; };
+		B20000000000000000000212 /* LoopbackWebSocketServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000211 /* LoopbackWebSocketServer.swift */; };
+		B20000000000000000000214 /* AppTransportSecurityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000213 /* AppTransportSecurityTests.swift */; };
+		B20000000000000000000216 /* AppSessionLaunchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000215 /* AppSessionLaunchTests.swift */; };
 		B20000000000000000000204 /* PairLinkRoutingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000203 /* PairLinkRoutingTests.swift */; };
 		B20000000000000000000206 /* ContentCacheProtectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000205 /* ContentCacheProtectionTests.swift */; };
 /* End PBXBuildFile section */
@@ -106,6 +109,9 @@
 		B10000000000000000000116 /* MergedQueueList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MergedQueueList.swift; sourceTree = "<group>"; };
 		B10000000000000000000118 /* AppSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSession.swift; sourceTree = "<group>"; };
 		B20000000000000000000201 /* KeychainCredentialStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainCredentialStoreTests.swift; sourceTree = "<group>"; };
+		B20000000000000000000211 /* LoopbackWebSocketServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoopbackWebSocketServer.swift; sourceTree = "<group>"; };
+		B20000000000000000000213 /* AppTransportSecurityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppTransportSecurityTests.swift; sourceTree = "<group>"; };
+		B20000000000000000000215 /* AppSessionLaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSessionLaunchTests.swift; sourceTree = "<group>"; };
 		B20000000000000000000203 /* PairLinkRoutingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairLinkRoutingTests.swift; sourceTree = "<group>"; };
 		B20000000000000000000205 /* ContentCacheProtectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentCacheProtectionTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -213,6 +219,9 @@
 		AC0000010000000000000009 /* NostromoTests */ = {
 			isa = PBXGroup;
 			children = (
+				B20000000000000000000211 /* LoopbackWebSocketServer.swift */,
+				B20000000000000000000213 /* AppTransportSecurityTests.swift */,
+				B20000000000000000000215 /* AppSessionLaunchTests.swift */,
 				B20000000000000000000205 /* ContentCacheProtectionTests.swift */,
 				B20000000000000000000203 /* PairLinkRoutingTests.swift */,
 				B20000000000000000000201 /* KeychainCredentialStoreTests.swift */,
@@ -377,6 +386,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				AC0000010000000000000001 /* NostromoSmokeTests.swift in Sources */,
+				B20000000000000000000212 /* LoopbackWebSocketServer.swift in Sources */,
+				B20000000000000000000214 /* AppTransportSecurityTests.swift in Sources */,
+				B20000000000000000000216 /* AppSessionLaunchTests.swift in Sources */,
 				B20000000000000000000206 /* ContentCacheProtectionTests.swift in Sources */,
 				B20000000000000000000204 /* PairLinkRoutingTests.swift in Sources */,
 				B20000000000000000000202 /* KeychainCredentialStoreTests.swift in Sources */,

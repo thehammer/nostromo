@@ -21,7 +21,7 @@ struct EnterCodeView: View {
 
     var body: some View {
         Form {
-            Section("Server address") {
+            Section {
                 TextField("10.0.0.5", text: $address)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -29,6 +29,10 @@ struct EnterCodeView: View {
                     .focused($focus, equals: .address)
                     .submitLabel(.next)
                     .onSubmit { focus = .code }
+            } header: {
+                Text("Server address")
+            } footer: {
+                Text(PairingCopy.addressHint)
             }
             Section("Code") {
                 TextField("123456", text: $code)

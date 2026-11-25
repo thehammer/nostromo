@@ -12,7 +12,7 @@ public enum DeviceUnpairer {
     /// Returns `true` only if the server answered `DeviceUnpaired` within `timeout`.
     public static func unpair(host: String, port: UInt16, credential: DeviceCredential,
                               timeout: TimeInterval = 5) async -> Bool {
-        let channel = WebSocketChannel(host: host, port: port, bearer: credential.token)
+        guard let channel = try? WebSocketChannel(host: host, port: port, bearer: credential.token) else { return false }
         defer { channel.cancel() }
         channel.resume()
         do {

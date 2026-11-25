@@ -16,6 +16,9 @@ struct AskQuestionPrompt: View {
     let header:    String
     let options:   [DaemonAskOption]
     let onAnswer:  (String) -> Void
+    /// False over the WebSocket transport (it sends nothing that changes state): the options are
+    /// shown but cannot be tapped.
+    var canAnswer: Bool = true
 
     @State private var answered = false
 
@@ -61,8 +64,14 @@ struct AskQuestionPrompt: View {
                         .background(Color.accentColor.opacity(answered ? 0.05 : 0.12))
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
-                    .disabled(answered)
+                    .disabled(answered || !canAnswer)
                 }
+            }
+
+            if !canAnswer {
+                Text("Answer it on your Mac")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 4)

@@ -51,7 +51,8 @@ struct PairingFlowView: View {
             case .start:
                 PairWithNostromoView(onScan: { screen = .scanner },
                                      onEnterCode: { screen = .entry },
-                                     onDigit: { digit in code = digit; screen = .entry })
+                                     onDigit: { digit in code = digit; screen = .entry },
+                                     onUseLegacy: { session.setTransport(.legacyTCP) })
             case .scanner:
                 QRScannerView(onLink: { link in
                     address = link.host

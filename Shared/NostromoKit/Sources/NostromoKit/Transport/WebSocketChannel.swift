@@ -11,14 +11,29 @@ final class WebSocketChannel: @unchecked Sendable {
     private let session: URLSession
     private let task: URLSessionWebSocketTask
 
-    /// `bearer == nil` opens a pairing-only socket.
-    init(host: String, port: UInt16, bearer: String?) {
+    /// The address cannot be turned into a `ws://` URL. Never replaced by a fallback address: a
+    /// socket (and the token on it) goes only where the operator's address says.
+    struct BadAddress: Error, Equatable {}
+
+    /// The `ws://host:port/` URL for `host`, or `nil` when `host` is not usable. An IPv6 literal keeps
+    /// its brackets (`[::1]`); a bare one (`::1`) gets them.
+    static func url(host: String, port: UInt16) -> URL? {
+        let bare = host.trimmingCharacters(in: .whitespaces)
+        guard !bare.isEmpty else { return nil }
+        let bracketed = bare.contains(":") && !bare.hasPrefix("[") ? "[\(bare)]" : bare
         var components = URLComponents()
         components.scheme = "ws"
-        components.host = host.hasPrefix("[") ? String(host.dropFirst().dropLast()) : host
+        components.host = bracketed
         components.port = Int(port)
         components.path = "/"
-        var request = URLRequest(url: components.url ?? URL(string: "ws://invalid.invalid/")!)
+        guard let url = components.url, url.scheme == "ws", url.host != nil else { return nil }
+        return url
+    }
+
+    /// `bearer == nil` opens a pairing-only socket. Throws `BadAddress` for a host that has no URL.
+    init(host: String, port: UInt16, bearer: String?) throws {
+        guard let url = Self.url(host: host, port: port) else { throw BadAddress() }
+        var request = URLRequest(url: url)
         // Longer than the 20 s ping so an idle but healthy socket is never cut by the request timeout;
         // the clients run their own, shorter, handshake deadline.
         request.timeoutInterval = 30
@@ -68,6 +83,7 @@ final class WebSocketChannel: @unchecked Sendable {
 
     /// Pure core of `failure(for:)`, so the table test can drive it without a socket.
     static func failure(for error: Error, closeCode: Int, httpStatus: Int?) -> ConnectionFailure {
+        if error is BadAddress { return .badAddress }
         if closeCode == ConnectionFailure.unauthorizedCloseCode { return .closed(code: closeCode) }
         if let status = httpStatus, status != 101 { return .httpStatus(status) }
         if let urlError = error as? URLError { return .transport(urlError.code) }

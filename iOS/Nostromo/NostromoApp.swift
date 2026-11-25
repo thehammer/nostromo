@@ -215,7 +215,7 @@ struct ContentView: View {
         }.count
     }
 
-    private var readOnlyDecisions: Bool { ConnectionSettings.transport == .webSocket }
+    private var readOnlyDecisions: Bool { !store.canMutate }
 }
 
 // MARK: - SessionsTab

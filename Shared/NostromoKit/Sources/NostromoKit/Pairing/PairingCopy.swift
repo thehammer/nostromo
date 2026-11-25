@@ -25,8 +25,28 @@ public enum PairingCopy {
         "Nostromo can't use your local network, so it can't reach \(address) on this Wi-Fi. "
             + "Turn on Local Network for Nostromo in Settings, or use your VPN."
     }
+    /// The address cannot be used at all (a malformed host); nothing was sent to it.
+    public static func badAddress(address: String) -> String {
+        "\(address) isn't an address Nostromo can connect to. Use the server's IP address, "
+            + "such as 10.0.0.5, or a name ending in .local."
+    }
     public static func noLongerPaired(kind: String) -> String {
         "This \(kind) is no longer paired with Nostromo. Pair it again to reconnect."
+    }
+
+    // MARK: Address form (App Transport Security)
+
+    /// Shown under the address field. iOS lets this app open a plain `ws://` socket only to an IP
+    /// address (a VPN address included), a `.local` name or a single-word name: the exception is
+    /// `NSAllowsLocalNetworking`, and it cannot be widened to the operator's own domain at run time.
+    public static let addressHint =
+        "Use the server's IP address (for example 10.0.0.5 or its VPN address) or a .local name. "
+        + "A full domain name such as mac.example.com can't be used."
+
+    /// Added under "can't reach" when `address` is a full domain name, which iOS blocks for this app
+    /// whether or not the server is up. `nil` for an address that is not blocked on those grounds.
+    public static func addressFormHint(address: String) -> String? {
+        PairingAddress.isLocalNetworkingForm(address) ? nil : addressHint
     }
 
     // MARK: Banners over last-known content

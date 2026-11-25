@@ -29,6 +29,9 @@ struct ConfirmPairingView: View {
             Section {
                 Text(PairingCopy.confirmation(kind: kindName, address: confirmation.address))
                     .font(.headline)
+                LabeledContent("Address", value: confirmation.address)
+                LabeledContent("Port", value: String(confirmation.port))
+                LabeledContent("Code", value: confirmation.code)
                 TextField("Name", text: $model.name)
                     .textInputAutocapitalization(.words)
                     .autocorrectionDisabled()

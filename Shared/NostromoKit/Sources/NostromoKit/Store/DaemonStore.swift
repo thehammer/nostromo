@@ -147,7 +147,7 @@ public final class DaemonStore: ObservableObject {
     /// Whether this client may answer, resume, cancel or retry anything. False over the backplane
     /// transport: the phone is a read-only window (B10, Q4), and `WebSocketClient` refuses those
     /// verbs besides. True only for the legacy TCP transport.
-    public var canMutate: Bool { client is NetworkClient }
+    public var canMutate: Bool { client.canMutate }
 
     /// Whether anything last-known is on screen. While it is, the tabs keep showing it under a banner
     /// instead of replacing it with "Disconnected".
@@ -486,7 +486,7 @@ public final class DaemonStore: ObservableObject {
 
         case .sessionListResp(let list):
             // Replace the full sessions dict with the fresh snapshot.
-            sessions = Dictionary(uniqueKeysWithValues: list.map { ($0.tag, $0) })
+            sessions = Dictionary(list.map { ($0.tag, $0) }, uniquingKeysWith: { _, last in last })
 
         case .sessionState(let tag, let state):
             guard var info = sessions[tag] else { return }
@@ -594,7 +594,7 @@ public final class DaemonStore: ObservableObject {
             client.send(ClientSessionList())
 
         case .focusListResp(let list), .focusRegistryUpdated(let list):
-            focuses = Dictionary(uniqueKeysWithValues: list.map { ($0.tag, $0) })
+            focuses = Dictionary(list.map { ($0.tag, $0) }, uniquingKeysWith: { _, last in last })
             // Per-focus PR pin dies with its focus (W8, D3): a tag no longer
             // in the registry can never be shown on screen again, so its
             // entry must not linger in perriCurrentPr forever.
@@ -641,7 +641,7 @@ public final class DaemonStore: ObservableObject {
 
         case .withheld(let topics, let reason):
             withheldTopics = Set(topics)
-            withheldReasons = Dictionary(uniqueKeysWithValues: topics.map { ($0, reason) })
+            withheldReasons = Dictionary(topics.map { ($0, reason) }, uniquingKeysWith: { _, last in last })
 
         case .teriState(let snap):
             teriTodos = snap

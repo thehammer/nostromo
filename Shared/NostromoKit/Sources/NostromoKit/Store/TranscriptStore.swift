@@ -31,6 +31,10 @@ public final class TranscriptStore: ObservableObject {
     /// `attach`/`detach`.
     private var attachCount = 0
 
+    /// Whether this transcript may send anything: the composer, answer buttons, Stop and New
+    /// Session show only when it can. False over the WebSocket transport.
+    public var canMutate: Bool { client.canMutate }
+
     // MARK: - Init
 
     public init(client: any DaemonTransport) {

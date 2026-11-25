@@ -96,17 +96,22 @@ struct PerriView: View {
                         NostromoKit.PerriPRRow(
                             model:   rowModel(for: item),
                             onLoad:  { store.perriLoadPr(number: item.number, repo: item.repo) },
-                            onClear: { store.perriClear() }
+                            onClear: { store.perriClear() },
+                            actionsEnabled: store.canMutate
                         )
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            Button {
-                                // First tap only stages the approval — confirmation
-                                // dialog fires before anything is sent to GitHub.
-                                pendingApproval = item
-                            } label: {
-                                Label("Approve", systemImage: "checkmark.seal.fill")
+                            // Approve, Load and Clear change the Mac's Perri state: not offered
+                            // when the transport cannot send them (WebSocket).
+                            if store.canMutate {
+                                Button {
+                                    // First tap only stages the approval — confirmation
+                                    // dialog fires before anything is sent to GitHub.
+                                    pendingApproval = item
+                                } label: {
+                                    Label("Approve", systemImage: "checkmark.seal.fill")
+                                }
+                                .tint(.green)
                             }
-                            .tint(.green)
                         }
                     }
                 }

@@ -212,6 +212,26 @@ socket.
 **What:** `NostromoTests`, an XCTest bundle hosted by the iOS app
 (`iOS/NostromoTests/`), run in an iOS Simulator process.
 
+**App Transport Security is only visible here.** On iOS 17 and later ATS refuses a plain `ws://`
+connection to an IP address unless the app's `Info.plist` sets `NSAllowsLocalNetworking`
+(`NSAppTransportSecurity`; never `NSAllowsArbitraryLoads`). `URLSessionWebSocketTask` is an ATS-governed
+URLSession task (the legacy `NetworkClient` uses `NWConnection`, which ATS does not cover, which is why the
+old transport worked without it). A SwiftPM test binary has no `Info.plist`, so no Kit test can notice a
+missing key: every Kit test opens sockets ATS never sees, and a phone with the key missing would fail every
+connection with error -1022, shown as "can't reach" forever. `AppTransportSecurityTests` runs in the hosted
+app, starts an in-process `NWListener` WebSocket server on loopback and reaches it over plain `ws://` on
+`127.0.0.1` and `[::1]` through a raw `URLSessionWebSocketTask`, `WebSocketClient` and `PairingClient`; it
+fails if ATS blocks any of them. `tests/ios_policy` scans `Info.plist` for the same keys.
+
+What `NSAllowsLocalNetworking` covers is the pairing-address rule: an IPv4 or IPv6 literal (a VPN address
+such as a WireGuard `10.x` or a Tailscale `100.x` included), a `.local` name, or a single-word name. A full
+domain name (`mac.tailnet.ts.net`, `mac.example.com`) is outside it, and the list cannot be extended at run
+time: an `NSExceptionDomains` entry is fixed in the built app, so it would have to name one operator's
+domain. So the pairing screen says to use the IP address or a `.local` name (`PairingCopy.addressHint`), and a
+"can't reach" for a full domain name carries the same sentence. Which names are covered is Apple's documented
+behaviour for the key; the loopback test proves the IP-literal half on the Simulator. A real device on a VPN
+address is a manual check (W11-13).
+
 **Run:**
 
 ```
@@ -220,7 +240,7 @@ make ios-test
 
 which is `xcodebuild test` of the shared `Nostromo` scheme (it includes the
 `NostromoTests` target) against `IOS_SIM_NAME` (default `iPhone 17`, a device
-every iOS runtime on the `macos-26` runner image ships), `CODE_SIGNING_ALLOWED=NO`.
+every iOS runtime on the `macos-26` runner image ships), signed ad hoc (`CODE_SIGN_IDENTITY=-`, no team, no profile) so the hosted app has entitlements and the Keychain tests can run.
 Derived data goes on `/Volumes/Scratch` when it is mounted (otherwise
 `iOS/build/`); see `docs/ci.md`. It also runs as the second build step of the
 `iOS simulator build` PR check (`make ci-remote ONLY=ios` dispatches it). It
@@ -304,7 +324,11 @@ reach app-module code (`ConnectionSettings`) and construct `NetworkClient` the w
 round trip, delete on revoke, token never in UserDefaults), `PairLinkRoutingTests` (the `nostromo` URL
 scheme in the built Info.plist, the camera and Local Network reasons, and `AppSession.handle(url:)` routing
 a valid link to the confirmation step and refusing a bad one) and `ContentCacheProtectionTests` (the cache
-file's `complete` protection class, backup exclusion, wipe). All carry `// L5:` headers. What they do not
+file's `complete` protection class, backup exclusion, wipe), `AppTransportSecurityTests` (below),
+`AppSessionLaunchTests` (an orphaned credential is deleted at launch, a hostile link after a reinstall sees
+no token or proof, a revoke clears the credential and the content before the screen changes, the legacy
+transport is reachable before any pairing) and a small loopback WebSocket server they share. All carry
+`// L5:` headers. What they do not
 show: the Simulator's Keychain and file protection are softer than a device's, so a locked phone is a
 manual check (W11-13).
 

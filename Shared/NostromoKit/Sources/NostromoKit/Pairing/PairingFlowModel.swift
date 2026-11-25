@@ -24,6 +24,8 @@ public enum PairingFailure: Equatable {
     case localNetworkDenied
     /// The server paired us but the Keychain refused the token.
     case notSaved
+    /// The address is not one the phone can open a socket to (a malformed host).
+    case badAddress
 }
 
 /// What pairing will do to the pairing this device already has.
@@ -114,20 +116,22 @@ public final class PairingFlowModel: ObservableObject {
         step = .checking
         let server = makeServer(address, port)
         self.server = server
-        oldCredential = credentials.load()
+        // The old token is only ever used against the address this device was paired at. With no
+        // saved address there is no old pairing to replace or to tell: never fall back to the new
+        // address (a link's), which could be a hostile server asking for the token.
+        let current = effects.currentServer
+        oldCredential = current == nil ? nil : credentials.load()
         do {
             var offer = try await server.check(code: code, proof: nil)
             var existing = PairingReplacement.none
-            if let old = oldCredential {
+            if let old = oldCredential, let current {
                 // Prove we know this server, on this socket, without sending the token (D6).
                 let proof = PairingClient.proof(token: old.token, challenge: offer.challenge, code: code)
                 offer = try await server.check(code: code, proof: proof)
                 if offer.knowsDevice == true {
                     existing = .sameServer
                 } else {
-                    let current = effects.currentServer
-                    existing = .differentServer(oldAddress: current?.address ?? address,
-                                                   oldPort: current?.port ?? port)
+                    existing = .differentServer(oldAddress: current.address, oldPort: current.port)
                 }
             }
             if name.isEmpty { name = offer.nameHint ?? kindName }
@@ -198,6 +202,7 @@ public final class PairingFlowModel: ObservableObject {
         case .expired: return .expired
         case .invalid: return .invalid
         case .localNetworkDenied: return .localNetworkDenied
+        case .badAddress: return .badAddress
         case .unreachable, nil: return .unreachable
         }
     }

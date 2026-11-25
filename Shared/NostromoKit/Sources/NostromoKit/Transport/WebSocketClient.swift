@@ -20,21 +20,31 @@ import os
 
 private let log = Logger(subsystem: "com.hammer.nostromo.ios", category: "WebSocketClient")
 
-/// Which verbs the phone refuses to send. Everything the phone does send is read-only:
-/// subscribe, list, attach, snapshot, model get.
+/// The only verbs the phone sends over the WebSocket transport. A network peer is read-only: this
+/// is the daemon's `NETWORK_ALLOWED` list (`src/ipc/peer.rs`) in wire form, and
+/// `tests/ios_policy/test_ios_backplane_policy.py` fails when the two differ. Everything else
+/// (approve, answer, Mother actions, the message queue, Perri actions, session send/interrupt,
+/// close pane, model set, ...) is dropped before it is encoded onto the socket (B10, Q4, Q7); the
+/// daemon would refuse it anyway, so the views hide the controls that would send it (`canMutate`).
 public enum OutboundPolicy {
-    /// Wire `type` values the WebSocket transport never sends.
-    public static let refusedTypes: Set<String> = [
-        "approval_answer",           // B10: no approve/deny anywhere on iOS
-        "decision_answer",           // Q4: decisions are read-only on the phone
-        "mother_resume",             // B10: no answering a held Mother job
-        "mother_action",             // B10: no cancel/retry/force-start
-        "session_queue_watch",       // D7, Q7: the phone shows nothing from the message queue
-        "session_queue_take_back",
-        "session_queue_remove",
+    /// Wire `type` values the WebSocket transport may send (snake_case of the Rust variant names).
+    public static let allowedTypes: Set<String> = [
+        "activity_snapshot_request",
+        "focus_list",
+        "hello",
+        "model_catalog_request",
+        "model_defaults_request",
+        "ping",
+        "pty_detach",
+        "pty_list",
+        "session_attach",
+        "session_detach",
+        "session_list",
+        "session_model_get",
+        "subscribe",
     ]
 
-    public static func allows(type: String) -> Bool { !refusedTypes.contains(type) }
+    public static func allows(type: String) -> Bool { allowedTypes.contains(type) }
 }
 
 @MainActor
@@ -165,7 +175,10 @@ public final class WebSocketClient: ObservableObject {
 
     /// One connection, from the upgrade to its end.
     private func connectOnce() async -> Outcome {
-        let channel = WebSocketChannel(host: host, port: port, bearer: credential.token)
+        // A host that has no URL fails here, loudly: no token goes anywhere else instead.
+        guard let channel = try? WebSocketChannel(host: host, port: port, bearer: credential.token) else {
+            return Outcome(failure: .badAddress, wasConnected: false)
+        }
         self.channel = channel
         channel.resume()
 

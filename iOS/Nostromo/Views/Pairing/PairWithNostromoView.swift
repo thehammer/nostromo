@@ -13,6 +13,8 @@ struct PairWithNostromoView: View {
     let onEnterCode: () -> Void
     /// A digit typed on a hardware keyboard: jump into the code field with it.
     let onDigit: (String) -> Void
+    /// Advanced: switch to the old local-network transport (Bonjour, no pairing) and show the tabs.
+    let onUseLegacy: () -> Void
 
     var body: some View {
         VStack(spacing: 24) {
@@ -37,6 +39,14 @@ struct PairWithNostromoView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.large)
                 .keyboardShortcut(.defaultAction)
+
+                Button(action: onUseLegacy) {
+                    Text("Advanced: Use local network (legacy)")
+                        .font(.footnote)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .padding(.top, 4)
             }
         }
         .padding(24)

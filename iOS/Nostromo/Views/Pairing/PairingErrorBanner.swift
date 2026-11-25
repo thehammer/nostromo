@@ -16,6 +16,9 @@ struct PairingErrorBanner: View {
         VStack(alignment: .leading, spacing: 8) {
             Label(sentence, systemImage: "exclamationmark.triangle.fill")
                 .foregroundStyle(.red)
+            if failure == .unreachable, let hint = PairingCopy.addressFormHint(address: address) {
+                Text(hint).font(.footnote).foregroundStyle(.secondary)
+            }
             if failure == .localNetworkDenied {
                 Button("Open Settings") {
                     if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
@@ -34,6 +37,7 @@ struct PairingErrorBanner: View {
         case .invalid: return PairingCopy.invalid()
         case .unreachable, .notSaved: return PairingCopy.unreachable(address: address)
         case .localNetworkDenied: return PairingCopy.localNetworkDenied(address: address)
+        case .badAddress: return PairingCopy.badAddress(address: address)
         }
     }
 }

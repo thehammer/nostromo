@@ -31,6 +31,8 @@ public enum ConnectionFailure: Equatable {
     case httpStatus(Int)
     /// The transport failed below HTTP (refused, timed out, DNS, TLS, network down, reset).
     case transport(URLError.Code)
+    /// The address has no `ws://` URL (a malformed host). Nothing was sent anywhere.
+    case badAddress
     /// The local-network probe says iOS is blocking the address.
     case localNetworkDenied
     /// Anything else.
@@ -48,7 +50,7 @@ public enum ConnectionFailure: Equatable {
             return .notPaired(reason: "unauthorized")
         case .localNetworkDenied:
             return .localNetworkDenied
-        case .closed, .httpStatus, .transport, .other:
+        case .closed, .httpStatus, .transport, .badAddress, .other:
             return .unreachable
         }
     }
@@ -58,7 +60,7 @@ public enum ConnectionFailure: Equatable {
     var mayBeLocalNetworkPolicy: Bool {
         switch self {
         case .transport, .other: return true
-        case .unauthorizedFrame, .closed, .httpStatus, .localNetworkDenied: return false
+        case .unauthorizedFrame, .closed, .httpStatus, .badAddress, .localNetworkDenied: return false
         }
     }
 }

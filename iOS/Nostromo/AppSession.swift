@@ -59,11 +59,13 @@ final class AppSession: ObservableObject, PairingSideEffects {
             store?.start()
             return
         }
-        guard let credential = credentials.load(), let address = ConnectionSettings.lastAddress else {
+        // A credential with no saved address (the app was deleted and reinstalled: the Keychain
+        // item survives, UserDefaults does not) is deleted here, so no pairing link can ask for it.
+        guard let resume = credentials.resumeOrDiscardOrphan(address: ConnectionSettings.lastAddress) else {
             phase = .unpaired
             return
         }
-        startPaired(credential: credential, address: address, port: ConnectionSettings.webSocketPort)
+        startPaired(credential: resume.credential, address: resume.address, port: ConnectionSettings.webSocketPort)
     }
 
     private func startPaired(credential: DeviceCredential, address: String, port: UInt16) {

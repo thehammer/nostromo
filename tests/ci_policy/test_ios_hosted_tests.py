@@ -227,9 +227,16 @@ def check_makefile_ios_test(text):
         return ["Makefile has no `ios-test` target"]
     out = []
     for needle in ("set -o pipefail", "iOS/Nostromo.xcodeproj", "-scheme Nostromo",
-                   "platform=iOS Simulator,name=$(IOS_SIM_NAME)", "CODE_SIGNING_ALLOWED=NO"):
+                   "platform=iOS Simulator,name=$(IOS_SIM_NAME)", "CODE_SIGN_IDENTITY=-",
+                   "CODE_SIGNING_REQUIRED=NO", "CODE_SIGNING_ALLOWED=YES"):
         if needle not in recipe:
             out.append("ios-test recipe lacks %r" % needle)
+    # Ad hoc signing gives the hosted app entitlements (Keychain) with no Apple team; a team would
+    # make the run depend on a provisioning profile the runner does not have.
+    if "CODE_SIGNING_ALLOWED=NO" in recipe:
+        out.append("ios-test must sign ad hoc: an unsigned host has no entitlements (Keychain -34018)")
+    if "DEVELOPMENT_TEAM" in recipe:
+        out.append("ios-test must not name a DEVELOPMENT_TEAM (ad hoc signing, no team)")
     if '-derivedDataPath "$(IOS_TEST_DERIVED)"' not in recipe:
         out.append("ios-test must use -derivedDataPath \"$(IOS_TEST_DERIVED)\" (never a fixed in-repo path)")
     guard = [l for l in recipe.splitlines() if "Executed [1-9]" in l and "grep" in l]
@@ -523,7 +530,10 @@ class MakefileBites(unittest.TestCase):
             ("-project iOS/Nostromo.xcodeproj", "-project iOS/Other.xcodeproj"),
             ("-scheme Nostromo \\\n\t  -destination 'platform=iOS Simulator", "-scheme Other \\\n\t  -destination 'platform=iOS Simulator"),
             ("name=$(IOS_SIM_NAME)'", "name=iPhone 17'"),
-            ("  CODE_SIGNING_ALLOWED=NO 2>&1 | tee iOS/build/ios-test-full.log", "  2>&1 | tee iOS/build/ios-test-full.log"),
+            ("  CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=YES 2>&1 | tee iOS/build/ios-test-full.log", "  2>&1 | tee iOS/build/ios-test-full.log"),
+            ("CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=YES 2>&1", "CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=YES 2>&1"),
+            ("CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=YES 2>&1", "CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO 2>&1"),
+            ("CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=YES 2>&1", "CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=YES DEVELOPMENT_TEAM=ABCDE12345 2>&1"),
             ('-derivedDataPath "$(IOS_TEST_DERIVED)"', "-derivedDataPath iOS/build/derived"),
         ):
             self.assertTrue(check_makefile_ios_test(_mutate(self.mk, old, new)), old)

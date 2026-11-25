@@ -19,6 +19,8 @@ public enum PairingError: Error, Equatable {
     case invalid
     case unreachable
     case localNetworkDenied
+    /// The address has no `ws://` URL (a malformed host). Nothing was sent.
+    case badAddress
 }
 
 /// The answer to a `PairCheck`.
@@ -110,7 +112,8 @@ public final class PairingClient {
 
     /// Sends one request and returns the next frame the daemon answers with.
     private func exchange(_ request: some Encodable) async throws -> ServerMsg {
-        let channel = openIfNeeded()
+        let channel: WebSocketChannel
+        do { channel = try openIfNeeded() } catch { throw PairingError.badAddress }
         do {
             let body = try JSONEncoder().encode(request)
             let timeout = responseTimeout
@@ -135,9 +138,9 @@ public final class PairingClient {
         }
     }
 
-    private func openIfNeeded() -> WebSocketChannel {
+    private func openIfNeeded() throws -> WebSocketChannel {
         if let channel { return channel }
-        let fresh = WebSocketChannel(host: host, port: port, bearer: nil)
+        let fresh = try WebSocketChannel(host: host, port: port, bearer: nil)
         fresh.resume()
         channel = fresh
         return fresh

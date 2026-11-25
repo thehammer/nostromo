@@ -52,6 +52,27 @@ final class KeychainCredentialStoreTests: XCTestCase {
                        kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String)
     }
 
+    /// The item lands in the app's own keychain access group (the one in `Nostromo.entitlements`,
+    /// `$(AppIdentifierPrefix)com.hammer.nostromo.ios`), not in a shared group another app could read.
+    /// The team prefix is whatever the signing identity provides (empty for ad hoc), so the check is
+    /// on the suffix.
+    func testTheItemIsInTheAppsOwnAccessGroup() throws {
+        try store.save(credential)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var out: CFTypeRef?
+        XCTAssertEqual(SecItemCopyMatching(query as CFDictionary, &out), errSecSuccess)
+        let attributes = try XCTUnwrap(out as? [String: Any])
+        let group = try XCTUnwrap(attributes[kSecAttrAccessGroup as String] as? String, "the item has no access group")
+        XCTAssertTrue(group.hasSuffix("com.hammer.nostromo.ios"), "unexpected access group: \(group)")
+        XCTAssertFalse(group.contains("apple"), "the item must not be in an Apple shared group: \(group)")
+    }
+
     func testClearRemovesTheItemAsARevokeDoes() throws {
         try store.save(credential)
         try store.clear()

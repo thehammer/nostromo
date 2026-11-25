@@ -18,9 +18,19 @@ public protocol DaemonTransport: AnyObject {
     func start()
     func stop()
     func send(_ msg: some Encodable)
+    /// Whether this link may carry anything that changes state on the Mac (answer, approve, send,
+    /// cancel...). The WebSocket transport cannot (`OutboundPolicy`), so views hide those controls.
+    var canMutate: Bool { get }
+}
+
+extension DaemonTransport {
+    /// Fails safe: a transport says so explicitly to be allowed to mutate.
+    public var canMutate: Bool { false }
 }
 
 extension NetworkClient: DaemonTransport {
+    public var canMutate: Bool { true }
+
     public var connectedPublisher: AnyPublisher<Bool, Never> { $connected.eraseToAnyPublisher() }
 
     public var framePublisher: AnyPublisher<HostedServerMsg, Never> {
@@ -33,6 +43,8 @@ extension NetworkClient: DaemonTransport {
 }
 
 extension WebSocketClient: DaemonTransport {
+    public var canMutate: Bool { false }
+
     public var connectedPublisher: AnyPublisher<Bool, Never> { $connected.eraseToAnyPublisher() }
     public var framePublisher: AnyPublisher<HostedServerMsg, Never> { hostedMessages.eraseToAnyPublisher() }
     public var connectionStatePublisher: AnyPublisher<ConnectionState, Never> { $state.eraseToAnyPublisher() }

@@ -37,6 +37,21 @@ public protocol DeviceCredentialStore: AnyObject {
     func clear() throws
 }
 
+extension DeviceCredentialStore {
+    /// What the app resumes with at launch: the credential and the address it was paired at. A
+    /// credential with no saved address is an orphan (Keychain items outlive an app delete, the
+    /// saved address does not): there is no server it may be sent to, so it is deleted here rather
+    /// than kept for a pairing link to ask for.
+    public func resumeOrDiscardOrphan(address: String?) -> (credential: DeviceCredential, address: String)? {
+        guard let credential = load() else { return nil }
+        guard let address, !address.isEmpty else {
+            try? clear()
+            return nil
+        }
+        return (credential, address)
+    }
+}
+
 public struct DeviceCredentialError: Error, Equatable {
     public let status: OSStatus
 }

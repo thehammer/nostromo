@@ -65,7 +65,7 @@ public final class ContentCache: @unchecked Sendable {
             guard let data = try? Data(contentsOf: url),
                   let snapshot = try? Self.decoder.decode(Snapshot.self, from: data) else { return nil }
             // Take the saved frames as the live set, so a later write extends them.
-            frames = Dictionary(uniqueKeysWithValues: snapshot.frames.map { (Self.slot($0), $0) })
+            frames = Dictionary(snapshot.frames.map { (Self.slot($0), $0) }, uniquingKeysWith: { _, last in last })
             return snapshot
         }
     }
