@@ -85,13 +85,32 @@ def parse_total_seconds(log_text):
     return last
 
 
-def balance(weights, bins=SHARD_COUNT):
+# Slow or WebKit-backed classes that must never land in the catch-all (the last shard): it also runs
+# every new class, so it is the one shard whose load cannot be planned. Mirrors the pins asserted in
+# tests/ci_policy/test_mac_shard_coverage.py.
+PINNED_TO_LISTED_SHARDS = frozenset({
+    "ReviewWebViewIntegrationTests",
+    "ReviewNavigationPolicyTests",
+    "ReviewPaneAccessibilityTests",
+    "ReviewPaneHostsTests",
+    "ReviewPaneModelTests",
+    "ReviewPaneRedactionTests",
+    "ReviewPaneStoreTests",
+})
+
+
+def balance(weights, bins=SHARD_COUNT, head_start=None, pinned=frozenset()):
     """Greedy longest-first assignment. Deterministic: ties go to the lowest bin and the
-    lowest class name. Returns a list of `bins` sorted class-name lists."""
-    loads = [0.0] * bins
+    lowest class name. Returns a list of `bins` sorted class-name lists.
+
+    `head_start` is per-bin seconds of non-test work already counted against a bin (shard 1 also
+    runs the compile gate), so bins end with equal job WALL, not equal test seconds.
+    `pinned` classes are only placed in the listed bins (every bin but the last, the catch-all)."""
+    loads = list(head_start) if head_start else [0.0] * bins
     out = [[] for _ in range(bins)]
     for name, weight in sorted(weights.items(), key=lambda kv: (-kv[1], kv[0])):
-        target = min(range(bins), key=lambda b: (loads[b], b))
+        allowed = range(bins - 1) if name in pinned else range(bins)
+        target = min(allowed, key=lambda b: (loads[b], b))
         out[target].append(name)
         loads[target] += weight
     return [sorted(b) for b in out]
@@ -245,7 +264,9 @@ def _cmd_regenerate(args):
         weights = {c: float(n) for c, n in known.items() if n}
         floor = int(sum(weights.values()) * 0.97)
         source = args.balanced_from or "test-method-count estimate (no timing log yet)"
-    assignment = balance(weights)
+    handicap = args.shard1_handicap or 0.0
+    pinned = PINNED_TO_LISTED_SHARDS & set(known)
+    assignment = balance(weights, head_start=[handicap] + [0.0] * (SHARD_COUNT - 1), pinned=pinned)
     config = build_config(assignment, source, floor)
     if args.floor:
         config["expected_min_executed"] = args.floor
@@ -278,6 +299,8 @@ def _parse_args(argv):
     p.add_argument("--from-source", action="store_true", help="estimate from test-method counts")
     p.add_argument("--balanced-from", help="label recorded in the config (e.g. the run id)")
     p.add_argument("--floor", type=int, help="override expected_min_executed")
+    p.add_argument("--shard1-handicap", type=float, default=0.0,
+                   help="seconds of test time to take off shard 1 because it also runs the compile gate")
     p.add_argument("--write", action="store_true", help="write the config instead of printing it")
     return parser.parse_args(argv)
 

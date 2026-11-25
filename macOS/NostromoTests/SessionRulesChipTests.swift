@@ -709,11 +709,19 @@ final class SessionRuleCardTests: MouseQueueTestCase {
 
     func testThePickRevertsAfterFifteenSeconds() throws {
         let h = harness(try RuleFixtures.request())
+        h.card.selectionLifetime = 0.05
         select(h, index: 0)
+        XCTAssertNotNil(h.card.selectedCandidate)
         let expiry = expectation(description: "the pick reverts")
-        DispatchQueue.main.asyncAfter(deadline: .now() + SessionRuleGesture.selectionLifetime + 0.5) { expiry.fulfill() }
-        wait(for: [expiry], timeout: SessionRuleGesture.selectionLifetime + 3)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { expiry.fulfill() }
+        wait(for: [expiry], timeout: 3)
         XCTAssertNil(h.card.selectedCandidate)
+    }
+
+    func testTheRealSelectionLifetimeIsFifteenSeconds() throws {
+        XCTAssertEqual(SessionRuleGesture.selectionLifetime, 15)
+        let h = harness(try RuleFixtures.request())
+        XCTAssertEqual(h.card.selectionLifetime, 15, "production cards keep the real lifetime")
     }
 }
 
@@ -1247,11 +1255,12 @@ final class AlwaysAllowCardTests: MouseQueueTestCase {
 
     func testThePanelRevertsAfterTheSessionPicksLifetime() throws {
         let h = harness(try request())
+        h.card.selectionLifetime = 0.05
         open(h)
         XCTAssertTrue(h.card.alwaysIsOpen)
         let expiry = expectation(description: "the panel reverts")
-        DispatchQueue.main.asyncAfter(deadline: .now() + SessionRuleGesture.selectionLifetime + 0.5) { expiry.fulfill() }
-        wait(for: [expiry], timeout: SessionRuleGesture.selectionLifetime + 3)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { expiry.fulfill() }
+        wait(for: [expiry], timeout: 3)
         XCTAssertFalse(h.card.alwaysIsOpen)
         XCTAssertEqual(h.recorder.sent, [])
     }
