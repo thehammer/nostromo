@@ -223,6 +223,14 @@ app, starts an in-process `NWListener` WebSocket server on loopback and reaches 
 `127.0.0.1` and `[::1]` through a raw `URLSessionWebSocketTask`, `WebSocketClient` and `PairingClient`; it
 fails if ATS blocks any of them. `tests/ios_policy` scans `Info.plist` for the same keys.
 
+**Limit, measured:** with `NSAllowsLocalNetworking` flipped to `false` (a mutation branch, CI run 45712146182)
+the live connections to loopback and to the runner's LAN address still succeeded on the Simulator, and only
+the test that reads the built `Info.plist` failed. So on the Simulator the live tests cannot show that the key
+matters (either the Simulator does not enforce ATS for IP literals or ATS does not govern `ws://` there). What
+they prove is that the app's own transports work inside an app bundle; the key itself is guarded by the
+built-plist test and the policy scan, and by Apple's documented iOS 17 behaviour. Whether a real iPhone on a
+WireGuard address connects is a device check (W11-13), not something CI shows.
+
 What `NSAllowsLocalNetworking` covers is the pairing-address rule: an IPv4 or IPv6 literal (a VPN address
 such as a WireGuard `10.x` or a Tailscale `100.x` included), a `.local` name, or a single-word name. A full
 domain name (`mac.tailnet.ts.net`, `mac.example.com`) is outside it, and the list cannot be extended at run

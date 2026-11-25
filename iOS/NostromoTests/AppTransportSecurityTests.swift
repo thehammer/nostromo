@@ -5,7 +5,9 @@
 // "can't reach" forever. These tests run in the hosted app, where ATS applies: an in-process
 // listener on loopback (127.0.0.1 and [::1]) and on this machine's own LAN address is reached by a
 // raw `URLSessionWebSocketTask`, Kit's `WebSocketClient` and `PairingClient`. They fail if ATS blocks
-// the connection, and this is the only place CI can notice.
+// the connection. Measured limit: on the Simulator these connections also succeed with
+// `NSAllowsLocalNetworking` set to false, so only `testTheBuiltInfoPlistAllowsLocalNetworking...`
+// guards the key itself; whether a device is blocked is a manual check.
 
 import XCTest
 import NostromoKit
