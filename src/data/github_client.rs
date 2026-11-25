@@ -220,10 +220,6 @@ fn contents_url(base_url: &str, owner: &str, repo: &str, path: &str) -> Result<r
 /// beside `pr_diff_poll_secs` — the overall timeout must stay under that
 /// poll interval or a hung request outlives the cycle meant to supersede it
 /// (pinned by `github_timeout_is_shorter_than_the_poll_interval` below).
-fn github_http_client_builder() -> reqwest::ClientBuilder {
-    github_http_client_builder_with_timeout(http_timeout())
-}
-
 /// The production overall request timeout; only tests build a client with
 /// another (`GithubClient::new_for_test_with_timeout`).
 fn http_timeout() -> Duration {
@@ -903,13 +899,16 @@ mod tests {
     /// output is the only introspection available for "are the timeouts
     /// configured at all", and is the intended way to test it.
     ///
-    /// Fails against the pre-fix `github_http_client_builder` (which only
+    /// Fails against the pre-fix `github_http_client_builder_with_timeout` (which only
     /// sets `user_agent`); passes once `.connect_timeout(...)` and
     /// `.timeout(...)` are added using `GITHUB_CONNECT_TIMEOUT_SECS` /
     /// `GITHUB_HTTP_TIMEOUT_SECS`.
     #[test]
     fn github_http_client_builder_debug_output_carries_connect_and_overall_timeouts() {
-        let debug = format!("{:?}", github_http_client_builder());
+        let debug = format!(
+            "{:?}",
+            github_http_client_builder_with_timeout(http_timeout())
+        );
         assert!(
             debug.contains("connect_timeout"),
             "builder Debug output must show a configured connect_timeout, got: {debug}"
@@ -927,7 +926,10 @@ mod tests {
     fn the_production_request_timeout_is_twenty_seconds() {
         assert_eq!(GITHUB_HTTP_TIMEOUT_SECS, 20);
         assert_eq!(http_timeout(), Duration::from_secs(20));
-        let debug = format!("{:?}", github_http_client_builder());
+        let debug = format!(
+            "{:?}",
+            github_http_client_builder_with_timeout(http_timeout())
+        );
         assert!(debug.contains("20s"), "builder Debug output: {debug}");
     }
 

@@ -3560,29 +3560,6 @@ mod tests {
     // for GitHub, so both code paths are driven through the exact same
     // `GithubClient` a real fetch would use.
 
-    /// Build a `GithubClient` whose `octocrab` *and* raw `http` client both
-    /// point at `server_uri` — `octocrab`'s base URI has to be set at
-    /// construction time (there's no post-build setter), which is exactly
-    /// what [`GithubClient::new_for_test`] is for. Callers must also set
-    /// `perri_queue_native::API_BASE_OVERRIDE` to the same `server_uri` so
-    /// `fetch_diff`'s raw-`http` call (routed through `api_base()`) is
-    /// redirected too — one override per transport, both needed for a full
-    /// `fetch_pr` cycle to hit the mock server end to end.
-    fn make_test_client_for_server(server_uri: &str) -> GithubClient {
-        let dir = tempfile::tempdir().unwrap();
-        let hosts_path = dir.path().join("hosts.yml");
-        std::fs::write(
-            &hosts_path,
-            "github.com:\n  oauth_token: test-token\n  user: tester\n  git_protocol: https\n",
-        )
-        .unwrap();
-        std::env::remove_var("GITHUB_TOKEN");
-        let client = GithubClient::new_for_test(Some(&hosts_path), server_uri)
-            .expect("client should build from hosts.yml fixture, pointed at the mock server");
-        std::mem::forget(dir);
-        client
-    }
-
     /// The overall request timeout the stalled-fetch tests give the client,
     /// instead of the production `GITHUB_HTTP_TIMEOUT_SECS` (20 s): the
     /// assertions are the same, in ratio form (a stall is `T + 30 s`, a slow
@@ -3590,6 +3567,12 @@ mod tests {
     /// is pinned by `github_client::tests::the_production_request_timeout_is_twenty_seconds`.
     const STALL_TEST_TIMEOUT_SECS: u64 = 2;
 
+    /// Build a `GithubClient` whose `octocrab` *and* raw `http` client both
+    /// point at `server_uri`, with `timeout` as the overall request timeout.
+    /// Callers must also set `perri_queue_native::API_BASE_OVERRIDE` to the
+    /// same `server_uri` so `fetch_diff`'s raw-`http` call (routed through
+    /// `api_base()`) is redirected too: one override per transport, both
+    /// needed for a full `fetch_pr` cycle to hit the mock server end to end.
     fn make_test_client_with_timeout(
         server_uri: &str,
         timeout: std::time::Duration,

@@ -164,6 +164,12 @@ jobs:
         id: test
         shell: bash
         timeout-minutes: 35
+        env:
+          # The tracker fuzz oracle runs 100 interleavings per PR (default 400;
+          # `.github/workflows/deep-fuzz.yml` runs 5000 on a schedule). The
+          # named-seed counterexample tests always run. Why 100 and not 400:
+          # docs/test-time-audit.md section 4.3 (mutation table).
+          TRACKER_FUZZ_COUNT: "100"
         run: cargo test --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
 
       # libtest prints `test <name> has been running for over 60 seconds` for a
