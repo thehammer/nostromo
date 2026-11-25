@@ -26,9 +26,10 @@ final class LoopbackWebSocketServer: @unchecked Sendable {
     /// Every text frame any client sent.
     var receivedTexts: [String] { locked { _received } }
 
-    static func start(greeting: String? = nil,
+    /// `loopbackOnly: false` listens on every interface, so the machine's own LAN address reaches it.
+    static func start(greeting: String? = nil, loopbackOnly: Bool = true,
                       reply: @escaping @Sendable (String) -> String? = { $0 }) async throws -> LoopbackWebSocketServer {
-        let server = try LoopbackWebSocketServer(greeting: greeting, reply: reply)
+        let server = try LoopbackWebSocketServer(greeting: greeting, loopbackOnly: loopbackOnly, reply: reply)
         try await server.listen()
         return server
     }
@@ -40,13 +41,13 @@ final class LoopbackWebSocketServer: @unchecked Sendable {
 
     // MARK: Private
 
-    private init(greeting: String?, reply: @escaping @Sendable (String) -> String?) throws {
+    private init(greeting: String?, loopbackOnly: Bool, reply: @escaping @Sendable (String) -> String?) throws {
         self.greeting = greeting
         self.reply = reply
         let ws = NWProtocolWebSocket.Options()
         ws.autoReplyPing = true
         let parameters = NWParameters.tcp
-        parameters.requiredInterfaceType = .loopback
+        if loopbackOnly { parameters.requiredInterfaceType = .loopback }
         parameters.allowLocalEndpointReuse = true
         parameters.defaultProtocolStack.applicationProtocols.insert(ws, at: 0)
         listener = try NWListener(using: parameters, on: .any)
@@ -119,6 +120,28 @@ final class LoopbackWebSocketServer: @unchecked Sendable {
             if let error { pending?.resume(throwing: error) } else { pending?.resume() }
         }
     }
+}
+
+/// This machine's first non-loopback IPv4 address (the Simulator shares the host's network, so it
+/// can connect to it). `nil` on a machine with none.
+func firstNonLoopbackIPv4() -> String? {
+    var head: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&head) == 0, let first = head else { return nil }
+    defer { freeifaddrs(head) }
+    var cursor: UnsafeMutablePointer<ifaddrs>? = first
+    while let entry = cursor {
+        defer { cursor = entry.pointee.ifa_next }
+        let flags = Int32(entry.pointee.ifa_flags)
+        guard flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0,
+              let address = entry.pointee.ifa_addr, address.pointee.sa_family == UInt8(AF_INET) else { continue }
+        var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        if getnameinfo(address, socklen_t(address.pointee.sa_len), &buffer, socklen_t(buffer.count),
+                       nil, 0, NI_NUMERICHOST) == 0 {
+            let text = String(cString: buffer)
+            if !text.hasPrefix("169.254.") { return text }
+        }
+    }
+    return nil
 }
 
 /// Polls `condition` on the main actor until it holds or `timeout` passes.
