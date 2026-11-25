@@ -430,6 +430,8 @@ pub struct DropCounts {
     pub reply: AtomicU64,
     pub junk: AtomicU64,
     pub oversize: AtomicU64,
+    /// A `publish` or `reply` that arrived before the satellite was admitted.
+    pub unadmitted: AtomicU64,
 }
 
 #[derive(Default)]

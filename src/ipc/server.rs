@@ -417,6 +417,10 @@ pub(super) enum PeerOrigin {
         /// Set when the connection ended because its `Hello` claimed a role
         /// its token may not have, so the socket closes 4001 rather than 1000.
         role_refused: Arc<AtomicBool>,
+        /// Set once a satellite's `Hello` was accepted and it is registered
+        /// with the router; until then `run_paired` drops its `publish` and
+        /// `reply` frames.
+        admitted: Arc<AtomicBool>,
     },
 }
 
@@ -1029,6 +1033,9 @@ where
     if let (PeerTrust::Satellite { admin }, Some(h)) = (trust, hub.get()) {
         if let Some((info, req_tx)) = origin.take_uplink() {
             let conn_id = h.router().register(&info.name, info.egress, req_tx);
+            if let PeerOrigin::Ws { admitted, .. } = &origin {
+                admitted.store(true, Ordering::SeqCst);
+            }
             uplink = Some((info.name, conn_id));
             let pair_from = h.registry().full_hosts();
             let _ = targeted_tx.send(ServerMsg::DeviceAdminLevel {

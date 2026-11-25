@@ -42,9 +42,7 @@ use super::protocol::{ClientMsg, ServerMsg, MAX_FRAME_LEN, MIN_CLIENT_VERSION, P
 use super::router::{
     ingest_from_satellite, Bucket, Router, SatelliteRecord, UplinkLimits, Verdict,
 };
-use super::server::{
-    handle_client, purge_host_retained, HeldMotherJobs, PeerOrigin, RetainedCache, SatelliteLink,
-};
+use super::server::{handle_client, HeldMotherJobs, PeerOrigin, RetainedCache, SatelliteLink};
 use super::session_manager::SessionManager;
 use super::uplink_wire::{wrap_server_bytes, UplinkFrame};
 use crate::terminal::TerminalManager;
@@ -404,6 +402,7 @@ async fn serve(
                 shared,
                 limits.max_sockets_per_device,
                 limits.uplink.clone(),
+                limits.handshake_timeout,
             )
             .await
         }
@@ -557,6 +556,9 @@ struct UplinkSession {
     publish: Bucket,
     reply: Bucket,
     client: Bucket,
+    /// Set by the handler once the `Hello` was accepted and the satellite is
+    /// registered. Nothing it publishes or answers counts before that.
+    admitted: Arc<AtomicBool>,
 }
 
 /// What reading one uplink frame decided.
@@ -603,6 +605,10 @@ impl UplinkSession {
                     }
                     Verdict::Allow => {}
                 }
+                if !self.admitted.load(Ordering::SeqCst) {
+                    router.drops.unadmitted.fetch_add(1, Ordering::Relaxed);
+                    return Inbound::Done;
+                }
                 if oversize {
                     router.drops.oversize.fetch_add(1, Ordering::Relaxed);
                     router.note_drop(&name, &Router::variant_of(&msg), "over the size cap");
@@ -627,6 +633,10 @@ impl UplinkSession {
                         return Inbound::Done;
                     }
                     Verdict::Allow => {}
+                }
+                if !self.admitted.load(Ordering::SeqCst) {
+                    router.drops.unadmitted.fetch_add(1, Ordering::Relaxed);
+                    return Inbound::Done;
                 }
                 if let Err(why) =
                     router.accept_routed_reply(&self.record, &id, msg, &self.tags, now)
@@ -668,6 +678,7 @@ async fn run_paired(
     shared: Arc<WsShared>,
     max_sockets: usize,
     uplink_limits: UplinkLimits,
+    hello_timeout: Duration,
 ) -> Result<()> {
     let Some(_conn) = hub.try_connected(&device_id, max_sockets) else {
         let mut ws = ws;
@@ -692,6 +703,7 @@ async fn run_paired(
     let (mut sink, mut stream) = ws.split();
 
     let role_refused = Arc::new(AtomicBool::new(false));
+    let admitted = Arc::new(AtomicBool::new(false));
     let (req_tx, req_rx) = mpsc::unbounded_channel::<UplinkFrame>();
     let (link, mut req_rx, mut uplink) = match &satellite {
         Some(info) => {
@@ -722,6 +734,7 @@ async fn run_paired(
                     now,
                 ),
                 limits: uplink_limits,
+                admitted: Arc::clone(&admitted),
             };
             (
                 Some(SatelliteLink {
@@ -741,6 +754,7 @@ async fn run_paired(
             device_id: device_id.clone(),
             satellite: link,
             role_refused: Arc::clone(&role_refused),
+            admitted: Arc::clone(&admitted),
         },
         shared.tx.subscribe(),
         shared.tx.clone(),
@@ -766,6 +780,10 @@ async fn run_paired(
     let mut touch = tokio::time::interval(TOUCH_EVERY);
     touch.tick().await;
     let mut closing: Option<Message> = None;
+    // A satellite must get its `Hello` accepted in the time a WebSocket
+    // handshake may take; a silent socket does not hold its slot for ever.
+    let hello_deadline = tokio::time::sleep(hello_timeout);
+    tokio::pin!(hello_deadline);
     // How the socket closes when the handler is done or the uplink was replaced.
     let ended = |registry: &super::devices::DeviceRegistry, refused: &AtomicBool| -> Message {
         if refused.load(Ordering::SeqCst) {
@@ -898,6 +916,10 @@ async fn run_paired(
                 }
             }
             _ = touch.tick() => registry.touch(&device_id),
+            _ = &mut hello_deadline, if uplink.is_some() && !admitted.load(Ordering::SeqCst) => {
+                closing = Some(close_msg(1008, "no hello"));
+                break;
+            }
         }
     }
 
@@ -910,14 +932,6 @@ async fn run_paired(
     drop(bridge_wr);
     reader.abort();
     let _ = handler.await;
-    // A satellite may publish before its `Hello`, so its frames can be kept
-    // though the handler never registered it (and so never purges). With no
-    // uplink for the host now, nothing it published stays replayable.
-    if let Some(sat) = &satellite {
-        if !hub.router().is_connected(&sat.name) {
-            purge_host_retained(&shared.retained, &sat.name);
-        }
-    }
     info!(device = %device_id, "device disconnected");
     Ok(())
 }

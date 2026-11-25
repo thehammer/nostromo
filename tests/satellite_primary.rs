@@ -2261,21 +2261,94 @@ async fn what_a_satellite_published_is_not_replayed_once_it_is_revoked_or_gone()
 }
 
 #[tokio::test]
-async fn what_a_satellite_published_before_its_hello_is_forgotten_when_it_disconnects() {
+async fn what_a_satellite_published_is_forgotten_when_it_disconnects() {
+    let rig = Rig::new().await;
+    let mut kobe = join(&rig, "kobe", Egress::Personal, SatelliteAdmin::RevokeOnly).await;
+    assert!(kobe.publish(&jobs_frame(Some("kobe"), &["a-job"])).await);
+    replay_until(&rig, |f| !jobs_in(f).is_empty()).await;
+    kobe.close().await;
+    replay_until(&rig, |f| replayed_hosts(f).is_empty()).await;
+}
+
+/// Wait out a satellite's unadmitted frames, then check no subscriber was
+/// sent them live, none is replayed, and each was counted as dropped.
+async fn assert_nothing_published_got_out(rig: &Rig, live: &mut Conn, dropped: u64) {
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    fence(rig, &mut [&mut *live]).await;
+    assert!(
+        jobs_in(&live.inbox).is_empty(),
+        "delivered live: {:?}",
+        live.inbox
+    );
+    let replay = rig.unix(vec![], false).await.take_all();
+    assert!(jobs_in(&replay).is_empty(), "retained: {replay:#?}");
+    let counted = rig.hub.router().drops.unadmitted.load(Ordering::Relaxed);
+    assert!(counted >= dropped, "counted {counted}, wanted {dropped}");
+}
+
+#[tokio::test]
+async fn a_publish_before_any_hello_is_never_delivered_or_retained() {
     let rig = Rig::new().await;
     let minted = enrol(&rig, "kobe", Egress::Personal, SatelliteAdmin::RevokeOnly);
-    // A socket publishes and drops without ever sending a
-    // `Hello`: the handler never registers it, so only the socket's own
-    // clean-up can forget what it published.
+    let mut live = rig.unix(all_topics(), false).await;
     let mut early = Sat::dial(&rig, &minted, Egress::Personal).await;
     assert!(
         early
             .publish(&jobs_frame(Some("kobe"), &["early-job"]))
             .await
     );
+    assert!(
+        early
+            .reply("some-id", &jobs_frame(Some("kobe"), &["early-reply"]))
+            .await
+    );
+    assert_nothing_published_got_out(&rig, &mut live, 2).await;
+}
+
+#[tokio::test]
+async fn a_publish_before_a_wrong_hello_is_never_delivered_or_retained() {
+    let rig = Rig::new().await;
+    let minted = enrol(&rig, "kobe", Egress::Personal, SatelliteAdmin::RevokeOnly);
+    let mut live = rig.unix(all_topics(), false).await;
+    let mut early = Sat::dial(&rig, &minted, Egress::Personal).await;
+    assert!(
+        early
+            .publish(&jobs_frame(Some("kobe"), &["early-job"]))
+            .await
+    );
+    early.hello(Some(role("kobe", Egress::Work))).await;
+    assert_eq!(early.expect_close().await, Some(CLOSE_UNAUTHORIZED));
+    assert_nothing_published_got_out(&rig, &mut live, 1).await;
+}
+
+#[tokio::test]
+async fn a_publish_after_a_good_hello_is_delivered_and_retained() {
+    let rig = Rig::new().await;
+    let mut live = rig.unix(all_topics(), false).await;
+    let mut kobe = join(&rig, "kobe", Egress::Personal, SatelliteAdmin::RevokeOnly).await;
+    assert!(kobe.publish(&jobs_frame(Some("kobe"), &["a-job"])).await);
     replay_until(&rig, |f| !jobs_in(f).is_empty()).await;
-    early.close().await;
-    replay_until(&rig, |f| replayed_hosts(f).is_empty()).await;
+    kobe.sync().await;
+    fence(&rig, &mut [&mut live]).await;
+    assert_eq!(
+        jobs_in(&live.inbox),
+        vec![(Some("kobe".to_string()), vec!["a-job".to_string()])]
+    );
+}
+
+#[tokio::test]
+async fn a_satellite_that_never_sends_a_hello_is_closed_and_its_slot_is_freed() {
+    let rig = Rig::with_limits(WsLimits {
+        handshake_timeout: Duration::from_millis(400),
+        max_sockets_per_device: 1,
+        ..Default::default()
+    })
+    .await;
+    let minted = enrol(&rig, "kobe", Egress::Personal, SatelliteAdmin::RevokeOnly);
+    let mut silent = Sat::dial(&rig, &minted, Egress::Personal).await;
+    assert_eq!(silent.expect_close().await, Some(1008));
+    // The one slot is free again: the same satellite is admitted.
+    let _kobe = Sat::admit(&rig, &minted, Egress::Personal).await;
 }
 
 #[tokio::test]
@@ -2289,31 +2362,14 @@ async fn a_replaced_uplink_ending_does_not_forget_the_newer_uplinks_frames() {
     );
     replay_until(&rig, |f| !jobs_in(f).is_empty()).await;
 
-    // The same host connects again. Its frame goes in before its `Hello`, so
-    // it is already kept when the primary swaps it in for the first uplink
-    // and the first uplink's clean-up runs.
-    let mut second = Sat::dial(&rig, &first.minted, Egress::Personal).await;
+    // The same host connects again, and publishes as soon as it is admitted,
+    // so its frame may be kept before the first uplink's clean-up runs.
+    let mut second = Sat::admit(&rig, &first.minted, Egress::Personal).await;
     assert!(
         second
             .publish(&jobs_frame(Some("kobe"), &["from-the-second"]))
             .await
     );
-    replay_until(&rig, |f| {
-        jobs_in(f)
-            .iter()
-            .any(|(_, ids)| ids == &["from-the-second".to_string()])
-    })
-    .await;
-    second.hello(Some(role("kobe", Egress::Personal))).await;
-    second
-        .next_server("the Welcome", |m| matches!(m, ServerMsg::Welcome { .. }))
-        .await;
-    second.subscribe(&[]).await;
-    second
-        .next_server("DeviceAdminLevel", |m| {
-            matches!(m, ServerMsg::DeviceAdminLevel { .. })
-        })
-        .await;
     assert_eq!(first.expect_close().await, Some(1000));
     // Give the first uplink's clean-up time to run, then look more than once.
     for _ in 0..4 {
