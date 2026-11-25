@@ -143,6 +143,7 @@ fn timing_at(poll: Duration, unread_count_ttl: Duration, offset: FixedOffset) ->
         calendar_poll: poll,
         unread_count_ttl,
         day_offset: Some(offset),
+        ..FredTiming::default()
     }
 }
 

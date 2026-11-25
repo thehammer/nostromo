@@ -800,13 +800,21 @@ fn run_interleaving(seed: u64, skip_wait: bool, merge: bool) -> Vec<String> {
     problems
 }
 
-const RACE_SEEDS: u64 = 1000;
+/// Seeds per race test: 1000 by default; `QUEUE_RACE_SEEDS` runs more (the
+/// scheduled deep run uses 5000) or fewer.
+fn race_seeds() -> u64 {
+    std::env::var("QUEUE_RACE_SEEDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000)
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_typed_message_is_delivered_taken_back_removed_or_dropped_exactly_once() {
-    println!("queue race: seeds 1..={RACE_SEEDS}");
-    let problems = tokio::task::spawn_blocking(|| {
-        (1..=RACE_SEEDS)
+    let seeds = race_seeds();
+    println!("queue race: seeds 1..={seeds}");
+    let problems = tokio::task::spawn_blocking(move || {
+        (1..=seeds)
             .flat_map(|seed| run_interleaving(seed, false, false))
             .collect::<Vec<_>>()
     })
@@ -817,9 +825,10 @@ async fn every_typed_message_is_delivered_taken_back_removed_or_dropped_exactly_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn merged_batches_are_delivered_taken_back_removed_or_dropped_exactly_once() {
-    println!("merged queue race: seeds 1..={RACE_SEEDS}, queues of 2 to 5");
-    let problems = tokio::task::spawn_blocking(|| {
-        (1..=RACE_SEEDS)
+    let seeds = race_seeds();
+    println!("merged queue race: seeds 1..={seeds}, queues of 2 to 5");
+    let problems = tokio::task::spawn_blocking(move || {
+        (1..=seeds)
             .flat_map(|seed| run_interleaving(seed, false, true))
             .collect::<Vec<_>>()
     })
@@ -830,14 +839,15 @@ async fn merged_batches_are_delivered_taken_back_removed_or_dropped_exactly_once
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_merged_race_test_catches_a_decision_made_without_waiting_for_the_in_flight_write() {
-    let caught = tokio::task::spawn_blocking(|| {
-        (1..=RACE_SEEDS)
+    let seeds = race_seeds();
+    let caught = tokio::task::spawn_blocking(move || {
+        (1..=seeds)
             .filter(|seed| !run_interleaving(*seed, true, true).is_empty())
             .count()
     })
     .await
     .unwrap();
-    println!("merged race mutation: caught in {caught} of {RACE_SEEDS} seeds");
+    println!("merged race mutation: caught in {caught} of {seeds} seeds");
     assert!(caught > 0);
 }
 
@@ -845,17 +855,18 @@ async fn the_merged_race_test_catches_a_decision_made_without_waiting_for_the_in
 /// in-flight write must be caught.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_race_test_catches_a_decision_made_without_waiting_for_the_in_flight_write() {
-    let caught = tokio::task::spawn_blocking(|| {
-        (1..=RACE_SEEDS)
+    let seeds = race_seeds();
+    let caught = tokio::task::spawn_blocking(move || {
+        (1..=seeds)
             .filter(|seed| !run_interleaving(*seed, true, false).is_empty())
             .count()
     })
     .await
     .unwrap();
-    println!("queue race mutation: caught in {caught} of {RACE_SEEDS} seeds (1..={RACE_SEEDS})");
+    println!("queue race mutation: caught in {caught} of {seeds} seeds (1..={seeds})");
     assert!(
         caught > 0,
-        "the mutation went unnoticed in {RACE_SEEDS} interleavings"
+        "the mutation went unnoticed in {seeds} interleavings"
     );
 }
 

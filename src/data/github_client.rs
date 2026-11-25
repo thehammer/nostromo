@@ -66,7 +66,7 @@ pub struct GithubClient {
 impl GithubClient {
     /// Build a new client, resolving the GitHub token from environment or gh CLI config.
     pub fn new(hosts_yml_path: Option<&Path>) -> Result<Self> {
-        Self::build(hosts_yml_path, None)
+        Self::build(hosts_yml_path, None, http_timeout())
     }
 
     /// Test-only constructor: same as [`Self::new`], but points `octocrab`
@@ -77,10 +77,26 @@ impl GithubClient {
     /// be driven against a mock server deterministically.
     #[cfg(test)]
     pub(crate) fn new_for_test(hosts_yml_path: Option<&Path>, base_uri: &str) -> Result<Self> {
-        Self::build(hosts_yml_path, Some(base_uri))
+        Self::build(hosts_yml_path, Some(base_uri), http_timeout())
     }
 
-    fn build(hosts_yml_path: Option<&Path>, octocrab_base_uri: Option<&str>) -> Result<Self> {
+    /// [`Self::new_for_test`] with the overall request timeout (production:
+    /// `GITHUB_HTTP_TIMEOUT_SECS`) replaced, so a test of "a stalled request
+    /// fails within the timeout" does not wait out the real 20 s.
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_timeout(
+        hosts_yml_path: Option<&Path>,
+        base_uri: &str,
+        timeout: Duration,
+    ) -> Result<Self> {
+        Self::build(hosts_yml_path, Some(base_uri), timeout)
+    }
+
+    fn build(
+        hosts_yml_path: Option<&Path>,
+        octocrab_base_uri: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Self> {
         let token = resolve_token(hosts_yml_path)?;
         debug!("github token resolved");
 
@@ -96,8 +112,8 @@ impl GithubClient {
         let mut octocrab_builder = Octocrab::builder()
             .personal_token(token.clone())
             .set_connect_timeout(Some(Duration::from_secs(GITHUB_CONNECT_TIMEOUT_SECS)))
-            .set_read_timeout(Some(Duration::from_secs(GITHUB_HTTP_TIMEOUT_SECS)))
-            .set_write_timeout(Some(Duration::from_secs(GITHUB_HTTP_TIMEOUT_SECS)));
+            .set_read_timeout(Some(timeout))
+            .set_write_timeout(Some(timeout));
         if let Some(base) = octocrab_base_uri {
             octocrab_builder = octocrab_builder
                 .base_uri(base)
@@ -107,7 +123,7 @@ impl GithubClient {
             .build()
             .context("building octocrab client")?;
 
-        let http = github_http_client_builder()
+        let http = github_http_client_builder_with_timeout(timeout)
             .build()
             .context("building reqwest client for github")?;
 
@@ -205,10 +221,20 @@ fn contents_url(base_url: &str, owner: &str, repo: &str, path: &str) -> Result<r
 /// poll interval or a hung request outlives the cycle meant to supersede it
 /// (pinned by `github_timeout_is_shorter_than_the_poll_interval` below).
 fn github_http_client_builder() -> reqwest::ClientBuilder {
+    github_http_client_builder_with_timeout(http_timeout())
+}
+
+/// The production overall request timeout; only tests build a client with
+/// another (`GithubClient::new_for_test_with_timeout`).
+fn http_timeout() -> Duration {
+    Duration::from_secs(GITHUB_HTTP_TIMEOUT_SECS)
+}
+
+fn github_http_client_builder_with_timeout(timeout: Duration) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .user_agent(concat!("nostromo/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(GITHUB_CONNECT_TIMEOUT_SECS))
-        .timeout(Duration::from_secs(GITHUB_HTTP_TIMEOUT_SECS))
+        .timeout(timeout)
 }
 
 /// The production GitHub API base. A constant rather than a hard-coded literal
@@ -892,6 +918,17 @@ mod tests {
             debug.contains("timeout"),
             "builder Debug output must show a configured overall request timeout, got: {debug}"
         );
+    }
+
+    /// The one test of the real value: the stalled-fetch tests in
+    /// `perri_pr_native` inject a short timeout, so this is what keeps the
+    /// production client at the 20 s that bounds every GitHub request (#160).
+    #[test]
+    fn the_production_request_timeout_is_twenty_seconds() {
+        assert_eq!(GITHUB_HTTP_TIMEOUT_SECS, 20);
+        assert_eq!(http_timeout(), Duration::from_secs(20));
+        let debug = format!("{:?}", github_http_client_builder());
+        assert!(debug.contains("20s"), "builder Debug output: {debug}");
     }
 
     /// Pins the relationship documented on `GITHUB_HTTP_TIMEOUT_SECS` in

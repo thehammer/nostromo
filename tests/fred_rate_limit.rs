@@ -24,7 +24,10 @@
 //!     can only be slower than its wait, never faster; and
 //!   * UPPER bounds that are deliberately generous (>= 1 s of slack).
 //!
-//! Waits are 2-8 s, so the timing tests cost a few real seconds each.
+//! Waits are up to 3 s (the Retry-After ones) and the exponential backoff base
+//! is injected (`FredTiming::backoff_base`; production 2 s, pinned without
+//! waiting by a unit test in `data::http_backoff`), so the timing tests cost
+//! a few real seconds each at most.
 
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
@@ -324,12 +327,22 @@ fn noon_offset() -> FixedOffset {
     FixedOffset::east_opt(12 * 3600 - secs_into_utc_day).unwrap()
 }
 
+/// The backoff's first step in the timing tests (production: 2 s; pinned by
+/// `http_backoff::tests::the_production_backoff_is_at_least_2_then_4_seconds_...`
+/// and `fred_mailbox_native::timing_tests`). The assertions below scale with it.
+const BASE: Duration = Duration::from_millis(250);
+
 fn timing(poll: Duration, unread_count_ttl: Duration) -> FredTiming {
+    timing_with_base(poll, unread_count_ttl, BASE)
+}
+
+fn timing_with_base(poll: Duration, unread_count_ttl: Duration, base: Duration) -> FredTiming {
     FredTiming {
         mailbox_poll: poll,
         calendar_poll: poll,
         unread_count_ttl,
         day_offset: Some(noon_offset()),
+        backoff_base: base,
     }
 }
 
@@ -1048,24 +1061,24 @@ async fn consecutive_429s_without_retry_after_back_off_2_4_seconds_with_bounded_
 >() {
     let (r, _good) = rig_good::<X>(X::timing(fast())).await;
     r.sh.fail(Failure::throttled(None), X::ALL);
-    wait_hits(
-        &r.sh,
-        "three throttled responses",
-        Duration::from_secs(40),
-        |hits| hits.iter().filter(|h| h.is_failure()).count() >= 3,
-    )
+    wait_hits(&r.sh, "three throttled responses", WAIT, |hits| {
+        hits.iter().filter(|h| h.is_failure()).count() >= 3
+    })
     .await;
     let fh = r.sh.failure_hits();
     let (g1, g2) = (gap(&fh[0], &fh[1]), gap(&fh[1], &fh[2]));
-    // Base step 2 s then 4 s; jitter adds at most 25% of the base (+1 s of
-    // scheduling slack).
+    // Base step B then 2B (2 s then 4 s in production); jitter adds at most
+    // 25% of the step (+1 s of scheduling slack). The lower bounds are what
+    // tell a backoff that ignores the base, or does not double, from the real one.
+    let b = BASE.as_secs_f64();
     assert!(
-        (2.0..=3.5).contains(&g1),
-        "first wait was {g1:.2}s, expected 2s + <=25% jitter"
+        (b..=b * 1.25 + 1.0).contains(&g1),
+        "first wait was {g1:.2}s, expected {b}s + <=25% jitter"
     );
     assert!(
-        (4.0..=6.0).contains(&g2),
-        "second wait was {g2:.2}s, expected 4s + <=25% jitter"
+        (2.0 * b..=2.0 * b * 1.25 + 1.0).contains(&g2),
+        "second wait was {g2:.2}s, expected {}s + <=25% jitter",
+        2.0 * b
     );
 }
 both!(
@@ -1075,7 +1088,10 @@ both!(
 );
 
 async fn a_successful_fetch_resets_the_backoff<X: Subject>() {
-    let (mut r, good) = rig_good::<X>(X::timing(fast())).await;
+    // A 1 s base (not `BASE`): the upper bound below has to tell the first
+    // step (1-1.25 s) from the second (2-2.5 s) with room for scheduling.
+    let base = Duration::from_secs(1);
+    let (mut r, good) = rig_good::<X>(timing_with_base(fast(), an_hour(), base)).await;
     let each = guard::<X>(Some(X::fingerprint(&good)));
 
     // One 429, then the service recovers.
@@ -1087,7 +1103,7 @@ async fn a_successful_fetch_resets_the_backoff<X: Subject>() {
     })
     .await;
 
-    // Throttled again: the wait starts from the first step (~2 s), not 4 s.
+    // Throttled again: the wait starts from the first step (~B), not 2B.
     let mark = r.sh.hits().len();
     r.sh.fail(Failure::throttled(None), X::ALL);
     wait_hits(&r.sh, "two more throttled responses", WAIT, |hits| {
@@ -1100,9 +1116,11 @@ async fn a_successful_fetch_resets_the_backoff<X: Subject>() {
         .cloned()
         .collect();
     let g = gap(&fh[0], &fh[1]);
+    let b = base.as_secs_f64();
     assert!(
-        (2.0..=3.5).contains(&g),
-        "after a success the wait restarts at ~2s, was {g:.2}s"
+        (b..2.0 * b - 0.15).contains(&g),
+        "after a success the wait restarts at ~{b}s (not {}s), was {g:.2}s",
+        2.0 * b
     );
 }
 both!(
@@ -1112,27 +1130,25 @@ both!(
 );
 
 async fn retry_after_wins_over_the_exponential_step<X: Subject>() {
-    let (r, _good) = rig_good::<X>(X::timing(fast())).await;
-    // First 429 carries no header (wait ~2 s); the second carries Retry-After: 3,
-    // where the exponential step would have been 4-5 s.
+    // Base 1 s: the first 429 carries no header (wait ~1 s); the second
+    // carries Retry-After: 1 where the exponential step would have been 2-2.5 s.
+    let (r, _good) =
+        rig_good::<X>(timing_with_base(fast(), an_hour(), Duration::from_secs(1))).await;
     r.sh.fail(Failure::throttled(None), X::ALL);
     wait_hits(&r.sh, "the first throttled response", REACT, |hits| {
         hits.iter().any(Hit::is_failure)
     })
     .await;
-    r.sh.fail(Failure::throttled(Some(RetryAfter::Seconds(3))), X::ALL);
-    wait_hits(
-        &r.sh,
-        "three throttled responses",
-        Duration::from_secs(40),
-        |hits| hits.iter().filter(|h| h.is_failure()).count() >= 3,
-    )
+    r.sh.fail(Failure::throttled(Some(RetryAfter::Seconds(1))), X::ALL);
+    wait_hits(&r.sh, "three throttled responses", WAIT, |hits| {
+        hits.iter().filter(|h| h.is_failure()).count() >= 3
+    })
     .await;
     let fh = r.sh.failure_hits();
     let g = gap(&fh[1], &fh[2]);
     assert!(
-        (3.0..=3.9).contains(&g),
-        "Retry-After: 3 must set the wait (not the 4-5s backoff step); was {g:.2}s"
+        (1.0..=1.9).contains(&g),
+        "Retry-After: 1 must set the wait (not the 2-2.5s backoff step); was {g:.2}s"
     );
 }
 both!(
