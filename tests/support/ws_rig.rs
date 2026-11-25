@@ -326,6 +326,15 @@ impl Rig {
         conn
     }
 
+    /// A Unix connection to some other daemon's socket (a satellite's), after
+    /// Hello, Welcome, Subscribe and a sync.
+    pub async fn unix_at(path: &std::path::Path, topics: Vec<Topic>) -> Conn {
+        let stream = UnixStream::connect(path).await.expect("unix connect");
+        let mut conn = Conn::new(Io::Unix(stream));
+        conn.handshake(&[], topics, false).await;
+        conn
+    }
+
     /// A raw Unix connection with no handshake yet.
     pub async fn unix_raw(&self) -> Conn {
         let stream = UnixStream::connect(&self.socket_path)

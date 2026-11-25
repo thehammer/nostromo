@@ -65,29 +65,57 @@ pub const SERVER_UNREACHABLE: &str = "server_unreachable";
 
 // ── the egress filter ─────────────────────────────────────────────────────────
 
-/// Which focus tags belong to a PHI repo, learned from the focus frames that
-/// pass through, plus the repo names themselves.
+/// Which focus tags belong to a PHI repo, and which tags are known at all.
+///
+/// The authority is the daemon's focus registry, read before every decision
+/// (see [`PhiScope::refresh`]); the focus frames that pass through update it
+/// too. A tag the registry does not hold cannot be classified, so a frame or a
+/// routed read naming it is refused: this fails closed.
 #[derive(Debug, Clone)]
 pub struct PhiScope {
     repos: Vec<String>,
-    tags: HashSet<String>,
+    /// Every tag in the registry.
+    known: HashSet<String>,
+    /// The subset whose project is a PHI repo.
+    phi: HashSet<String>,
+}
+
+/// A repo or project name in comparable form: lower-case, `-` for spaces and
+/// underscores, no `.git` suffix.
+fn norm(name: &str) -> String {
+    let n: String = name
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c == ' ' || c == '_' { '-' } else { c })
+        .collect();
+    n.strip_suffix(".git").unwrap_or(&n).to_string()
 }
 
 impl PhiScope {
     pub fn new(repos: Vec<String>) -> Self {
         Self {
-            repos,
-            tags: HashSet::new(),
+            repos: repos.iter().map(|r| norm(r)).collect(),
+            known: HashSet::new(),
+            phi: HashSet::new(),
         }
     }
 
+    /// Is this one name (a path component or a project name) a PHI repo, or a
+    /// worktree or checkout named after one (`admin-portal-feat-x`)?
+    fn name_is_phi(&self, name: &str) -> bool {
+        let n = norm(name);
+        self.repos
+            .iter()
+            .any(|r| n == *r || n.starts_with(&format!("{r}-")) || n.starts_with(&format!("{r}.")))
+    }
+
+    /// Any component of the path names a PHI repo: a worktree inside the repo,
+    /// or a checkout beside it, is PHI too.
     fn path_is_phi(&self, path: &str) -> bool {
-        let last = path
-            .trim_end_matches(['/', '\\'])
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or("");
-        self.repos.iter().any(|r| r == last)
+        path.split(['/', '\\'])
+            .filter(|c| !c.is_empty())
+            .any(|c| self.name_is_phi(c))
     }
 
     fn focus_is_phi(&self, meta: &crate::ipc::protocol::FocusMeta) -> bool {
@@ -97,41 +125,48 @@ impl PhiScope {
             || meta
                 .project_name
                 .as_deref()
-                .is_some_and(|n| self.repos.iter().any(|r| r == n))
+                .is_some_and(|n| self.name_is_phi(n))
     }
 
-    /// Learn which tags are PHI-scoped from a focus frame.
+    /// Replace what is known with the registry's focuses.
+    pub fn refresh(&mut self, focuses: &[crate::ipc::protocol::FocusMeta]) {
+        self.known = focuses.iter().map(|f| f.tag.clone()).collect();
+        self.phi = focuses
+            .iter()
+            .filter(|f| self.focus_is_phi(f))
+            .map(|f| f.tag.clone())
+            .collect();
+    }
+
+    /// Learn from a focus frame passing through.
     pub fn observe(&mut self, msg: &ServerMsg) {
         match msg {
             ServerMsg::FocusListResp { focuses, .. }
-            | ServerMsg::FocusRegistryUpdated { focuses, .. } => {
-                let phi: HashSet<String> = focuses
-                    .iter()
-                    .filter(|f| self.focus_is_phi(f))
-                    .map(|f| f.tag.clone())
-                    .collect();
-                self.tags = phi;
-            }
-            ServerMsg::FocusCreated { meta, .. } if self.focus_is_phi(meta) => {
-                self.tags.insert(meta.tag.clone());
+            | ServerMsg::FocusRegistryUpdated { focuses, .. } => self.refresh(focuses),
+            ServerMsg::FocusCreated { meta, .. } => {
+                self.known.insert(meta.tag.clone());
+                if self.focus_is_phi(meta) {
+                    self.phi.insert(meta.tag.clone());
+                }
             }
             _ => {}
         }
     }
 
-    /// Is a request or frame about a PHI focus?
-    pub fn tag_is_phi(&self, tag: &str) -> bool {
-        self.tags.contains(tag)
+    /// May a frame or read about this tag leave? Only a tag the registry
+    /// holds, and which is not PHI-scoped.
+    pub fn tag_is_shareable(&self, tag: &str) -> bool {
+        self.known.contains(tag) && !self.phi.contains(tag)
     }
 
     fn job_is_phi(&self, job: &crate::mother::MotherJob) -> bool {
         self.path_is_phi(&job.repo)
     }
 
-    /// `msg` without its PHI-scoped content; `None` when nothing is left that
-    /// is not about a PHI repo. A `personal` satellite's PHI work is never sent
-    /// at all (the primary only accepts a `personal` frame the network filter
-    /// leaves unchanged, so a metadata-only version could not be delivered).
+    /// `msg` without its PHI-scoped or unclassifiable content; `None` when
+    /// nothing is left. A `personal` satellite's PHI work is never sent at all
+    /// (the primary only accepts a `personal` frame the network filter leaves
+    /// unchanged, so a metadata-only version could not be delivered).
     pub fn strip(&self, msg: ServerMsg) -> Option<ServerMsg> {
         match msg {
             ServerMsg::MotherJobs { jobs, host } => Some(ServerMsg::MotherJobs {
@@ -160,12 +195,12 @@ impl PhiScope {
             ServerMsg::SessionListResp { sessions, host } => Some(ServerMsg::SessionListResp {
                 sessions: sessions
                     .into_iter()
-                    .filter(|s| !self.tags.contains(&s.tag))
+                    .filter(|s| self.tag_is_shareable(&s.tag))
                     .collect(),
                 host,
             }),
             other => match frame_tag(&other) {
-                Some(tag) if self.tags.contains(&tag) => None,
+                Some(tag) if !self.tag_is_shareable(&tag) => None,
                 _ => Some(other),
             },
         }
@@ -289,7 +324,14 @@ impl Forwarder {
         (serde_json::to_value(&after).ok()? == serde_json::to_value(&msg).ok()?).then_some(msg)
     }
 
-    /// May a routed request name this tag? A PHI-scoped focus is refused.
+    /// Re-read the daemon's focus registry (the authority on which tag is
+    /// which repo's).
+    pub fn refresh_registry(&mut self, focuses: &[crate::ipc::protocol::FocusMeta]) {
+        self.phi.refresh(focuses);
+    }
+
+    /// May a routed request name this tag? A PHI-scoped or unknown focus is
+    /// refused.
     pub fn request_allowed(&self, msg: &ClientMsg) -> bool {
         let tag = match msg {
             ClientMsg::SessionModelGet { tag, .. }
@@ -298,7 +340,7 @@ impl Forwarder {
             | ClientMsg::SessionDetach { tag, .. } => Some(tag.as_str()),
             _ => None,
         };
-        tag.is_none_or(|t| !self.phi.tag_is_phi(t))
+        tag.is_none_or(|t| self.phi.tag_is_shareable(t))
     }
 }
 
@@ -707,16 +749,28 @@ pub(super) fn spawn(env: Env) {
         cache: BTreeMap::new(),
         publish: None,
     }));
-    tokio::spawn(filter_task(env.tx.subscribe(), Arc::clone(&shared)));
+    tokio::spawn(filter_task(
+        env.tx.subscribe(),
+        Arc::clone(&shared),
+        env.dispatch.clone(),
+    ));
     tokio::spawn(connection_loop(env, shared));
 }
 
-async fn filter_task(mut rx: broadcast::Receiver<ServerMsg>, shared: Arc<Mutex<Shared>>) {
+async fn filter_task(
+    mut rx: broadcast::Receiver<ServerMsg>,
+    shared: Arc<Mutex<Shared>>,
+    dispatch: LocalDispatch,
+) {
     loop {
         match rx.recv().await {
             Ok(msg) => {
                 let key = cache_key(&msg);
+                // Which tag is which repo's: read from the registry, not guessed
+                // from the frames seen so far. (Never while holding `shared`.)
+                let registry = dispatch.focus_registry();
                 let mut sh = shared.lock().unwrap();
+                sh.forwarder.refresh_registry(&registry);
                 match sh.forwarder.publish(msg) {
                     Some(out) => {
                         if let Some(k) = key {
@@ -1030,7 +1084,12 @@ fn handle_request(
         routed.close(&env.dispatch, &id);
         return;
     }
-    let refused = !shared.lock().unwrap().forwarder.request_allowed(&msg);
+    let refused = {
+        let registry = env.dispatch.focus_registry();
+        let mut sh = shared.lock().unwrap();
+        sh.forwarder.refresh_registry(&registry);
+        !sh.forwarder.request_allowed(&msg)
+    };
     let attach = matches!(msg, ClientMsg::SessionAttach { .. });
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMsg>();
     if refused {
@@ -1061,7 +1120,12 @@ fn handle_request(
             };
             let Some(m) = next else { break };
             let is_refusal = matches!(m, ServerMsg::Error { .. } | ServerMsg::Withheld { .. });
-            let filtered = shared.lock().unwrap().forwarder.reply(m);
+            let registry = dispatch.focus_registry();
+            let filtered = {
+                let mut sh = shared.lock().unwrap();
+                sh.forwarder.refresh_registry(&registry);
+                sh.forwarder.reply(m)
+            };
             if let Some(m) = filtered {
                 let _ = out.send(UplinkFrame::Reply {
                     id: reply_id.clone(),
@@ -1570,10 +1634,10 @@ mod tests {
             ServerMsg::SessionListResp { host, .. } => assert_eq!(host.as_deref(), Some("kobe")),
             other => panic!("{other:?}"),
         }
-        personal.phi.observe(&ServerMsg::FocusCreated {
-            meta: focus("cody-a", "/code/admin-portal"),
-            host: None,
-        });
+        personal.refresh_registry(&[
+            focus("cody-a", "/code/admin-portal"),
+            focus("cody-b", "/code/blog"),
+        ]);
         assert!(!personal.request_allowed(&ClientMsg::SessionAttach {
             tag: "cody-a".into(),
             host: None
@@ -1582,6 +1646,13 @@ mod tests {
             tag: "cody-b".into(),
             host: None
         }));
+        assert!(
+            !personal.request_allowed(&ClientMsg::SessionAttach {
+                tag: "cody-unknown".into(),
+                host: None
+            }),
+            "an unknown tag is refused"
+        );
     }
 
     #[test]

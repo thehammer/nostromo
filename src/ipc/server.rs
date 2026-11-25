@@ -471,6 +471,11 @@ impl LocalDispatch {
         );
     }
 
+    /// The daemon's focus registry: which tag belongs to which project.
+    pub(super) fn focus_registry(&self) -> Vec<crate::ipc::protocol::FocusMeta> {
+        self.session_mgr.lock().unwrap().focus_registry()
+    }
+
     /// Forget a routed connection: detach it from every session.
     pub(super) fn close_routed(&self, conn_key: &str) {
         let mut mgr = self.session_mgr.lock().unwrap();
