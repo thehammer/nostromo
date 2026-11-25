@@ -8,10 +8,40 @@
 import SwiftUI
 import NostromoKit
 
-/// UserDefaults-backed connection settings.
+/// UserDefaults-backed connection settings. `host` is the last address used and is never cleared by
+/// a revoke or an un-pair (PRD-AC32); it is the only pairing-related thing kept in UserDefaults:
+/// the token lives in the Keychain.
 enum ConnectionSettings {
     private static let hostKey = "nostromd.host"
     private static let portKey = "nostromd.port"
+    private static let wsPortKey = "nostromd.ws.port"
+    private static let transportKey = "nostromd.transport"
+
+    enum Transport: String {
+        case webSocket
+        case legacyTCP
+    }
+
+    static let defaultWebSocketPort: UInt16 = 47101
+
+    /// Which transport the app uses. `.legacyTCP` is only reachable from Settings → Advanced.
+    static var transport: Transport {
+        get { Transport(rawValue: UserDefaults.standard.string(forKey: transportKey) ?? "") ?? .webSocket }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: transportKey) }
+    }
+
+    /// The last server address used, or `nil` if there never was one.
+    static var lastAddress: String? { UserDefaults.standard.string(forKey: hostKey) }
+
+    static var webSocketPort: UInt16 {
+        let port = UInt16(truncatingIfNeeded: UserDefaults.standard.integer(forKey: wsPortKey))
+        return port == 0 ? defaultWebSocketPort : port
+    }
+
+    static func saveAddress(host: String, webSocketPort: UInt16) {
+        UserDefaults.standard.set(host, forKey: hostKey)
+        UserDefaults.standard.set(Int(webSocketPort), forKey: wsPortKey)
+    }
 
     static let defaultHost = "192.168.1.1"
     static let defaultPort: UInt16 = 47100
@@ -107,8 +137,8 @@ struct ConnectionSettingsView: View {
         }
 
         ConnectionSettings.save(host: host, port: portVal)
-        store.client.host = host
-        store.client.port = portVal
+        store.legacyClient?.host = host
+        store.legacyClient?.port = portVal
 
         dismiss()
     }

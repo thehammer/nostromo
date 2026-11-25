@@ -169,6 +169,9 @@ public enum ServerMsg {
     case unauthorized(reason: String)
     /// The answer to `device_unpair_self`.
     case deviceUnpaired
+    /// How many permission requests a focus has held: the count only, the one approval frame a
+    /// network peer receives. `host` is the satellite it came from (see `HostedServerMsg`).
+    case approvalPending(tag: String, count: Int)
     /// The satellites currently connected to the primary.
     case hosts([HostInfoWire])
     /// A request naming `host` could not be routed.

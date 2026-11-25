@@ -1,10 +1,10 @@
 // Nostromo iOS — NostromoApp.swift
 //
-// SwiftUI app entry point.  Instantiates DaemonStore as the root @StateObject
-// so every view in the hierarchy can access it via @EnvironmentObject.
-//
-// On first launch (or whenever no host is saved) ConnectionSettingsView is
-// presented as a sheet so the user can enter the Mac's LAN IP and port.
+// SwiftUI app entry point. The root is a small state machine owned by `AppSession`:
+//   no credential   -> Pair with Nostromo (scan, system-Camera link, or a typed code)
+//   credential      -> the main tabs over a WebSocket client, hydrated from last-known content
+//   notPaired       -> the no-longer-paired screen (credential and content already wiped)
+// A `nostromo://pair` link goes straight to the confirmation step, in any state.
 
 import SwiftUI
 import NostromoKit
@@ -12,37 +12,60 @@ import NostromoKit
 @main
 struct NostromoApp: App {
 
-    @StateObject private var store: DaemonStore = {
-        let (host, port) = ConnectionSettings.load()
-        let client = NetworkClient(host: host, port: port)
-        return DaemonStore(client: client)
-    }()
-
-    @State private var showSettings = false
+    @StateObject private var session = AppSession()
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environmentObject(store)
-                .onAppear {
-                    // On first launch, open discovery so the user doesn't need
-                    // to type an IP.  DaemonDiscoveryView calls store.start()
-                    // on successful connect; we call it here for subsequent
-                    // launches where the host is already saved.
-                    if ConnectionSettings.isDefault {
-                        showSettings = true
-                    } else {
-                        store.start()
-                    }
+            RootView()
+                .environmentObject(session)
+                .onOpenURL { session.handle(url: $0) }
+        }
+    }
+}
+
+/// Chooses the screen for the app's phase.
+struct RootView: View {
+    @EnvironmentObject var session: AppSession
+    @State private var pairingAgain = false
+
+    var body: some View {
+        Group {
+            switch session.phase {
+            case .unpaired:
+                PairingFlowView(session: session, link: session.pendingLink)
+                    .id(session.pendingLink)
+            case .noLongerPaired:
+                if pairingAgain || session.pendingLink != nil {
+                    PairingFlowView(session: session, link: session.pendingLink,
+                                    prefillAddress: session.serverAddress)
+                        .id(session.pendingLink)
+                } else {
+                    NoLongerPairedView(kindName: session.kindName) { pairingAgain = true }
                 }
-                .sheet(isPresented: $showSettings, onDismiss: {
-                    // Only start if DaemonDiscoveryView didn't already start it.
-                    if !store.client.connected {
-                        store.start()
-                    }
-                }) {
-                    DaemonDiscoveryView(store: store)
+            case .paired:
+                if let name = session.successName {
+                    PairingSuccessView(name: name)
+                } else if let store = session.store {
+                    ContentView()
+                        .environmentObject(store)
+                        .onAppear { store.start() }
                 }
+            }
+        }
+        // A pairing link opened while already paired lands on the confirmation step.
+        .fullScreenCover(isPresented: Binding(
+            get: { session.phase == .paired && session.pendingLink != nil },
+            set: { if !$0 { session.pendingLink = nil } }
+        )) {
+            PairingFlowView(session: session, link: session.pendingLink) { session.pendingLink = nil }
+        }
+        .alert("Can't use that link", isPresented: Binding(
+            get: { session.linkError != nil },
+            set: { if !$0 { session.linkError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(session.linkError ?? "")
         }
     }
 }
@@ -50,6 +73,9 @@ struct NostromoApp: App {
 /// Root content view — TabView with Sessions, Queue, Perri, Fred, and Teri tabs.
 struct ContentView: View {
     @EnvironmentObject var store: DaemonStore
+    /// Decisions the operator closed on this phone. Over the WebSocket transport the phone answers
+    /// nothing (B10, Q4), so closing only hides the sheet here.
+    @State private var locallyClosedDecisions: Set<String> = []
 
     enum Tab: Hashable { case sessions, queue, perri, fred, teri }
     @State private var selection: Tab = .sessions
@@ -67,6 +93,13 @@ struct ContentView: View {
     @State private var presentedDecisionRequestId: String?
 
     var body: some View {
+        VStack(spacing: 0) {
+            ConnectionBanner()
+            tabs
+        }
+    }
+
+    private var tabs: some View {
         TabView(selection: $selection) {
             SessionsTab()
                 .tag(Tab.sessions)
@@ -82,15 +115,13 @@ struct ContentView: View {
                 .tabItem { Label("Perri", systemImage: "checkmark.seal") }
                 .badge(store.perriQueue.count)
 
-            FredTab(onStartAgent: { selection = .sessions })
+            FredTab()
                 .tag(Tab.fred)
                 .tabItem { Label("Fred", systemImage: "envelope") }
-                .badge(unreadCount)
 
             TeriTab()
                 .tag(Tab.teri)
                 .tabItem { Label("Teri", systemImage: "checklist") }
-                .badge(openTodoCount)
         }
         // Decision modals present above the root TabView (ios-curated-view-
         // parity W3, D1) — never from a region/focus view — so a decision
@@ -99,7 +130,7 @@ struct ContentView: View {
         // container (the recycle-and-re-arm shape that forced
         // TurnInteractionStore into existence on macOS for AskQuestionView).
         .sheet(item: Binding<PendingDecision?>(
-            get: { store.pendingDecisions.first },
+            get: { store.pendingDecisions.first { !locallyClosedDecisions.contains($0.requestId) } },
             set: { newValue in
                 // SwiftUI calls this setter when the PRESENTATION wants to
                 // write the binding back to nil — i.e. the operator swiped
@@ -127,6 +158,7 @@ struct ContentView: View {
                 request: request,
                 askingFocusName: store.focuses[request.tag]?.displayName,
                 resolution: store.decisionStore.resolution(for: request.requestId),
+                readOnly: readOnlyDecisions,
                 onClose: { reason in
                     switch reason {
                     case .operatorChose(let choiceId):
@@ -159,6 +191,11 @@ struct ContentView: View {
     /// `pendingDecisions` directly, which dismisses this sheet with no call
     /// through this function at all.
     private func closeDecision(_ reason: DecisionCloseReason, for requestId: String) {
+        // The phone answers nothing over the WebSocket transport: "Answer it on your Mac".
+        if readOnlyDecisions {
+            locallyClosedDecisions.insert(requestId)
+            return
+        }
         let choiceId: String?
         switch reason {
         case .operatorChose(let id): choiceId = id
@@ -178,20 +215,14 @@ struct ContentView: View {
         }.count
     }
 
-    private var unreadCount: Int {
-        store.fredMailbox?.unreadCount ?? 0
-    }
-
-    /// Count of active todos for the tab badge.
-    private var openTodoCount: Int {
-        store.teriTodos?.items.count ?? 0
-    }
+    private var readOnlyDecisions: Bool { ConnectionSettings.transport == .webSocket }
 }
 
 // MARK: - SessionsTab
 
 private struct SessionsTab: View {
     @EnvironmentObject var store: DaemonStore
+    @EnvironmentObject var session: AppSession
     @State private var showSettings = false
 
     var body: some View {
@@ -203,13 +234,14 @@ private struct SessionsTab: View {
                         Button {
                             showSettings = true
                         } label: {
-                            Image(systemName: "network")
+                            Image(systemName: "gearshape")
                         }
                     }
                 }
         }
         .sheet(isPresented: $showSettings) {
-            DaemonDiscoveryView(store: store)
+            DeviceSettingsView()
+                .environmentObject(session)
         }
     }
 }
@@ -239,11 +271,9 @@ private struct PerriTab: View {
 // MARK: - FredTab
 
 private struct FredTab: View {
-    var onStartAgent: () -> Void = {}
-
     var body: some View {
         NavigationStack {
-            FredView(onStartAgent: onStartAgent)
+            FredView()
                 .navigationTitle("Fred")
         }
     }

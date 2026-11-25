@@ -75,18 +75,23 @@ struct MotherJobDetailView: View {
                 Section("Question") {
                     Text(job.question ?? "This job is waiting for your input.")
                         .foregroundStyle(.primary)
-                    TextField("Your answer…", text: $answerText, axis: .vertical)
-                        .lineLimit(3...)
-                    Button("Submit Answer") {
-                        store.motherResume(jobId: job.id, answer: answerText)
-                        answerText = ""
+                    if store.canMutate {
+                        TextField("Your answer…", text: $answerText, axis: .vertical)
+                            .lineLimit(3...)
+                        Button("Submit Answer") {
+                            store.motherResume(jobId: job.id, answer: answerText)
+                            answerText = ""
+                        }
+                        .disabled(answerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    } else {
+                        // B10: the phone answers nothing over the WebSocket transport.
+                        Text("Answer it on your Mac").foregroundStyle(.secondary)
                     }
-                    .disabled(answerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
 
             // MARK: Actions
-            let actions = availableActions
+            let actions = store.canMutate ? availableActions : []
             if !actions.isEmpty {
                 Section("Actions") {
                     ForEach(actions, id: \.0) { label, color, confirmKey in

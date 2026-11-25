@@ -33,9 +33,13 @@ public struct MotherJob: Codable, Identifiable, Equatable {
     /// focus is told. `nil` for a job the daemon did not annotate, and for a
     /// malformed annotation (it never costs the job).
     public let nostromo:   MotherJobAnnotation?
+    /// Why Mother paused the job (`user`, `adherence_blocked`, `operator_hold`, `cost_cap`, ...).
+    /// A fixed vocabulary: the one reason a work host's metadata-only frame still carries.
+    public let pausedReason: String?
 
     enum CodingKeys: String, CodingKey {
         case id, state, title, repo, branch, question, origin, nostromo
+        case pausedReason = "paused_reason"
         case prUrl      = "pr_url"
         case createdAt  = "created_at"
         case startedAt  = "started_at"
@@ -55,7 +59,8 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         question: String? = nil,
         originLabel: String? = nil,
         crew: MotherCrewState = MotherCrewState(),
-        nostromo: MotherJobAnnotation? = nil
+        nostromo: MotherJobAnnotation? = nil,
+        pausedReason: String? = nil
     ) {
         self.id         = id
         self.state      = state
@@ -70,6 +75,7 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         self.originLabel = originLabel
         self.crew       = crew
         self.nostromo   = nostromo
+        self.pausedReason = pausedReason
     }
 
     private struct Origin: Codable {
@@ -80,7 +86,8 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id         = try c.decode(String.self, forKey: .id)
         state      = try c.decode(String.self, forKey: .state)
-        title      = try c.decode(String.self, forKey: .title)
+        // A work host's metadata-only frame carries no title (W10); absent reads as empty.
+        title      = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
         repo       = try c.decodeIfPresent(String.self, forKey: .repo)
         branch     = try c.decodeIfPresent(String.self, forKey: .branch)
         // A crew-contract key: a malformed value never costs the job.
@@ -94,6 +101,7 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         // The daemon's annotation: additive, and a malformed one never costs the
         // job (iOS decodes the whole `mother_jobs` frame all-or-nothing).
         nostromo   = (try? c.decodeIfPresent(MotherJobAnnotation.self, forKey: .nostromo)) ?? nil
+        pausedReason = (try? c.decodeIfPresent(String.self, forKey: .pausedReason)) ?? nil
     }
 
     /// Writes the crew keys flat, next to the job's own, in the daemon's form.
@@ -111,6 +119,7 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(question, forKey: .question)
         if let originLabel { try c.encode(Origin(label: originLabel), forKey: .origin) }
         try c.encodeIfPresent(nostromo, forKey: .nostromo)
+        try c.encodeIfPresent(pausedReason, forKey: .pausedReason)
         try crew.encode(to: encoder)
     }
 }

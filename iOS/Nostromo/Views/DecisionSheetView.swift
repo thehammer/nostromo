@@ -53,21 +53,27 @@ struct DecisionSheetView: View {
     /// construction site — the same trick `AskQuestionView.init` and
     /// macOS's `DecisionSheet.init` use for exactly this bug class.
     let resolution: DecisionResolutionRecord?
+    /// Over the WebSocket transport the phone answers nothing (B10, Q4): every control is inert and
+    /// the sheet says where to answer.
+    let readOnly: Bool
     let onClose: (DecisionCloseReason) -> Void
 
     init(
         request: PendingDecision,
         askingFocusName: String?,
         resolution: DecisionResolutionRecord?,
+        readOnly: Bool = false,
         onClose: @escaping (DecisionCloseReason) -> Void
     ) {
         self.request = request
         self.askingFocusName = askingFocusName
         self.resolution = resolution
+        self.readOnly = readOnly
         self.onClose = onClose
     }
 
     private var isResolved: Bool { resolution != nil }
+    private var choicesDisabled: Bool { isResolved || readOnly }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -89,7 +95,13 @@ struct DecisionSheetView: View {
                 }
             }
 
-            if isResolved {
+            if readOnly && !isResolved {
+                Text("Answer it on your Mac")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Close", role: .cancel) { onClose(.operatorDismissed) }
+                    .frame(maxWidth: .infinity)
+            } else if isResolved {
                 resolvedCaption
             } else {
                 Button("Dismiss", role: .cancel) {
@@ -143,7 +155,7 @@ struct DecisionSheetView: View {
             .background(choiceBackground(choice.id))
             .clipShape(RoundedRectangle(cornerRadius: 10))
         }
-        .disabled(isResolved)
+        .disabled(choicesDisabled)
     }
 
     private func choiceBackground(_ choiceId: String) -> Color {

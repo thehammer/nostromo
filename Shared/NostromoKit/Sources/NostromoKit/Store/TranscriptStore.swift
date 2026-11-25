@@ -19,7 +19,7 @@ public final class TranscriptStore: ObservableObject {
 
     // MARK: - Dependencies
 
-    private let client: NetworkClient
+    private let client: any DaemonTransport
     private var tag: String?
     private var agentName: String = ""
     private var viewName: String = ""
@@ -33,7 +33,7 @@ public final class TranscriptStore: ObservableObject {
 
     // MARK: - Init
 
-    public init(client: NetworkClient) {
+    public init(client: any DaemonTransport) {
         self.client = client
     }
 
@@ -67,7 +67,8 @@ public final class TranscriptStore: ObservableObject {
         self.tag = tag
         turns = []
         attachCount = 1
-        cancellable = client.messages
+        cancellable = client.framePublisher
+            .map(\.msg)
             .receive(on: RunLoop.main)
             .sink { [weak self] in self?.handle($0) }
         client.send(ClientSessionAttach(tag: tag))

@@ -98,6 +98,70 @@ public final class DaemonStore: ObservableObject {
     /// Whether the daemon connection is currently alive.
     @Published public private(set) var connected: Bool = false
 
+    // MARK: - Backplane state (W11)
+
+    /// Why the link is up or down. Only `.notPaired` means the pairing is gone (PRD-AC22).
+    @Published public private(set) var connectionState: ConnectionState = .connecting
+
+    /// What the screen shows is last-known, not live: it came from the cache or from before a drop.
+    @Published public private(set) var isStale: Bool = false
+
+    /// When the cached snapshot was saved, while `isStale` because of a relaunch.
+    @Published public private(set) var lastKnownAt: Date? = nil
+
+    /// Why a topic is withheld, from `Withheld.reason` (`not_shared` in v1: Q2).
+    @Published public private(set) var withheldReasons: [String: String] = [:]
+
+    /// Mother jobs of each satellite host, keyed by the host's name. The primary's own jobs stay in
+    /// `motherJobs`, so a job is identified by `(host, id)` and two hosts' queues never collide.
+    @Published public private(set) var hostedMotherJobs: [String: [MotherJob]] = [:]
+
+    /// Sessions and focuses of each satellite host, keyed by host name (metadata only for a `work` host).
+    @Published public private(set) var hostedSessions: [String: [SessionInfo]] = [:]
+    @Published public private(set) var hostedFocuses: [String: [FocusMeta]] = [:]
+
+    /// The satellites connected to the primary, from `Hosts`.
+    @Published public private(set) var hostInfos: [HostInfoWire] = []
+
+    /// What each host last reported it may do with content. Kept after the host disconnects, so its
+    /// last-known rows keep their shape; a host never heard from is treated as `work`.
+    @Published public private(set) var hostEgress: [String: HostEgress] = [:]
+
+    /// The merged list across Macs (Q8): "needs you" first, then recency; each row carries its
+    /// Mac's name only when the rows come from more than one Mac. `primaryName` names the primary's rows.
+    public func mergedQueue(primaryName: String) -> [MergedQueueRow] {
+        MergedQueue.rows(primaryJobs: motherJobs, primarySessions: sessionList,
+                         hostedJobs: hostedMotherJobs, hostedSessions: hostedSessions,
+                         egress: hostEgress, primaryName: primaryName)
+    }
+
+    /// The "needs you" count per host (`""` is the primary), display only. Fed from Kit's
+    /// `NeedsYouAggregator` by a Mother producer and an approvals-count producer; the phone shows
+    /// the count and never answers, resumes or acknowledges (B10).
+    @Published public private(set) var needsYouCount: [String: Int] = [:]
+
+    /// Whether a `mother_jobs` frame has arrived on the live connection (not from the cache): the
+    /// pairing success screen waits for it (PRD-AC8).
+    @Published public private(set) var motherJobsReceived: Bool = false
+
+    /// Whether this client may answer, resume, cancel or retry anything. False over the backplane
+    /// transport: the phone is a read-only window (B10, Q4), and `WebSocketClient` refuses those
+    /// verbs besides. True only for the legacy TCP transport.
+    public var canMutate: Bool { client is NetworkClient }
+
+    /// Whether anything last-known is on screen. While it is, the tabs keep showing it under a banner
+    /// instead of replacing it with "Disconnected".
+    public var hasLastKnownContent: Bool {
+        !motherJobs.isEmpty || !sessions.isEmpty || !focuses.isEmpty || !perriQueue.isEmpty
+            || !hostedMotherJobs.isEmpty || !hostedSessions.isEmpty
+    }
+
+    /// Whether the Fred and Teri tabs should say "Mail, calendar and todos stay on your Mac in this
+    /// version." (`Withheld { reason: "not_shared" }`).
+    public func isNotShared(_ topic: String) -> Bool {
+        withheldTopics.contains(topic) && withheldReasons[topic] == "not_shared"
+    }
+
     // MARK: - Ambient activity (ios-curated-view-parity W4)
 
     /// One assembled `ActivityStreamModel` per focus tag, keyed by
@@ -145,17 +209,28 @@ public final class DaemonStore: ObservableObject {
 
     // MARK: - Dependencies
 
-    public let client: NetworkClient
+    public let client: any DaemonTransport
+
+    /// The legacy TCP client, when that is the transport (Settings → Advanced → Local network).
+    public var legacyClient: NetworkClient? { client as? NetworkClient }
 
     // MARK: - Private
 
     private var cancellables = Set<AnyCancellable>()
+    /// The on-disk last-known content, or `nil` for the legacy transport (which keeps no content
+    /// across a drop and clears the screen on disconnect, as it always has).
+    private let cache: ContentCache?
+    private var needsYou: [String: NeedsYouAggregator] = [:]
 
     // MARK: - Init
 
-    public init(client: NetworkClient) {
+    /// `cache` non-nil is the backplane mode: the cached collections survive a drop (marked
+    /// `isStale`), and a relaunch starts from the saved snapshot.
+    public init(client: any DaemonTransport, cache: ContentCache? = nil) {
         self.client = client
+        self.cache = cache
         bind()
+        hydrateFromCache()
     }
 
     // MARK: - Lifecycle
@@ -236,30 +311,40 @@ public final class DaemonStore: ObservableObject {
 
     private func bind() {
         // Forward connection state.
-        client.$connected
+        client.connectionStatePublisher
+            .receive(on: RunLoop.main)
+            .sink { [weak self] in self?.connectionState = $0 }
+            .store(in: &cancellables)
+
+        client.connectedPublisher
             .receive(on: RunLoop.main)
             .sink { [weak self] isConnected in
                 self?.connected = isConnected
                 if isConnected {
+                    self?.isStale = false
+                    self?.lastKnownAt = nil
                     // Request the current session list immediately after connecting.
                     self?.client.send(ClientSessionList())
                     // Request the focus registry immediately after connecting.
                     self?.client.send(ClientFocusList())
                 } else {
-                    // Clear stale state on disconnect so the list doesn't show
-                    // ghost entries if the daemon is restarted.
-                    self?.sessions       = [:]
-                    self?.focuses        = [:]
+                    // With a cache, the cached collections are last-known content: keep them on
+                    // screen, marked stale, until the next connection replaces them (PRD-AC22).
+                    // Without one (legacy transport) clear them so the list doesn't show ghost
+                    // entries if the daemon is restarted.
+                    if self?.cache != nil {
+                        self?.isStale = true
+                    } else {
+                        self?.clearLastKnownContent()
+                    }
                     self?.focusLayouts   = [:]
                     self?.focusRegionStates = [:]
-                    self?.motherJobs     = []
                     self?.motherPeeks    = [:]
-                    self?.perriQueue     = []
-                    self?.perriCurrentPr = [:]
                     self?.fredMailbox    = nil
                     self?.fredCalendar   = nil
                     self?.teriTodos      = nil
                     self?.withheldTopics = []
+                    self?.withheldReasons = [:]
                     // A reconnect starts fresh and says so — never
                     // resurrects pre-drop events (D8's client half of the
                     // PRD's "no persistence across a drop" requirement).
@@ -280,15 +365,115 @@ public final class DaemonStore: ObservableObject {
             .store(in: &cancellables)
 
         // Route incoming server messages.
-        client.messages
+        client.framePublisher
             .receive(on: RunLoop.main)
-            .sink { [weak self] msg in
-                self?.handle(msg)
+            .sink { [weak self] frame in
+                if let raw = frame.raw { self?.cache?.record(host: frame.host, raw: raw) }
+                self?.handle(frame.msg, host: frame.host)
             }
             .store(in: &cancellables)
     }
 
+    // MARK: - Needs you (display only)
+
+    private var approvalCounts: [String: [String: Int]] = [:]   // host -> tag -> held requests
+
+    private func refreshNeedsYouMother(host: String, jobs: [MotherJob]) {
+        var aggregator = needsYou[host] ?? NeedsYouAggregator()
+        aggregator.set(producer: MotherNeedsYouProducer.name, items: MotherNeedsYouProducer.items(from: jobs))
+        needsYou[host] = aggregator
+        needsYouCount[host] = aggregator.snapshot.total
+    }
+
+    private func refreshNeedsYouApprovals(host: String, tag: String, count: Int) {
+        approvalCounts[host, default: [:]][tag] = count
+        let items = approvalCounts[host, default: [:]].sorted { $0.key < $1.key }.flatMap { tag, count in
+            (0..<max(count, 0)).map {
+                NeedsYouItem(id: "approvals:\(tag):\($0)", source: .focus(tag), reason: .approvalPending(1))
+            }
+        }
+        var aggregator = needsYou[host] ?? NeedsYouAggregator()
+        aggregator.set(producer: ApprovalsNeedsYouProducer.name, items: items)
+        needsYou[host] = aggregator
+        needsYouCount[host] = aggregator.snapshot.total
+    }
+
+    // MARK: - Last-known content
+
+    /// The collections the cache holds and the stale view shows.
+    private func clearLastKnownContent() {
+        sessions       = [:]
+        focuses        = [:]
+        motherJobs     = []
+        perriQueue     = []
+        perriCurrentPr = [:]
+        hostedMotherJobs = [:]
+        hostedSessions = [:]
+        hostedFocuses  = [:]
+        hostInfos      = []
+        hostEgress     = [:]
+        needsYou       = [:]
+        approvalCounts = [:]
+        needsYouCount  = [:]
+    }
+
+    /// Loads the saved snapshot through the same `handle` the live frames use, then marks the
+    /// content stale: it stays so until the first live connection.
+    private func hydrateFromCache() {
+        guard let snapshot = cache?.load() else { return }
+        for frame in snapshot.frames {
+            let hosted = ServerMsg.decodeHosted(from: Data(frame.json.utf8))
+            handle(hosted.msg, host: hosted.host)
+        }
+        motherJobsReceived = false   // cached, not live
+        isStale = true
+        lastKnownAt = snapshot.savedAt
+    }
+
+    /// Forgets everything shown and deletes the cache file. Called when the pairing is gone (revoke,
+    /// un-pair, pairing with a different server): after it, memory and disk hold no Nostromo content.
+    public func wipeAll() {
+        cache?.wipe()
+        clearLastKnownContent()
+        focusLayouts = [:]
+        focusRegionStates = [:]
+        motherPeeks = [:]
+        fredMailbox = nil
+        fredCalendar = nil
+        teriTodos = nil
+        withheldTopics = []
+        withheldReasons = [:]
+        activityModels = [:]
+        pendingActivitySnapshotRequests = []
+        pendingDecisions = []
+        transcriptStores = [:]
+        scrollKeys = [:]
+        motherJobsReceived = false
+        isStale = false
+        lastKnownAt = nil
+    }
+
     // MARK: - Message handling
+
+    /// Routes one frame by the host it names: the primary's own (`nil`) takes the long-standing path,
+    /// a satellite's frames land in the per-host collections. A satellite's session-scoped frames
+    /// (turns, panes, layouts) are not kept: its tags may collide with the primary's.
+    private func handle(_ msg: ServerMsg, host: String?) {
+        guard let host else { handle(msg); return }
+        switch msg {
+        case .motherJobs(let jobs):
+            hostedMotherJobs[host] = jobs
+            refreshNeedsYouMother(host: host, jobs: jobs)
+        case .sessionListResp(let list):
+            hostedSessions[host] = list
+        case .focusListResp(let list), .focusRegistryUpdated(let list):
+            hostedFocuses[host] = list
+        case .approvalPending(let tag, let count):
+            refreshNeedsYouApprovals(host: host, tag: tag, count: count)
+        default:
+            break
+        }
+    }
 
     private func handle(_ msg: ServerMsg) {
         switch msg {
@@ -412,6 +597,15 @@ public final class DaemonStore: ObservableObject {
 
         case .motherJobs(let jobs):
             motherJobs = jobs
+            motherJobsReceived = true
+            refreshNeedsYouMother(host: "", jobs: jobs)
+
+        case .approvalPending(let tag, let count):
+            refreshNeedsYouApprovals(host: "", tag: tag, count: count)
+
+        case .hosts(let list):
+            hostInfos = list
+            for host in list { hostEgress[host.name] = host.egress }
 
         case .motherPeek(let snap):
             if snap.todos.isEmpty {
@@ -428,14 +622,20 @@ public final class DaemonStore: ObservableObject {
                 perriCurrentPr.removeValue(forKey: tag)
             }
 
+        case .fredState where cache != nil, .teriState where cache != nil:
+            // Q2: mail, calendar and todos stay on the Mac in v1. Nothing from Fred or Teri is kept
+            // over the backplane transport, whatever arrives.
+            break
+
         case .fredState(let mailbox, let calendar):
             fredMailbox  = mailbox
             fredCalendar = calendar
             // Real data arriving means the daemon is no longer withholding it.
             withheldTopics.remove("fred")
 
-        case .withheld(let topics, _):
+        case .withheld(let topics, let reason):
             withheldTopics = Set(topics)
+            withheldReasons = Dictionary(uniqueKeysWithValues: topics.map { ($0, reason) })
 
         case .teriState(let snap):
             teriTodos = snap

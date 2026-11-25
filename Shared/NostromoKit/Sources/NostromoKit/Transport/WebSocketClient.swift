@@ -107,7 +107,7 @@ public final class WebSocketClient: ObservableObject {
     // MARK: - Send
 
     /// Sends `msg` as one text frame; drops it when not connected or when `OutboundPolicy` refuses it.
-    func send(_ msg: some Encodable) {
+    public func send(_ msg: some Encodable) {
         guard let body = encodeForSend(msg), let channel else {
             log.debug("send dropped: not connected or refused")
             return

@@ -2088,9 +2088,7 @@ class AppStore: ObservableObject {
         case .remoteShellResolved(let resolved):
             remoteShellResolutions.send(resolved)
 
-        // Device pairing and satellite hosts (W9, W10): the phone's frames; the Mac app has no use for them.
-        case .pong, .unknown, .pairOffer, .paired, .pairRefused, .unauthorized, .deviceUnpaired,
-             .hosts, .hostUnavailable:
+        case .pong, .unknown:
             break
         }
     }

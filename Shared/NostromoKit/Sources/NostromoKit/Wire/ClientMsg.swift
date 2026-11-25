@@ -5,6 +5,9 @@
 // All types are pure value types (Encodable); no import dependencies.
 
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - Hello
 
@@ -438,4 +441,14 @@ public struct ClientDeviceUnpairSelf: Encodable, Equatable {
 /// `satellite`).
 public enum DeviceKindWire: String, Codable, Equatable {
     case iphone, ipad
+
+    /// This device's kind. Kept in Kit so no app view reads the device idiom (the iOS policy: the
+    /// presentation is chosen by width class alone).
+    public static var current: DeviceKindWire {
+        #if canImport(UIKit)
+        return UIDevice.current.userInterfaceIdiom == .pad ? .ipad : .iphone
+        #else
+        return .iphone
+        #endif
+    }
 }

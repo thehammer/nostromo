@@ -7,6 +7,19 @@
 		<string>_nostromo._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Nostromo finds your Mac's nostromd daemon on the local network via Bonjour so it can connect and show your agent sessions.</string>
+	<string>Nostromo connects to your Nostromo server when it's on this Wi-Fi network.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Nostromo uses the camera only to scan the pairing code shown on your Mac.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.hammer.nostromo.ios.pair</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>nostromo</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

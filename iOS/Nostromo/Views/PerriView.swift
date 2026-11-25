@@ -30,7 +30,7 @@ struct PerriView: View {
 
     var body: some View {
         Group {
-            if !store.connected {
+            if !store.connected && !store.hasLastKnownContent {
                 disconnectedView
             } else if store.perriQueue.isEmpty && store.perriCurrentPr(for: Self.builtInTag) == nil {
                 emptyView

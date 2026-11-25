@@ -63,10 +63,14 @@ public enum HostUnavailableReason: Equatable {
 public struct HostedServerMsg {
     public let host: String?
     public let msg: ServerMsg
+    /// The frame's JSON as it arrived, for the content cache (which keeps only an allow-listed few).
+    /// `nil` for a frame built in memory.
+    public let raw: Data?
 
-    public init(host: String?, msg: ServerMsg) {
+    public init(host: String?, msg: ServerMsg, raw: Data? = nil) {
         self.host = host
         self.msg = msg
+        self.raw = raw
     }
 }
 
@@ -95,7 +99,7 @@ extension ServerMsg {
     /// or one about the primary itself, has `host == nil`.
     public static func decodeHosted(from data: Data) -> HostedServerMsg {
         let host = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["host"] as? String
-        return HostedServerMsg(host: host, msg: decode(from: data))
+        return HostedServerMsg(host: host, msg: decode(from: data), raw: data)
     }
 
     /// `Welcome.features` (`"ws"`, `"pair"`, `"hosts"`, ...); empty when the frame has none.
@@ -126,6 +130,9 @@ extension ServerMsg {
             return .unauthorized(reason: json?["reason"] as? String ?? "")
         case "device_unpaired":
             return .deviceUnpaired
+        case "approval_pending":
+            guard let tag = json?["tag"] as? String, let count = json?["count"] as? Int else { return .unknown }
+            return .approvalPending(tag: tag, count: count)
         case "hosts":
             guard let m = try? dec.decode(HostsWrapper.self, from: data) else { return .unknown }
             return .hosts(m.hosts.map {
