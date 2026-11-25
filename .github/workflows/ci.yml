@@ -188,11 +188,13 @@ jobs:
         run: |
           log="$RUNNER_TEMP/nextest.log"
           [ -f "$log" ] || exit 0
-          grep -a -E '^ *SLOW \[' "$log" | sed -E 's/^ *SLOW \[[^]]*\] //' | sort -u \
-            | while IFS= read -r name; do
-                grep -a -v -E '^ *SLOW \[' "$log" | grep -a -q -E "^ *[A-Z]+ +\[[^]]*\] +$(printf '%s' "$name" | sed 's/[][\\.*^$/+?(){}|]/\\&/g')\$" \
-                  || echo "::error::still running when the step ended: $name"
-              done
+          # SLOW lines carry a placeholder counter `(───────)`, finished lines a real one
+          # `(103/103)`: drop the counter from both before comparing.
+          strip() { sed -E 's/^ *[A-Z]+ +\[[^]]*\] +(\([^)]*\) +)?//'; }
+          grep -a -E '^ *SLOW \[' "$log" | strip | sort -u > "$RUNNER_TEMP/slow.txt"
+          grep -a -E '^ *[A-Z]+ +\[' "$log" | grep -a -v -E '^ *SLOW \[' | strip | sort -u > "$RUNNER_TEMP/finished.txt"
+          comm -23 "$RUNNER_TEMP/slow.txt" "$RUNNER_TEMP/finished.txt" \
+            | while IFS= read -r name; do echo "::error::still running when the step ended: $name"; done
 
   # The required status check. Its name is the same as before the split, so
   # branch protection needs no change. `always()` makes it run (and fail) when a

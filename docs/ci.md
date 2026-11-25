@@ -250,7 +250,8 @@ ref, so changes apply only to jobs added after they merge.
   parallel across binaries, one process per test. The tool is pinned in `ci.yml`
   (`taiki-e/install-action` by commit SHA, `cargo-nextest@X.Y.Z`; bump both on purpose;
   `tests/ci_policy/test_nextest_pin.py` enforces it) and `.config/nextest.toml` sets
-  `retries = 0`. Doc tests are the separate `Doc tests` step.
+  `retries = 0`. Doc tests are the separate `Doc tests` step. Measured on this change's own
+  CI run: `Test` step 11 min 50 s, whole job 12 min 12 s.
 - **Path gate:** docs, `.claude`, `tests/*.rs` and Cargo-file-only changes skip the
   Swift jobs. `src/` is **not** skippable because `StatusBarPostureWindowsTests`
   scans `src/**/*.rs`. Verified on throwaway PRs #370-#372 (closed).
