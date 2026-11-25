@@ -19,10 +19,39 @@ use super::pairing::{CheckAnswer, PairingTable};
 use super::peer::PeerTrust;
 use super::protocol::{ClientMsg, ServerMsg};
 use super::router::Router;
+use super::uplink::UplinkRelay;
 
 /// How the hub reaches the rest of the daemon: set once, when the daemon wires
 /// the listeners. Empty on a daemon with no device registry.
-pub type HubSlot = Arc<OnceLock<Arc<DeviceHub>>>;
+pub type HubSlot = Arc<HubCell>;
+
+/// What a daemon holds for device administration: on a primary the hub (the
+/// registry and pairings); on a satellite the relay that forwards its local
+/// clients' admin verbs up the uplink. Never both.
+#[derive(Default)]
+pub struct HubCell {
+    hub: OnceLock<Arc<DeviceHub>>,
+    relay: OnceLock<Arc<UplinkRelay>>,
+}
+
+impl HubCell {
+    pub fn get(&self) -> Option<&Arc<DeviceHub>> {
+        self.hub.get()
+    }
+
+    pub fn set(&self, hub: Arc<DeviceHub>) -> Result<(), Arc<DeviceHub>> {
+        self.hub.set(hub)
+    }
+
+    /// The satellite's admin relay, once its uplink is wired.
+    pub fn relay(&self) -> Option<&Arc<UplinkRelay>> {
+        self.relay.get()
+    }
+
+    pub fn set_relay(&self, relay: Arc<UplinkRelay>) -> Result<(), Arc<UplinkRelay>> {
+        self.relay.set(relay)
+    }
+}
 
 pub struct DeviceHub {
     registry: Arc<DeviceRegistry>,

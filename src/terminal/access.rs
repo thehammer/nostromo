@@ -23,6 +23,7 @@ pub(crate) fn mint(trust: PeerTrust) -> Option<OperatorCap> {
         PeerTrust::LocalOther
         | PeerTrust::Tcp
         | PeerTrust::Paired
+        | PeerTrust::Routed
         | PeerTrust::Satellite { .. } => None,
     }
 }

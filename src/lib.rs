@@ -20,3 +20,4 @@ pub mod perri_cli;
 pub mod sensitive_text;
 pub mod terminal;
 pub mod tracker;
+pub mod uplink_cli;

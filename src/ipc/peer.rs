@@ -66,6 +66,10 @@ pub enum PeerTrust {
     /// primary closes the uplink when it changes). Not `Tcp`'s policy: see
     /// [`satellite_allowed`].
     Satellite { admin: SatelliteAdmin },
+    /// On a satellite: a read the primary routed down its uplink, injected
+    /// under a synthetic connection. Exactly `Tcp`'s policy and sensitivity
+    /// rules; it is never a local peer.
+    Routed,
 }
 
 impl PeerTrust {
@@ -82,7 +86,10 @@ impl PeerTrust {
     /// True for peers reached over the network.
     pub fn is_network(&self) -> bool {
         match self {
-            PeerTrust::Tcp | PeerTrust::Paired | PeerTrust::Satellite { .. } => true,
+            PeerTrust::Tcp
+            | PeerTrust::Paired
+            | PeerTrust::Routed
+            | PeerTrust::Satellite { .. } => true,
             PeerTrust::OperatorApp | PeerTrust::LocalOther => false,
         }
     }

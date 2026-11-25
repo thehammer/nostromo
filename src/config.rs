@@ -53,6 +53,98 @@ pub const GITHUB_HTTP_TIMEOUT_SECS: u64 = 20;
 /// warning whenever the resolved address is non-loopback.
 pub const DEFAULT_TCP_ADDR: &str = "127.0.0.1:47100";
 
+/// Environment variable that overrides `mode`.
+pub const MODE_ENV: &str = "NOSTROMD_MODE";
+/// Environment variable that overrides `uplink.url`.
+pub const UPLINK_URL_ENV: &str = "NOSTROMD_UPLINK_URL";
+
+/// Repos whose work is never sent upstream in anything but metadata form. The
+/// config may add to this list; it cannot remove these.
+pub const DEFAULT_PHI_REPOS: [&str; 2] = ["admin-portal", "referral-monitor"];
+
+/// A daemon's role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonMode {
+    #[default]
+    Primary,
+    Satellite,
+}
+
+/// The `[uplink]` table of a satellite.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UplinkConfig {
+    /// The primary's WebSocket URL, `ws://<host>:47101`.
+    pub url: String,
+    /// Where the satellite's bearer token lives (mode 0600).
+    pub token_path: PathBuf,
+    /// What this host publishes: `work` (metadata only, default) or `personal`.
+    pub egress: crate::ipc::devices::Egress,
+    /// Extra PHI repo names, added to [`DEFAULT_PHI_REPOS`].
+    pub phi_repos: Vec<String>,
+    /// Narrow what is published to these topics (default: all the profile allows).
+    pub publish_topics: Option<Vec<crate::ipc::protocol::Topic>>,
+    /// A local narrowing of the device-admin level the primary grants.
+    pub device_admin: crate::ipc::devices::SatelliteAdmin,
+}
+
+impl Default for UplinkConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            token_path: default_uplink_token_path(),
+            egress: crate::ipc::devices::Egress::Work,
+            phi_repos: Vec::new(),
+            publish_topics: None,
+            // A local narrowing: `full` narrows nothing.
+            device_admin: crate::ipc::devices::SatelliteAdmin::Full,
+        }
+    }
+}
+
+/// `~/.nostromo/uplink-token`.
+pub fn default_uplink_token_path() -> PathBuf {
+    nostromo_dir().join("uplink-token")
+}
+
+/// `~/.nostromo/uplink-tag-key`: the satellite's random key for pseudonymous
+/// focus tags.
+pub fn default_uplink_tag_key_path() -> PathBuf {
+    nostromo_dir().join("uplink-tag-key")
+}
+
+fn nostromo_dir() -> PathBuf {
+    home_dir().join(".nostromo")
+}
+
+/// What a satellite daemon runs with, once validated.
+#[derive(Debug, Clone)]
+pub struct SatelliteSetup {
+    pub host: String,
+    pub uplink: UplinkConfig,
+    /// [`DEFAULT_PHI_REPOS`] plus the configured additions.
+    pub phi_repos: Vec<String>,
+}
+
+/// A satellite binds loopback only: an address that is not loopback keeps its
+/// port and moves to `127.0.0.1`.
+pub fn loopback_only(addr: SocketAddr) -> SocketAddr {
+    if addr.ip().is_loopback() {
+        addr
+    } else {
+        SocketAddr::from(([127, 0, 0, 1], addr.port()))
+    }
+}
+
+/// A host name the router and the registry accept.
+pub fn valid_host_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= 16
+        && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 /// Top-level config struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -73,6 +165,19 @@ pub struct Config {
     /// code). Default: the bound WebSocket address if it is specific, otherwise
     /// the host's first non-loopback, non-link-local IPv4 address.
     pub pair_host: Option<String>,
+
+    /// What this daemon is: the `primary` (default) that devices pair with, or
+    /// a `satellite` that dials out to a primary and binds nothing off-loopback.
+    /// Overridden by `NOSTROMD_MODE`.
+    pub mode: DaemonMode,
+
+    /// The name this host publishes under when it is a satellite. Defaults to
+    /// the OS host name's first label, lower-cased; a `work` satellite must set
+    /// it explicitly (an MDM may name the machine after a person).
+    pub host_name: Option<String>,
+
+    /// The `[uplink]` table: where a satellite dials and what it may publish.
+    pub uplink: Option<UplinkConfig>,
 
     /// Folder whose children are your code repos (default: `~/Code`).
     ///
@@ -222,6 +327,9 @@ impl Default for Config {
             tcp_addr: None,
             ws_addr: None,
             pair_host: None,
+            mode: DaemonMode::Primary,
+            host_name: None,
+            uplink: None,
             code_root: None,
             agents: None,
             fred_accounts: None,
@@ -491,6 +599,63 @@ impl Config {
                 .join(".cache")
                 .join("nostromo")
                 .join("graph-token.json")
+        })
+    }
+
+    /// The mode this daemon runs in: `NOSTROMD_MODE` (`primary` or `satellite`),
+    /// else `mode`. An unrecognised env value is ignored.
+    pub fn resolved_mode(&self) -> DaemonMode {
+        match std::env::var(MODE_ENV)
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("satellite") => DaemonMode::Satellite,
+            Some("primary") => DaemonMode::Primary,
+            _ => self.mode,
+        }
+    }
+
+    /// The satellite's host name, validated, plus its `[uplink]` table (with
+    /// `NOSTROMD_UPLINK_URL` applied). Errors say what to fix; a `work`
+    /// satellite must name itself.
+    pub fn satellite_setup(&self) -> Result<SatelliteSetup> {
+        let mut uplink = self
+            .uplink
+            .clone()
+            .context("mode = \"satellite\" needs an [uplink] table with a url")?;
+        if let Ok(url) = std::env::var(UPLINK_URL_ENV) {
+            if !url.trim().is_empty() {
+                uplink.url = url.trim().to_string();
+            }
+        }
+        anyhow::ensure!(!uplink.url.is_empty(), "[uplink] url is not set");
+        let host = match (&self.host_name, uplink.egress) {
+            (Some(h), _) => h.clone(),
+            (None, crate::ipc::devices::Egress::Work) => anyhow::bail!(
+                "a work satellite needs an explicit host_name (a managed laptop's OS name may be a person's name)"
+            ),
+            (None, _) => hostname::get()
+                .ok()
+                .and_then(|h| h.into_string().ok())
+                .and_then(|h| h.split('.').next().map(str::to_ascii_lowercase))
+                .unwrap_or_default(),
+        };
+        anyhow::ensure!(
+            valid_host_name(&host),
+            "host_name must match ^[a-z][a-z0-9-]{{0,15}}$"
+        );
+        let mut phi_repos: Vec<String> = DEFAULT_PHI_REPOS.iter().map(|s| s.to_string()).collect();
+        for r in &uplink.phi_repos {
+            let r = r.trim().to_string();
+            if !r.is_empty() && !phi_repos.contains(&r) {
+                phi_repos.push(r);
+            }
+        }
+        Ok(SatelliteSetup {
+            host,
+            uplink,
+            phi_repos,
         })
     }
 

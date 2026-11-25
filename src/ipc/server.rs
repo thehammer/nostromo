@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -32,7 +32,7 @@ use uuid::Uuid;
 use super::{
     codec::{read_frame, write_frame},
     decisions::{AnswerOutcome, DecisionRegistry},
-    device_hub::{DeviceHub, Dispatched, HubSlot},
+    device_hub::{DeviceHub, Dispatched, HubCell, HubSlot},
     devices::SatelliteInfo,
     peer::{
         outbound, refuse_for_network, satellite_allowed, withheld_msg, withheld_msg_for,
@@ -241,7 +241,7 @@ impl Server {
         let held_for_loop = Arc::clone(&held_mother_jobs);
         let unix_peers = UnixPeers { verifier, qa_mode };
         let terminals_for_loop = Arc::clone(&terminals);
-        let hub: HubSlot = Arc::new(OnceLock::new());
+        let hub: HubSlot = Arc::new(HubCell::default());
         let hub_for_loop = Arc::clone(&hub);
         tokio::spawn(async move {
             if let Err(e) = accept_loop(
@@ -378,9 +378,107 @@ impl Server {
     }
 }
 
+impl Server {
+    /// Start a satellite's uplink: dial `setup.uplink.url` with the token in
+    /// `token_path`, publish this server's filtered broadcasts upstream and
+    /// answer the reads the primary routes back. Local admin verbs are relayed
+    /// through the same socket (see [`super::uplink::UplinkRelay`]).
+    pub fn bind_uplink(
+        &self,
+        setup: crate::config::SatelliteSetup,
+        tag_key_path: PathBuf,
+        session_mgr: Arc<Mutex<SessionManager>>,
+        perri_state_dir: PathBuf,
+        decisions: Arc<Mutex<DecisionRegistry>>,
+    ) {
+        let dispatch = LocalDispatch {
+            session_mgr: Arc::clone(&session_mgr),
+            perri_state_dir,
+            decisions,
+            held_mother_jobs: Arc::clone(&self.held_mother_jobs),
+            terminals: Arc::clone(&self.terminals),
+            broadcast_tx: self.tx.clone(),
+        };
+        let relay = super::uplink::UplinkRelay::new(setup.uplink.device_admin);
+        let _ = self.hub.set_relay(Arc::clone(&relay));
+        super::uplink::spawn(super::uplink::Env {
+            setup,
+            tag_key_path,
+            tx: self.tx.clone(),
+            sensitive: session_mgr.lock().unwrap().sensitive_tags(),
+            dispatch,
+            relay,
+        });
+    }
+}
+
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+/// What a satellite needs to run a read the primary routed down its uplink,
+/// as if a (network) client had sent it on a local socket.
+#[derive(Clone)]
+pub(super) struct LocalDispatch {
+    session_mgr: Arc<Mutex<SessionManager>>,
+    perri_state_dir: PathBuf,
+    decisions: Arc<Mutex<DecisionRegistry>>,
+    held_mother_jobs: HeldMotherJobs,
+    terminals: Arc<Mutex<TerminalManager>>,
+    broadcast_tx: broadcast::Sender<ServerMsg>,
+}
+
+impl LocalDispatch {
+    /// Register `conn_key` as a network client whose targeted frames (and
+    /// session fan-out) go to `tx`. A network client never closes a session's
+    /// merge gate (it is attached through `attach_network`).
+    pub(super) fn open_routed(&self, conn_key: &str, tx: &mpsc::UnboundedSender<ServerMsg>) {
+        let mut mgr = self.session_mgr.lock().unwrap();
+        mgr.client_sender_registry()
+            .lock()
+            .unwrap()
+            .insert(conn_key.to_string(), tx.clone());
+        mgr.set_client_merge_capable(conn_key, false);
+    }
+
+    /// Run a routed read under `PeerTrust::Routed`: exactly the refusals a TCP
+    /// peer gets (FND-1), then the same handler a local client's read reaches.
+    pub(super) fn run_routed(
+        &self,
+        msg: ClientMsg,
+        conn_key: &str,
+        tx: &mpsc::UnboundedSender<ServerMsg>,
+    ) {
+        let sensitive = self.session_mgr.lock().unwrap().sensitive_tags();
+        handle_client_msg(
+            msg,
+            PeerTrust::Routed,
+            None,
+            None,
+            &sensitive,
+            conn_key,
+            conn_key,
+            &self.session_mgr,
+            tx,
+            &self.broadcast_tx,
+            &self.perri_state_dir,
+            &self.decisions,
+            &self.held_mother_jobs,
+            None,
+            &self.terminals,
+        );
+    }
+
+    /// Forget a routed connection: detach it from every session.
+    pub(super) fn close_routed(&self, conn_key: &str) {
+        let mut mgr = self.session_mgr.lock().unwrap();
+        mgr.client_sender_registry()
+            .lock()
+            .unwrap()
+            .remove(conn_key);
+        mgr.on_client_disconnect(conn_key);
     }
 }
 
@@ -1057,6 +1155,14 @@ where
         });
     }
 
+    // A local client of a satellite that follows the device list is told the
+    // level the primary granted (narrowed locally) and the latest list.
+    if !trust.is_network() && hub.get().is_none() && topics.contains(&Topic::Devices) {
+        if let Some(relay) = hub.relay() {
+            relay.subscribe_devices(&conn_key, &targeted_tx);
+        }
+    }
+
     // ── Terminal stream ───────────────────────────────────────────────────────
     // A terminal's replay and output reach this connection only through this
     // bounded stream, and only an operator-app connection is registered for
@@ -1257,7 +1363,7 @@ where
     // A `Paired` device is replayed every retained frame its trust allows and
     // told once which topics are not shared.
     match trust {
-        PeerTrust::Tcp => replay_messages(&mut writer, [withheld_msg()]).await,
+        PeerTrust::Tcp | PeerTrust::Routed => replay_messages(&mut writer, [withheld_msg()]).await,
         // A satellite subscribes to the device list only; nothing is retained for it.
         PeerTrust::Satellite { .. } => {}
         PeerTrust::Paired => {
@@ -1471,7 +1577,7 @@ where
                             // Replay retained frames only for the topics this
                             // subscribe adds; a network peer gets none.
                             let mut frames = match trust {
-                                PeerTrust::Tcp | PeerTrust::Satellite { .. } => vec![],
+                                PeerTrust::Tcp | PeerTrust::Routed | PeerTrust::Satellite { .. } => vec![],
                                 PeerTrust::Paired => retained_matching(&retained, &new_topics, Some(&topics))
                                     .into_iter()
                                     .filter_map(|m| outbound(trust, m, &sensitive))
@@ -1497,6 +1603,15 @@ where
                                     level: crate::ipc::devices::SatelliteAdmin::Full,
                                     pair_from: vec![],
                                 });
+                            }
+                            if !trust.is_network()
+                                && hub.get().is_none()
+                                && new_topics.contains(&Topic::Devices)
+                                && !topics.contains(&Topic::Devices)
+                            {
+                                if let Some(relay) = hub.relay() {
+                                    relay.subscribe_devices(&conn_key, &targeted_tx);
+                                }
                             }
                             topics = new_topics;
                             replay_messages(&mut writer, frames).await;
@@ -1573,11 +1688,18 @@ where
                                 }
                                 Dispatched::NotHandled => {}
                             },
+                            // A satellite has no registry: its local clients' admin verbs
+                            // go up the uplink (answered `server_unreachable` when it is down).
                             None if !trust.is_network() && is_device_admin_verb(&msg) => {
-                                let _ = targeted_tx.send(ServerMsg::DeviceAdminError {
-                                    request_id: device_admin_request_id(&msg),
-                                    reason: "devices_unavailable".to_string(),
-                                });
+                                match hub.relay() {
+                                    Some(relay) => relay.relay_verb(msg, &conn_key, &targeted_tx),
+                                    None => {
+                                        let _ = targeted_tx.send(ServerMsg::DeviceAdminError {
+                                            request_id: device_admin_request_id(&msg),
+                                            reason: "devices_unavailable".to_string(),
+                                        });
+                                    }
+                                }
                                 continue;
                             }
                             None => {}
@@ -1626,6 +1748,10 @@ where
         claimed_id,
         conn_key, "client handler exiting; detaching sessions"
     );
+    // A pairing a satellite relayed for this client never outlives it either.
+    if let Some(relay) = hub.relay() {
+        relay.drop_connection(&conn_key);
+    }
     // A pairing never outlives the window or command that shows its code.
     if let Some(h) = hub.get() {
         h.drop_connection(&conn_key);
@@ -4483,6 +4609,7 @@ fn peer_json(trust: PeerTrust, peer: Option<&PeerInfo>) -> serde_json::Value {
             PeerTrust::LocalOther => "local_other",
             PeerTrust::Tcp => "tcp",
             PeerTrust::Paired => "paired",
+            PeerTrust::Routed => "routed",
             PeerTrust::Satellite { .. } => "satellite",
         },
     });
@@ -5078,7 +5205,7 @@ fn is_approval_frame(msg: &ServerMsg) -> bool {
     )
 }
 
-fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
+pub(super) fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
     match msg {
         // Presenters only (see `deliver_broadcast`): never by topic.
         ServerMsg::ApprovalRequest { .. }

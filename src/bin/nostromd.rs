@@ -352,8 +352,27 @@ async fn main() -> Result<()> {
     )
     .with_context(|| format!("binding IPC socket at {}", socket_path.display()))?;
 
+    // ── Mode ──────────────────────────────────────────────────────────────────
+    // A satellite dials out and binds nothing off-loopback: it is not
+    // discoverable, and it has no device registry of its own.
+    let satellite = match config.resolved_mode() {
+        nostromo::config::DaemonMode::Primary => None,
+        nostromo::config::DaemonMode::Satellite => Some(
+            config
+                .satellite_setup()
+                .context("satellite mode is misconfigured")?,
+        ),
+    };
+
     // ── IPC server (TCP — iOS / LAN clients) ──────────────────────────────────
-    let tcp_addr = config.tcp_listen_addr();
+    let mut tcp_addr = config.tcp_listen_addr();
+    if satellite.is_some() && !tcp_addr.ip().is_loopback() {
+        warn!(
+            addr = %tcp_addr,
+            "a satellite binds loopback only; ignoring the configured TCP address"
+        );
+        tcp_addr = nostromo::config::loopback_only(tcp_addr);
+    }
     let tcp_listener = tokio::net::TcpListener::bind(tcp_addr)
         .await
         .with_context(|| format!("binding TCP IPC listener at {tcp_addr}"))?;
@@ -387,6 +406,11 @@ async fn main() -> Result<()> {
         warn!("{warning}");
     }
     match config.ws_listen_addr() {
+        // A satellite has no registry to serve: its uplink goes out, and its
+        // local clients' device verbs are relayed to the primary.
+        Some(_) if satellite.is_some() => {
+            info!("satellite mode: no WebSocket listener")
+        }
         None => info!("WebSocket listener disabled (NOSTROMD_WS_ADDR=off)"),
         Some(ws_addr) => {
             // A busy port or an unreadable device registry must not take down
@@ -423,19 +447,37 @@ async fn main() -> Result<()> {
     // Advertise nostromd on the LAN so iOS clients can discover it without a
     // hardcoded IP.  Failure is non-fatal: some sandboxed or enterprise
     // environments block multicast.  The guard MUST outlive the select! below.
-    let _mdns_guard = match mdns::advertise(bound_tcp_addr.port()) {
-        Ok(guard) => {
-            info!(
-                port = bound_tcp_addr.port(),
-                "mDNS advertising started (_nostromo._tcp.local.)"
-            );
-            Some(guard)
-        }
-        Err(e) => {
-            warn!("mDNS advertising unavailable (non-fatal): {e:#}");
-            None
+    // A satellite advertises nothing: it must not be discoverable.
+    let _mdns_guard = if satellite.is_some() {
+        info!("satellite mode: no mDNS advertising");
+        None
+    } else {
+        match mdns::advertise(bound_tcp_addr.port()) {
+            Ok(guard) => {
+                info!(
+                    port = bound_tcp_addr.port(),
+                    "mDNS advertising started (_nostromo._tcp.local.)"
+                );
+                Some(guard)
+            }
+            Err(e) => {
+                warn!("mDNS advertising unavailable (non-fatal): {e:#}");
+                None
+            }
         }
     };
+
+    // ── Satellite uplink ──────────────────────────────────────────────────────
+    if let Some(setup) = satellite {
+        info!(host = %setup.host, egress = ?setup.uplink.egress, "satellite mode: dialing the primary");
+        server.bind_uplink(
+            setup,
+            nostromo::config::default_uplink_tag_key_path(),
+            Arc::clone(&session_mgr),
+            config.perri_state_dir(),
+            Arc::clone(&decisions),
+        );
+    }
 
     // ── Session crash-recovery supervisor ──────────────────────────────────────
     {

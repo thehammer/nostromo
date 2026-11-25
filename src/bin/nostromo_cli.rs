@@ -20,6 +20,25 @@ enum Command {
     /// Pair and manage phones, iPads and satellite Macs.
     #[command(subcommand)]
     Device(Device),
+    /// Enrol this Mac as a satellite of a primary.
+    #[command(subcommand)]
+    Uplink(Uplink),
+}
+
+#[derive(Subcommand)]
+enum Uplink {
+    /// Redeem a satellite enrolment code (from `nostromo device pair --satellite <host>`
+    /// on the primary) and save the token for the uplink.
+    Pair {
+        /// The primary's WebSocket URL, e.g. ws://10.0.0.5:47101
+        #[arg(long)]
+        url: String,
+        /// The code shown on the primary.
+        code: String,
+        /// Where to save the token (default: the `[uplink]` token_path, else ~/.nostromo/uplink-token).
+        #[arg(long)]
+        token_path: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -66,13 +85,17 @@ fn parse_egress(s: &str) -> Result<Egress, String> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let cli = Cli::parse();
-    let Some(Command::Device(device)) = cli.command else {
-        use clap::CommandFactory;
-        let _ = Cli::command().print_help();
-        println!();
-        return;
+    let result = match cli.command {
+        Some(Command::Device(device)) => run(device).await,
+        Some(Command::Uplink(uplink)) => run_uplink(uplink).await,
+        None => {
+            use clap::CommandFactory;
+            let _ = Cli::command().print_help();
+            println!();
+            return;
+        }
     };
-    let code = match run(device).await {
+    let code = match result {
         Ok(code) => code,
         Err(e) => {
             eprintln!("{e:#}");
@@ -104,4 +127,24 @@ async fn run(device: Device) -> anyhow::Result<i32> {
             device_cli::set_admin(&client, &host, level, &mut out).await
         }
     }
+}
+
+async fn run_uplink(uplink: Uplink) -> anyhow::Result<i32> {
+    let Uplink::Pair {
+        url,
+        code,
+        token_path,
+    } = uplink;
+    let config = nostromo::config::Config::load(None)?;
+    let host = config.satellite_setup().map(|s| s.host).or_else(|_| {
+        config
+            .host_name
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("set host_name in config.toml first"))
+    })?;
+    let token_path = token_path
+        .or_else(|| config.uplink.as_ref().map(|u| u.token_path.clone()))
+        .unwrap_or_else(nostromo::config::default_uplink_token_path);
+    let mut out = std::io::stdout();
+    nostromo::uplink_cli::pair(&url, &code, &host, &token_path, &mut out).await
 }
