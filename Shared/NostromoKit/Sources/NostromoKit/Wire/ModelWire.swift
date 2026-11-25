@@ -395,8 +395,10 @@ public struct ClientModelDefaultsRequest: Encodable {
 public struct ClientSessionModelGet: Encodable {
     let type_ = "session_model_get"
     public let tag: String
-    public init(tag: String) { self.tag = tag }
-    enum CodingKeys: String, CodingKey { case type_ = "type", tag }
+    /// W10: the satellite host that owns `tag`. `nil` omits the field.
+    public let host: String?
+    public init(tag: String, host: String? = nil) { self.tag = tag; self.host = host }
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag, host }
 }
 
 /// `ClientMsg::SessionModelSet` (refused over TCP). `nil` model or effort
