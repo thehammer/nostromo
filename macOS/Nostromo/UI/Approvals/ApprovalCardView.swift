@@ -265,6 +265,9 @@ final class ApprovalCardView: NSView {
     private let gesture: SessionRuleGesture
     private let currentEvent: () -> NSEvent?
     private var selectionGeneration = 0
+    /// How long a pick stands before it reverts; production keeps `SessionRuleGesture.selectionLifetime`,
+    /// a test shortens it instead of sleeping.
+    var selectionLifetime: TimeInterval = SessionRuleGesture.selectionLifetime
     private let sessionRuleLabel = NSTextField(wrappingLabelWithString: "")
     private let sessionSummaryLabel = NSTextField(wrappingLabelWithString: "")
     private let sessionScopeLabel = NSTextField(wrappingLabelWithString: "")
@@ -701,7 +704,7 @@ final class ApprovalCardView: NSView {
             selectionGeneration += 1
             let generation = selectionGeneration
             showSessionPanel(for: candidate)
-            DispatchQueue.main.asyncAfter(deadline: .now() + SessionRuleGesture.selectionLifetime) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + selectionLifetime) { [weak self] in
                 guard let self, self.selectionGeneration == generation else { return }
                 self.clearSessionSelection()
             }
@@ -848,7 +851,7 @@ final class ApprovalCardView: NSView {
     private func armAlwaysExpiry() {
         alwaysGeneration += 1
         let generation = alwaysGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + SessionRuleGesture.selectionLifetime) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + selectionLifetime) { [weak self] in
             guard let self, self.alwaysGeneration == generation else { return }
             self.closeAlwaysPanel()
         }
