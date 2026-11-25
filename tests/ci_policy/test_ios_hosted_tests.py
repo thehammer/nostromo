@@ -325,7 +325,7 @@ def check_scheme(scheme_text, pbx):
     if app is None:
         out.append("no build entry for the app target")
     else:
-        for k in ("buildForRunning", "buildForArchiving"):
+        for k in ("buildForTesting", "buildForRunning", "buildForArchiving"):
             if app.get(k) != "YES":
                 out.append("app build entry has %s=%r, must stay YES" % (k, app.get(k)))
     tests = entry(TESTS)
@@ -337,12 +337,31 @@ def check_scheme(scheme_text, pbx):
         for k in ("buildForRunning", "buildForProfiling", "buildForArchiving", "buildForAnalyzing"):
             if tests.get(k) != "NO":
                 out.append("tests build entry has %s=%r, must be NO (tests only build for testing)" % (k, tests.get(k)))
-    testable = [t for t in root.iter("TestableReference")
-                if any(r.get("BlueprintName") == TESTS for r in t.iter("BuildableReference"))]
-    if not testable:
+    testables = list(root.iter("TestableReference"))
+    names = []
+    for t in testables:
+        for r in t.iter("BuildableReference"):
+            ident, name = r.get("BlueprintIdentifier"), r.get("BlueprintName")
+            names.append(name)
+            if targets.get(ident) != name:
+                out.append("Testable %s/%s matches no PBXNativeTarget of that id and name" % (ident, name))
+            if t.get("skipped") == "YES":
+                out.append("Testable %s is marked skipped" % name)
+    if TESTS not in names:
         out.append("TestAction has no Testable for NostromoTests")
-    elif testable[0].get("skipped") == "YES":
-        out.append("the NostromoTests Testable is marked skipped")
+    test_action = root.find("TestAction")
+    if test_action is None:
+        out.append("scheme has no TestAction")
+    elif test_action.get("buildConfiguration") != "Debug":
+        out.append("TestAction buildConfiguration is %r, must be Debug (ENABLE_TESTABILITY is Debug-only, "
+                   "so `@testable import Nostromo` would break)" % test_action.get("buildConfiguration"))
+    tests_id = next((i for i, n in targets.items() if n == TESTS), None)
+    app_id = next((i for i, n in targets.items() if n == APP), None)
+    attrs = re.search(r"TargetAttributes = \{", pbx)
+    attr_body = _block(pbx, attrs.start()) if attrs else ""
+    m = re.search(r"\b%s = \{(.*?)\};" % re.escape(tests_id or "?"), attr_body, re.S)
+    if m is None or _setting(m.group(1), "TestTargetID") != app_id:
+        out.append("PBXProject TargetAttributes for NostromoTests lacks TestTargetID = the app target id (%s)" % app_id)
     return out
 
 
@@ -397,6 +416,11 @@ class RealTreeTests(unittest.TestCase):
 
     def test_makefile_ios_test_target_is_hermetic_scratch_aware_and_guards_against_zero_tests(self):
         self.assertEqual(check_makefile_ios_test(_read(MAKEFILE)), [])
+
+    def test_scheme_tests_in_debug_and_project_links_the_test_target_to_the_app(self):
+        scheme, pbx = _read(SCHEME), _read(PBXPROJ)
+        self.assertEqual(ET.fromstring(scheme).find("TestAction").get("buildConfiguration"), "Debug")
+        self.assertEqual(check_scheme(scheme, pbx), [])
 
     def test_shared_scheme_tests_the_bundle_and_builds_it_for_testing_only(self):
         self.assertTrue(os.path.exists(SCHEME), "shared scheme file is missing")
@@ -546,6 +570,34 @@ class SchemeBites(unittest.TestCase):
 
     def test_app_no_longer_built_for_running(self):
         self.assertTrue(check_scheme(_mutate(self.scheme, 'buildForRunning = "YES"', 'buildForRunning = "NO"'), self.pbx))
+
+    def test_app_not_built_for_testing(self):
+        self.assertTrue(check_scheme(_mutate(self.scheme, 'buildForTesting = "YES"', 'buildForTesting = "NO"'), self.pbx))
+
+    def test_test_action_uses_release(self):
+        m = _mutate(self.scheme, 'buildConfiguration = "Debug"', 'buildConfiguration = "Release"', after="<TestAction")
+        self.assertTrue(check_scheme(m, self.pbx))
+
+    def test_scheme_without_test_action(self):
+        a = self.scheme.index("<TestAction")
+        b = self.scheme.index("</TestAction>") + len("</TestAction>")
+        self.assertTrue(check_scheme(self.scheme[:a] + self.scheme[b:], self.pbx))
+
+    def test_test_target_id_removed_or_wrong(self):
+        self.assertTrue(check_scheme(self.scheme, _mutate(self.pbx, "\t\t\t\t\t\tTestTargetID = AA000001000000000000003A;\n", "")))
+        self.assertTrue(check_scheme(self.scheme, _mutate(self.pbx, "TestTargetID = AA000001000000000000003A;", "TestTargetID = AC000001000000000000000A;")))
+
+    def test_a_second_testable_with_a_dangling_reference_is_caught(self):
+        extra = ('<TestableReference skipped = "NO"><BuildableReference BuildableIdentifier = "primary" '
+                 'BlueprintIdentifier = "DEAD" BuildableName = "X.xctest" BlueprintName = "Ghost" '
+                 'ReferencedContainer = "container:Nostromo.xcodeproj"></BuildableReference></TestableReference>')
+        self.assertTrue(check_scheme(_mutate(self.scheme, "</Testables>", extra + "</Testables>"), self.pbx))
+
+    def test_a_second_skipped_testable_is_caught(self):
+        extra = ('<TestableReference skipped = "YES"><BuildableReference BuildableIdentifier = "primary" '
+                 'BlueprintIdentifier = "AA000001000000000000003A" BuildableName = "Nostromo.app" BlueprintName = "Nostromo" '
+                 'ReferencedContainer = "container:Nostromo.xcodeproj"></BuildableReference></TestableReference>')
+        self.assertTrue(check_scheme(_mutate(self.scheme, "</Testables>", extra + "</Testables>"), self.pbx))
 
     def test_tests_entry_built_for_running(self):
         old = 'buildForRunning = "NO"'

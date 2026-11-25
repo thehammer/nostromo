@@ -1,12 +1,14 @@
-// L5: needs a running iOS app process: the app launches under the XCTest host, UIKit's
-// application delegate exists, and the app module's launch-time wiring (ConnectionSettings ->
-// NetworkClient) runs against real UserDefaults. Nothing here can run under `swift test`.
+// L5: needs a running iOS app process: the test bundle links against the app module
+// (`@testable import Nostromo`) and calls app code and UIKit's application delegate inside the
+// iOS process the app launched in. Nothing here can run under `swift test`.
 //
 // Smoke test for the hosted target (docs/ios-verification.md, L5). The app is a SwiftUI
-// `@main App`, so there is no hand-written app delegate to call; the honest equivalent of "the
-// app delegate launches" is that UIKit's own delegate for the SwiftUI app is live in this
-// process, and that the same two calls `NostromoApp.store` makes on launch (load the saved
-// connection settings, construct `NetworkClient`) succeed.
+// `@main App`, so there is no hand-written app delegate to call. What this file shows:
+//   - UIKit's delegate for the SwiftUI app is live, i.e. the host app really launched;
+//   - the test bundle can reach the app module's code (`ConnectionSettings`), and the same
+//     `NetworkClient` construction `NostromoApp.store` performs succeeds in the iOS process.
+// It does NOT show that `NostromoApp`'s own initialiser ran (the test calls the same functions
+// itself). That the bundle is hosted in the app at all is `HostedHarnessTests`' job.
 
 import XCTest
 import UIKit
@@ -21,13 +23,12 @@ final class NostromoSmokeTests: XCTestCase {
                         "the SwiftUI app's UIKit delegate must exist once the host app has launched")
     }
 
-    func testLaunchPathConstructsNetworkClientFromSavedSettings() {
+    func testNetworkClientConstructsFromTheAppsConnectionSettings() {
         let (host, port) = ConnectionSettings.load()
         XCTAssertFalse(host.isEmpty)
-        XCTAssertNotEqual(port, 0)
 
-        // Same call NostromoApp's `store` initialiser makes. It must not open a connection on
-        // construction: the app starts it later, from onAppear.
+        // The call NostromoApp's `store` initialiser makes. Construction must not open a
+        // connection: the app starts it later, from onAppear.
         let client = NetworkClient(host: host, port: port)
         XCTAssertFalse(client.connected)
         XCTAssertEqual(client.host, host)

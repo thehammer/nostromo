@@ -21,7 +21,8 @@
 // summing to 1) — the layout DECISION is a pure function tested by
 // `LayoutPlanTests` with no device and no simulator, and this file's job is
 // to obey it. That division of labour is the only defence this wedge has:
-// there is no iOS test target and no simulator in CI.
+// the iOS test target (L5, docs/ios-verification.md) is scoped to behaviour
+// that needs an iOS process, and layout and rendering are not that.
 //
 // D6 — THE DIVIDER IS A SEPARATOR, NOT A HANDLE. There is deliberately no
 // drag gesture, no grab affordance, no hover or press feedback, no

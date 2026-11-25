@@ -596,7 +596,7 @@ locally — every layout decision remains the daemon-side placement engine's
 alone (see `nostromo.show` above).
 
 See `docs/ios-verification.md` for how this rendering is verified given
-`iOS/Nostromo.xcodeproj` has no test target.
+`iOS/Nostromo.xcodeproj`'s only test target (L5) is scoped to iOS-process behaviour, not rendering.
 
 Ambient activity (`ios-curated-view-parity` W4) is a related but separate
 surface, deliberately not a pane or a tab: the `activity` view type never

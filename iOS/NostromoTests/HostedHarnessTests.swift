@@ -24,9 +24,9 @@ final class HostedHarnessTests: XCTestCase {
     }
 
     func testUIApplicationExistsInAnIOSProcess() {
-        // `UIApplication.shared` is only usable inside an iOS app process; host-less it traps.
-        let state = UIApplication.shared.applicationState
-        XCTAssertTrue([.active, .inactive, .background].contains(state))
-        XCTAssertEqual(UIDevice.current.systemName, "iOS")
+        // `UIApplication.shared` is only usable inside an iOS app process; in a host-less bundle
+        // there is no application object to ask. `systemName` is "iPadOS" on an iPad simulator.
+        XCTAssertNotNil(UIApplication.shared.delegate)
+        XCTAssertTrue(["iOS", "iPadOS"].contains(UIDevice.current.systemName))
     }
 }

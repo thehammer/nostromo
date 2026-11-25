@@ -275,7 +275,11 @@ backplane's runtime surface only, and the rule is made visible and checked:
    access group, the URL, the protection attribute) and check the assertion
    still bites. A test that passes either way is an L1 test in the wrong place.
 4. Does it avoid the network, the real Keychain contents of the developer, and
-   wall-clock sleeps? L5 runs on a stock runner with no daemon.
+   wall-clock sleeps? L5 runs on a stock runner with no daemon. Note the host
+   app really launches `ContentView` under the test host: on a simulator whose
+   defaults already hold a saved daemon host it will try to connect, so a local
+   `make ios-test` is only hermetic on a simulator that has never been pointed
+   at a daemon (a fresh one shows the discovery sheet instead).
 5. Does the PR body say what L5 does *not* show (for example, behaviour that
    differs on a real device, such as Keychain on a locked phone or APNs
    delivery)? The simulator is not a device.
@@ -291,16 +295,17 @@ softer approximation of the device's — and anything perceptual (see the
 worked example below). A green L5 means "this iOS-process behaviour holds on
 the Simulator," not "the app works on the phone."
 
-**What is in it today:** two smoke tests. `NostromoSmokeTests` proves the
-launch path runs: the app is a SwiftUI `@main App` with no hand-written app
-delegate, so the honest equivalent of "the app delegate launches" is that
-UIKit's delegate for the app is live and that the calls `NostromoApp` makes
-at launch (load `ConnectionSettings`, construct `NetworkClient`) succeed.
-`HostedHarnessTests` proves the bundle really runs hosted in the app inside
-an iOS process (main bundle is `com.hammer.nostromo.ios`, `UIApplication`
-exists, the test case lives in an `.xctest` bundle). Both carry `// L5:`
-headers. Nothing else is in L5 until W11 adds the first real runtime
-behaviour.
+**What is in it today:** two smoke files. `NostromoSmokeTests`: the app is a
+SwiftUI `@main App` with no hand-written app delegate, so the honest equivalent
+of "the app delegate launches" is that UIKit's delegate for the app is live in
+the process, and that the bundle can reach app-module code (`ConnectionSettings`)
+and construct `NetworkClient` the way `NostromoApp` does. It does not show that
+`NostromoApp`'s own initialiser ran; the test calls the same functions itself.
+`HostedHarnessTests` is what proves the bundle really runs hosted in the app
+inside an iOS process (the main bundle is `com.hammer.nostromo.ios`, the test
+case lives in a separate `.xctest` bundle, `UIApplication` has a delegate). Both
+carry `// L5:` headers. Nothing else is in L5 until W11 adds the first real
+runtime behaviour.
 
 ## Worked example: ambient activity (W4)
 
