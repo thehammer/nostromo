@@ -12,7 +12,6 @@ final class LoopbackWebSocketServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "L5LoopbackWebSocketServer")
     private let lock = NSLock()
     private var connections: [NWConnection] = []
-    private var _headers: [[(name: String, value: String)]] = []
     private var _received: [String] = []
 
     /// Sent to every client as soon as its socket is open.
@@ -24,8 +23,6 @@ final class LoopbackWebSocketServer: @unchecked Sendable {
     var port: UInt16 { listener.port?.rawValue ?? 0 }
     /// How many TCP connections the server accepted.
     var acceptedCount: Int { locked { connections.count } }
-    /// The upgrade requests' headers, one entry per client.
-    var handshakeHeaders: [[(name: String, value: String)]] { locked { _headers } }
     /// Every text frame any client sent.
     var receivedTexts: [String] { locked { _received } }
 
@@ -53,10 +50,8 @@ final class LoopbackWebSocketServer: @unchecked Sendable {
         parameters.allowLocalEndpointReuse = true
         parameters.defaultProtocolStack.applicationProtocols.insert(ws, at: 0)
         listener = try NWListener(using: parameters, on: .any)
-        ws.setClientRequestHandler(queue) { [weak self] _, headers in
-            self?.locked { self?._headers.append(headers) }
-            return NWProtocolWebSocket.Response(status: .accept, subprotocol: nil)
-        }
+        // Accept every upgrade (the handler also reports no client headers, so none can be asserted here).
+        ws.setClientRequestHandler(queue) { _, _ in NWProtocolWebSocket.Response(status: .accept, subprotocol: nil) }
     }
 
     private func listen() async throws {

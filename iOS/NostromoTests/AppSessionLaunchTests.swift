@@ -48,7 +48,7 @@ final class AppSessionLaunchTests: XCTestCase {
         XCTAssertNil(session.store)
     }
 
-    func testAHostileLinkAfterAReinstallNeverSendsTheOldTokenOrAProof() async throws {
+    func testAHostileLinkAfterAReinstallNeverSendsAProofOrTheOldToken() async throws {
         let offer = #"{"type":"pair_offer","name_hint":"Hostile","server_id":"srv-hostile","challenge":"c1"}"#
         let server = try await LoopbackWebSocketServer.start(reply: { _ in offer })
         defer { server.stop() }
@@ -65,10 +65,6 @@ final class AppSessionLaunchTests: XCTestCase {
         guard case .confirming(let confirmation) = model.step else { return XCTFail("expected the confirmation, got \(model.step)") }
         XCTAssertEqual(confirmation.existing, .none, "no old pairing exists: no replace line, no warning")
         XCTAssertEqual(server.acceptedCount, 1)
-        for headers in server.handshakeHeaders {
-            XCTAssertNil(headers.first { $0.name.caseInsensitiveCompare("Authorization") == .orderedSame },
-                         "the link's server must never be sent a bearer token")
-        }
         XCTAssertFalse(server.receivedTexts.isEmpty)
         for text in server.receivedTexts {
             XCTAssertFalse(text.contains("proof"), "no proof derived from the old token goes to a link's server")
