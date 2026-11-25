@@ -221,6 +221,9 @@ public final class DaemonStore: ObservableObject {
     /// across a drop and clears the screen on disconnect, as it always has).
     private let cache: ContentCache?
     private var needsYou: [String: NeedsYouAggregator] = [:]
+    /// Set by `wipeAll()`: a frame already in flight must not refill the store or the cache after a
+    /// wipe. Cleared by the next live connection.
+    private var isWiped = false
 
     // MARK: - Init
 
@@ -321,6 +324,7 @@ public final class DaemonStore: ObservableObject {
             .sink { [weak self] isConnected in
                 self?.connected = isConnected
                 if isConnected {
+                    self?.isWiped = false
                     self?.isStale = false
                     self?.lastKnownAt = nil
                     // Request the current session list immediately after connecting.
@@ -368,6 +372,7 @@ public final class DaemonStore: ObservableObject {
         client.framePublisher
             .receive(on: RunLoop.main)
             .sink { [weak self] frame in
+                guard self?.isWiped == false else { return }
                 if let raw = frame.raw { self?.cache?.record(host: frame.host, raw: raw) }
                 self?.handle(frame.msg, host: frame.host)
             }
@@ -433,6 +438,7 @@ public final class DaemonStore: ObservableObject {
     /// Forgets everything shown and deletes the cache file. Called when the pairing is gone (revoke,
     /// un-pair, pairing with a different server): after it, memory and disk hold no Nostromo content.
     public func wipeAll() {
+        isWiped = true
         cache?.wipe()
         clearLastKnownContent()
         focusLayouts = [:]

@@ -96,9 +96,12 @@ final class DaemonStoreBackplaneTests: XCTestCase {
     }
 
     private func makeStore(cache: ContentCache? = nil,
-                           transport: FakeDaemonTransport = FakeDaemonTransport()) async
+                           transport suppliedTransport: FakeDaemonTransport? = nil) async
         -> (store: DaemonStore, transport: FakeDaemonTransport) {
-        let store = DaemonStore(client: transport, cache: cache)
+        let (store, transport) = await MainActor.run { () -> (DaemonStore, FakeDaemonTransport) in
+            let transport = suppliedTransport ?? FakeDaemonTransport()
+            return (DaemonStore(client: transport, cache: cache), transport)
+        }
         await letMainLoopTurn()   // the transport's initial "disconnected" is delivered first
         return (store, transport)
     }
