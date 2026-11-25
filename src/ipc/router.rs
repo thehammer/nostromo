@@ -142,11 +142,139 @@ pub fn server_msg_host(msg: &ServerMsg) -> Option<Option<&str>> {
     })
 }
 
-/// The focus tag a frame is about, for the variants that carry one.
-fn reply_tag(msg: &ServerMsg) -> Option<String> {
-    serde_json::to_value(msg)
-        .ok()
-        .and_then(|v| v.get("tag").and_then(|t| t.as_str().map(String::from)))
+/// What a frame says about which focus it concerns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsgTag<'a> {
+    /// The frame is about this one focus.
+    Tag(&'a str),
+    /// It names no single focus: daemon-wide state, an administrative frame,
+    /// or a list carrying many focuses (a list is filtered entry by entry).
+    Untagged,
+    /// A focus-scoped frame that carries no tag on this occurrence. A filter
+    /// must treat it as unclassifiable and fail closed.
+    Missing,
+}
+
+/// The focus tag a frame is about, decided per variant. The match is
+/// exhaustive on purpose: a new `ServerMsg` variant does not compile until it
+/// is classified here, so a new focus-scoped frame cannot skip a tag-based
+/// egress or reply check (a JSON `"tag"` key lookup misses `Activity`, whose
+/// tag is `focus_tag`).
+pub fn server_msg_tag(msg: &ServerMsg) -> MsgTag<'_> {
+    fn opt(t: &Option<String>) -> MsgTag<'_> {
+        t.as_deref().map_or(MsgTag::Missing, MsgTag::Tag)
+    }
+    match msg {
+        ServerMsg::PerriState { tag, .. }
+        | ServerMsg::SessionSpawned { tag, .. }
+        | ServerMsg::SessionTurns { tag, .. }
+        | ServerMsg::SessionTurnDelta { tag, .. }
+        | ServerMsg::SessionTurnOrigin { tag, .. }
+        | ServerMsg::SessionState { tag, .. }
+        | ServerMsg::SessionBridge { tag, .. }
+        | ServerMsg::SessionExited { tag, .. }
+        | ServerMsg::SessionDown { tag, .. }
+        | ServerMsg::SessionSummaryUpdate { tag, .. }
+        | ServerMsg::FocusLayout { tag, .. }
+        | ServerMsg::PaneContent { tag, .. }
+        | ServerMsg::DecisionRequest { tag, .. }
+        | ServerMsg::DecisionResolved { tag, .. }
+        | ServerMsg::ApprovalRequest { tag, .. }
+        | ServerMsg::ApprovalPreview { tag, .. }
+        | ServerMsg::ApprovalResolved { tag, .. }
+        | ServerMsg::ApprovalSessionRules { tag, .. }
+        | ServerMsg::ApprovalPending { tag, .. }
+        | ServerMsg::ApprovalGuardBlocked { tag, .. }
+        | ServerMsg::PaneActionResult { tag, .. }
+        | ServerMsg::Notification { tag, .. }
+        | ServerMsg::ActivitySnapshot { tag, .. }
+        | ServerMsg::SessionQueue { tag, .. }
+        | ServerMsg::SessionQueueResult { tag, .. }
+        | ServerMsg::SessionQueueReturned { tag, .. }
+        | ServerMsg::SessionTasks { tag, .. }
+        | ServerMsg::SessionTaskDetail { tag, .. }
+        | ServerMsg::SessionCommands { tag, .. }
+        | ServerMsg::ConversationResumeFailed { tag, .. }
+        | ServerMsg::SessionTaskStopResult { tag, .. }
+        | ServerMsg::SessionMcpResult { tag, .. }
+        | ServerMsg::SessionTaskOutputResult { tag, .. }
+        | ServerMsg::TrackerBoard { tag, .. }
+        | ServerMsg::TrackerEditResult { tag, .. }
+        | ServerMsg::TrackerSummary { tag, .. } => MsgTag::Tag(tag),
+        ServerMsg::TerminalStagingList { owner_tag, .. } => MsgTag::Tag(owner_tag),
+        ServerMsg::ConversationResumeResult { tag, .. }
+        | ServerMsg::RemoteShellConfirmRequest { tag, .. } => opt(tag),
+        ServerMsg::Activity(event) => opt(&event.focus_tag),
+        // LocalOnly, and pinned by a source scan to appear only as `{ .. }`:
+        // never forwarded, and unclassifiable here.
+        ServerMsg::SessionPermissionRequest { .. } => MsgTag::Missing,
+        ServerMsg::SessionModelState(state) => MsgTag::Tag(&state.tag),
+        ServerMsg::TerminalState { terminal } => MsgTag::Tag(&terminal.tag),
+        ServerMsg::TerminalClosed(closed) => MsgTag::Tag(&closed.tag),
+        // Many focuses (or none): judged entry by entry by the filter.
+        ServerMsg::MotherJobs { .. }
+        | ServerMsg::SessionListResp { .. }
+        | ServerMsg::FocusListResp { .. }
+        | ServerMsg::FocusRegistryUpdated { .. }
+        | ServerMsg::FocusCreated { .. }
+        | ServerMsg::MotherNoticeState { .. }
+        | ServerMsg::MotherStatusline(_)
+        | ServerMsg::MotherAwaitDetected(_) => MsgTag::Untagged,
+        // Daemon-wide, administrative or bookkeeping: no focus.
+        ServerMsg::Welcome { .. }
+        | ServerMsg::TeriState { .. }
+        | ServerMsg::FredState { .. }
+        | ServerMsg::Pong
+        | ServerMsg::Error { .. }
+        | ServerMsg::MotherPeek { .. }
+        | ServerMsg::ApprovalsSnapshot { .. }
+        | ServerMsg::ApprovalRules { .. }
+        | ServerMsg::ApprovalsLogPage { .. }
+        | ServerMsg::ApprovalsLogDetail { .. }
+        | ServerMsg::ApprovalsLogRefused { .. }
+        | ServerMsg::ApprovalAnswerRefused { .. }
+        | ServerMsg::ClaudeLoginState { .. }
+        | ServerMsg::ActivityHealth { .. }
+        | ServerMsg::WorkSourceStatus { .. }
+        | ServerMsg::WorkSnapshot { .. }
+        | ServerMsg::TeriPicks { .. }
+        | ServerMsg::WorkDetail { .. }
+        | ServerMsg::WorkSendPreview { .. }
+        | ServerMsg::WorkSendResult { .. }
+        | ServerMsg::Withheld { .. }
+        | ServerMsg::ModelCatalog { .. }
+        | ServerMsg::ModelDefaults { .. }
+        | ServerMsg::ModelRequestResult { .. }
+        | ServerMsg::ConversationHistory { .. }
+        | ServerMsg::ConversationHistoryChanged { .. }
+        | ServerMsg::TerminalList { .. }
+        | ServerMsg::TerminalReplay { .. }
+        | ServerMsg::TerminalOutput { .. }
+        | ServerMsg::TerminalRefused { .. }
+        | ServerMsg::TerminalRemoteSummary { .. }
+        | ServerMsg::RemoteShellTargets { .. }
+        | ServerMsg::RemoteShellResolved { .. }
+        | ServerMsg::DaemonReconnected
+        | ServerMsg::AuthoredPrPreview { .. }
+        | ServerMsg::AuthoredPrNotifyResult { .. }
+        | ServerMsg::AuthoredPrStartSessionResult { .. }
+        | ServerMsg::AuthoredPrLinkResult { .. }
+        | ServerMsg::AuthoredPrMergeResult { .. }
+        | ServerMsg::AuthoredPrs { .. }
+        | ServerMsg::PairOffer { .. }
+        | ServerMsg::Paired { .. }
+        | ServerMsg::PairRefused { .. }
+        | ServerMsg::Unauthorized { .. }
+        | ServerMsg::DeviceUnpaired
+        | ServerMsg::DevicePairing { .. }
+        | ServerMsg::DevicePairOutcome { .. }
+        | ServerMsg::Devices { .. }
+        | ServerMsg::DeviceRevoked { .. }
+        | ServerMsg::DeviceAdminError { .. }
+        | ServerMsg::Hosts { .. }
+        | ServerMsg::HostUnavailable { .. }
+        | ServerMsg::DeviceAdminLevel { .. } => MsgTag::Untagged,
+    }
 }
 
 fn msg_type(msg: &ServerMsg) -> String {
@@ -694,9 +822,11 @@ impl Router {
                 }
             }
             // A reply that names a focus names the one the request asked about.
-            if let (Some(asked), Some(answered)) = (entry.tag.as_deref(), reply_tag(&msg)) {
-                if asked != answered {
-                    return Err(ReplyDrop::WrongTag);
+            if let Some(asked) = entry.tag.as_deref() {
+                match server_msg_tag(&msg) {
+                    MsgTag::Tag(answered) if answered != asked => return Err(ReplyDrop::WrongTag),
+                    MsgTag::Missing => return Err(ReplyDrop::WrongTag),
+                    _ => {}
                 }
             }
             if !unchanged_by_tcp_outbound(&msg, tags) {

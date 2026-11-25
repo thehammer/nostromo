@@ -2063,6 +2063,13 @@ impl SessionManager {
         self.attach(tag, client_id)
     }
 
+    /// The ids of the connections attached as network peers. For integration
+    /// tests: a routed read's key must be among them.
+    #[doc(hidden)]
+    pub fn network_client_ids_for_test(&self) -> Vec<String> {
+        self.network_clients.iter().cloned().collect()
+    }
+
     /// Detach `client_id` from `tag` (the child keeps running).
     pub fn detach(&mut self, tag: &str, client_id: &str) {
         if let Some(session) = self.sessions.get_mut(tag) {

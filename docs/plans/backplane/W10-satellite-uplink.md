@@ -1240,3 +1240,13 @@ lenses:
   when its last uplink ends or it is revoked. Finished focuses are not
   pruned from the retained cache before then: the per-host cap (512) bounds
   them.
+
+## Fix round 1 (PR #533 review)
+
+- **Frame tags are decided per variant.** `router::server_msg_tag` is an exhaustive match over `ServerMsg`; the forwarder and the primary's reply check share it (a new variant does not compile until it is classified). `Activity` is judged by `focus_tag`; a focus-scoped frame with no tag, an unknown tag and a `cwd` inside a PHI repo are all kept home.
+- **The replay cache holds raw frames** and every one is judged again at replay (registry and sensitive tags of that moment). Entries for tags the registry dropped are evicted.
+- **Backoff resets only after a session that stayed up 30 s**, so a primary that welcomes and then closes (1008, 4001, 1009) is not redialled every second.
+- **Secrets:** the tag key and the uplink token must be mode 0600 or the uplink refuses (the key is created by temp file and link, never partial; a short or empty key is refused, not regenerated).
+- **Bounds:** 1024 queued publishes, 256 queued verbs/replies (a frame that does not fit is dropped and counted, never waited for); at most 32 open routed reads, ids at most 128 bytes.
+- **What PHI matching covers.** A focus: a path component or project name naming a PHI repo (or `repo-*` / `repo.*` checkouts), or a worktree whose `.git` file points into one. A Mother job: its repo, plan path, PR URL, or the focus that queued it (name, or tag; an origin focus the registry does not hold is withheld). Not matched: a PHI repo's checkout under an unrelated directory name that is not a worktree of it (add that name to `phi_repos`), and the git remote of a plain clone.
+- **Open item for the operator (W10-9):** the `uplink: disconnected` status frame still needs a new `ServerMsg` variant, which is outside W10c.
