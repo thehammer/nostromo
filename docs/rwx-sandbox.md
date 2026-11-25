@@ -23,7 +23,8 @@ Run these from the worktree root. Give each tool call a 10-minute timeout.
 | One test (or module) | `rwx sandbox exec -- cargo test --lib <path::to::test>` |
 | One integration test file | `rwx sandbox exec -- cargo test --test <name>` (a file in `tests/`) |
 | Whole lib suite | `rwx sandbox exec -- cargo test --lib` |
-| Full suite (lib, integration, doc tests) | `rwx sandbox exec -- cargo test` |
+| Full suite, exactly as CI runs it | `rwx sandbox exec -- cargo nextest run --no-fail-fast`, then `rwx sandbox exec -- cargo test --doc` (nextest skips doc tests); install nextest first, see below |
+| Full suite under libtest (slower, same tests) | `rwx sandbox exec -- cargo test` |
 | Clippy, exactly as CI runs it | `rwx sandbox exec -- cargo clippy --all-targets -- -D warnings` |
 | Python tooling | `rwx sandbox exec -- make python-test` (see §5 for how Linux differs from CI) |
 | List sandboxes | `rwx sandbox list` |
@@ -31,11 +32,23 @@ Run these from the worktree root. Give each tool call a 10-minute timeout.
 | Stop (frees the vCPUs) | `rwx sandbox stop` (check `rwx sandbox list` afterwards; if it still says `active`, run `stop` again) |
 | Watch setup / open the run | `rwx sandbox exec --open -- true` |
 
+cargo-nextest is not in the sandbox image; install the version CI pins (`ci.yml`,
+`cargo-nextest@X.Y.Z`) once per sandbox (a reset or restart from the layer loses it):
+
+```bash
+rwx sandbox exec -- bash -c 'curl -LsSf https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.152/cargo-nextest-0.9.152-x86_64-unknown-linux-gnu.tar.gz | tar zxf - -C ~/.cargo/bin'
+```
+
+Nextest runs each test in its own process; a test that passes under `cargo test` but fails
+under nextest shares in-process state with another test, and the test is what to fix.
+A single test: `rwx sandbox exec -- cargo nextest run <name-filter>`.
+
 ## 3. Pre-PR check
 
 ```bash
 rwx sandbox exec -- cargo clippy --all-targets -- -D warnings
-rwx sandbox exec -- cargo test
+rwx sandbox exec -- cargo nextest run --no-fail-fast
+rwx sandbox exec -- cargo test --doc
 rwx sandbox stop
 ```
 
