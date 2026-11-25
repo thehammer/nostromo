@@ -33,7 +33,19 @@
 		AA00000100000000000000AB /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000100000000000000AA /* NostromoKit */; };
 		AA00000100000000000000AC /* ProseSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA00000100000000000000AD /* ProseSurfaceView.swift */; };
 		FE0000010000000000000001 /* PRLabelBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE0000010000000000000002 /* PRLabelBar.swift */; };
+		AC0000010000000000000001 /* NostromoSmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC0000010000000000000003 /* NostromoSmokeTests.swift */; };
+		AC0000010000000000000002 /* HostedHarnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC0000010000000000000004 /* HostedHarnessTests.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		AC0000010000000000000006 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AA000001000000000000004A /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AA000001000000000000003A;
+			remoteInfo = Nostromo;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		5318BC592FD5A28A00957D5C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -63,6 +75,9 @@
 		AA00000100000000000000A0 /* Nostromo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Nostromo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA00000100000000000000AD /* ProseSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProseSurfaceView.swift; sourceTree = "<group>"; };
 		FE0000010000000000000002 /* PRLabelBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PRLabelBar.swift; sourceTree = "<group>"; };
+		AC0000010000000000000003 /* NostromoSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostromoSmokeTests.swift; sourceTree = "<group>"; };
+		AC0000010000000000000004 /* HostedHarnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedHarnessTests.swift; sourceTree = "<group>"; };
+		AC0000010000000000000005 /* NostromoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NostromoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -74,6 +89,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AC0000010000000000000008 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -81,6 +103,7 @@
 			isa = PBXGroup;
 			children = (
 				AA00000100000000000000A0 /* Nostromo.app */,
+				AC0000010000000000000005 /* NostromoTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -146,8 +169,18 @@
 			isa = PBXGroup;
 			children = (
 				AA000001000000000000002B /* Nostromo */,
+				AC0000010000000000000009 /* NostromoTests */,
 				AA000001000000000000002A /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		AC0000010000000000000009 /* NostromoTests */ = {
+			isa = PBXGroup;
+			children = (
+				AC0000010000000000000003 /* NostromoSmokeTests.swift */,
+				AC0000010000000000000004 /* HostedHarnessTests.swift */,
+			);
+			path = NostromoTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -173,6 +206,23 @@
 			productReference = AA00000100000000000000A0 /* Nostromo.app */;
 			productType = "com.apple.product-type.application";
 		};
+		AC000001000000000000000A /* NostromoTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AC000001000000000000000D /* Build configuration list for PBXNativeTarget "NostromoTests" */;
+			buildPhases = (
+				AC000001000000000000000E /* Sources */,
+				AC0000010000000000000008 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				AC0000010000000000000007 /* PBXTargetDependency */,
+			);
+			name = NostromoTests;
+			productName = NostromoTests;
+			productReference = AC0000010000000000000005 /* NostromoTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -185,6 +235,10 @@
 				TargetAttributes = {
 					AA000001000000000000003A = {
 						CreatedOnToolsVersion = 16.0;
+					};
+					AC000001000000000000000A = {
+						CreatedOnToolsVersion = 16.0;
+						TestTargetID = AA000001000000000000003A;
 					};
 				};
 			};
@@ -205,6 +259,7 @@
 			projectRoot = "";
 			targets = (
 				AA000001000000000000003A /* Nostromo */,
+				AC000001000000000000000A /* NostromoTests */,
 			);
 		};
 /* End PBXProject section */
@@ -252,7 +307,24 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AC000001000000000000000E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AC0000010000000000000001 /* NostromoSmokeTests.swift in Sources */,
+				AC0000010000000000000002 /* HostedHarnessTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		AC0000010000000000000007 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AA000001000000000000003A /* Nostromo */;
+			targetProxy = AC0000010000000000000006 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		AA000001000000000000006A /* Debug */ = {
@@ -446,6 +518,46 @@
 			};
 			name = Release;
 		};
+		AC000001000000000000000B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.hammer.nostromo.ios.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Nostromo.app/Nostromo";
+			};
+			name = Debug;
+		};
+		AC000001000000000000000C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.hammer.nostromo.ios.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Nostromo.app/Nostromo";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -463,6 +575,15 @@
 			buildConfigurations = (
 				AA000001000000000000006A /* Debug */,
 				AA000001000000000000006B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AC000001000000000000000D /* Build configuration list for PBXNativeTarget "NostromoTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AC000001000000000000000B /* Debug */,
+				AC000001000000000000000C /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

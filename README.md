@@ -266,8 +266,10 @@ This unloads the agent, removes the plist, and deletes the binary.
 
 Every pull request against `main` runs the Rust build/lint/test, the Python
 tooling tests, the Swift tests for the Mac app (`make mac-test`) and for
-NostromoKit (`make kit-test`), and an iOS simulator build on GitHub. Those
-two Make targets remain the local commands. See [`docs/ci.md`](docs/ci.md)
+NostromoKit (`make kit-test`), and an iOS simulator build plus the hosted iOS
+unit tests (`make ios-test`, L5: only what needs an iOS process; see
+[`docs/ios-verification.md`](docs/ios-verification.md)) on GitHub. Those Make
+targets remain the local commands. See [`docs/ci.md`](docs/ci.md)
 for the job list, runtimes and how to make a check required.
 
 ## Health check

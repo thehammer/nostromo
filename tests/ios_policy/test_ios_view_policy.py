@@ -6,7 +6,7 @@ history is three reactive switch-exhaustiveness fixes with comments
 explaining why the case is a stub — a target maintained by the compiler
 complaining, one incident at a time. Adding real renderers on top of that
 regime (W4, W5, W7, W8, W9) produces renderers that break silently on the
-next wire change. This suite is the L2 layer of the three-layer verification
+next wire change. This suite is the L2 layer of the layered verification
 model described in docs/ios-verification.md — wiring and policy, checked by
 scanning `iOS/Nostromo/**/*.swift` as text.
 
@@ -1030,7 +1030,8 @@ def check_region_container_computes_no_layout_fraction(files):
     simulator (`LayoutPlanTests`); this view's job is to obey it. A literal
     fraction appearing in a sizing expression here means some part of the
     arrangement has escaped back into the view, where nothing can check it —
-    on the one target in this repo that has no test target at all.
+    in a view whose rendering no test layer, L5's simulator target included,
+    is scoped to cover.
 
     A heuristic over arithmetic, and a narrow one: it looks for a decimal
     literal strictly between 0 and 1 on a line that also sizes something
