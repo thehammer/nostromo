@@ -1,0 +1,114 @@
+────────────
+    Starting 103 tests across 1 binary (4336 tests skipped)
+        PASS [   0.004s] (  1/103) nostromo ipc::task_output::tests::a_carriage_return_inside_a_line_keeps_only_what_follows_it
+        PASS [   0.006s] (  2/103) nostromo ipc::task_output::tests::a_cli_path_under_its_claude_uid_folder_in_tmp_teaches_that_folder
+        PASS [   0.006s] (  3/103) nostromo ipc::task_output::tests::a_crlf_is_an_ordinary_line_ending
+        PASS [   0.006s] (  4/103) nostromo ipc::task_output::tests::a_big_file_yields_only_its_last_eight_kibibytes_and_the_true_total
+        PASS [   0.004s] (  5/103) nostromo ipc::task_output::tests::a_few_stray_nul_bytes_are_dropped_not_treated_as_binary
+        PASS [   0.004s] (  6/103) nostromo ipc::task_output::tests::a_directory_named_like_an_output_file_is_refused
+        PASS [   0.004s] (  7/103) nostromo ipc::task_output::tests::a_file_of_exactly_the_window_is_returned_whole
+        PASS [   0.004s] (  8/103) nostromo ipc::task_output::tests::a_directory_that_only_shares_the_roots_name_prefix_is_outside_it
+        PASS [   0.004s] (  9/103) nostromo ipc::task_output::tests::a_file_whose_name_is_not_the_task_id_dot_output_is_refused
+        PASS [   0.004s] ( 10/103) nostromo ipc::task_output::tests::a_file_outside_the_root_is_refused
+        PASS [   0.005s] ( 11/103) nostromo ipc::task_output::tests::a_file_that_shrinks_between_requests_reads_as_an_empty_range_at_its_new_end
+        PASS [   0.003s] ( 12/103) nostromo ipc::task_output::tests::a_line_of_exactly_200_characters_is_kept_whole
+        PASS [   0.004s] ( 13/103) nostromo ipc::task_output::tests::a_line_longer_than_the_window_is_split_inside_the_window_and_still_reassembles
+        PASS [   0.008s] ( 14/103) nostromo ipc::task_output::tests::a_finished_file_is_taken_whole_even_when_it_ends_in_half_an_escape_or_half_a_scalar
+        PASS [   0.003s] ( 15/103) nostromo ipc::task_output::tests::a_line_still_being_written_is_returned_as_far_as_it_goes_and_continued_by_the_next_request
+        PASS [   0.003s] ( 16/103) nostromo ipc::task_output::tests::a_lone_escape_is_dropped_wherever_it_sits
+        PASS [   0.005s] ( 17/103) nostromo ipc::task_output::tests::a_long_line_of_multi_byte_characters_is_cut_between_characters
+        PASS [   0.003s] ( 18/103) nostromo ipc::task_output::tests::a_longer_line_is_cut_to_200_characters_ending_in_an_ellipsis
+        PASS [   0.019s] ( 19/103) nostromo ipc::task_output::tests::a_long_run_of_nested_string_openers_neither_overflows_the_stack_nor_leaks_an_escape
+        PASS [   0.003s] ( 20/103) nostromo ipc::task_output::tests::a_missing_file_is_an_error_not_a_panic
+        PASS [   0.003s] ( 21/103) nostromo ipc::task_output::tests::a_named_pipe_is_refused_without_blocking
+        PASS [   0.003s] ( 22/103) nostromo ipc::task_output::tests::a_path_that_climbs_out_of_the_tmp_root_teaches_nothing
+        PASS [   0.003s] ( 23/103) nostromo ipc::task_output::tests::a_path_that_is_not_in_the_cli_tmp_root_for_this_user_teaches_nothing
+        PASS [   0.003s] ( 24/103) nostromo ipc::task_output::tests::a_path_too_shallow_to_have_the_shape_has_no_root_and_never_the_filesystem_root
+        PASS [   0.003s] ( 25/103) nostromo ipc::task_output::tests::a_path_whose_directory_is_not_tasks_has_no_root
+        PASS [   0.003s] ( 26/103) nostromo ipc::task_output::tests::a_path_with_a_parent_component_is_refused_even_if_it_resolves_inside_the_root
+        PASS [   0.003s] ( 27/103) nostromo ipc::task_output::tests::a_preview_line_built_from_hostile_output_is_clean
+        PASS [   0.003s] ( 28/103) nostromo ipc::task_output::tests::a_progress_bar_previews_as_its_final_state
+        PASS [   0.005s] ( 29/103) nostromo ipc::task_output::tests::a_range_that_is_only_the_start_of_an_escape_at_the_end_of_a_growing_file_is_not_consumed
+        PASS [   0.003s] ( 30/103) nostromo ipc::task_output::tests::a_ranged_read_for_an_invalid_task_id_is_refused_even_though_the_file_exists
+        PASS [   0.003s] ( 31/103) nostromo ipc::task_output::tests::a_ranged_read_of_a_directory_is_refused
+        PASS [   0.003s] ( 32/103) nostromo ipc::task_output::tests::a_ranged_read_of_a_file_outside_the_root_is_refused_and_its_content_never_returned
+        PASS [   0.003s] ( 33/103) nostromo ipc::task_output::tests::a_ranged_read_of_a_missing_file_is_an_error_after_one_open
+        PASS [   0.003s] ( 34/103) nostromo ipc::task_output::tests::a_ranged_read_of_a_named_pipe_is_refused_without_blocking
+        PASS [   0.003s] ( 35/103) nostromo ipc::task_output::tests::a_ranged_read_of_a_symlink_is_refused_even_into_the_root
+        PASS [   0.003s] ( 36/103) nostromo ipc::task_output::tests::a_ranged_read_with_a_file_name_that_is_not_the_task_id_is_refused
+        PASS [   0.066s] ( 37/103) nostromo ipc::task_output::tests::a_megabyte_of_random_escapes_leaves_no_escape_byte
+        PASS [   0.003s] ( 38/103) nostromo ipc::task_output::tests::a_read_past_the_end_is_an_empty_range_at_the_end
+        PASS [   0.003s] ( 39/103) nostromo ipc::task_output::tests::a_reader_that_starts_inside_a_scalar_with_the_smallest_window_still_reaches_the_end
+        PASS [   0.003s] ( 40/103) nostromo ipc::task_output::tests::a_regular_output_file_under_the_root_opens_and_reads
+        PASS [   0.003s] ( 41/103) nostromo ipc::task_output::tests::a_relative_path_is_refused
+        PASS [   0.003s] ( 42/103) nostromo ipc::task_output::tests::a_reversed_filename_trick_shows_its_true_text
+        PASS [   0.003s] ( 43/103) nostromo ipc::task_output::tests::a_small_file_is_returned_whole
+        PASS [   0.006s] ( 44/103) nostromo ipc::task_output::tests::a_scalar_cut_in_half_by_the_end_of_a_growing_file_is_left_for_the_next_request
+        PASS [   0.087s] ( 45/103) nostromo ipc::task_output::tests::a_long_escaped_line_over_a_one_mebibyte_window_reassembles
+        PASS [   0.004s] ( 46/103) nostromo ipc::task_output::tests::a_smaller_requested_window_is_honoured
+        PASS [   0.003s] ( 47/103) nostromo ipc::task_output::tests::a_symlink_to_a_file_is_refused_even_when_the_target_is_inside_the_root
+        PASS [   0.003s] ( 48/103) nostromo ipc::task_output::tests::a_symlink_to_a_file_outside_the_root_is_refused
+        PASS [   0.003s] ( 49/103) nostromo ipc::task_output::tests::a_symlinked_directory_that_leads_outside_the_root_is_refused
+        PASS [   0.003s] ( 50/103) nostromo ipc::task_output::tests::a_tail_of_a_file_smaller_than_the_window_is_the_whole_file
+        PASS [   0.003s] ( 51/103) nostromo ipc::task_output::tests::a_tail_of_a_file_with_no_newline_in_its_window_still_ends_at_the_end_and_starts_on_a_scalar
+        PASS [   0.005s] ( 52/103) nostromo ipc::task_output::tests::a_tail_cut_through_any_character_width_is_valid_utf8_and_a_suffix
+        PASS [   0.004s] ( 53/103) nostromo ipc::task_output::tests::a_tail_of_an_empty_file_is_empty
+        PASS [   0.003s] ( 54/103) nostromo ipc::task_output::tests::a_tail_whose_window_is_inside_one_long_last_line_still_returns_that_line
+        PASS [   0.003s] ( 55/103) nostromo ipc::task_output::tests::a_trailing_carriage_return_does_not_blank_the_line
+        PASS [   0.007s] ( 56/103) nostromo ipc::task_output::tests::a_tail_read_holds_at_most_the_window_ends_at_the_end_and_starts_on_a_line
+        SLOW [>  0.100s] (───────) nostromo ipc::task_output::tests::a_long_line_of_mixed_escapes_and_scalars_reassembles_for_every_nearby_window_size
+        PASS [   0.005s] ( 57/103) nostromo ipc::task_output::tests::a_validator_without_a_counter_reads_normally
+        PASS [   0.005s] ( 58/103) nostromo ipc::task_output::tests::a_window_never_ends_inside_a_string_sequence_that_holds_an_eight_bit_introducer
+        PASS [   0.106s] ( 59/103) nostromo ipc::task_output::tests::a_long_line_of_mixed_escapes_and_scalars_reassembles_for_every_nearby_window_size
+        PASS [   0.003s] ( 60/103) nostromo ipc::task_output::tests::a_window_title_sequence_is_removed_whether_it_ends_in_bel_or_st
+        PASS [   0.003s] ( 61/103) nostromo ipc::task_output::tests::all_blank_output_has_no_preview
+        PASS [   0.003s] ( 62/103) nostromo ipc::task_output::tests::an_added_root_is_accepted_and_others_stay_refused
+        PASS [   0.003s] ( 63/103) nostromo ipc::task_output::tests::an_empty_file_reads_as_an_empty_range_from_any_offset
+        PASS [   0.008s] ( 64/103) nostromo ipc::task_output::tests::a_window_of_any_size_never_ends_inside_a_scalar_or_an_escape_sequence
+        PASS [   0.003s] ( 65/103) nostromo ipc::task_output::tests::an_empty_file_reads_as_empty
+        PASS [   0.003s] ( 66/103) nostromo ipc::task_output::tests::an_unterminated_title_sequence_does_not_swallow_the_following_lines
+        PASS [   0.003s] ( 67/103) nostromo ipc::task_output::tests::an_offset_inside_a_scalar_starts_at_the_next_scalar
+        PASS [   0.003s] ( 68/103) nostromo ipc::task_output::tests::colour_codes_are_removed_and_the_text_is_kept
+        PASS [   0.005s] ( 69/103) nostromo ipc::task_output::tests::an_escape_sequence_cut_by_the_end_of_a_growing_file_is_left_for_the_next_request
+        PASS [   0.003s] ( 70/103) nostromo ipc::task_output::tests::cursor_and_erase_sequences_are_removed
+        PASS [   0.003s] ( 71/103) nostromo ipc::task_output::tests::eight_bit_control_characters_are_dropped
+        PASS [   0.003s] ( 72/103) nostromo ipc::task_output::tests::empty_output_is_empty_text
+        PASS [   0.003s] ( 73/103) nostromo ipc::task_output::tests::escape_sequences_are_still_removed_next_to_invisible_characters
+        PASS [   0.003s] ( 74/103) nostromo ipc::task_output::tests::every_successful_ranged_read_opens_the_file_once
+        PASS [   0.003s] ( 75/103) nostromo ipc::task_output::tests::invalid_utf8_is_replaced_not_fatal
+        PASS [   0.003s] ( 76/103) nostromo ipc::task_output::tests::every_truncation_of_an_escape_sequence_leaves_no_escape_byte
+        PASS [   0.003s] ( 77/103) nostromo ipc::task_output::tests::ids_with_underscores_dashes_and_64_characters_are_accepted
+        PASS [   0.003s] ( 78/103) nostromo ipc::task_output::tests::invisible_and_bidi_characters_are_removed_wherever_they_sit
+        PASS [   0.003s] ( 79/103) nostromo ipc::task_output::tests::mostly_nul_output_is_replaced_by_a_notice_with_its_size
+        PASS [   0.003s] ( 80/103) nostromo ipc::task_output::tests::ordinary_text_in_any_script_and_layout_whitespace_is_untouched
+        PASS [   0.003s] ( 81/103) nostromo ipc::task_output::tests::other_control_characters_and_delete_are_dropped
+        PASS [   0.003s] ( 82/103) nostromo ipc::task_output::tests::other_escape_sequences_are_removed
+        PASS [   0.003s] ( 83/103) nostromo ipc::task_output::tests::plain_unicode_text_is_untouched
+        PASS [   0.006s] ( 84/103) nostromo ipc::task_output::tests::random_bytes_around_an_escape_do_not_change_what_the_sanitiser_promises
+        PASS [   0.014s] ( 85/103) nostromo ipc::task_output::tests::many_small_random_inputs_never_leave_a_control_character
+        PASS [   0.003s] ( 86/103) nostromo ipc::task_output::tests::tabs_and_newlines_survive
+        PASS [   0.009s] ( 87/103) nostromo ipc::task_output::tests::reading_while_another_thread_appends_never_loses_or_repeats_a_byte
+        PASS [   0.003s] ( 88/103) nostromo ipc::task_output::tests::task_id_validity_follows_the_documented_pattern
+        PASS [   0.003s] ( 89/103) nostromo ipc::task_output::tests::the_cut_counts_characters_not_bytes
+        PASS [   0.003s] ( 90/103) nostromo ipc::task_output::tests::ten_percent_nul_is_still_text_and_more_than_that_is_binary
+        PASS [   0.003s] ( 91/103) nostromo ipc::task_output::tests::the_file_may_sit_at_any_depth_under_the_root
+        PASS [   0.003s] ( 92/103) nostromo ipc::task_output::tests::the_next_request_after_growth_returns_exactly_the_appended_part
+        PASS [   0.003s] ( 93/103) nostromo ipc::task_output::tests::the_preview_line_is_trimmed
+        PASS [   0.003s] ( 94/103) nostromo ipc::task_output::tests::the_preview_is_the_last_line_with_anything_on_it
+        PASS [   0.003s] ( 95/103) nostromo ipc::task_output::tests::the_real_default_root_for_this_user_is_learnable
+        PASS [   0.003s] ( 96/103) nostromo ipc::task_output::tests::the_root_is_four_levels_above_a_cli_output_path
+        PASS [   0.003s] ( 97/103) nostromo ipc::task_output::tests::the_tail_never_starts_in_the_middle_of_a_character
+        PASS [   0.003s] ( 98/103) nostromo ipc::task_output::tests::the_tail_window_is_eight_kibibytes
+        PASS [   0.003s] ( 99/103) nostromo ipc::task_output::tests::the_task_id_pattern_is_enforced_even_when_the_file_is_there
+        PASS [   0.003s] (100/103) nostromo ipc::task_output::tests::trailing_blank_and_whitespace_only_lines_are_skipped
+        PASS [   0.047s] (101/103) nostromo ipc::task_output::tests::random_escape_heavy_text_reassembles_whatever_the_window
+        SLOW [>  0.100s] (───────) nostromo ipc::task_output::tests::ranges_read_in_one_mebibyte_requests_from_offset_zero_reassemble_the_sanitised_whole_of_a_two_mebibyte_file
+        SLOW [>  0.100s] (───────) nostromo ipc::task_output::tests::the_result_frame_of_a_one_mebibyte_read_stays_under_the_frame_cap_whatever_the_bytes
+        PASS [   0.137s] (102/103) nostromo ipc::task_output::tests::ranges_read_in_one_mebibyte_requests_from_offset_zero_reassemble_the_sanitised_whole_of_a_two_mebibyte_file
+        SLOW [>  0.200s] (───────) nostromo ipc::task_output::tests::the_result_frame_of_a_one_mebibyte_read_stays_under_the_frame_cap_whatever_the_bytes
+        SLOW [>  0.300s] (───────) nostromo ipc::task_output::tests::the_result_frame_of_a_one_mebibyte_read_stays_under_the_frame_cap_whatever_the_bytes
+        SLOW [>  0.400s] (───────) nostromo ipc::task_output::tests::the_result_frame_of_a_one_mebibyte_read_stays_under_the_frame_cap_whatever_the_bytes
+        SLOW [>  0.500s] (───────) nostromo ipc::task_output::tests::the_result_frame_of_a_one_mebibyte_read_stays_under_the_frame_cap_whatever_the_bytes
+        PASS [   0.510s] (103/103) nostromo ipc::task_output::tests::the_result_frame_of_a_one_mebibyte_read_stays_under_the_frame_cap_whatever_the_bytes
+────────────
+     Summary [   0.686s] 103 tests run: 103 passed (3 slow), 4336 skipped
