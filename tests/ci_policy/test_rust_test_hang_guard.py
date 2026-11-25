@@ -55,12 +55,16 @@ class RustTestHangGuardTests(unittest.TestCase):
         self.assertIn("--no-fail-fast", step)
         # `tee` must not hide cargo's exit status.
         self.assertRegex(step, r"(?m)^        shell: bash$")
-        self.assertRegex(step, r"cargo test .*\| tee ")
+        self.assertRegex(step, r"cargo nextest run .*\| tee ")
+
+    def test_doc_tests_keep_their_own_step_because_nextest_skips_them(self):
+        step = _step(self.job, "Doc tests")
+        self.assertRegex(step, r"(?m)^        run: cargo test --doc$")
 
     def test_a_follow_up_step_names_the_tests_still_running(self):
         step = _step(self.job, "Name the tests still running")
         self.assertIn("always()", step)
-        self.assertIn("has been running for over 60 seconds", step)
+        self.assertIn("SLOW", step)
 
     def test_build_and_lint_still_needs_the_job_and_demands_success(self):
         build = _job(self.text, "build")

@@ -89,7 +89,7 @@ jobs:
   #
   # `cargo build --all-targets` is gone: `clippy --all-targets` type-checks
   # every target (lib, bins, tests; the repo has no examples or benches) and
-  # `cargo test` compiles and links the lib, the bins and every test binary.
+  # `cargo nextest run` compiles and links the lib, the bins and every test binary.
   # ---------------------------------------------------------------------------
   rust-fmt:
     if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","rust"]'), inputs.only)
@@ -152,33 +152,46 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.100.0
 
+      # cargo-nextest, pinned: the action by commit SHA (tag v2.90.8) and the tool by exact
+      # version, so a new release changes nothing until someone bumps both here.
+      # `tests/ci_policy/test_nextest_pin.py` holds the pin.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        with:
+          tool: cargo-nextest@0.9.152
+
       # A hung test must fail this step with its name, not leave a silent job
       # until the 45-minute limit cancels it (a cancelled job also hides which
       # test hung). The step limit is under the job limit and over a green run
-      # (measured 2026-11-23: 14.5 to 17 minutes green, 20 minutes on the slow
-      # runs, of which the cold build is 5 to 6 and the test binaries run one after
-      # another for about 12 to 14); `--no-fail-fast` reports every
-      # failing binary, not only the first. `Build & Lint` still needs this
-      # job to succeed: a step timeout fails the job.
+      # (libtest measured 2026-11-23: 14.5 to 17 minutes green, 20 minutes on the
+      # slow runs; nextest runs the tests in parallel across binaries and is
+      # expected to be several minutes faster, the cold build staying 4 to 6);
+      # `--no-fail-fast` reports every failing test, not only the first.
+      # No retries (`.config/nextest.toml`): a retry would hide a flake.
+      # `Build & Lint` still needs this job to succeed: a step timeout fails the job.
       - name: Test
         id: test
         shell: bash
         timeout-minutes: 35
-        run: cargo test --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
+        run: cargo nextest run --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/nextest.log"
 
-      # libtest prints `test <name> has been running for over 60 seconds` for a
-      # slow test and `test <name> ... ok` when it ends: what is left over is
-      # what was running when the step ended.
+      # nextest does not run doc tests.
+      - name: Doc tests
+        run: cargo test --doc
+
+      # nextest prints `SLOW [> 60.000s] <binary> <test>` for a slow test and a
+      # `PASS`/`FAIL`/... line with the same `<binary> <test>` when it ends: what
+      # is left over is what was running when the step ended.
       - name: Name the tests still running
         if: ${{ always() && steps.test.outcome != 'success' }}
         shell: bash
         run: |
-          log="$RUNNER_TEMP/cargo-test.log"
+          log="$RUNNER_TEMP/nextest.log"
           [ -f "$log" ] || exit 0
-          grep -a -o '^test .* has been running for over 60 seconds' "$log" \
-            | sed -e 's/^test //' -e 's/ has been running for over 60 seconds$//' \
-            | sort -u | while IFS= read -r name; do
-                grep -a -q -F "test $name ... " "$log" || echo "::error::still running when the step ended: $name"
+          grep -a -E '^ *SLOW \[' "$log" | sed -E 's/^ *SLOW \[[^]]*\] //' | sort -u \
+            | while IFS= read -r name; do
+                grep -a -v -E '^ *SLOW \[' "$log" | grep -a -q -E "^ *[A-Z]+ +\[[^]]*\] +$(printf '%s' "$name" | sed 's/[][\\.*^$/+?(){}|]/\\&/g')\$" \
+                  || echo "::error::still running when the step ended: $name"
               done
 
   # The required status check. Its name is the same as before the split, so
