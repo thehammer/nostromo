@@ -106,6 +106,20 @@ class BalanceTests(unittest.TestCase):
         loads = [sum(self.WEIGHTS[c] for c in b) for b in bins]
         self.assertLessEqual((max(loads) - min(loads)) / max(loads), 0.15, loads)
 
+    def test_a_head_start_gives_that_bin_less_test_time(self):
+        weights = {"A": 100.0, "B": 100.0, "C": 100.0, "D": 100.0, "E": 100.0, "F": 100.0}
+        even = [sum(weights[c] for c in b) for b in ms.balance(weights)]
+        self.assertEqual(even, [200.0, 200.0, 200.0])
+        skewed = ms.balance(weights, head_start=[150.0, 0.0, 0.0])
+        loads = [sum(weights[c] for c in b) for b in skewed]
+        self.assertEqual(loads, [100.0, 300.0, 200.0])  # 100+150 head start vs 300 and 200: wall 250/300/200 -> greedy
+        self.assertLess(loads[0], even[0])
+
+    def test_pinned_classes_never_land_in_the_last_bin(self):
+        weights = {"A": 500.0, "B": 400.0, "C": 1.0, "D": 1.0}
+        bins = ms.balance(weights, pinned=frozenset({"A", "B", "C", "D"}))
+        self.assertEqual(bins[2], [])
+
     def test_balance_is_deterministic_regardless_of_input_order(self):
         first = ms.balance(self.WEIGHTS)
         reordered = dict(reversed(list(self.WEIGHTS.items())))

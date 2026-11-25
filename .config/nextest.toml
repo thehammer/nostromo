@@ -1,0 +1,4 @@
+# cargo-nextest policy. Defaults otherwise (test-threads = one per core).
+[profile.default]
+# No retries, ever: a retried test that passes the second time hides a flake.
+retries = 0

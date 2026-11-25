@@ -42,4 +42,5 @@ jobs:
         run: cargo test --test tracker_concurrency -- --nocapture
 
       - name: Queue race tests
+        if: always()
         run: cargo test --lib ipc::session_manager::queue_tests -- --nocapture

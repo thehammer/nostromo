@@ -203,6 +203,12 @@ fn contents_url(base_url: &str, owner: &str, repo: &str, path: &str) -> Result<r
     Ok(url)
 }
 
+/// The production overall request timeout; only tests build a client with
+/// another (`GithubClient::new_for_test_with_timeout`).
+fn http_timeout() -> Duration {
+    Duration::from_secs(GITHUB_HTTP_TIMEOUT_SECS)
+}
+
 /// Builds the `reqwest::ClientBuilder` behind [`GithubClient::http`] — split
 /// out from [`GithubClient::build`] so a test can inspect the builder's
 /// `Debug` output (which prints `connect_timeout`/`timeout` fields only when
@@ -220,12 +226,6 @@ fn contents_url(base_url: &str, owner: &str, repo: &str, path: &str) -> Result<r
 /// beside `pr_diff_poll_secs` — the overall timeout must stay under that
 /// poll interval or a hung request outlives the cycle meant to supersede it
 /// (pinned by `github_timeout_is_shorter_than_the_poll_interval` below).
-/// The production overall request timeout; only tests build a client with
-/// another (`GithubClient::new_for_test_with_timeout`).
-fn http_timeout() -> Duration {
-    Duration::from_secs(GITHUB_HTTP_TIMEOUT_SECS)
-}
-
 fn github_http_client_builder_with_timeout(timeout: Duration) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .user_agent(concat!("nostromo/", env!("CARGO_PKG_VERSION")))

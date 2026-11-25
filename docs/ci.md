@@ -15,10 +15,10 @@ instead; see "Skipping the Swift jobs" below.
 | `Build & Lint` | ubuntu-latest | **the aggregate of the three Rust jobs below**: succeeds only if all three did. This is the required status check. | fmt, clippy and test together | the slowest of the three |
 | `Rust format` | ubuntu-latest | `cargo fmt --check` | same | ~15 s |
 | `Rust clippy` | ubuntu-latest | `cargo clippy --all-targets -- -D warnings`, then `systemd-analyze verify` on the rendered `dist/systemd/nostromd.service` (the Linux primary's unit) | same; the verify step needs a Linux host with systemd | ~2.5 min |
-| `Rust tests` | ubuntu-latest | `cargo test` (compiles and links the lib, the bins and every test binary) | same | see "Where the time goes" |
+| `Rust tests` | ubuntu-latest | `cargo nextest run --no-fail-fast` (compiles and links the lib, the bins and every test binary; cargo-nextest pinned, no retries), then `cargo test --doc` as its own step because nextest skips doc tests | same (see `docs/rwx-sandbox.md` for the install) | see "Where the time goes" |
 | `Detect changed paths` | ubuntu-latest | `scripts/ci_changes.py` over the PR's changed paths | n/a | ~10 s |
 | `Python tooling tests` | macos-latest | `make python-test` (fails on any skip) | `make python-test` | ~4 min |
-| `Mac tests shard 1/3`, `2/3`, `3/3` | macos-26 (x3, parallel) | `make mac-test SHARD=<n>`: one third of the `NostromoTests` classes (~7,700 tests in all, serial inside a shard); shard 1 also runs the compile gate | `make mac-test` (all classes) or `make mac-test SHARD=<n>` | see "Where the time goes" |
+| `Mac tests shard 1/3`, `2/3`, `3/3` | macos-26 (x3, parallel) | `make mac-test SHARD=<n>`: one third of the `NostromoTests` classes (~10,450 tests in all, serial inside a shard); shard 1 also runs the compile gate | `make mac-test` (all classes) or `make mac-test SHARD=<n>` | see "Where the time goes" |
 | `Swift tests (Mac app)` | ubuntu-latest | **the aggregate of the three Mac shards** (`scripts/ci_mac_aggregate.py`): green only if every shard ran, passed and reported tests, and the total reaches the floor in `macOS/ci/mac-shards.json`. Takes no macOS slot. | n/a | seconds after the last shard |
 | `Swift tests (NostromoKit)` | macos-26 | `make kit-test` — `swift test` over `Shared/NostromoKit`, ~570 tests | `make kit-test` | ~2.5 min |
 | `iOS simulator build` | macos-26 | `xcodebuild -scheme Nostromo -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build` (compile only; no device, no tests) | `make ios-build` is the device build; the simulator command is in the workflow | ~1.7 min |
@@ -75,7 +75,7 @@ logs, concatenate them and run
 
 ```
 cat shard-*-logs/mac-test-full.log > /tmp/all.log
-python3 scripts/mac_shards.py regenerate --log /tmp/all.log --balanced-from <run id> --write
+python3 scripts/mac_shards.py regenerate --log /tmp/all.log --balanced-from <run id> --shard1-handicap 90 --floor <n> --write
 ```
 
 `regenerate` balances by per-class duration (greedy, deterministic). A concatenated
@@ -153,9 +153,14 @@ build` 122 s, `Rust tests` 666 s, `Python tooling tests` 273 s, `Rust clippy` 13
 `make mac-test` executed 7,704 tests (the unsharded count the sharded total must
 match). With three shards the expected Mac wall-clock is setup ~90 s + build ~200 s +
 execution / 3 + the compile gate (about 11-13 min). The first assignment was balanced
-by test-method count and ran 356 s / 589 s / 580 s of test time; it was then regenerated
-from dispatch run 42353503588's logs (508 s each, floor 7,614 = 97% of the 7,850 tests that run executed). Measured
-per-shard times and the 5-slot cap result are recorded in the sharding PR description.
+by test-method count and ran 356 s / 589 s / 580 s of test time; it was regenerated
+several times since. The current assignment comes from main run 45532884319's logs
+(10,446 tests, floor 10,133 = 97% of them): test seconds 865 / 955 / 955 for shards 1 / 2 / 3.
+Shard 1 gets about 90 s less test time on purpose: it also runs the compile gate (~73-125 s
+outside the `make mac-test` step), so the target is equal job WALL, not equal test seconds.
+`regenerate --shard1-handicap 90` does that, and keeps the pinned slow Review classes in the listed shards
+(`PINNED_TO_LISTED_SHARDS`), so the catch-all (which also takes every new class) is not
+the overloaded one. Measured per-shard times and the 5-slot cap result are recorded in the sharding PR description.
 
 The required check name `Build & Lint` is unchanged (it is the aggregate job), so
 branch protection needs no change.
@@ -246,8 +251,12 @@ ref, so changes apply only to jobs added after they merge.
   #345 got through. (Test sharding was first deferred for the same parallel-safety
   reasons; it shipped as separate jobs, one process each, so none of the
   in-process parallel-testing risk applies: see "How the Mac tests are sharded".)
-- **Rust tests are now the longest remaining job** (~11 min): the next candidate
-  for the same treatment (`cargo test` partitioning or nextest).
+- **Rust tests run under cargo-nextest** (`docs/test-time-audit.md` §4.1): tests run in
+  parallel across binaries, one process per test. The tool is pinned in `ci.yml`
+  (`taiki-e/install-action` by commit SHA, `cargo-nextest@X.Y.Z`; bump both on purpose;
+  `tests/ci_policy/test_nextest_pin.py` enforces it) and `.config/nextest.toml` sets
+  `retries = 0`. Doc tests are the separate `Doc tests` step. Measured on this change's own
+  CI run: `Test` step 11 min 50 s, whole job 12 min 12 s.
 - **Path gate:** docs, `.claude`, `tests/*.rs` and Cargo-file-only changes skip the
   Swift jobs. `src/` is **not** skippable because `StatusBarPostureWindowsTests`
   scans `src/**/*.rs`. Verified on throwaway PRs #370-#372 (closed).
@@ -282,7 +291,7 @@ A bump is a deliberate PR:
 
 1. Change all three to the new version in one PR.
 2. Run `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` and the full
-   `cargo test` (in the RWX sandbox, see `docs/rwx-sandbox.md`), and fix new lints.
+   `cargo nextest run` and `cargo test --doc` (in the RWX sandbox, see `docs/rwx-sandbox.md`), and fix new lints.
 3. Merge once CI is green; the toolchain install step in the PR's CI log must report
    the new version.
 
