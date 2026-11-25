@@ -17,7 +17,7 @@ CI_YML = os.path.join(
 )
 
 
-FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "nextest_slow.log")
+FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "nextest_slow.txt")
 
 
 def _run_script(step):
