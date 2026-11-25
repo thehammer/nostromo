@@ -6,7 +6,7 @@
 
 import Foundation
 
-public struct PairLink: Equatable {
+public struct PairLink: Hashable {
     public let host: String
     public let port: UInt16
     /// Six digits.

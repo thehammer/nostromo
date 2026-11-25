@@ -18,7 +18,7 @@ struct TranscriptView<Accessory: View>: View {
     let displayName: String
     let agentName:   String
     let viewName:    String
-    let client:      NetworkClient
+    let client:      any DaemonTransport
     /// The ambient-activity ticker (ios-curated-view-parity W4), composed
     /// above the input bar inside this view's own bottom safe-area inset —
     /// NOT a second `safeAreaInset` (that would land below the input bar
@@ -56,7 +56,7 @@ struct TranscriptView<Accessory: View>: View {
     @State private var showNewSessionConfirm  = false
 
     init(
-        tag: String, displayName: String, agentName: String, viewName: String, client: NetworkClient,
+        tag: String, displayName: String, agentName: String, viewName: String, client: any DaemonTransport,
         store: TranscriptStore,
         saveScrollKey: @escaping (Int) -> Void,
         restoreScroll: @escaping (ClosedRange<Int>?) -> ScrollRestore,
