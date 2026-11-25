@@ -17,6 +17,7 @@
 //!   `personal` satellite.
 
 #![recursion_limit = "512"]
+#![allow(clippy::type_complexity, clippy::result_large_err)]
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -51,7 +52,13 @@ struct Sat {
     tmp: TempDir,
 }
 
-fn setup_for(name: &str, url: String, token_path: PathBuf, egress: Egress, local: SatelliteAdmin) -> SatelliteSetup {
+fn setup_for(
+    name: &str,
+    url: String,
+    token_path: PathBuf,
+    egress: Egress,
+    local: SatelliteAdmin,
+) -> SatelliteSetup {
     SatelliteSetup {
         host: name.to_string(),
         uplink: UplinkConfig {
@@ -66,7 +73,14 @@ fn setup_for(name: &str, url: String, token_path: PathBuf, egress: Egress, local
     }
 }
 
-fn start(url: String, token: &str, name: &str, egress: Egress, local: SatelliteAdmin, device_id: String) -> Sat {
+fn start(
+    url: String,
+    token: &str,
+    name: &str,
+    egress: Egress,
+    local: SatelliteAdmin,
+    device_id: String,
+) -> Sat {
     let tmp = TempDir::new().unwrap();
     let socket = tmp.path().join("sat.sock");
     let session_mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
@@ -112,7 +126,13 @@ async fn join(
 ) -> Sat {
     let r = primary
         .registry
-        .redeem_with_egress(name, DeviceKind::Satellite, Some(record_admin), Some(egress), None)
+        .redeem_with_egress(
+            name,
+            DeviceKind::Satellite,
+            Some(record_admin),
+            Some(egress),
+            None,
+        )
         .expect("a satellite record");
     let sat = start(
         format!("ws://127.0.0.1:{}", primary.ws_port),
@@ -163,11 +183,20 @@ fn dead_url() -> String {
 #[tokio::test]
 async fn a_personal_satellites_mother_jobs_reach_the_primarys_subscribers_with_its_host() {
     let primary = Rig::new().await;
-    let sat = join(&primary, "sat", Egress::Personal, SatelliteAdmin::Full, SatelliteAdmin::Full).await;
+    let sat = join(
+        &primary,
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::Full,
+        SatelliteAdmin::Full,
+    )
+    .await;
     let mut watcher = primary.unix(vec![Topic::MotherJobs], false).await;
     sat.server.broadcast(jobs_frame("0123456789abcdef"));
     let m = watcher
-        .next_matching("the satellite's jobs", |m| matches!(m, ServerMsg::MotherJobs { .. }))
+        .next_matching("the satellite's jobs", |m| {
+            matches!(m, ServerMsg::MotherJobs { .. })
+        })
         .await;
     assert_eq!(host_of_jobs(&m), Some(Some("sat".to_string())));
     match m {
@@ -179,7 +208,14 @@ async fn a_personal_satellites_mother_jobs_reach_the_primarys_subscribers_with_i
 #[tokio::test]
 async fn a_work_satellites_jobs_arrive_as_metadata_with_none_of_its_text() {
     let primary = Rig::new().await;
-    let sat = join(&primary, "kobe", Egress::Work, SatelliteAdmin::RevokeOnly, SatelliteAdmin::Full).await;
+    let sat = join(
+        &primary,
+        "kobe",
+        Egress::Work,
+        SatelliteAdmin::RevokeOnly,
+        SatelliteAdmin::Full,
+    )
+    .await;
     let mut watcher = primary.unix(vec![Topic::MotherJobs], false).await;
     sat.server.broadcast(jobs_frame("0123456789abcdef"));
     watcher
@@ -188,37 +224,69 @@ async fn a_work_satellites_jobs_arrive_as_metadata_with_none_of_its_text() {
     watcher.sync().await;
     let raw = watcher.raw.join("\n");
     assert!(raw.contains(r#""host":"kobe""#), "{raw}");
-    assert!(!raw.contains("MARKER"), "a work satellite leaked text: {raw}");
+    assert!(
+        !raw.contains("MARKER"),
+        "a work satellite leaked text: {raw}"
+    );
 }
 
 #[tokio::test]
 async fn sensitive_and_administrative_frames_never_reach_the_primary_and_ordinary_ones_do() {
     let primary = Rig::new().await;
-    let sat = join(&primary, "sat", Egress::Personal, SatelliteAdmin::Full, SatelliteAdmin::Full).await;
+    let sat = join(
+        &primary,
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::Full,
+        SatelliteAdmin::Full,
+    )
+    .await;
     let mut watcher = primary.unix(vec![], false).await;
     // The daemon's registry says which tags exist.
-    sat.session_mgr.lock().unwrap().set_focus_registry(vec![serde_json::from_value(json!({
-        "tag": "cody-x", "display_name": "x", "agent_name": "cody", "is_built_in": false,
-        "project_path": "/code/blog",
-    }))
-    .unwrap()]);
-    sat.server.broadcast(ServerMsg::ApprovalPending { tag: "fred".into(), count: 9, host: None });
+    sat.session_mgr
+        .lock()
+        .unwrap()
+        .set_focus_registry(vec![serde_json::from_value(json!({
+            "tag": "cody-x", "display_name": "x", "agent_name": "cody", "is_built_in": false,
+            "project_path": "/code/blog",
+        }))
+        .unwrap()]);
+    sat.server.broadcast(ServerMsg::ApprovalPending {
+        tag: "fred".into(),
+        count: 9,
+        host: None,
+    });
     sat.server.broadcast(ServerMsg::Hosts { hosts: vec![] });
-    sat.server.broadcast(ServerMsg::DeviceAdminLevel { level: SatelliteAdmin::Full, pair_from: vec!["sat".into()] });
-    sat.server.broadcast(ServerMsg::ApprovalPending { tag: "cody-x".into(), count: 2, host: None });
+    sat.server.broadcast(ServerMsg::DeviceAdminLevel {
+        level: SatelliteAdmin::Full,
+        pair_from: vec!["sat".into()],
+    });
+    sat.server.broadcast(ServerMsg::ApprovalPending {
+        tag: "cody-x".into(),
+        count: 2,
+        host: None,
+    });
     let m = watcher
-        .next_matching("the ordinary count", |m| matches!(m, ServerMsg::ApprovalPending { .. }))
+        .next_matching("the ordinary count", |m| {
+            matches!(m, ServerMsg::ApprovalPending { .. })
+        })
         .await;
     match m {
         ServerMsg::ApprovalPending { tag, count, host } => {
-            assert_eq!((tag.as_str(), count, host.as_deref()), ("cody-x", 2, Some("sat")));
+            assert_eq!(
+                (tag.as_str(), count, host.as_deref()),
+                ("cody-x", 2, Some("sat"))
+            );
         }
         _ => unreachable!(),
     }
     watcher.sync().await;
     for m in watcher.take_all() {
         assert!(
-            !matches!(m, ServerMsg::ApprovalPending { .. } | ServerMsg::DeviceAdminLevel { .. }),
+            !matches!(
+                m,
+                ServerMsg::ApprovalPending { .. } | ServerMsg::DeviceAdminLevel { .. }
+            ),
             "{m:?}"
         );
     }
@@ -229,10 +297,23 @@ async fn what_a_satellite_broadcast_while_disconnected_is_replayed_when_it_conne
     let primary = Rig::new().await;
     let r = primary
         .registry
-        .redeem_with_egress("sat", DeviceKind::Satellite, Some(SatelliteAdmin::Full), Some(Egress::Personal), None)
+        .redeem_with_egress(
+            "sat",
+            DeviceKind::Satellite,
+            Some(SatelliteAdmin::Full),
+            Some(Egress::Personal),
+            None,
+        )
         .unwrap();
     // Dial a port nothing listens on first, broadcast, then let it find the primary.
-    let sat = start(dead_url(), &r.token, "sat", Egress::Personal, SatelliteAdmin::Full, r.device_id);
+    let sat = start(
+        dead_url(),
+        &r.token,
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::Full,
+        r.device_id,
+    );
     sat.server.broadcast(jobs_frame("0123456789abcdef"));
     drop(sat);
     // A satellite whose first attempt succeeds replays what it cached before.
@@ -248,7 +329,9 @@ async fn what_a_satellite_broadcast_while_disconnected_is_replayed_when_it_conne
     let mut watcher = primary.unix(vec![Topic::MotherJobs], false).await;
     // Retained on the primary under the host: a late subscriber gets it.
     let m = watcher
-        .next_matching("the retained jobs", |m| matches!(m, ServerMsg::MotherJobs { .. }))
+        .next_matching("the retained jobs", |m| {
+            matches!(m, ServerMsg::MotherJobs { .. })
+        })
         .await;
     assert_eq!(host_of_jobs(&m), Some(Some("sat".to_string())));
 }
@@ -256,16 +339,29 @@ async fn what_a_satellite_broadcast_while_disconnected_is_replayed_when_it_conne
 #[tokio::test]
 async fn with_the_uplink_unreachable_local_clients_see_nothing_change() {
     let tmp_primary_none = dead_url();
-    let r = start(tmp_primary_none, "x", "sat", Egress::Personal, SatelliteAdmin::Full, String::new());
+    let r = start(
+        tmp_primary_none,
+        "x",
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::Full,
+        String::new(),
+    );
     let mut local = Rig::unix_at(&r.socket, vec![Topic::MotherJobs]).await;
     r.server.broadcast(jobs_frame("0123456789abcdef"));
     let m = local
         .next_matching("local jobs", |m| matches!(m, ServerMsg::MotherJobs { .. }))
         .await;
-    assert_eq!(host_of_jobs(&m), Some(None), "a local client sees its own, unstamped");
+    assert_eq!(
+        host_of_jobs(&m),
+        Some(None),
+        "a local client sees its own, unstamped"
+    );
     local.send(&ClientMsg::SessionList { host: None }).await;
     local
-        .next_matching("a local session list", |m| matches!(m, ServerMsg::SessionListResp { .. }))
+        .next_matching("a local session list", |m| {
+            matches!(m, ServerMsg::SessionListResp { .. })
+        })
         .await;
     drop(r.tmp);
 }
@@ -273,37 +369,76 @@ async fn with_the_uplink_unreachable_local_clients_see_nothing_change() {
 // ── routed reads ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn a_routed_read_is_answered_by_a_personal_satellite_and_refused_for_work_and_unknown_hosts() {
+async fn a_routed_read_is_answered_by_a_personal_satellite_and_refused_for_work_and_unknown_hosts()
+{
     let primary = Rig::new().await;
-    let _p = join(&primary, "sat", Egress::Personal, SatelliteAdmin::Full, SatelliteAdmin::Full).await;
-    let _w = join(&primary, "kobe", Egress::Work, SatelliteAdmin::RevokeOnly, SatelliteAdmin::Full).await;
+    let _p = join(
+        &primary,
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::Full,
+        SatelliteAdmin::Full,
+    )
+    .await;
+    let _w = join(
+        &primary,
+        "kobe",
+        Egress::Work,
+        SatelliteAdmin::RevokeOnly,
+        SatelliteAdmin::Full,
+    )
+    .await;
     let mut asker = primary.unix(vec![], false).await;
 
-    asker.send(&ClientMsg::SessionList { host: Some("sat".into()) }).await;
+    asker
+        .send(&ClientMsg::SessionList {
+            host: Some("sat".into()),
+        })
+        .await;
     let m = asker
-        .next_matching("the routed answer", |m| matches!(m, ServerMsg::SessionListResp { .. }))
+        .next_matching("the routed answer", |m| {
+            matches!(m, ServerMsg::SessionListResp { .. })
+        })
         .await;
     match m {
         ServerMsg::SessionListResp { host, .. } => assert_eq!(host.as_deref(), Some("sat")),
         _ => unreachable!(),
     }
 
-    asker.send(&ClientMsg::SessionList { host: Some("kobe".into()) }).await;
+    asker
+        .send(&ClientMsg::SessionList {
+            host: Some("kobe".into()),
+        })
+        .await;
     let m = asker
-        .next_matching("work refusal", |m| matches!(m, ServerMsg::HostUnavailable { .. }))
+        .next_matching("work refusal", |m| {
+            matches!(m, ServerMsg::HostUnavailable { .. })
+        })
         .await;
     assert!(matches!(
         m,
-        ServerMsg::HostUnavailable { reason: HostUnavailableReason::EgressMetadata, .. }
+        ServerMsg::HostUnavailable {
+            reason: HostUnavailableReason::EgressMetadata,
+            ..
+        }
     ));
 
-    asker.send(&ClientMsg::SessionList { host: Some("nope".into()) }).await;
+    asker
+        .send(&ClientMsg::SessionList {
+            host: Some("nope".into()),
+        })
+        .await;
     let m = asker
-        .next_matching("unknown host", |m| matches!(m, ServerMsg::HostUnavailable { .. }))
+        .next_matching("unknown host", |m| {
+            matches!(m, ServerMsg::HostUnavailable { .. })
+        })
         .await;
     assert!(matches!(
         m,
-        ServerMsg::HostUnavailable { reason: HostUnavailableReason::NotConnected, .. }
+        ServerMsg::HostUnavailable {
+            reason: HostUnavailableReason::NotConnected,
+            ..
+        }
     ));
 }
 
@@ -316,11 +451,24 @@ async fn follower(sat: &Sat) -> Conn {
 #[tokio::test]
 async fn a_local_clients_pairing_runs_on_the_primary_and_the_outcome_goes_to_that_client_alone() {
     let primary = Rig::new().await;
-    let sat = join(&primary, "sat", Egress::Personal, SatelliteAdmin::Full, SatelliteAdmin::Full).await;
+    let sat = join(
+        &primary,
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::Full,
+        SatelliteAdmin::Full,
+    )
+    .await;
     let mut a = follower(&sat).await;
     let mut b = follower(&sat).await;
     a.next_matching("the level", |m| {
-        matches!(m, ServerMsg::DeviceAdminLevel { level: SatelliteAdmin::Full, .. })
+        matches!(
+            m,
+            ServerMsg::DeviceAdminLevel {
+                level: SatelliteAdmin::Full,
+                ..
+            }
+        )
     })
     .await;
 
@@ -335,10 +483,18 @@ async fn a_local_clients_pairing_runs_on_the_primary_and_the_outcome_goes_to_tha
     })
     .await;
     let (code, url, pairing_id) = match a
-        .next_matching("DevicePairing", |m| matches!(m, ServerMsg::DevicePairing { .. }))
+        .next_matching("DevicePairing", |m| {
+            matches!(m, ServerMsg::DevicePairing { .. })
+        })
         .await
     {
-        ServerMsg::DevicePairing { request_id, code, server_url, pairing_id, .. } => {
+        ServerMsg::DevicePairing {
+            request_id,
+            code,
+            server_url,
+            pairing_id,
+            ..
+        } => {
             assert_eq!(request_id, rid, "answered under the client's own id");
             (code, server_url, pairing_id)
         }
@@ -350,13 +506,21 @@ async fn a_local_clients_pairing_runs_on_the_primary_and_the_outcome_goes_to_tha
     );
 
     let start = Instant::now();
-    let (reply, _) = primary.redeem(&code, "Phone", DeviceKind::Iphone, false).await;
+    let (reply, _) = primary
+        .redeem(&code, "Phone", DeviceKind::Iphone, false)
+        .await;
     assert!(matches!(reply, ServerMsg::Paired { .. }), "{reply:?}");
     match a
-        .next_matching("the outcome", |m| matches!(m, ServerMsg::DevicePairOutcome { .. }))
+        .next_matching("the outcome", |m| {
+            matches!(m, ServerMsg::DevicePairOutcome { .. })
+        })
         .await
     {
-        ServerMsg::DevicePairOutcome { pairing_id: id, outcome, .. } => {
+        ServerMsg::DevicePairOutcome {
+            pairing_id: id,
+            outcome,
+            ..
+        } => {
             assert_eq!(id, pairing_id);
             assert_eq!(outcome, PairOutcomeKind::Paired);
         }
@@ -365,7 +529,9 @@ async fn a_local_clients_pairing_runs_on_the_primary_and_the_outcome_goes_to_tha
     assert!(start.elapsed() < Duration::from_secs(2));
     b.sync().await;
     assert!(
-        b.take_all().iter().all(|m| !matches!(m, ServerMsg::DevicePairOutcome { .. })),
+        b.take_all()
+            .iter()
+            .all(|m| !matches!(m, ServerMsg::DevicePairOutcome { .. })),
         "a second client must not see that outcome"
     );
 }
@@ -374,23 +540,45 @@ async fn a_local_clients_pairing_runs_on_the_primary_and_the_outcome_goes_to_tha
 async fn a_revoke_from_a_satellite_takes_effect_on_the_primary_and_devices_updates_reach_it() {
     let primary = Rig::new().await;
     let phone = primary.mint_device("Phone");
-    let sat = join(&primary, "sat", Egress::Personal, SatelliteAdmin::Full, SatelliteAdmin::Full).await;
+    let sat = join(
+        &primary,
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::Full,
+        SatelliteAdmin::Full,
+    )
+    .await;
     let mut a = follower(&sat).await;
     let rid = request_id();
-    a.send(&ClientMsg::DeviceRevoke { request_id: rid.clone(), device: "Phone".into() }).await;
+    a.send(&ClientMsg::DeviceRevoke {
+        request_id: rid.clone(),
+        device: "Phone".into(),
+    })
+    .await;
     match a
-        .next_matching("DeviceRevoked", |m| matches!(m, ServerMsg::DeviceRevoked { .. }))
+        .next_matching("DeviceRevoked", |m| {
+            matches!(m, ServerMsg::DeviceRevoked { .. })
+        })
         .await
     {
-        ServerMsg::DeviceRevoked { request_id, device_id, .. } => {
+        ServerMsg::DeviceRevoked {
+            request_id,
+            device_id,
+            ..
+        } => {
             assert_eq!(request_id, rid);
             assert_eq!(device_id, phone.device_id);
         }
         _ => unreachable!(),
     }
-    assert!(primary.registry.resolve("Phone").is_err(), "the phone is revoked");
-    a.next_matching("a Devices update", |m| matches!(m, ServerMsg::Devices { .. }))
-        .await;
+    assert!(
+        primary.registry.resolve("Phone").is_err(),
+        "the phone is revoked"
+    );
+    a.next_matching("a Devices update", |m| {
+        matches!(m, ServerMsg::Devices { .. })
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -398,35 +586,74 @@ async fn the_primarys_level_and_the_local_narrowing_decide_which_verbs_run() {
     let primary = Rig::new().await;
     let _phone = primary.mint_device("Phone");
     // read_only on the primary: the list works, a revoke does not.
-    let sat = join(&primary, "sat", Egress::Personal, SatelliteAdmin::ReadOnly, SatelliteAdmin::Full).await;
+    let sat = join(
+        &primary,
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::ReadOnly,
+        SatelliteAdmin::Full,
+    )
+    .await;
     let mut a = follower(&sat).await;
     a.next_matching("read_only level", |m| {
-        matches!(m, ServerMsg::DeviceAdminLevel { level: SatelliteAdmin::ReadOnly, .. })
+        matches!(
+            m,
+            ServerMsg::DeviceAdminLevel {
+                level: SatelliteAdmin::ReadOnly,
+                ..
+            }
+        )
     })
     .await;
     let rid = request_id();
     a.send(&ClientMsg::DeviceList { request_id: rid }).await;
-    a.next_matching("the list", |m| matches!(m, ServerMsg::Devices { .. })).await;
-    a.send(&ClientMsg::DeviceRevoke { request_id: "r2".into(), device: "Phone".into() }).await;
+    a.next_matching("the list", |m| matches!(m, ServerMsg::Devices { .. }))
+        .await;
+    a.send(&ClientMsg::DeviceRevoke {
+        request_id: "r2".into(),
+        device: "Phone".into(),
+    })
+    .await;
     match a
-        .next_matching("a refusal", |m| matches!(m, ServerMsg::DeviceAdminError { .. }))
+        .next_matching("a refusal", |m| {
+            matches!(m, ServerMsg::DeviceAdminError { .. })
+        })
         .await
     {
         ServerMsg::DeviceAdminError { request_id, reason } => {
-            assert_eq!((request_id.as_str(), reason.as_str()), ("r2", "not_permitted_on_this_mac"));
+            assert_eq!(
+                (request_id.as_str(), reason.as_str()),
+                ("r2", "not_permitted_on_this_mac")
+            );
         }
         _ => unreachable!(),
     }
-    assert!(primary.registry.resolve("Phone").is_ok(), "a read_only satellite revokes nothing");
+    assert!(
+        primary.registry.resolve("Phone").is_ok(),
+        "a read_only satellite revokes nothing"
+    );
 }
 
 #[tokio::test]
 async fn a_revoke_only_satellite_cannot_start_a_pairing_and_hears_a_level_change_within_3_s() {
     let primary = Rig::new().await;
-    let sat = join(&primary, "sat", Egress::Personal, SatelliteAdmin::RevokeOnly, SatelliteAdmin::Full).await;
+    let sat = join(
+        &primary,
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::RevokeOnly,
+        SatelliteAdmin::Full,
+    )
+    .await;
     let mut a = follower(&sat).await;
     a.next_matching("revoke_only", |m| {
-        matches!(m, ServerMsg::DeviceAdminLevel { level: SatelliteAdmin::RevokeOnly, .. })
+        matches!(
+            m,
+            ServerMsg::DeviceAdminLevel {
+                level: SatelliteAdmin::RevokeOnly,
+                ..
+            }
+        )
     })
     .await;
     a.send(&ClientMsg::DevicePairStart {
@@ -439,17 +666,30 @@ async fn a_revoke_only_satellite_cannot_start_a_pairing_and_hears_a_level_change
     })
     .await;
     match a
-        .next_matching("refused", |m| matches!(m, ServerMsg::DeviceAdminError { .. }))
+        .next_matching("refused", |m| {
+            matches!(m, ServerMsg::DeviceAdminError { .. })
+        })
         .await
     {
-        ServerMsg::DeviceAdminError { reason, .. } => assert_eq!(reason, "not_permitted_on_this_mac"),
+        ServerMsg::DeviceAdminError { reason, .. } => {
+            assert_eq!(reason, "not_permitted_on_this_mac")
+        }
         _ => unreachable!(),
     }
     // The primary changes the level: the uplink is closed and re-admitted.
-    primary.registry.set_admin("sat", SatelliteAdmin::Off).unwrap();
+    primary
+        .registry
+        .set_admin("sat", SatelliteAdmin::Off)
+        .unwrap();
     let start = Instant::now();
     a.next_matching("off", |m| {
-        matches!(m, ServerMsg::DeviceAdminLevel { level: SatelliteAdmin::Off, .. })
+        matches!(
+            m,
+            ServerMsg::DeviceAdminLevel {
+                level: SatelliteAdmin::Off,
+                ..
+            }
+        )
     })
     .await;
     assert!(start.elapsed() < Duration::from_secs(3));
@@ -457,7 +697,14 @@ async fn a_revoke_only_satellite_cannot_start_a_pairing_and_hears_a_level_change
 
 #[tokio::test]
 async fn with_the_uplink_down_a_verb_is_answered_server_unreachable_within_100_ms() {
-    let sat = start(dead_url(), "x", "sat", Egress::Personal, SatelliteAdmin::Full, String::new());
+    let sat = start(
+        dead_url(),
+        "x",
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::Full,
+        String::new(),
+    );
     let mut a = Rig::unix_at(&sat.socket, vec![Topic::Devices]).await;
     let t = Instant::now();
     a.send(&ClientMsg::DevicePairStart {
@@ -470,21 +717,37 @@ async fn with_the_uplink_down_a_verb_is_answered_server_unreachable_within_100_m
     })
     .await;
     match a
-        .next_matching("unreachable", |m| matches!(m, ServerMsg::DeviceAdminError { .. }))
+        .next_matching("unreachable", |m| {
+            matches!(m, ServerMsg::DeviceAdminError { .. })
+        })
         .await
     {
         ServerMsg::DeviceAdminError { request_id, reason } => {
-            assert_eq!((request_id.as_str(), reason.as_str()), ("p", "server_unreachable"));
+            assert_eq!(
+                (request_id.as_str(), reason.as_str()),
+                ("p", "server_unreachable")
+            );
         }
         _ => unreachable!(),
     }
-    assert!(t.elapsed() < Duration::from_millis(100), "{:?}", t.elapsed());
+    assert!(
+        t.elapsed() < Duration::from_millis(100),
+        "{:?}",
+        t.elapsed()
+    );
 }
 
 #[tokio::test]
 async fn when_the_uplink_drops_every_open_pairing_reports_connection_lost() {
     let primary = Rig::new().await;
-    let sat = join(&primary, "sat", Egress::Personal, SatelliteAdmin::Full, SatelliteAdmin::Full).await;
+    let sat = join(
+        &primary,
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::Full,
+        SatelliteAdmin::Full,
+    )
+    .await;
     let mut a = follower(&sat).await;
     a.send(&ClientMsg::DevicePairStart {
         request_id: "p".into(),
@@ -495,11 +758,19 @@ async fn when_the_uplink_drops_every_open_pairing_reports_connection_lost() {
         origin: None,
     })
     .await;
-    a.next_matching("DevicePairing", |m| matches!(m, ServerMsg::DevicePairing { .. })).await;
+    a.next_matching("DevicePairing", |m| {
+        matches!(m, ServerMsg::DevicePairing { .. })
+    })
+    .await;
     // Revoking the satellite closes its socket.
-    primary.registry.revoke(&sat.device_id, RevokedBy::Operator).unwrap();
+    primary
+        .registry
+        .revoke(&sat.device_id, RevokedBy::Operator)
+        .unwrap();
     match a
-        .next_matching("connection lost", |m| matches!(m, ServerMsg::DevicePairOutcome { .. }))
+        .next_matching("connection lost", |m| {
+            matches!(m, ServerMsg::DevicePairOutcome { .. })
+        })
         .await
     {
         ServerMsg::DevicePairOutcome { outcome, .. } => {
@@ -512,7 +783,14 @@ async fn when_the_uplink_drops_every_open_pairing_reports_connection_lost() {
 #[tokio::test]
 async fn closing_a_local_client_cancels_its_pairing_on_the_primary() {
     let primary = Rig::new().await;
-    let sat = join(&primary, "sat", Egress::Personal, SatelliteAdmin::Full, SatelliteAdmin::Full).await;
+    let sat = join(
+        &primary,
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::Full,
+        SatelliteAdmin::Full,
+    )
+    .await;
     let mut a = follower(&sat).await;
     a.send(&ClientMsg::DevicePairStart {
         request_id: "p".into(),
@@ -524,7 +802,9 @@ async fn closing_a_local_client_cancels_its_pairing_on_the_primary() {
     })
     .await;
     let code = match a
-        .next_matching("DevicePairing", |m| matches!(m, ServerMsg::DevicePairing { .. }))
+        .next_matching("DevicePairing", |m| {
+            matches!(m, ServerMsg::DevicePairing { .. })
+        })
         .await
     {
         ServerMsg::DevicePairing { code, .. } => code,
@@ -532,8 +812,13 @@ async fn closing_a_local_client_cancels_its_pairing_on_the_primary() {
     };
     drop(a);
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let (reply, _) = primary.redeem(&code, "Phone", DeviceKind::Iphone, false).await;
-    assert!(matches!(reply, ServerMsg::PairRefused { .. }), "the code no longer works: {reply:?}");
+    let (reply, _) = primary
+        .redeem(&code, "Phone", DeviceKind::Iphone, false)
+        .await;
+    assert!(
+        matches!(reply, ServerMsg::PairRefused { .. }),
+        "the code no longer works: {reply:?}"
+    );
 }
 
 // ── a crafted primary ─────────────────────────────────────────────────────────
@@ -598,7 +883,12 @@ async fn fake_primary(features: &[&str]) -> FakePrimary {
             }
         }
     });
-    FakePrimary { port, frames, to_sat, auth }
+    FakePrimary {
+        port,
+        frames,
+        to_sat,
+        auth,
+    }
 }
 
 impl FakePrimary {
@@ -606,19 +896,29 @@ impl FakePrimary {
         self.frames.lock().unwrap().clone()
     }
 
-    async fn wait_for(&self, what: &str, pred: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+    async fn wait_for(
+        &self,
+        what: &str,
+        pred: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
         let start = Instant::now();
         loop {
             if let Some(f) = self.frames().into_iter().find(&pred) {
                 return f;
             }
-            assert!(start.elapsed() < READ_TIMEOUT, "waiting for {what}; got {:#?}", self.frames());
+            assert!(
+                start.elapsed() < READ_TIMEOUT,
+                "waiting for {what}; got {:#?}",
+                self.frames()
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
     fn send(&self, frame: &UplinkFrame) {
-        self.to_sat.send(serde_json::to_string(frame).unwrap()).unwrap();
+        self.to_sat
+            .send(serde_json::to_string(frame).unwrap())
+            .unwrap();
     }
 }
 
@@ -633,17 +933,30 @@ async fn the_satellite_says_hello_as_its_host_subscribes_to_devices_only_and_sen
         SatelliteAdmin::Full,
         String::new(),
     );
-    let hello = fake.wait_for("hello", |f| f["msg"]["type"] == "hello").await;
+    let hello = fake
+        .wait_for("hello", |f| f["msg"]["type"] == "hello")
+        .await;
     assert_eq!(hello["uplink"], "client");
-    assert_eq!(hello["msg"]["role"], json!({"kind": "satellite", "host": "kobe", "egress": "work"}));
-    assert_eq!(hello["msg"].get("capabilities"), None, "it attaches to nothing on the primary");
-    let sub = fake.wait_for("subscribe", |f| f["msg"]["type"] == "subscribe").await;
+    assert_eq!(
+        hello["msg"]["role"],
+        json!({"kind": "satellite", "host": "kobe", "egress": "work"})
+    );
+    assert_eq!(
+        hello["msg"].get("capabilities"),
+        None,
+        "it attaches to nothing on the primary"
+    );
+    let sub = fake
+        .wait_for("subscribe", |f| f["msg"]["type"] == "subscribe")
+        .await;
     assert_eq!(sub["msg"]["topics"], json!(["devices"]));
     let (bearer, origin) = fake.auth.lock().unwrap().clone().unwrap();
     assert_eq!(bearer.as_deref(), Some("Bearer tok-123"));
     assert!(!origin, "the uplink sends no Origin header");
     sat.server.broadcast(jobs_frame("0123456789abcdef"));
-    let p = fake.wait_for("a publish", |f| f["uplink"] == "publish").await;
+    let p = fake
+        .wait_for("a publish", |f| f["uplink"] == "publish")
+        .await;
     assert_eq!(p["msg"]["host"], "kobe");
     assert!(!p.to_string().contains("MARKER"));
 }
@@ -660,9 +973,13 @@ async fn a_primary_without_uplink_support_gets_no_subscribe_and_no_frames() {
         String::new(),
     );
     sat.server.broadcast(jobs_frame("0123456789abcdef"));
-    fake.wait_for("hello", |f| f["msg"]["type"] == "hello").await;
+    fake.wait_for("hello", |f| f["msg"]["type"] == "hello")
+        .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(fake.frames().iter().all(|f| f["msg"]["type"] != "subscribe" && f["uplink"] != "publish"));
+    assert!(fake
+        .frames()
+        .iter()
+        .all(|f| f["msg"]["type"] != "subscribe" && f["uplink"] != "publish"));
 }
 
 #[tokio::test]
@@ -678,7 +995,8 @@ async fn a_crafted_primary_runs_only_the_six_reads_and_only_for_a_personal_satel
             String::new(),
         );
         let _decisions_untouched = &sat.session_mgr;
-        fake.wait_for("subscribe", |f| f["msg"]["type"] == "subscribe").await;
+        fake.wait_for("subscribe", |f| f["msg"]["type"] == "subscribe")
+            .await;
         // Verbs that must never run from an uplink.
         for (i, msg) in [
             json!({"type": "decision_answer", "request_id": "r", "choice": "a", "operator_nonce": "n"}),
@@ -695,7 +1013,9 @@ async fn a_crafted_primary_runs_only_the_six_reads_and_only_for_a_personal_satel
             }
         }
         // Bare frames and wrong-direction envelopes are dropped too.
-        fake.to_sat.send(json!({"type": "pong"}).to_string()).unwrap();
+        fake.to_sat
+            .send(json!({"type": "pong"}).to_string())
+            .unwrap();
         fake.to_sat
             .send(json!({"uplink": "publish", "msg": {"type": "pong"}}).to_string())
             .unwrap();
@@ -705,14 +1025,21 @@ async fn a_crafted_primary_runs_only_the_six_reads_and_only_for_a_personal_satel
             msg: ClientMsg::SessionList { host: None },
         });
         tokio::time::sleep(Duration::from_millis(800)).await;
-        let replies: Vec<_> = fake.frames().into_iter().filter(|f| f["uplink"] == "reply").collect();
+        let replies: Vec<_> = fake
+            .frames()
+            .into_iter()
+            .filter(|f| f["uplink"] == "reply")
+            .collect();
         if expect_replies {
             assert_eq!(replies.len(), 1, "{replies:#?}");
             assert_eq!(replies[0]["id"], "read1");
             assert_eq!(replies[0]["msg"]["type"], "session_list_resp");
             assert_eq!(replies[0]["msg"]["host"], "sat");
         } else {
-            assert!(replies.is_empty(), "a work satellite answers no reads: {replies:#?}");
+            assert!(
+                replies.is_empty(),
+                "a work satellite answers no reads: {replies:#?}"
+            );
         }
     }
 }
@@ -728,29 +1055,45 @@ async fn the_primarys_admin_frames_reach_only_the_local_clients_they_answer() {
         SatelliteAdmin::Full,
         String::new(),
     );
-    fake.wait_for("subscribe", |f| f["msg"]["type"] == "subscribe").await;
+    fake.wait_for("subscribe", |f| f["msg"]["type"] == "subscribe")
+        .await;
     fake.send(&UplinkFrame::Server {
-        msg: ServerMsg::DeviceAdminLevel { level: SatelliteAdmin::Full, pair_from: vec!["sendai".into()] },
+        msg: ServerMsg::DeviceAdminLevel {
+            level: SatelliteAdmin::Full,
+            pair_from: vec!["sendai".into()],
+        },
     });
     let mut follower = Rig::unix_at(&sat.socket, vec![Topic::Devices]).await;
     let mut not_following = Rig::unix_at(&sat.socket, vec![Topic::MotherJobs]).await;
     follower
-        .next_matching("the level", |m| matches!(m, ServerMsg::DeviceAdminLevel { .. }))
+        .next_matching("the level", |m| {
+            matches!(m, ServerMsg::DeviceAdminLevel { .. })
+        })
         .await;
     // Nothing the satellite relays locally is ever published back up.
-    fake.send(&UplinkFrame::Server { msg: ServerMsg::Devices { devices: vec![], hosts: vec![] } });
-    follower.next_matching("the list", |m| matches!(m, ServerMsg::Devices { .. })).await;
+    fake.send(&UplinkFrame::Server {
+        msg: ServerMsg::Devices {
+            devices: vec![],
+            hosts: vec![],
+        },
+    });
+    follower
+        .next_matching("the list", |m| matches!(m, ServerMsg::Devices { .. }))
+        .await;
     not_following.sync().await;
-    assert!(not_following
-        .take_all()
-        .iter()
-        .all(|m| !matches!(m, ServerMsg::Devices { .. } | ServerMsg::DeviceAdminLevel { .. })));
+    assert!(not_following.take_all().iter().all(|m| !matches!(
+        m,
+        ServerMsg::Devices { .. } | ServerMsg::DeviceAdminLevel { .. }
+    )));
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
         fake.frames()
             .iter()
             .filter(|f| f["uplink"] == "publish")
-            .all(|f| !matches!(f["msg"]["type"].as_str(), Some("devices" | "device_admin_level"))),
+            .all(|f| !matches!(
+                f["msg"]["type"].as_str(),
+                Some("devices" | "device_admin_level")
+            )),
         "an administrative frame was echoed upward"
     );
 }
@@ -780,14 +1123,25 @@ async fn uplink_pair_enrols_writes_a_0600_token_and_never_prints_it() {
     let token = token.trim();
     assert!(!token.is_empty());
     assert!(!printed.contains(token), "the token was printed");
-    assert!(printed.contains("Enrolled kobe with 127.0.0.1:"), "{printed}");
+    assert!(
+        printed.contains("Enrolled kobe with 127.0.0.1:"),
+        "{printed}"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
     // The token works as a satellite's bearer.
-    assert!(primary.registry.summaries(|_| false).1.iter().any(|h| h.name == "kobe"));
+    assert!(primary
+        .registry
+        .summaries(|_| false)
+        .1
+        .iter()
+        .any(|h| h.name == "kobe"));
 }
 
 #[tokio::test]

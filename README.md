@@ -154,6 +154,41 @@ The raw TCP listener (`tcp_addr`, port 47100, plus Bonjour) is **deprecated**:
 it has no authentication and is read-only. New clients use the WebSocket
 endpoint.
 
+### Satellite mode
+
+A satellite is a `nostromd` on a Mac that owns agent sessions and Mother
+queues but should not be reachable: it binds loopback only, advertises nothing
+on mDNS, and dials out to a primary (the always-on host devices pair with).
+Its own Unix-socket clients keep working with the VPN down.
+
+```toml
+# ~/.config/nostromo/config.toml on the satellite (Kobe)
+mode = "satellite"
+host_name = "kobe"            # required for a work satellite: ^[a-z][a-z0-9-]{0,15}$
+
+[uplink]
+url = "ws://10.0.0.5:47101"   # the primary's WireGuard/LAN address
+egress = "work"               # work (default): metadata only; personal: what a paired phone may see
+device_admin = "full"         # only ever narrows what the primary grants
+# phi_repos = ["billing"]     # added to admin-portal and referral-monitor
+```
+
+Enrol it once. On the primary: `nostromo device pair --satellite kobe --egress work
+--admin revoke-only` (an unset `--admin` is `revoke-only`), then on the satellite
+`nostromo uplink pair --url ws://10.0.0.5:47101 <code>`, which saves the token
+at `~/.nostromo/uplink-token` (0600) and prints only `Enrolled kobe with ...`.
+If the primary stored another name (`kobe 2`, because "kobe" was taken) the
+command says so: revoke the old record and enrol again.
+
+A `work` satellite publishes fixed-vocabulary metadata only (job states, short
+references, counts, the host name). A `personal` satellite publishes what a
+paired phone could see anyway, minus PHI-repo work; mail, calendar and todos stay
+home on every host, and approvals and decisions are answered only at the Mac
+they belong to. Device administration from a satellite's Mac app goes up the
+same outbound socket; with the uplink down it answers `server_unreachable` at
+once. On a managed laptop use a split-tunnel WireGuard profile (`AllowedIPs` =
+the home subnet) so corporate traffic stays on its own VPN.
+
 ### Install
 
 ```bash

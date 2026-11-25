@@ -1113,10 +1113,9 @@ fn handle_request(
                 rx.recv().await
             } else {
                 let left = ROUTED_TTL.saturating_sub(started.elapsed());
-                match tokio::time::timeout(left, rx.recv()).await {
-                    Ok(m) => m,
-                    Err(_) => None,
-                }
+                tokio::time::timeout(left, rx.recv())
+                    .await
+                    .unwrap_or_default()
             };
             let Some(m) = next else { break };
             let is_refusal = matches!(m, ServerMsg::Error { .. } | ServerMsg::Withheld { .. });
@@ -1675,5 +1674,51 @@ mod tests {
             job_id: "j".into(),
             answer: "a".into()
         }));
+    }
+
+    #[test]
+    fn redact_for_network_is_idempotent_so_a_reply_survives_the_primarys_check() {
+        let tags = SensitiveTags::default();
+        let samples = vec![
+            jobs_msg(vec![job("0123456789abcdef", "/code/blog")]),
+            ServerMsg::SessionListResp {
+                sessions: vec![],
+                host: Some("kobe".into()),
+            },
+            ServerMsg::FocusListResp {
+                focuses: vec![focus("cody-a", "/code/blog")],
+                host: Some("kobe".into()),
+            },
+            ServerMsg::ApprovalPending {
+                tag: "cody-a".into(),
+                count: 3,
+                host: None,
+            },
+        ];
+        for m in samples {
+            let once = crate::ipc::peer::redact_for_network(m, &tags);
+            let twice = crate::ipc::peer::redact_for_network(once.clone(), &tags);
+            assert_eq!(
+                serde_json::to_value(&once).unwrap(),
+                serde_json::to_value(&twice).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn a_routed_read_is_a_network_peer_so_it_never_closes_a_merge_gate() {
+        // `SessionAttach` attaches a network peer through `attach_network`.
+        assert!(PeerTrust::Routed.is_network());
+    }
+
+    #[test]
+    fn a_satellite_binds_loopback_only() {
+        let lan: std::net::SocketAddr = "0.0.0.0:47100".parse().unwrap();
+        assert_eq!(
+            crate::config::loopback_only(lan).to_string(),
+            "127.0.0.1:47100"
+        );
+        let lo: std::net::SocketAddr = "127.0.0.1:47101".parse().unwrap();
+        assert_eq!(crate::config::loopback_only(lo), lo);
     }
 }
