@@ -114,14 +114,17 @@ final class WebSocketClientTests: XCTestCase {
     }
 
     func testTheTokenGoesOnlyInAnExactBearerAuthorizationHeaderAndNoOriginIsSent() async throws {
-        let server = try await startServer()
-        let client = makeClient(port: server.port)
+        let capture = try await RawUpgradeCapture.start()
+        defer { capture.stop() }
+        let client = makeClient(port: capture.port)
         client.start()
+        defer { client.stop() }
 
-        await assertEventually("the upgrade arrives") { !server.handshakes.isEmpty }
-        let handshake = try XCTUnwrap(server.handshakes.first)
-        XCTAssertEqual(handshake.authorization, "Bearer \(secretToken)")
-        XCTAssertNil(handshake.origin, "The daemon refuses an upgrade that carries an Origin header")
+        await assertEventually("the upgrade arrives") { capture.request != nil }
+        XCTAssertEqual(capture.header("Authorization"), "Bearer \(secretToken)")
+        XCTAssertNil(capture.header("Origin"), "The daemon refuses an upgrade that carries an Origin header")
+        XCTAssertEqual(capture.requestLine?.hasPrefix("GET / HTTP/1.1"), true)
+        XCTAssertFalse(capture.requestLine?.contains(secretToken) ?? true, "the token is never in the URL")
     }
 
     // MARK: - State

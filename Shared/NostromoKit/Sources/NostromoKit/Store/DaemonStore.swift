@@ -333,7 +333,7 @@ public final class DaemonStore: ObservableObject {
                     // Without one (legacy transport) clear them so the list doesn't show ghost
                     // entries if the daemon is restarted.
                     if self?.cache != nil {
-                        self?.isStale = true
+                        self?.isStale = self?.hasLastKnownContent ?? false
                     } else {
                         self?.clearLastKnownContent()
                     }

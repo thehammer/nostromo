@@ -280,14 +280,17 @@ final class PairingClientTests: XCTestCase {
     // MARK: - Headers
 
     func testAPairingSocketCarriesNoAuthorizationAndNoOriginHeader() async throws {
-        let server = try await startPairingServer()
-        let client = makeClient(port: server.port)
+        let capture = try await RawUpgradeCapture.start()
+        defer { capture.stop() }
+        let client = makeClient(port: capture.port)
 
-        _ = try await client.check(code: "123456")
+        // The capture drops the connection after reading the upgrade, so the check itself fails.
+        _ = try? await client.check(code: "123456")
 
-        let handshake = try XCTUnwrap(server.handshakes.first)
-        XCTAssertNil(handshake.authorization, "A pairing socket is token-less")
-        XCTAssertNil(handshake.origin, "The daemon refuses an upgrade that carries an Origin header")
+        XCTAssertNotNil(capture.request, "the upgrade request should have arrived")
+        XCTAssertNil(capture.header("Authorization"), "A pairing socket is token-less")
+        XCTAssertNil(capture.header("Origin"), "The daemon refuses an upgrade that carries an Origin header")
+        XCTAssertEqual(capture.requestLine?.hasPrefix("GET / HTTP/1.1"), true)
     }
 
     // MARK: - Failures

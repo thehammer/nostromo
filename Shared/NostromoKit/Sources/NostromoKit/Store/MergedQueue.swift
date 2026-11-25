@@ -10,6 +10,7 @@
 //     a title, question, branch, repository or session name never reaches it.
 
 import Foundation
+import CryptoKit
 
 public struct MergedQueueRow: Identifiable, Equatable {
     public enum Kind: Equatable { case job, session }
@@ -99,9 +100,16 @@ public enum MergedQueue {
         let state = session.state.rawValue
         let text = metadataOnly ? ReasonPhrases.sessionLine(agentName: session.agentName, state: state)
                                 : "\(session.agentName) · \(state)"
-        return MergedQueueRow(id: "\(host ?? "")|session|\(session.tag)", kind: .session, host: host, hostBadge: nil,
+        // A work host's tag is the daemon's pseudonym, but nothing of a work host's is used raw: the id
+        // carries a short hash of it.
+        let tagPart = metadataOnly ? shortHash(session.tag) : session.tag
+        return MergedQueueRow(id: "\(host ?? "")|session|\(tagPart)", kind: .session, host: host, hostBadge: nil,
                               isMetadataOnly: metadataOnly, needsYou: false, text: text, recency: nil,
                               job: nil, session: metadataOnly ? nil : session)
+    }
+
+    private static func shortHash(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).prefix(4).map { String(format: "%02x", $0) }.joined()
     }
 
     private static func parse(_ iso: String) -> Date? {

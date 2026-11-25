@@ -295,17 +295,18 @@ softer approximation of the device's — and anything perceptual (see the
 worked example below). A green L5 means "this iOS-process behaviour holds on
 the Simulator," not "the app works on the phone."
 
-**What is in it today:** two smoke files. `NostromoSmokeTests`: the app is a
-SwiftUI `@main App` with no hand-written app delegate, so the honest equivalent
-of "the app delegate launches" is that UIKit's delegate for the app is live in
-the process, and that the bundle can reach app-module code (`ConnectionSettings`)
-and construct `NetworkClient` the way `NostromoApp` does. It does not show that
-`NostromoApp`'s own initialiser ran; the test calls the same functions itself.
-`HostedHarnessTests` is what proves the bundle really runs hosted in the app
-inside an iOS process (the main bundle is `com.hammer.nostromo.ios`, the test
-case lives in a separate `.xctest` bundle, `UIApplication` has a delegate). Both
-carry `// L5:` headers. Nothing else is in L5 until W11 adds the first real
-runtime behaviour.
+**What is in it today:** the two smoke files, and W11's three backplane files. `NostromoSmokeTests`: the
+app is a SwiftUI `@main App` with no hand-written app delegate, so the honest equivalent of "the app
+delegate launches" is that UIKit's delegate for the app is live in the process, and that the bundle can
+reach app-module code (`ConnectionSettings`) and construct `NetworkClient` the way `NostromoApp` does.
+`HostedHarnessTests` proves the bundle really runs hosted in the app inside an iOS process.
+`KeychainCredentialStoreTests` (the device credential's item attributes, `AfterFirstUnlockThisDeviceOnly`,
+round trip, delete on revoke, token never in UserDefaults), `PairLinkRoutingTests` (the `nostromo` URL
+scheme in the built Info.plist, the camera and Local Network reasons, and `AppSession.handle(url:)` routing
+a valid link to the confirmation step and refusing a bad one) and `ContentCacheProtectionTests` (the cache
+file's `complete` protection class, backup exclusion, wipe). All carry `// L5:` headers. What they do not
+show: the Simulator's Keychain and file protection are softer than a device's, so a locked phone is a
+manual check (W11-13).
 
 ## Worked example: ambient activity (W4)
 

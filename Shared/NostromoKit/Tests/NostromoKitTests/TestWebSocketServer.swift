@@ -313,3 +313,95 @@ func parseWireJSON(_ text: String) -> [String: Any] {
 
 /// The `type` of a JSON text frame.
 func wireType(_ text: String) -> String? { parseWireJSON(text)["type"] as? String }
+
+// MARK: - Raw upgrade capture
+
+/// A plain TCP listener that records the first HTTP upgrade request it receives (request line and
+/// headers, verbatim) and then closes. `NWProtocolWebSocket`'s request handler does not report the
+/// client's headers, so header and path assertions read the raw request instead. The client sees a
+/// dropped connection, which these tests do not care about.
+final class RawUpgradeCapture: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "RawUpgradeCapture")
+    private let lock = NSLock()
+    private var _request: String?
+    private(set) var port: UInt16 = 0
+
+    /// The request head (through the blank line), once one arrived.
+    var request: String? { lock.lock(); defer { lock.unlock() }; return _request }
+
+    /// The header lines as (name, value) pairs; names compared case-insensitively by `header(_:)`.
+    func header(_ name: String) -> String? {
+        guard let request else { return nil }
+        for line in request.components(separatedBy: "\r\n").dropFirst() {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            if line[..<colon].lowercased() == name.lowercased() {
+                return line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return nil
+    }
+
+    var requestLine: String? { request?.components(separatedBy: "\r\n").first }
+
+    static func start() async throws -> RawUpgradeCapture {
+        let capture = try RawUpgradeCapture()
+        try await capture.listen()
+        return capture
+    }
+
+    func stop() { listener.cancel() }
+
+    private init() throws {
+        let parameters = NWParameters.tcp
+        parameters.requiredInterfaceType = .loopback
+        listener = try NWListener(using: parameters, on: .any)
+    }
+
+    private func listen() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let once = NSLock()
+            var resumed = false
+            func finish(_ error: Error?) {
+                once.lock(); defer { once.unlock() }
+                guard !resumed else { return }
+                resumed = true
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+            listener.newConnectionHandler = { [weak self] connection in
+                guard let self else { return }
+                connection.start(queue: self.queue)
+                self.read(connection, buffer: Data())
+            }
+            listener.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .ready:
+                    self?.port = self?.listener.port?.rawValue ?? 0
+                    finish(nil)
+                case .failed(let error): finish(error)
+                case .cancelled: finish(CancellationError())
+                default: break
+                }
+            }
+            listener.start(queue: queue)
+        }
+    }
+
+    private func read(_ connection: NWConnection, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, done, error in
+            guard let self else { return }
+            var buffer = buffer
+            if let data { buffer.append(data) }
+            if let text = String(data: buffer, encoding: .utf8), let end = text.range(of: "\r\n\r\n") {
+                self.lock.lock()
+                if self._request == nil { self._request = String(text[..<end.upperBound]) }
+                self.lock.unlock()
+                connection.cancel()
+            } else if error != nil || done {
+                connection.cancel()
+            } else {
+                self.read(connection, buffer: buffer)
+            }
+        }
+    }
+}
