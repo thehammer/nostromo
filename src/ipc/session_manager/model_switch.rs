@@ -1469,10 +1469,14 @@ pub(super) fn spawn_apply_task(
                 ModelRequestOutcome::failed("the model switch failed unexpectedly")
             }
         };
+        // Leave `Applying` before answering: a requester that gets its answer
+        // and asks again at once must find the session free, not still
+        // "applying" the switch it was just told is done (which would answer
+        // `PendingTurnEnd` for a request that is `Unchanged` or applicable).
+        finish_apply(&task_shared);
         if let Some(reply) = reply {
             let _ = reply.send(outcome);
         }
-        finish_apply(&task_shared);
     });
     publish_model_state(shared);
 }

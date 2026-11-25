@@ -6753,6 +6753,38 @@ mod tests {
     }
 
     // [seam: model_switch::spawn_apply_task]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_switch_task_leaves_applying_before_it_answers_its_requester() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_reap, shared, out) = stub_applying_a_switch(&dir);
+        let (tx, mut rx) = oneshot::channel();
+
+        // Leaving `Applying` needs the session state; hold it so the task can
+        // finish its work but not leave `Applying`. Until it can, the requester
+        // must not be told the switch is done (it would ask again at once and
+        // meet a session still "applying", answered `PendingTurnEnd`).
+        let state = shared.state.lock().unwrap();
+        model_switch::spawn_apply_task(&shared, Some(tx), async { applied() });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "answered while the session was still Applying"
+        );
+        drop(state);
+
+        let outcome = tokio::time::timeout(Duration::from_secs(30), rx)
+            .await
+            .expect("answered")
+            .expect("not dropped");
+        assert_eq!(outcome, applied());
+        assert!(
+            shared.model.lock().unwrap().applying.is_none(),
+            "the answer came after the session left Applying"
+        );
+        assert_session_released(&shared, &out).await;
+    }
+
+    // [seam: model_switch::spawn_apply_task]
     #[tokio::test]
     async fn a_switch_task_that_panics_still_leaves_applying_fails_its_requester_and_releases_the_queue(
     ) {
