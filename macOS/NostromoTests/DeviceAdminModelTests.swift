@@ -31,7 +31,6 @@ final class DeviceAdminModelTests: XCTestCase {
 
     private var transport = FakeTransport()
     private var model: DeviceAdminModel!
-    private var counter = 0
 
     private let human = HumanGestureVerdict.human(sourcePid: nil, sourceState: nil)
     private let refused = HumanGestureVerdict.refused(reason: .appControl)
@@ -40,7 +39,6 @@ final class DeviceAdminModelTests: XCTestCase {
     override func setUp() {
         super.setUp()
         transport = FakeTransport()
-        counter = 0
         model = makeModel(transport)
     }
 

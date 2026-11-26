@@ -5,7 +5,7 @@ import CoreImage
 final class PairQRTests: XCTestCase {
 
     private func scan(_ image: CGImage) -> [String] {
-        let detector = CIDetector(ofType: CIDetectorTypeQR, context: nil,
+        let detector = CIDetector(ofType: CIDetectorTypeQRCode, context: nil,
                                   options: [CIDetectorAccuracy: CIDetectorAccuracyHigh])
         let features = detector?.features(in: CIImage(cgImage: image)) ?? []
         return features.compactMap { ($0 as? CIQRCodeFeature)?.messageString }
