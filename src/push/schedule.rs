@@ -263,10 +263,17 @@ impl DeviceSchedule {
         }
 
         // 4. The morning digest at the end of quiet hours, and the evening summary.
-        let anything = self.items.values().any(|t| enabled(t));
+        let anything = self.items.values().any(enabled);
         let date = local.date_naive();
         let morning_at = parse_hhmm(&prefs.quiet.end).unwrap_or_else(default_morning);
-        if due_daily(&mut self.last_morning, date, local.time(), morning_at, baseline) && anything {
+        if due_daily(
+            &mut self.last_morning,
+            date,
+            local.time(),
+            morning_at,
+            baseline,
+        ) && anything
+        {
             fx.push(Effect::Summary {
                 reason: SummaryReason::Morning,
                 covered: Vec::new(),

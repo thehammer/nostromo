@@ -1303,3 +1303,127 @@ mod ws_addr_tests {
         );
     }
 }
+
+/// The `[push]` table (W13).
+#[cfg(test)]
+mod push_config_tests {
+    use super::*;
+    use crate::push::wire::HostClass;
+
+    fn parse(text: &str) -> Config {
+        toml::from_str(text).unwrap_or_else(|e| panic!("{text}: {e}"))
+    }
+
+    #[test]
+    fn there_is_no_push_table_unless_the_config_has_one() {
+        assert!(parse("").push.is_none());
+        assert!(Config::default().push.is_none());
+    }
+
+    #[test]
+    fn the_engine_is_enabled_unless_the_table_says_otherwise() {
+        assert!(PushConfig::default().enabled);
+        assert!(
+            parse("[push]\nrelay_url = \"https://relay.example\"\n")
+                .push
+                .unwrap()
+                .enabled
+        );
+        assert!(parse("[push]\n").push.unwrap().enabled);
+        assert!(!parse("[push]\nenabled = false\n").push.unwrap().enabled);
+    }
+
+    #[test]
+    fn the_tables_keys_are_read() {
+        let cfg = parse(
+            r#"
+relay_url = "https://github-relay.example"
+
+[push]
+relay_url = "https://push.example/"
+relay_token_path = "/tmp/token"
+decision_grace_secs = 5
+grace_secs = 7
+state_dir = "/tmp/push"
+work_owners = ["Acme"]
+
+[push.hosts]
+kobe = "work"
+sendai = "personal"
+"#,
+        );
+        let push = cfg.push.unwrap();
+        assert_eq!(
+            push.relay_url.as_deref(),
+            Some("https://push.example/"),
+            "not the GitHub relay's"
+        );
+        assert_eq!(push.relay_token_path, Some(PathBuf::from("/tmp/token")));
+        assert_eq!(push.decision_grace_secs, Some(5));
+        assert_eq!(push.grace_secs, Some(7));
+        assert_eq!(push.state_dir, Some(PathBuf::from("/tmp/push")));
+        assert_eq!(push.hosts.get("kobe"), Some(&HostClass::Work));
+        assert_eq!(push.hosts.get("sendai"), Some(&HostClass::Personal));
+        assert_eq!(
+            cfg.relay_url.as_deref(),
+            Some("https://github-relay.example")
+        );
+    }
+
+    #[test]
+    fn the_timings_default_to_none_so_the_engine_uses_the_prds_numbers() {
+        let push = parse("[push]\n").push.unwrap();
+        assert_eq!(push.grace_secs, None);
+        assert_eq!(push.decision_grace_secs, None);
+        assert!(push.hosts.is_empty(), "every host is work until classified");
+    }
+
+    fn owners(configured: &[&str]) -> Vec<String> {
+        PushConfig {
+            work_owners: configured.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+        .resolved_work_owners()
+    }
+
+    #[test]
+    fn carefeed_is_always_a_work_owner_whatever_the_config_says() {
+        assert_eq!(owners(&[]), ["Carefeed"]);
+        assert_eq!(owners(&["Acme"]), ["Carefeed", "Acme"]);
+        assert_eq!(
+            owners(&["carefeed"]),
+            ["Carefeed"],
+            "the default's own spelling wins, once"
+        );
+        assert_eq!(owners(&["CAREFEED", "Acme"]), ["Carefeed", "Acme"]);
+        assert_eq!(
+            owners(&["", "  ", "Acme"]),
+            ["Carefeed", "Acme"],
+            "blank entries are ignored"
+        );
+    }
+
+    #[test]
+    fn the_list_can_only_grow_and_never_repeats_an_owner() {
+        assert_eq!(owners(&["Acme", "acme", "ACME"]), ["Carefeed", "Acme"]);
+        assert_eq!(owners(&[" Acme "]), ["Carefeed", "Acme"], "trimmed");
+        for configured in [
+            &["Acme"][..],
+            &["Acme", "Initech"][..],
+            &[][..],
+            &["initech", "Acme"][..],
+        ] {
+            let resolved = owners(configured);
+            assert_eq!(resolved[0], "Carefeed");
+            for c in configured {
+                assert!(
+                    resolved.iter().any(|r| r.eq_ignore_ascii_case(c)),
+                    "{c} is kept: {resolved:?}"
+                );
+            }
+            let lower: std::collections::BTreeSet<String> =
+                resolved.iter().map(|o| o.to_ascii_lowercase()).collect();
+            assert_eq!(lower.len(), resolved.len(), "no repeats: {resolved:?}");
+        }
+    }
+}

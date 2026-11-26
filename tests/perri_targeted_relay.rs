@@ -370,6 +370,9 @@ struct Probe {
     review_decision: Option<String>,
     requested_reviewers: Vec<(String, String)>,
     reviews: Vec<(String, String, String)>,
+    /// Absent from the answer unless set (W13: the size of a review).
+    additions: Option<u64>,
+    deletions: Option<u64>,
 }
 
 impl Probe {
@@ -387,11 +390,13 @@ impl Probe {
             review_decision: Some("REVIEW_REQUIRED".to_owned()),
             requested_reviewers: Vec::new(),
             reviews: Vec::new(),
+            additions: None,
+            deletions: None,
         }
     }
 
     fn body(&self) -> serde_json::Value {
-        json!({"data": {"repository": {"pullRequest": {
+        let mut v = json!({"data": {"repository": {"pullRequest": {
             "number": self.number,
             "title": format!("PR {}", self.number),
             "url": format!("https://github.com/{REPO}/pull/{}", self.number),
@@ -410,7 +415,15 @@ impl Probe {
             "reviews": {"nodes": self.reviews.iter().map(|(state, submitted, author)| json!({
                 "state": state, "submittedAt": submitted, "author": {"login": author}
             })).collect::<Vec<_>>()},
-        }}}})
+        }}}});
+        let pr = &mut v["data"]["repository"]["pullRequest"];
+        if let Some(a) = self.additions {
+            pr["additions"] = json!(a);
+        }
+        if let Some(d) = self.deletions {
+            pr["deletions"] = json!(d);
+        }
+        v
     }
 }
 
@@ -1221,6 +1234,71 @@ async fn probe_fills_tickets_from_branch_and_body_in_the_same_query() {
         sent.contains("headRefName") && sent.contains("body"),
         "{sent}"
     );
+}
+
+/// W13: the probe selects `additions` and `deletions` in the same query, and
+/// their sum is the item's `changed_lines` (the size phrase of a review
+/// notification), with no extra request.
+#[tokio::test]
+async fn probe_carries_additions_and_deletions_as_changed_lines_in_the_same_query() {
+    let server = MockServer::start().await;
+    let mut h = Harness::new(&server);
+    let mut probe = Probe::new(42, "sha-42");
+    probe.review_decision = None;
+    probe.requested_reviewers = vec![(ME.to_owned(), "User".to_owned())];
+    probe.additions = Some(30);
+    probe.deletions = Some(12);
+    mount_probe(&server, &probe).await;
+    mount_check_runs_for(&server, "sha-42", "success").await;
+
+    h.apply(&ev("pr.review_requested").num(42).reviewer(ME))
+        .await;
+
+    let items = h.items();
+    assert_eq!(bucket_of(&items, 42), Some("requested"), "got {items:?}");
+    assert_eq!(items[0].changed_lines, Some(42));
+    assert_eq!(h.candidate(42).unwrap().changed_lines, Some(42));
+    let graphql: Vec<_> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path() == "/graphql")
+        .collect();
+    assert_eq!(graphql.len(), 1, "one probe, no extra request");
+    let sent = String::from_utf8_lossy(&graphql[0].body).into_owned();
+    assert!(
+        sent.contains("additions") && sent.contains("deletions"),
+        "{sent}"
+    );
+}
+
+/// A probe answer without the counts (or with only one) leaves the size unknown,
+/// which a notification renders by omitting the size phrase, never by guessing.
+#[tokio::test]
+async fn probe_without_both_counts_leaves_changed_lines_unknown_and_zero_is_not_unknown() {
+    for (additions, deletions, want) in [
+        (None, None, None),
+        (Some(30), None, None),
+        (None, Some(12), None),
+        (Some(0), Some(0), Some(0)),
+        (Some(400), Some(1), Some(401)),
+    ] {
+        let server = MockServer::start().await;
+        let mut h = Harness::new(&server);
+        let mut probe = Probe::new(42, "sha-42");
+        probe.review_decision = None;
+        probe.requested_reviewers = vec![(ME.to_owned(), "User".to_owned())];
+        probe.additions = additions;
+        probe.deletions = deletions;
+        mount_probe(&server, &probe).await;
+        mount_check_runs_for(&server, "sha-42", "success").await;
+        h.apply(&ev("pr.review_requested").num(42).reviewer(ME))
+            .await;
+        let items = h.items();
+        assert_eq!(items.len(), 1, "{additions:?}/{deletions:?}");
+        assert_eq!(items[0].changed_lines, want, "{additions:?}/{deletions:?}");
+    }
 }
 
 /// Dependabot PRs get their own bucket rather than being dropped, and the daemon

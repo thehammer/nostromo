@@ -2675,8 +2675,24 @@ mod tests {
     }
 
     /// Register the three GitHub mock endpoints needed to return PR #42 in
-    /// `review:required` with head SHA `head_sha` and passing CI.
+    /// `review:required` with head SHA `head_sha` and passing CI. The PR detail
+    /// reports 30 additions and 12 deletions (42 changed lines, W13).
     async fn mount_pr_mocks(server: &wiremock::MockServer, head_sha: &str) {
+        mount_pr_mocks_sized(
+            server,
+            head_sha,
+            serde_json::json!({"additions": 30, "deletions": 12}),
+        )
+        .await;
+    }
+
+    /// [`mount_pr_mocks`] with `size` as the line-count keys of the `/pulls/{n}`
+    /// body (`{}` is a GitHub that omits them).
+    async fn mount_pr_mocks_sized(
+        server: &wiremock::MockServer,
+        head_sha: &str,
+        size: serde_json::Value,
+    ) {
         use serde_json::json;
         use wiremock::matchers::{method, path, path_regex, query_param};
         use wiremock::{Mock, ResponseTemplate};
@@ -2733,13 +2749,14 @@ mod tests {
             .mount(server)
             .await;
 
-        // PR detail — head SHA
-        let head_sha = head_sha.to_owned();
+        // PR detail — head SHA and, when GitHub says, the line counts
+        let mut detail = json!({ "head": { "sha": head_sha } });
+        if let (Some(d), Some(s)) = (detail.as_object_mut(), size.as_object()) {
+            d.extend(s.clone());
+        }
         Mock::given(method("GET"))
             .and(path("/repos/Carefeed/admin-portal/pulls/42"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "head": { "sha": head_sha }
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(detail))
             .mount(server)
             .await;
 
@@ -2811,6 +2828,107 @@ mod tests {
             "PR with different sha should appear in snapshot"
         );
         assert_eq!(snap.items[0].number, 42);
+    }
+
+    // ── changed_lines (W13: the size of a review notification) ────────────────
+
+    /// Fetch PR #42 against a GitHub whose `/pulls/42` body carries `size`.
+    async fn fetch_with_size(size: serde_json::Value) -> (PrQueueSnapshot, wiremock::MockServer) {
+        let server = wiremock::MockServer::start().await;
+        API_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+        mount_pr_mocks_sized(&server, "sha-size", size).await;
+        let (source, dir) = make_source();
+        let state_path = source.config.perri_state_dir().join("approvals-state.json");
+        let suppress = Arc::new(Mutex::new(SuppressStore::new(
+            state_path,
+            std::time::Duration::from_secs(900),
+        )));
+        let snap = run_fetch(&source, suppress).await;
+        drop(dir);
+        (snap, server)
+    }
+
+    #[tokio::test]
+    async fn changed_lines_are_additions_plus_deletions_from_the_pr_detail() {
+        let (snap, _server) =
+            fetch_with_size(serde_json::json!({"additions": 30, "deletions": 12})).await;
+        assert_eq!(snap.items.len(), 1);
+        assert_eq!(snap.items[0].changed_lines, Some(42));
+    }
+
+    #[tokio::test]
+    async fn the_default_mock_reports_42_changed_lines() {
+        let server = wiremock::MockServer::start().await;
+        API_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+        mount_pr_mocks(&server, "sha-abc").await;
+        let (source, _dir) = make_source();
+        let state_path = source.config.perri_state_dir().join("approvals-state.json");
+        let suppress = Arc::new(Mutex::new(SuppressStore::new(
+            state_path,
+            std::time::Duration::from_secs(900),
+        )));
+        let snap = run_fetch(&source, suppress).await;
+        assert_eq!(snap.items[0].changed_lines, Some(42));
+    }
+
+    #[tokio::test]
+    async fn changed_lines_are_none_when_github_omits_the_counts_or_gives_only_one() {
+        for (size, what) in [
+            (serde_json::json!({}), "neither"),
+            (serde_json::json!({"additions": 30}), "only additions"),
+            (serde_json::json!({"deletions": 12}), "only deletions"),
+            (
+                serde_json::json!({"additions": null, "deletions": null}),
+                "nulls",
+            ),
+        ] {
+            let (snap, _server) = fetch_with_size(size).await;
+            assert_eq!(snap.items.len(), 1, "{what}: the PR is still in the queue");
+            assert_eq!(snap.items[0].changed_lines, None, "{what}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pr_with_no_changed_lines_is_zero_not_unknown() {
+        let (snap, _server) =
+            fetch_with_size(serde_json::json!({"additions": 0, "deletions": 0})).await;
+        assert_eq!(snap.items[0].changed_lines, Some(0));
+    }
+
+    #[tokio::test]
+    async fn reading_the_line_counts_costs_no_request() {
+        // The counts come from the `/pulls/{n}` body the head-SHA read already
+        // fetched: the same requests reach GitHub with the counts as without.
+        let (with, with_server) =
+            fetch_with_size(serde_json::json!({"additions": 30, "deletions": 12})).await;
+        let (without, without_server) = fetch_with_size(serde_json::json!({})).await;
+        assert_eq!(with.items[0].changed_lines, Some(42));
+        assert_eq!(without.items[0].changed_lines, None);
+        async fn paths(s: &wiremock::MockServer) -> Vec<String> {
+            let mut p: Vec<String> = s
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.url.path().to_string())
+                .collect();
+            p.sort();
+            p
+        }
+        let a = paths(&with_server).await;
+        let b = paths(&without_server).await;
+        assert_eq!(a, b, "no request was added for the line counts");
+        assert_eq!(
+            a.iter()
+                .filter(|p| p.as_str() == "/repos/Carefeed/admin-portal/pulls/42")
+                .count(),
+            1,
+            "the PR detail is read once: {a:?}"
+        );
+        assert!(
+            a.iter().all(|p| !p.ends_with("/files") && p != "/graphql"),
+            "{a:?}"
+        );
     }
 
     /// A PR not in the suppression store always appears normally.

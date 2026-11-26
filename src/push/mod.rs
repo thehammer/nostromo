@@ -39,8 +39,8 @@ use schedule::{enabled_waiting, DeviceSchedule, Effect, ScheduleCfg};
 use sent_log::{SentLine, SentLog};
 use vocab::{render_alert, render_summary, render_withdrawal, RenderContext, Rendered};
 use wire::{
-    HostClass, PushCapabilities, PushEnvironment, PushKind, PushOutcome, PushPrefs,
-    PushStatusBody, PushWaitingItem,
+    HostClass, PushCapabilities, PushEnvironment, PushKind, PushOutcome, PushPrefs, PushStatusBody,
+    PushWaitingItem,
 };
 
 /// Advertised in `Welcome.features` by a primary that runs the engine.
@@ -55,8 +55,10 @@ const DEFAULT_EXPIRY: ChronoDuration = ChronoDuration::hours(4);
 const HOST_FORGET_AFTER: ChronoDuration = ChronoDuration::minutes(10);
 /// How often the retained-frame cache is compared with what the engine holds.
 const RECONCILE_EVERY: ChronoDuration = ChronoDuration::seconds(30);
-/// A ceiling on open decisions tracked, whatever a satellite sends.
-const MAX_DECISIONS: usize = 512;
+/// A ceiling on open decisions tracked per host, whatever a satellite sends. It
+/// is per host so one satellite cannot crowd out another's, or the daemon's own;
+/// past it the host's oldest decision is dropped to make room.
+const MAX_DECISIONS_PER_HOST: usize = 64;
 
 /// Whether the push engine took a client message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,7 +337,7 @@ impl PushEngine {
 
     /// Fold one broadcast frame into the sources. True if the waiting set may
     /// have changed.
-    fn ingest(&self, msg: ServerMsg, now: DateTime<Utc>) -> bool {
+    pub fn ingest(&self, msg: ServerMsg, now: DateTime<Utc>) -> bool {
         if !matches!(
             msg,
             ServerMsg::MotherJobs { .. }
@@ -371,8 +373,20 @@ impl PushEngine {
             } => {
                 let host = self.label(host);
                 let key = (host.clone(), request_id.clone());
-                if !st.decisions.contains_key(&key) && st.decisions.len() >= MAX_DECISIONS {
-                    return false;
+                if !st.decisions.contains_key(&key) {
+                    let mut mine: Vec<_> = st
+                        .decisions
+                        .iter()
+                        .filter(|((h, _), _)| *h == host)
+                        .map(|(k, d)| (d.raised, k.clone()))
+                        .collect();
+                    if mine.len() >= MAX_DECISIONS_PER_HOST {
+                        mine.sort();
+                        let evict = mine.len() + 1 - MAX_DECISIONS_PER_HOST;
+                        for (_, k) in mine.into_iter().take(evict) {
+                            st.decisions.remove(&k);
+                        }
+                    }
                 }
                 st.host_seen.insert(host.clone(), now);
                 let raised = st.decisions.get(&key).map_or(now, |d| d.raised);
@@ -430,7 +444,7 @@ impl PushEngine {
 
     /// Once a second: forget satellites that are gone, prune the sent log, and
     /// repair what a lagged receiver may have missed from the retained frames.
-    fn housekeeping(&self, retained: Option<&RetainedSource>, now: DateTime<Utc>) {
+    pub fn housekeeping(&self, retained: Option<&RetainedSource>, now: DateTime<Utc>) {
         let snapshot = {
             let st = self.state.lock().unwrap();
             let due = st.resync || now - st.last_reconcile >= RECONCILE_EVERY;
@@ -464,7 +478,9 @@ impl PushEngine {
             .host_seen
             .iter()
             .filter(|(h, seen)| {
-                **h != self.local_host && !st.connected.contains(*h) && now - **seen > HOST_FORGET_AFTER
+                **h != self.local_host
+                    && !st.connected.contains(*h)
+                    && now - **seen > HOST_FORGET_AFTER
             })
             .map(|(h, _)| h.clone())
             .collect();
@@ -476,6 +492,9 @@ impl PushEngine {
             st.seeded_mother.remove(&host);
             st.seeded_reviews.remove(&host);
         }
+        // A decision past its deadline is no longer waiting (its asker gave up).
+        st.decisions
+            .retain(|_, d| d.facts.deadline.is_none_or(|deadline| deadline > now));
         if now - st.last_prune >= ChronoDuration::hours(1) {
             st.last_prune = now;
             st.sent.prune(now);
@@ -496,7 +515,10 @@ impl PushEngine {
         }
         let mut chosen = BTreeMap::new();
         for (pr, candidates) in &by_pr {
-            let sticky = st.review_host.get(pr).and_then(|h| candidates.iter().find(|w| w.host == *h));
+            let sticky = st
+                .review_host
+                .get(pr)
+                .and_then(|h| candidates.iter().find(|w| w.host == *h));
             let local = candidates.iter().find(|w| w.host == self.local_host);
             let pick = sticky.or(local).or(candidates.first()).copied();
             if let Some(w) = pick {
@@ -529,7 +551,18 @@ impl PushEngine {
 
     // ── deciding and sending ─────────────────────────────────────────────────
 
-    /// Step every device's schedule and send what is due.
+    /// Step every device's schedule at `now` and send what is due, awaiting
+    /// each send. [`PushEngine::spawn`] drives the engine from the clock; this
+    /// is public so a test can drive it on a fabricated one.
+    pub async fn step_at(&self, now: DateTime<Utc>) {
+        let sends = {
+            let mut st = self.state.lock().unwrap();
+            self.plan(&mut st, now)
+        };
+        self.deliver(sends, now).await;
+    }
+
+    /// Step every device's schedule and send what is due, without waiting.
     fn run(self: &Arc<Self>, now: DateTime<Utc>) {
         let sends = {
             let mut st = self.state.lock().unwrap();
@@ -539,7 +572,7 @@ impl PushEngine {
             return;
         }
         let engine = Arc::clone(self);
-        tokio::spawn(async move { engine.deliver(sends).await });
+        tokio::spawn(async move { engine.deliver(sends, now).await });
     }
 
     fn plan(&self, st: &mut State, now: DateTime<Utc>) -> Vec<Outgoing> {
@@ -583,11 +616,13 @@ impl PushEngine {
                 continue;
             };
             let fresh = !st.schedules.contains_key(&id);
-            let effects = st
-                .schedules
-                .entry(id.clone())
-                .or_default()
-                .step(now, &waiting, &device.prefs, &schedule_cfg, fresh);
+            let effects = st.schedules.entry(id.clone()).or_default().step(
+                now,
+                &waiting,
+                &device.prefs,
+                &schedule_cfg,
+                fresh,
+            );
             if effects.is_empty() {
                 continue;
             }
@@ -633,12 +668,11 @@ impl PushEngine {
         out
     }
 
-    /// Send, in order, one at a time, and log what came of each. No retry.
-    async fn deliver(self: Arc<Self>, sends: Vec<Outgoing>) {
+    /// Send, in order, one at a time, and log what came of each at `now`. No retry.
+    async fn deliver(&self, sends: Vec<Outgoing>, now: DateTime<Utc>) {
         let _gate = self.gate.lock().await;
         for send in sends {
             let delivery = self.publisher.send(&send.request).await;
-            let now = Utc::now();
             let mut st = self.state.lock().unwrap();
             let outcome = |ok: PushOutcome| match &delivery {
                 Delivery::Delivered => ok,
@@ -658,9 +692,10 @@ impl PushEngine {
                     },
                     now,
                 ),
-                None => st
-                    .sent
-                    .note_status(&send.push_id, outcome(PushOutcome::DeliveredToApple), now),
+                None => {
+                    st.sent
+                        .note_status(&send.push_id, outcome(PushOutcome::DeliveredToApple), now)
+                }
             }
         }
     }
@@ -679,6 +714,7 @@ fn kind_word(kind: PushKind) -> &'static str {
     kind.as_str()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn request(
     device: &PushDevice,
     collapse_id: &str,
@@ -721,7 +757,13 @@ fn data_for(w: &Waiting, resolved: bool) -> RelayData {
     }
 }
 
-fn alert(device: &PushDevice, w: &Waiting, text: Rendered, badge: u32, now: DateTime<Utc>) -> Outgoing {
+fn alert(
+    device: &PushDevice,
+    w: &Waiting,
+    text: Rendered,
+    badge: u32,
+    now: DateTime<Utc>,
+) -> Outgoing {
     let (level, expiry) = match &w.detail {
         Detail::Decision { deadline, .. } => (
             InterruptionLevel::TimeSensitive,
@@ -783,7 +825,13 @@ fn summary(device: &PushDevice, text: Rendered, badge: u32, now: DateTime<Utc>) 
 }
 
 /// The passive replacement of a delivered notification, in place (same collapse id).
-fn withdrawal(device: &PushDevice, w: &Waiting, text: Rendered, badge: u32, now: DateTime<Utc>) -> Outgoing {
+fn withdrawal(
+    device: &PushDevice,
+    w: &Waiting,
+    text: Rendered,
+    badge: u32,
+    now: DateTime<Utc>,
+) -> Outgoing {
     Outgoing {
         push_id: device.push_id.clone(),
         request: request(

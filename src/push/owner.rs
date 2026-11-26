@@ -37,9 +37,7 @@ pub fn parse_github_url(url: &str) -> Option<Remote> {
     let owner = parts.next()?;
     let repo = parts.next()?.trim_end_matches(".git");
     let owner_ok = (1..=39).contains(&owner.len())
-        && owner
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-');
+        && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
     let repo_ok = (1..=100).contains(&repo.len())
         && repo
             .chars()
@@ -94,7 +92,11 @@ mod tests {
             "ssh://git@github.com/thehammer/nostromo.git",
             "https://token@github.com/thehammer/nostromo.git\n",
         ] {
-            assert_eq!(parse_github_url(url), remote("thehammer", "nostromo"), "{url}");
+            assert_eq!(
+                parse_github_url(url),
+                remote("thehammer", "nostromo"),
+                "{url}"
+            );
         }
     }
 

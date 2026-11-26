@@ -241,3 +241,71 @@ fn default_evening() -> Option<String> {
 fn default_tz() -> String {
     "UTC".to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_agent_name_maps_to_the_fixed_set_ignoring_case_and_padding() {
+        for (name, want) in [
+            ("mother", AgentClass::Mother),
+            ("perri", AgentClass::Perri),
+            ("fred", AgentClass::Fred),
+            ("teri", AgentClass::Teri),
+            ("claudia", AgentClass::Claudia),
+            ("Claudia", AgentClass::Claudia),
+            ("CLAUDIA", AgentClass::Claudia),
+            ("  Perri  ", AgentClass::Perri),
+            ("MoThEr", AgentClass::Mother),
+            ("\tfred\n", AgentClass::Fred),
+        ] {
+            assert_eq!(AgentClass::from_agent_name(name), want, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn anything_else_including_a_sessions_own_name_is_other() {
+        for name in [
+            "",
+            "cody",
+            "marty",
+            "ada",
+            "archie",
+            "redd",
+            "claude",
+            "claudia-3f2a",
+            "claudia in my-project",
+            "Claudia in `nostromo`",
+            "mother of dragons",
+            "perri:review",
+            "perri2",
+            "claud ia",
+            "secret-agent-man",
+        ] {
+            assert_eq!(
+                AgentClass::from_agent_name(name),
+                AgentClass::Other,
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_per_kind_switches_each_govern_their_own_kind() {
+        let off = PushKinds {
+            mother: false,
+            decision: true,
+            review: true,
+        };
+        assert!(!off.enabled(PushKind::Mother));
+        assert!(off.enabled(PushKind::Decision) && off.enabled(PushKind::Review));
+        let only_review = PushKinds {
+            mother: false,
+            decision: false,
+            review: true,
+        };
+        assert!(only_review.enabled(PushKind::Review));
+        assert!(!only_review.enabled(PushKind::Decision) && !only_review.enabled(PushKind::Mother));
+    }
+}

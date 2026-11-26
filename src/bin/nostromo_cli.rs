@@ -208,7 +208,11 @@ fn run_push(push: Push) -> anyhow::Result<i32> {
             writeln!(
                 out,
                 "{owner}: {}",
-                if added { "added" } else { "already a work owner" }
+                if added {
+                    "added"
+                } else {
+                    "already a work owner"
+                }
             )?;
         }
     }

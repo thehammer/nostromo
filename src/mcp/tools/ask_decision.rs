@@ -110,7 +110,11 @@ pub async fn handle(state: &McpSharedState, args: &Value, pty_id: Option<&str>) 
     // waiting, the asking agent mapped to the fixed set, and the project's
     // `github.com` owner from its local `origin` remote. The agent's own name
     // and the project path never go on the wire.
-    let (agent_class, project_path) = daemon.session_mgr.lock().unwrap().decision_focus_facts(&tag);
+    let (agent_class, project_path) = daemon
+        .session_mgr
+        .lock()
+        .unwrap()
+        .decision_focus_facts(&tag);
     let remote = match project_path {
         Some(path) => crate::push::owner::origin_remote(std::path::Path::new(&path)).await,
         None => None,

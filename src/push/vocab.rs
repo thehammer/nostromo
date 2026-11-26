@@ -232,7 +232,10 @@ pub fn render_alert(w: &Waiting, ctx: &RenderContext<'_>) -> Option<Rendered> {
         } => {
             let mut parts = vec![
                 format!("{} is waiting on you", agent_name(*agent)),
-                format!("{choices} {}", if *choices == 1 { "choice" } else { "choices" }),
+                format!(
+                    "{choices} {}",
+                    if *choices == 1 { "choice" } else { "choices" }
+                ),
             ];
             parts.extend(timeout_phrase(*deadline, ctx.now));
             parts.join(SEP)
@@ -242,7 +245,12 @@ pub fn render_alert(w: &Waiting, ctx: &RenderContext<'_>) -> Option<Rendered> {
             changed_lines,
             ..
         } => {
-            let waiting = ctx.reviews_waiting.get(&w.host).copied().unwrap_or(1).max(1);
+            let waiting = ctx
+                .reviews_waiting
+                .get(&w.host)
+                .copied()
+                .unwrap_or(1)
+                .max(1);
             let mut parts = vec![format!("PR #{number}")];
             parts.extend(size_phrase(*changed_lines).map(str::to_string));
             parts.push(format!("{waiting} waiting"));
@@ -280,7 +288,11 @@ pub fn render_withdrawal(w: &Waiting, ctx: &RenderContext<'_>) -> Option<Rendere
 
 /// A Summary of everything waiting: counts by host and the age of the oldest
 /// item. Never a repository name.
-pub fn render_summary(waiting: &[&Waiting], oldest: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Rendered {
+pub fn render_summary(
+    waiting: &[&Waiting],
+    oldest: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Rendered {
     let mut per_host: BTreeMap<&str, usize> = BTreeMap::new();
     for w in waiting {
         *per_host.entry(host_label(&w.host)).or_default() += 1;
@@ -417,7 +429,9 @@ mod tests {
         ))
         .unwrap();
         let table = |name: &str, rows: &[(&str, &str)]| {
-            let obj = fixture[name].as_object().unwrap_or_else(|| panic!("{name}"));
+            let obj = fixture[name]
+                .as_object()
+                .unwrap_or_else(|| panic!("{name}"));
             assert_eq!(obj.len(), rows.len(), "{name}");
             for (k, v) in rows {
                 assert_eq!(obj[*k], *v, "{name}.{k}");

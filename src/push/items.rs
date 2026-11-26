@@ -141,8 +141,11 @@ const COUNTED_ATTENTION: &[&str] = &["progress_stalled", "burn_ahead", "gates_in
 /// The 8-hex suffix of a Mother job id (`YYYYMMDDTHHMMSSZ-xxxxxxxx`), if it is one.
 pub fn job_ref(id: &str) -> Option<String> {
     let suffix = id.rsplit('-').next()?;
-    (suffix.len() == 8 && suffix.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
-        .then(|| suffix.to_string())
+    (suffix.len() == 8
+        && suffix
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+    .then(|| suffix.to_string())
 }
 
 fn reason_of(job: &MotherJob) -> MotherReason {

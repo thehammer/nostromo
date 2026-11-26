@@ -133,7 +133,10 @@ impl Publisher {
         };
         let status = response.status();
         if !status.is_success() {
-            warn!(status = status.as_u16(), "push relay answered with an error");
+            warn!(
+                status = status.as_u16(),
+                "push relay answered with an error"
+            );
             return Delivery::Unreachable;
         }
         match response.json::<RelayResponse>().await {

@@ -54,7 +54,9 @@ pub struct DeviceStore {
 
 /// An APNs token as the phone sends it: non-empty hex, bounded.
 pub fn valid_apns_token(token: &str) -> bool {
-    !token.is_empty() && token.len() <= MAX_TOKEN_LEN && token.bytes().all(|b| b.is_ascii_hexdigit())
+    !token.is_empty()
+        && token.len() <= MAX_TOKEN_LEN
+        && token.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Settings as the daemon will keep them, or `None` when any part is not valid:
@@ -63,7 +65,10 @@ pub fn sanitize_prefs(prefs: PushPrefs) -> Option<PushPrefs> {
     let tz_ok = prefs.tz.parse::<chrono_tz::Tz>().is_ok();
     let times_ok = parse_hhmm(&prefs.quiet.start).is_some()
         && parse_hhmm(&prefs.quiet.end).is_some()
-        && prefs.evening_summary.as_deref().is_none_or(|t| parse_hhmm(t).is_some());
+        && prefs
+            .evening_summary
+            .as_deref()
+            .is_none_or(|t| parse_hhmm(t).is_some());
     (tz_ok && times_ok).then_some(prefs)
 }
 
@@ -180,7 +185,8 @@ fn new_push_id() -> String {
 pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
     }
     let tmp = path.with_extension("tmp");
     let mut options = std::fs::OpenOptions::new();
@@ -203,4 +209,323 @@ pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 /// The zone a device's settings name (UTC when unknown).
 pub fn device_tz(prefs: &PushPrefs) -> chrono_tz::Tz {
     parse_tz(&prefs.tz)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::push::wire::{PushKinds, QuietHours};
+
+    fn store() -> (tempfile::TempDir, DeviceStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DeviceStore::load(dir.path().join("push").join("devices.json"));
+        (dir, store)
+    }
+
+    fn token() -> String {
+        "ab".repeat(32)
+    }
+
+    fn register(s: &mut DeviceStore, id: &str, tok: &str, tz: &str) -> bool {
+        s.register(
+            id,
+            tok,
+            PushEnvironment::Sandbox,
+            tz,
+            PushCapabilities::default(),
+        )
+        .unwrap()
+    }
+
+    // ── tokens ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn an_apns_token_is_non_empty_hex_of_at_most_200_characters() {
+        assert!(valid_apns_token("a"));
+        assert!(valid_apns_token(&token()));
+        assert!(
+            valid_apns_token(&"AB".repeat(100)),
+            "uppercase hex, 200 characters"
+        );
+        assert!(
+            valid_apns_token(&"ab".repeat(100)),
+            "200 characters is the longest"
+        );
+        assert!(
+            !valid_apns_token(&format!("{}a", "ab".repeat(100))),
+            "201 characters"
+        );
+        assert!(!valid_apns_token(&"ab".repeat(101)), "202 characters");
+        assert!(!valid_apns_token(&"a".repeat(1000)));
+        for bad in ["", " ", "g", "zz", "ab cd", "ab\n", "0x12", "ab-cd", "日本"] {
+            assert!(!valid_apns_token(bad), "{bad:?}");
+        }
+    }
+
+    // ── settings ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_default_settings_are_valid_and_come_back_unchanged() {
+        let prefs = PushPrefs::default();
+        assert_eq!(sanitize_prefs(prefs.clone()), Some(prefs));
+    }
+
+    #[test]
+    fn settings_with_a_zone_or_time_that_is_not_valid_are_refused() {
+        let ok = |f: &dyn Fn(&mut PushPrefs)| {
+            let mut p = PushPrefs::default();
+            f(&mut p);
+            sanitize_prefs(p).is_some()
+        };
+        assert!(ok(&|p| p.tz = "America/Chicago".into()));
+        assert!(ok(&|p| p.tz = "Asia/Tokyo".into()));
+        assert!(ok(&|p| p.tz = "UTC".into()));
+        assert!(!ok(&|p| p.tz = "Mars/Olympus_Mons".into()));
+        assert!(!ok(&|p| p.tz = String::new()));
+        assert!(!ok(&|p| p.tz = "America/".into()));
+
+        assert!(ok(&|p| p.quiet.start = "00:00".into()));
+        assert!(ok(&|p| p.quiet.end = "23:59".into()));
+        assert!(!ok(&|p| p.quiet.start = "24:00".into()));
+        assert!(!ok(&|p| p.quiet.start = "25:00".into()));
+        assert!(!ok(&|p| p.quiet.end = "07:60".into()));
+        assert!(!ok(&|p| p.quiet.end = "7am".into()));
+        assert!(!ok(&|p| p.quiet.start = String::new()));
+        assert!(!ok(&|p| p.quiet.start = "ab:cd".into()));
+
+        assert!(ok(&|p| p.evening_summary = None));
+        assert!(ok(&|p| p.evening_summary = Some("18:45".into())));
+        assert!(!ok(&|p| p.evening_summary = Some("half past five".into())));
+        assert!(!ok(&|p| p.evening_summary = Some("17:61".into())));
+        assert!(!ok(&|p| p.evening_summary = Some(String::new())));
+    }
+
+    #[test]
+    fn quiet_hours_that_are_switched_off_still_have_to_hold_valid_times() {
+        let p = PushPrefs {
+            quiet: QuietHours {
+                start: "99:99".into(),
+                end: "07:00".into(),
+                enabled: false,
+            },
+            ..PushPrefs::default()
+        };
+        assert!(
+            sanitize_prefs(p).is_none(),
+            "the morning digest still fires at `end`"
+        );
+    }
+
+    // ── registering ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_first_registration_mints_a_random_128_bit_device_reference() {
+        let (_dir, mut s) = store();
+        assert!(register(&mut s, "dev-1", &token(), "UTC"));
+        assert!(register(&mut s, "dev-2", &token(), "UTC"));
+        let a = s.get("dev-1").unwrap().push_id.clone();
+        let b = s.get("dev-2").unwrap().push_id.clone();
+        for id in [&a, &b] {
+            assert_eq!(id.len(), 32, "128 bits as hex: {id}");
+            assert!(
+                id.bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+                "{id}"
+            );
+        }
+        assert_ne!(a, b, "random per device");
+    }
+
+    #[test]
+    fn registering_again_keeps_the_reference_and_the_settings_and_updates_the_rest() {
+        let (_dir, mut s) = store();
+        register(&mut s, "dev-1", &token(), "UTC");
+        let push_id = s.get("dev-1").unwrap().push_id.clone();
+        let prefs = PushPrefs {
+            kinds: PushKinds {
+                mother: false,
+                decision: true,
+                review: false,
+            },
+            quiet: QuietHours {
+                start: "21:30".into(),
+                ..QuietHours::default()
+            },
+            evening_summary: None,
+            ..PushPrefs::default()
+        };
+        assert!(s.set_prefs("dev-1", prefs.clone()).unwrap());
+
+        let changed = s
+            .register(
+                "dev-1",
+                &"cd".repeat(32),
+                PushEnvironment::Production,
+                "Asia/Tokyo",
+                PushCapabilities { nse_withdraw: true },
+            )
+            .unwrap();
+        assert!(changed);
+        let d = s.get("dev-1").unwrap();
+        assert_eq!(d.push_id, push_id);
+        assert_eq!(d.apns_token, "cd".repeat(32));
+        assert_eq!(d.environment, PushEnvironment::Production);
+        assert!(d.capabilities.nse_withdraw);
+        assert_eq!(d.prefs.tz, "Asia/Tokyo");
+        assert_eq!(d.prefs.kinds, prefs.kinds, "the settings are kept");
+        assert_eq!(d.prefs.quiet.start, "21:30");
+        assert_eq!(d.prefs.evening_summary, None);
+    }
+
+    #[test]
+    fn registering_the_same_thing_again_changes_nothing_and_a_capability_change_alone_counts() {
+        let (_dir, mut s) = store();
+        assert!(register(&mut s, "dev-1", &token(), "UTC"));
+        assert!(!register(&mut s, "dev-1", &token(), "UTC"), "identical");
+        assert!(
+            s.register(
+                "dev-1",
+                &token(),
+                PushEnvironment::Sandbox,
+                "UTC",
+                PushCapabilities { nse_withdraw: true }
+            )
+            .unwrap(),
+            "only the capabilities changed"
+        );
+        assert!(s.get("dev-1").unwrap().capabilities.nse_withdraw);
+        assert!(s
+            .register(
+                "dev-1",
+                &token(),
+                PushEnvironment::Sandbox,
+                "UTC",
+                PushCapabilities::default()
+            )
+            .unwrap());
+        assert!(
+            !s.get("dev-1").unwrap().capabilities.nse_withdraw,
+            "the latest wins"
+        );
+    }
+
+    #[test]
+    fn a_zone_this_build_does_not_know_is_stored_as_utc() {
+        let (_dir, mut s) = store();
+        register(&mut s, "dev-1", &token(), "Not/AZone");
+        assert_eq!(s.get("dev-1").unwrap().prefs.tz, "UTC");
+        register(&mut s, "dev-1", &token(), "Europe/London");
+        assert_eq!(s.get("dev-1").unwrap().prefs.tz, "Europe/London");
+    }
+
+    #[test]
+    fn set_prefs_is_false_for_an_unknown_device_and_for_unchanged_settings() {
+        let (_dir, mut s) = store();
+        assert!(!s.set_prefs("ghost", PushPrefs::default()).unwrap());
+        register(&mut s, "dev-1", &token(), "UTC");
+        assert!(
+            !s.set_prefs("dev-1", PushPrefs::default()).unwrap(),
+            "unchanged"
+        );
+        let p = PushPrefs {
+            kinds: PushKinds {
+                review: false,
+                ..PushKinds::default()
+            },
+            ..PushPrefs::default()
+        };
+        assert!(s.set_prefs("dev-1", p).unwrap());
+        assert!(s.get("ghost").is_none());
+    }
+
+    #[test]
+    fn removing_a_device_deletes_its_record_from_disk() {
+        let (dir, mut s) = store();
+        register(&mut s, "dev-1", &token(), "UTC");
+        register(&mut s, "dev-2", &"cd".repeat(32), "UTC");
+        let gone = s.remove("dev-1").unwrap().expect("it existed");
+        assert_eq!(gone.device_id, "dev-1");
+        assert!(s.remove("dev-1").unwrap().is_none(), "already gone");
+        let text = std::fs::read_to_string(dir.path().join("push/devices.json")).unwrap();
+        assert!(
+            !text.contains("dev-1") && !text.contains(&token()),
+            "{text}"
+        );
+        assert!(text.contains("dev-2"));
+        assert_eq!(s.ids(), vec!["dev-2".to_string()]);
+    }
+
+    // ── on disk ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn what_is_saved_reloads_whole() {
+        let (dir, mut s) = store();
+        register(&mut s, "dev-1", &token(), "America/Chicago");
+        let mut p = s.get("dev-1").unwrap().prefs.clone();
+        p.kinds.decision = false;
+        s.set_prefs("dev-1", p.clone()).unwrap();
+        let before = s.get("dev-1").unwrap().clone();
+
+        let again = DeviceStore::load(dir.path().join("push/devices.json"));
+        let after = again.get("dev-1").expect("reloaded");
+        assert_eq!(after.apns_token, before.apns_token);
+        assert_eq!(after.push_id, before.push_id);
+        assert_eq!(after.environment, before.environment);
+        assert_eq!(after.prefs, p);
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_file_is_an_empty_store() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(DeviceStore::load(dir.path().join("nope.json"))
+            .ids()
+            .is_empty());
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, "{ this is not json").unwrap();
+        assert!(DeviceStore::load(&bad).ids().is_empty());
+    }
+
+    #[test]
+    fn a_record_written_before_capabilities_or_prefs_existed_still_loads_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        std::fs::write(
+            &path,
+            r#"{"devices":{"dev-1":{"device_id":"dev-1","apns_token":"abab","environment":"sandbox","push_id":"00112233445566778899aabbccddeeff"}}}"#,
+        )
+        .unwrap();
+        let s = DeviceStore::load(&path);
+        let d = s.get("dev-1").expect("loaded");
+        assert_eq!(d.capabilities, PushCapabilities::default());
+        assert_eq!(d.prefs, PushPrefs::default());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_device_file_is_private_and_written_through_a_rename() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, mut s) = store();
+        register(&mut s, "dev-1", &token(), "UTC");
+        let path = dir.path().join("push/devices.json");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600, "an APNs token is a credential");
+        // A second write replaces it whole, still private, with no temporary left.
+        register(&mut s, "dev-2", &"cd".repeat(32), "UTC");
+        assert_eq!(mode(&path), 0o600);
+        let names: Vec<String> = std::fs::read_dir(dir.path().join("push"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["devices.json".to_string()], "{names:?}");
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).unwrap())
+            .expect("always whole JSON");
+    }
+
+    #[test]
+    fn a_device_record_never_prints_its_token() {
+        let (_dir, mut s) = store();
+        register(&mut s, "dev-1", &token(), "UTC");
+        let printed = format!("{:?} {:?}", s.get("dev-1").unwrap(), s);
+        assert!(!printed.contains(&token()), "{printed}");
+    }
 }

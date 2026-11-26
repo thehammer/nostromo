@@ -1,0 +1,283 @@
+{
+  "_comment": "Golden table for the push item derivation (W13-30): Mother jobs on a host and the items they make waiting on the operator. One item per awaiting or held job (not a quota pause), plus one per unacknowledged attention reason of progress_stalled, burn_ahead or gates_incomplete. The same rules are the MotherNeedsYouProducer's (MC4), so a change to this file is a change to both. Item names: item=mother has a reason of asked | blocked_after_review | held_after_failure | spend_cap | pipeline_blocked | needs_you, a job_ref (the 8-hex suffix of the id, or null), a repo and owner (from the job's pr_url only, else null) and a start (paused_at, or null); item=attention has the reason and its since. No free-text field (title, question, plan, branch, notes, repo) is read.",
+  "host": "kobe",
+  "cases": [
+    {
+      "name": "awaiting_user_question",
+      "jobs": [
+        {"id": "20261126T090000Z-3f9a1c2e", "state": "awaiting", "paused_reason": "user", "paused_at": "2026-11-26T09:58:00Z", "title": "Fix the thing", "repo": "admin-portal", "question": "Which one?"}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-3f9a1c2e", "job_ref": "3f9a1c2e", "reason": "asked", "repo": null, "owner": null, "start": "2026-11-26T09:58:00Z"}
+      ]
+    },
+    {
+      "name": "awaiting_without_a_reason_needs_you",
+      "jobs": [
+        {"id": "20261126T090000Z-aaaa0001", "state": "awaiting"}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-aaaa0001", "job_ref": "aaaa0001", "reason": "needs_you", "repo": null, "owner": null, "start": null}
+      ]
+    },
+    {
+      "name": "awaiting_adherence_blocked",
+      "jobs": [
+        {"id": "20261126T090000Z-aaaa0002", "state": "awaiting", "paused_reason": "adherence_blocked", "paused_at": "2026-11-26T09:00:00Z"}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-aaaa0002", "job_ref": "aaaa0002", "reason": "blocked_after_review", "repo": null, "owner": null, "start": "2026-11-26T09:00:00Z"}
+      ]
+    },
+    {
+      "name": "awaiting_operator_hold",
+      "jobs": [
+        {"id": "20261126T090000Z-aaaa0003", "state": "awaiting", "paused_reason": "operator_hold"}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-aaaa0003", "job_ref": "aaaa0003", "reason": "held_after_failure", "repo": null, "owner": null, "start": null}
+      ]
+    },
+    {
+      "name": "awaiting_cost_cap",
+      "jobs": [
+        {"id": "20261126T090000Z-aaaa0004", "state": "awaiting", "paused_reason": "cost_cap"}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-aaaa0004", "job_ref": "aaaa0004", "reason": "spend_cap", "repo": null, "owner": null, "start": null}
+      ]
+    },
+    {
+      "name": "awaiting_pipeline_blocked_activity",
+      "jobs": [
+        {"id": "20261126T090000Z-aaaa0005", "state": "awaiting", "activity": "pipeline_blocked"}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-aaaa0005", "job_ref": "aaaa0005", "reason": "pipeline_blocked", "repo": null, "owner": null, "start": null}
+      ]
+    },
+    {
+      "name": "gate_hold_awaiting_needs_you",
+      "jobs": [
+        {"id": "20261126T090000Z-aaaa0006", "state": "awaiting", "activity": "gate_hold"}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-aaaa0006", "job_ref": "aaaa0006", "reason": "needs_you", "repo": null, "owner": null, "start": null}
+      ]
+    },
+    {
+      "name": "review_hold_awaiting_needs_you",
+      "jobs": [
+        {"id": "20261126T090000Z-aaaa0007", "state": "awaiting", "activity": "review_hold"}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-aaaa0007", "job_ref": "aaaa0007", "reason": "needs_you", "repo": null, "owner": null, "start": null}
+      ]
+    },
+    {
+      "name": "held_with_an_open_decision",
+      "jobs": [
+        {"id": "20261126T090000Z-bbbb0001", "state": "running", "decision": {"id": "dec-1", "kind": "gate_hold", "opened_at": "2026-11-26T09:00:00Z", "options": [{"id": "resume_with_guidance", "label": "Resume", "consequence": "It carries on", "takes_text": true}]}}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-bbbb0001", "job_ref": "bbbb0001", "reason": "needs_you", "repo": null, "owner": null, "start": null}
+      ]
+    },
+    {
+      "name": "a_resolved_decision_does_not_hold_the_job",
+      "jobs": [
+        {"id": "20261126T090000Z-bbbb0002", "state": "running", "decision": {"id": "dec-2", "kind": "gate_hold", "opened_at": "2026-11-26T09:00:00Z", "resolved_at": "2026-11-26T09:05:00Z", "options": []}}
+      ],
+      "expect": []
+    },
+    {
+      "name": "decision_awaiting_attention_is_covered_by_the_hold_item",
+      "jobs": [
+        {"id": "20261126T090000Z-bbbb0003", "state": "awaiting", "paused_reason": "user", "decision": {"id": "dec-3", "kind": "gate_hold", "opened_at": "2026-11-26T09:00:00Z", "options": []}, "attention_reasons": [{"reason": "decision_awaiting", "since": "2026-11-26T09:00:00Z", "acked": false}]}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-bbbb0003", "job_ref": "bbbb0003", "reason": "asked", "repo": null, "owner": null, "start": null}
+      ]
+    },
+    {
+      "name": "gates_incomplete_unacked",
+      "jobs": [
+        {"id": "20261126T090000Z-cccc0001", "state": "running", "attention_reasons": [{"reason": "gates_incomplete", "since": "2026-11-26T09:30:00Z", "acked": false}]}
+      ],
+      "expect": [
+        {"item": "attention", "job_id": "20261126T090000Z-cccc0001", "reason": "gates_incomplete", "since": "2026-11-26T09:30:00Z"}
+      ]
+    },
+    {
+      "name": "gates_incomplete_acked",
+      "jobs": [
+        {"id": "20261126T090000Z-cccc0001", "state": "running", "attention_reasons": [{"reason": "gates_incomplete", "since": "2026-11-26T09:30:00Z", "acked": true}]}
+      ],
+      "expect": []
+    },
+    {
+      "name": "progress_stalled_first",
+      "jobs": [
+        {"id": "20261126T090000Z-cccc0002", "state": "running", "attention_reasons": [{"reason": "progress_stalled", "since": "2026-11-26T08:00:00Z", "acked": false}]}
+      ],
+      "expect": [
+        {"item": "attention", "job_id": "20261126T090000Z-cccc0002", "reason": "progress_stalled", "since": "2026-11-26T08:00:00Z"}
+      ]
+    },
+    {
+      "name": "progress_stalled_acked",
+      "jobs": [
+        {"id": "20261126T090000Z-cccc0002", "state": "running", "attention_reasons": [{"reason": "progress_stalled", "since": "2026-11-26T08:00:00Z", "acked": true}]}
+      ],
+      "expect": []
+    },
+    {
+      "name": "progress_stalled_reraised",
+      "jobs": [
+        {"id": "20261126T090000Z-cccc0002", "state": "running", "attention_reasons": [{"reason": "progress_stalled", "since": "2026-11-26T09:45:00Z", "acked": false}]}
+      ],
+      "expect": [
+        {"item": "attention", "job_id": "20261126T090000Z-cccc0002", "reason": "progress_stalled", "since": "2026-11-26T09:45:00Z"}
+      ]
+    },
+    {
+      "name": "burn_ahead_unacked",
+      "jobs": [
+        {"id": "20261126T090000Z-cccc0003", "state": "running", "attention_reasons": [{"reason": "burn_ahead", "since": "2026-11-26T07:00:00Z", "acked": false}]}
+      ],
+      "expect": [
+        {"item": "attention", "job_id": "20261126T090000Z-cccc0003", "reason": "burn_ahead", "since": "2026-11-26T07:00:00Z"}
+      ]
+    },
+    {
+      "name": "only_the_three_counted_reasons_make_attention_items",
+      "jobs": [
+        {"id": "20261126T090000Z-cccc0004", "state": "running", "attention_reasons": [{"reason": "decision_awaiting", "since": "2026-11-26T07:00:00Z", "acked": false}, {"reason": "some_future_reason", "since": "2026-11-26T07:00:00Z", "acked": false}]}
+      ],
+      "expect": []
+    },
+    {
+      "name": "the_older_attention_list_is_read_when_attention_reasons_is_empty",
+      "jobs": [
+        {"id": "20261126T090000Z-cccc0005", "state": "running", "attention": [{"reason": "burn_ahead", "since": "2026-11-26T07:00:00Z"}]}
+      ],
+      "expect": [
+        {"item": "attention", "job_id": "20261126T090000Z-cccc0005", "reason": "burn_ahead", "since": "2026-11-26T07:00:00Z"}
+      ]
+    },
+    {
+      "name": "quota_pause_produces_no_item",
+      "jobs": [
+        {"id": "20261126T090000Z-dddd0001", "state": "awaiting", "paused_reason": "quota_5h"},
+        {"id": "20261126T090000Z-dddd0002", "state": "awaiting", "paused_reason": "quota_weekly", "activity": "gate_hold"}
+      ],
+      "expect": []
+    },
+    {
+      "name": "a_quota_pause_still_counts_its_attention",
+      "jobs": [
+        {"id": "20261126T090000Z-dddd0003", "state": "awaiting", "paused_reason": "quota_5h", "attention_reasons": [{"reason": "gates_incomplete", "since": "2026-11-26T09:30:00Z", "acked": false}]}
+      ],
+      "expect": [
+        {"item": "attention", "job_id": "20261126T090000Z-dddd0003", "reason": "gates_incomplete", "since": "2026-11-26T09:30:00Z"}
+      ]
+    },
+    {
+      "name": "work_send_job_has_no_repository",
+      "jobs": [
+        {"id": "20261126T090000Z-eeee0001", "state": "awaiting", "paused_reason": "user", "pr_url": "https://github.com/thehammer/bishop/pull/9", "origin": {"label": "teri-send"}}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-eeee0001", "job_ref": "eeee0001", "reason": "asked", "repo": null, "owner": null, "start": null}
+      ]
+    },
+    {
+      "name": "job_with_a_personal_pr_url_has_repo_and_owner",
+      "jobs": [
+        {"id": "20261126T090000Z-eeee0002", "state": "awaiting", "paused_reason": "adherence_blocked", "repo": "bishop", "pr_url": "https://github.com/thehammer/bishop/pull/12"}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-eeee0002", "job_ref": "eeee0002", "reason": "blocked_after_review", "repo": "bishop", "owner": "thehammer", "start": null}
+      ]
+    },
+    {
+      "name": "job_with_a_carefeed_pr_url_has_the_work_owner",
+      "jobs": [
+        {"id": "20261126T090000Z-eeee0003", "state": "awaiting", "paused_reason": "user", "pr_url": "https://github.com/Carefeed/admin-portal/pull/4821"}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-eeee0003", "job_ref": "eeee0003", "reason": "asked", "repo": "admin-portal", "owner": "Carefeed", "start": null}
+      ]
+    },
+    {
+      "name": "a_bare_repo_name_and_no_pr_url_means_an_unknown_owner",
+      "jobs": [
+        {"id": "20261126T090000Z-eeee0004", "state": "awaiting", "paused_reason": "user", "repo": "admin-portal"}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-eeee0004", "job_ref": "eeee0004", "reason": "asked", "repo": null, "owner": null, "start": null}
+      ]
+    },
+    {
+      "name": "a_pr_url_on_another_host_has_no_owner",
+      "jobs": [
+        {"id": "20261126T090000Z-eeee0005", "state": "awaiting", "paused_reason": "user", "pr_url": "https://gitlab.com/thehammer/bishop/-/merge_requests/3"}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-eeee0005", "job_ref": "eeee0005", "reason": "asked", "repo": null, "owner": null, "start": null}
+      ]
+    },
+    {
+      "name": "metadata_shaped_job_makes_the_same_item_as_a_full_one",
+      "jobs": [
+        {"id": "20261126T090000Z-ffff0001", "state": "awaiting", "title": "", "repo": "", "paused_reason": "adherence_blocked", "paused_at": "2026-11-26T09:10:00Z", "activity": "gate_hold"}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-ffff0001", "job_ref": "ffff0001", "reason": "blocked_after_review", "repo": null, "owner": null, "start": "2026-11-26T09:10:00Z"}
+      ]
+    },
+    {
+      "name": "a_job_id_without_an_8_hex_suffix_has_no_ref",
+      "jobs": [
+        {"id": "20261126T090000Z-zzzzzzzz", "state": "awaiting", "paused_reason": "user"},
+        {"id": "20261126T090000Z-FFFF0002", "state": "awaiting", "paused_reason": "user"}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-zzzzzzzz", "job_ref": null, "reason": "asked", "repo": null, "owner": null, "start": null},
+        {"item": "mother", "job_id": "20261126T090000Z-FFFF0002", "job_ref": null, "reason": "asked", "repo": null, "owner": null, "start": null}
+      ]
+    },
+    {
+      "name": "jobs_in_other_states_are_not_waiting",
+      "jobs": [
+        {"id": "20261126T090000Z-1111aaaa", "state": "running"},
+        {"id": "20261126T090000Z-1111aaab", "state": "queued"},
+        {"id": "20261126T090000Z-1111aaac", "state": "succeeded"},
+        {"id": "20261126T090000Z-1111aaad", "state": "failed", "paused_reason": "user"},
+        {"id": "20261126T090000Z-1111aaae", "state": "cancelled"}
+      ],
+      "expect": []
+    },
+    {
+      "name": "a_malformed_paused_at_is_no_start_and_costs_nothing",
+      "jobs": [
+        {"id": "20261126T090000Z-2222aaaa", "state": "awaiting", "paused_reason": "user", "paused_at": "yesterday"}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-2222aaaa", "job_ref": "2222aaaa", "reason": "asked", "repo": null, "owner": null, "start": null}
+      ]
+    },
+    {
+      "name": "several_jobs_keep_their_order_and_an_awaiting_job_with_attention_makes_both",
+      "jobs": [
+        {"id": "20261126T090000Z-3333aaaa", "state": "awaiting", "paused_reason": "user", "attention_reasons": [{"reason": "burn_ahead", "since": "2026-11-26T06:00:00Z", "acked": false}]},
+        {"id": "20261126T090000Z-3333aaab", "state": "awaiting", "paused_reason": "cost_cap"}
+      ],
+      "expect": [
+        {"item": "mother", "job_id": "20261126T090000Z-3333aaaa", "job_ref": "3333aaaa", "reason": "asked", "repo": null, "owner": null, "start": null},
+        {"item": "attention", "job_id": "20261126T090000Z-3333aaaa", "reason": "burn_ahead", "since": "2026-11-26T06:00:00Z"},
+        {"item": "mother", "job_id": "20261126T090000Z-3333aaab", "job_ref": "3333aaab", "reason": "spend_cap", "repo": null, "owner": null, "start": null}
+      ]
+    }
+  ]
+}

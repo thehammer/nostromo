@@ -70,7 +70,11 @@ pub fn status(config: &Config, out: &mut impl Write) -> Result<()> {
     for (host, class) in &push.hosts {
         writeln!(out, "host {host}: {class:?}")?;
     }
-    writeln!(out, "work owners: {}", push.resolved_work_owners().join(", "))?;
+    writeln!(
+        out,
+        "work owners: {}",
+        push.resolved_work_owners().join(", ")
+    )?;
     let devices = DeviceStore::load(dir.join("devices.json"));
     let log = SentLog::load(dir.join("sent.jsonl"), Utc::now());
     let mut any = false;
@@ -150,7 +154,11 @@ mod tests {
     fn classifying_a_host_keeps_the_rest_of_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "# mine\nhost_name = \"tokyo\"\n\n[push]\nrelay_url = \"https://r\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "# mine\nhost_name = \"tokyo\"\n\n[push]\nrelay_url = \"https://r\"\n",
+        )
+        .unwrap();
         set_host_class(&path, "sendai", HostClass::Personal).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("# mine") && text.contains("host_name = \"tokyo\""));
@@ -168,7 +176,10 @@ mod tests {
         assert!(!add_work_owner(&path, "acme").unwrap());
         assert!(!add_work_owner(&path, "carefeed").unwrap());
         let cfg: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(cfg.push.unwrap().resolved_work_owners(), ["Carefeed", "Acme"]);
+        assert_eq!(
+            cfg.push.unwrap().resolved_work_owners(),
+            ["Carefeed", "Acme"]
+        );
         assert!(add_work_owner(&path, "bad owner").is_err());
     }
 

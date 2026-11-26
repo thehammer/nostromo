@@ -71,6 +71,16 @@ const REASONS: &[&str] = &[
     "failed",
     "cancelled",
     "none",
+    // What the primary's push engine reads (W13): the reasons a job waits and
+    // the attention kinds it counts. Mother's own fixed words, never text.
+    "user",
+    "adherence_blocked",
+    "operator_hold",
+    "cost_cap",
+    "pipeline_blocked",
+    "progress_stalled",
+    "burn_ahead",
+    "gates_incomplete",
 ];
 const STAGES: &[&str] = &["build", "rework", "gates", "review", "present", "done"];
 const RESULTS: &[&str] = &[
@@ -147,6 +157,19 @@ fn is_hex8(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// `r-` plus 8 hex of HMAC-SHA256(host_key, repo): stable per host, opaque to
+/// everyone without the key. Empty stays empty.
+fn pseudonymous_repo(host_key: &[u8; 32], repo: &str) -> String {
+    if repo.is_empty() {
+        return String::new();
+    }
+    format!("r-{}", hex8(&hmac_sha256(host_key, repo.as_bytes())))
+}
+
+fn is_pseudonymous_repo(s: &str) -> bool {
+    s.is_empty() || s.strip_prefix("r-").is_some_and(is_hex8)
+}
+
 fn is_focus_tag(s: &str) -> bool {
     s.strip_prefix("f-").is_some_and(is_hex8)
 }
@@ -165,6 +188,22 @@ fn vocab(s: &str, set: &[&str]) -> String {
 
 fn vocab_opt(s: &Option<String>, set: &[&str]) -> Option<String> {
     s.as_deref().map(|v| vocab(v, set))
+}
+
+/// A pause reason: the crew vocabulary, or a quota pause (`quota_5h`, ...), which
+/// resumes on its own and which the push engine must be able to tell from a hold.
+fn paused_reason(s: &str) -> String {
+    let quota = s.strip_prefix("quota_").is_some_and(|rest| {
+        (1..=24).contains(&rest.len())
+            && rest
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    });
+    if quota {
+        s.to_string()
+    } else {
+        vocab(s, REASONS)
+    }
 }
 
 fn agent(name: &str) -> String {
@@ -207,7 +246,9 @@ fn metadata_job(job: &MotherJob, key: &[u8; 32]) -> MotherJob {
     let mut out = MotherJob {
         id: short_ref(key, &job.id),
         state: vocab(&job.state, STATES),
-        paused_reason: vocab_opt(&job.paused_reason, REASONS),
+        paused_reason: job.paused_reason.as_deref().map(paused_reason),
+        // A timestamp is a number, not text: the push engine's grace delay starts here.
+        paused_at: job.paused_at,
         activity: vocab_opt(&job.activity, REASONS),
         crew_opt_in: job.crew_opt_in,
         ..MotherJob::default()
@@ -445,6 +486,10 @@ pub fn redact_for_uplink_metadata(
                 .map(|q| crate::data::perri_queue::PrQueueItem {
                     number: q.number,
                     bucket: vocab(&q.bucket, BUCKETS),
+                    // The repository is pseudonymous (so two PRs with one number
+                    // in two repositories stay two items), and the size is a number.
+                    repo: pseudonymous_repo(host_key, &q.repo),
+                    changed_lines: cap64(q.changed_lines),
                     ..Default::default()
                 })
                 .collect(),
@@ -707,7 +752,8 @@ pub fn is_uplink_metadata_shape(msg: &ServerMsg) -> bool {
                 && queue.len() <= MAX_LIST
                 && queue.iter().all(|q| {
                     in_vocab(&q.bucket, BUCKETS)
-                        && q.repo.is_empty()
+                        && q.changed_lines.is_none_or(|n| n <= MAX_COUNT)
+                        && is_pseudonymous_repo(&q.repo)
                         && q.title.is_empty()
                         && q.author.is_empty()
                         && q.url.is_empty()
