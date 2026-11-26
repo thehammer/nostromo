@@ -1,0 +1,63 @@
+# The push relay (infra/push-relay, W13) is a standalone crate outside the daemon's build, so
+# ci.yml never compiles it. This workflow does: fmt, clippy (`-D warnings`) and its hermetic tests.
+#
+# It is a separate workflow, not a job in ci.yml, because ci.yml deliberately has no `paths:` filter
+# (a filtered workflow leaves a required check pending; see the comment there). Nothing here is a
+# required status check: it only runs when the relay (or this file) changes. To make it required,
+# add `Push relay (fmt, clippy, tests)` to branch protection and drop the filter.
+name: Push relay
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "infra/push-relay/**"
+      - ".github/workflows/push-relay.yml"
+  push:
+    branches: [main]
+    paths:
+      - "infra/push-relay/**"
+      - ".github/workflows/push-relay.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: push-relay-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  push-relay:
+    name: Push relay (fmt, clippy, tests)
+    # Pinned, not ubuntu-latest (see ci.yml).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: infra/push-relay
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --check
+
+      # With the AWS side (the shipped build) and without it (the handler alone).
+      - name: Clippy
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy --all-targets --no-default-features -- -D warnings
+
+      - name: Test
+        run: |
+          cargo test
+          cargo test --no-default-features

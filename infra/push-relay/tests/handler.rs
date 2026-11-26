@@ -458,17 +458,18 @@ async fn an_empty_configured_token_never_authenticates_an_empty_bearer() {
 async fn the_daemon_bearer_is_accepted_on_both_endpoints() {
     let h = Harness::new().await;
     assert_eq!(h.post(&valid()).await.status, 200);
-    assert_eq!(
-        h.get_records(&[("push_id", PUSH_ID)]).await.status,
-        200
-    );
+    assert_eq!(h.get_records(&[("push_id", PUSH_ID)]).await.status, 200);
 }
 
 // ─── W13-20: the closed request schema ───────────────────────────────────────
 
 async fn assert_refused(h: &Harness, label: &str, body: &Value) {
     let r = h.post(body).await;
-    assert_eq!(r.status, 400, "{label}: expected 400, got {}: {}", r.status, r.body);
+    assert_eq!(
+        r.status, 400,
+        "{label}: expected 400, got {}: {}",
+        r.status, r.body
+    );
     assert!(
         !r.body.contains("LEAKMARK") && !r.body.contains("leakmark"),
         "{label}: the 400 echoed request content: {}",
@@ -480,15 +481,27 @@ async fn assert_refused(h: &Harness, label: &str, body: &Value) {
 async fn unknown_fields_are_refused_at_the_top_level_and_inside_data() {
     let h = Harness::new().await;
     let cases = vec![
-        ("top-level extra", with(|v| v["leakmark_extra"] = json!("LEAKMARK-v"))),
-        ("repo smuggled", with(|v| v["repo"] = json!("LEAKMARK/repo"))),
+        (
+            "top-level extra",
+            with(|v| v["leakmark_extra"] = json!("LEAKMARK-v")),
+        ),
+        (
+            "repo smuggled",
+            with(|v| v["repo"] = json!("LEAKMARK/repo")),
+        ),
         ("pr_url smuggled", with(|v| v["pr_url"] = json!("LEAKMARK"))),
-        ("alert smuggled", with(|v| v["alert"] = json!({"title": "LEAKMARK"}))),
+        (
+            "alert smuggled",
+            with(|v| v["alert"] = json!({"title": "LEAKMARK"})),
+        ),
         (
             "data extra",
             with(|v| v["data"]["leakmark_extra"] = json!("LEAKMARK-v")),
         ),
-        ("data.title", with(|v| v["data"]["title"] = json!("LEAKMARK"))),
+        (
+            "data.title",
+            with(|v| v["data"]["title"] = json!("LEAKMARK")),
+        ),
         ("data.repo", with(|v| v["data"]["repo"] = json!("LEAKMARK"))),
     ];
     for (label, body) in &cases {
@@ -536,12 +549,7 @@ async fn title_and_body_go_together_or_not_at_all() {
     });
     assert_refused(&h, "title without body", &title_only).await;
     assert_refused(&h, "body without title", &body_only).await;
-    assert_refused(
-        &h,
-        "null body",
-        &with(|v| v["body"] = Value::Null),
-    )
-    .await;
+    assert_refused(&h, "null body", &with(|v| v["body"] = Value::Null)).await;
     // Neither is a badge-only push, which is valid.
     assert_eq!(h.post(&badge_only()).await.status, 200);
 }
@@ -558,11 +566,32 @@ async fn only_the_alert_push_type_exists() {
 #[tokio::test]
 async fn priority_must_be_5_or_10() {
     let h = Harness::new().await;
-    for p in [json!(0), json!(1), json!(7), json!(9), json!(11), json!(256), json!(-1), json!("10"), json!(10.5)] {
-        assert_refused(&h, &format!("priority {p}"), &with(|v| v["priority"] = p.clone())).await;
+    for p in [
+        json!(0),
+        json!(1),
+        json!(7),
+        json!(9),
+        json!(11),
+        json!(256),
+        json!(-1),
+        json!("10"),
+        json!(10.5),
+    ] {
+        assert_refused(
+            &h,
+            &format!("priority {p}"),
+            &with(|v| v["priority"] = p.clone()),
+        )
+        .await;
     }
-    assert_eq!(h.post(&with(|v| v["priority"] = json!(5))).await.status, 200);
-    assert_eq!(h.post(&with(|v| v["priority"] = json!(10))).await.status, 200);
+    assert_eq!(
+        h.post(&with(|v| v["priority"] = json!(5))).await.status,
+        200
+    );
+    assert_eq!(
+        h.post(&with(|v| v["priority"] = json!(10))).await.status,
+        200
+    );
 }
 
 #[tokio::test]
@@ -579,7 +608,12 @@ async fn push_id_must_be_32_lowercase_hex() {
         "a1b2c3d4e5f60718293a4b5c6d7e8f9é".into(),
     ];
     for id in &bad {
-        assert_refused(&h, &format!("push_id {id:?}"), &with(|v| v["push_id"] = json!(id))).await;
+        assert_refused(
+            &h,
+            &format!("push_id {id:?}"),
+            &with(|v| v["push_id"] = json!(id)),
+        )
+        .await;
     }
     assert_eq!(h.post(&valid()).await.status, 200);
 }
@@ -588,13 +622,30 @@ async fn push_id_must_be_32_lowercase_hex() {
 async fn apns_token_must_be_non_empty_hex_of_at_most_200_characters() {
     let h = Harness::new().await;
     assert_eq!(
-        h.post(&with(|v| v["apns_token"] = json!("a".repeat(200)))).await.status,
+        h.post(&with(|v| v["apns_token"] = json!("a".repeat(200))))
+            .await
+            .status,
         200
     );
-    assert_refused(&h, "201 chars", &with(|v| v["apns_token"] = json!("a".repeat(201)))).await;
+    assert_refused(
+        &h,
+        "201 chars",
+        &with(|v| v["apns_token"] = json!("a".repeat(201))),
+    )
+    .await;
     assert_refused(&h, "empty", &with(|v| v["apns_token"] = json!(""))).await;
-    assert_refused(&h, "non-hex", &with(|v| v["apns_token"] = json!("zz".repeat(10)))).await;
-    assert_refused(&h, "path traversal", &with(|v| v["apns_token"] = json!("../../v1/x"))).await;
+    assert_refused(
+        &h,
+        "non-hex",
+        &with(|v| v["apns_token"] = json!("zz".repeat(10))),
+    )
+    .await;
+    assert_refused(
+        &h,
+        "path traversal",
+        &with(|v| v["apns_token"] = json!("../../v1/x")),
+    )
+    .await;
     assert_refused(&h, "spaces", &with(|v| v["apns_token"] = json!("ab cd"))).await;
     assert_refused(&h, "slash", &with(|v| v["apns_token"] = json!("ab/cd"))).await;
 }
@@ -611,22 +662,41 @@ async fn an_empty_collapse_id_is_refused() {
 async fn collapse_id_is_bounded_at_64_bytes() {
     let h = Harness::new().await;
     assert_eq!(
-        h.post(&with(|v| v["collapse_id"] = json!("c".repeat(64)))).await.status,
+        h.post(&with(|v| v["collapse_id"] = json!("c".repeat(64))))
+            .await
+            .status,
         200
     );
-    assert_refused(&h, "65 bytes", &with(|v| v["collapse_id"] = json!("c".repeat(65)))).await;
+    assert_refused(
+        &h,
+        "65 bytes",
+        &with(|v| v["collapse_id"] = json!("c".repeat(65))),
+    )
+    .await;
     // 33 two-byte characters = 66 bytes: bytes, not characters, are counted.
-    assert_refused(&h, "66 bytes", &with(|v| v["collapse_id"] = json!("é".repeat(33)))).await;
+    assert_refused(
+        &h,
+        "66 bytes",
+        &with(|v| v["collapse_id"] = json!("é".repeat(33))),
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn thread_id_is_bounded_at_64_bytes() {
     let h = Harness::new().await;
     assert_eq!(
-        h.post(&with(|v| v["thread_id"] = json!("t".repeat(64)))).await.status,
+        h.post(&with(|v| v["thread_id"] = json!("t".repeat(64))))
+            .await
+            .status,
         200
     );
-    assert_refused(&h, "65 bytes", &with(|v| v["thread_id"] = json!("t".repeat(65)))).await;
+    assert_refused(
+        &h,
+        "65 bytes",
+        &with(|v| v["thread_id"] = json!("t".repeat(65))),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -634,7 +704,9 @@ async fn the_routing_data_is_bounded() {
     let h = Harness::new().await;
     for (field, ok_len) in [("item", 64), ("host", 64), ("ref", 64)] {
         assert_eq!(
-            h.post(&with(|v| v["data"][field] = json!("x".repeat(ok_len)))).await.status,
+            h.post(&with(|v| v["data"][field] = json!("x".repeat(ok_len))))
+                .await
+                .status,
             200,
             "data.{field} at {ok_len}"
         );
@@ -657,7 +729,9 @@ async fn interruption_level_is_one_of_the_three_known_levels() {
     }
     for lvl in ["active", "time-sensitive", "passive"] {
         assert_eq!(
-            h.post(&with(|v| v["interruption_level"] = json!(lvl))).await.status,
+            h.post(&with(|v| v["interruption_level"] = json!(lvl)))
+                .await
+                .status,
             200,
             "{lvl}"
         );
@@ -741,7 +815,10 @@ async fn badly_formed_bodies_are_refused_without_echoing_them() {
 #[tokio::test]
 async fn a_refused_request_never_reaches_apns_or_the_store() {
     let h = Harness::new().await;
-    assert_eq!(h.post(&with(|v| v["priority"] = json!(3))).await.status, 400);
+    assert_eq!(
+        h.post(&with(|v| v["priority"] = json!(3))).await.status,
+        400
+    );
     assert!(h.apns_requests().await.is_empty());
     assert!(h.store.all().is_empty());
 }
@@ -750,7 +827,15 @@ async fn a_refused_request_never_reaches_apns_or_the_store() {
 async fn unknown_paths_are_404_and_wrong_methods_are_405() {
     let h = Harness::new().await;
     let auth = Some("Bearer daemon-token-v1");
-    for path in ["/", "/nope", "/push/", "/records/x", "/PUSH", "/push/extra", "/healthz"] {
+    for path in [
+        "/",
+        "/nope",
+        "/push/",
+        "/records/x",
+        "/PUSH",
+        "/push/extra",
+        "/healthz",
+    ] {
         for method in ["GET", "POST"] {
             let r = h.send(method, path, &[], auth, vec![]).await;
             assert_eq!(r.status, 404, "{method} {path}: {}", r.body);
@@ -801,7 +886,13 @@ async fn the_records_endpoint_returns_the_same_five_fields_and_nothing_about_con
         set(&["push_id", "ts", "kind", "outcome", "expires_at"])
     );
     let wire = serde_json::to_string(&records).unwrap();
-    for content in ["Job finished", "Mother finished", "sendai", "job-42", "item-1"] {
+    for content in [
+        "Job finished",
+        "Mother finished",
+        "sendai",
+        "job-42",
+        "item-1",
+    ] {
         assert!(!wire.contains(content), "record leaks {content}");
     }
 }
@@ -841,7 +932,8 @@ async fn a_resolved_item_is_recorded_as_a_withdraw_and_a_missing_text_as_a_badge
 
     // resolved: false is not a withdrawal.
     let h = Harness::new().await;
-    h.post(&with(|v| v["data"]["resolved"] = json!(false))).await;
+    h.post(&with(|v| v["data"]["resolved"] = json!(false)))
+        .await;
     assert_eq!(h.store.all()[0].kind, "mother");
 
     // No title or body: a badge.
@@ -865,12 +957,16 @@ async fn apns_accepting_the_push_is_recorded_accepted_and_returned() {
     let h = Harness::new().await;
     let r = h.post(&valid()).await;
     assert_eq!(r.status, 200);
-    assert_eq!(json_of(&r), json!({"apns_status": 200, "apns_reason": null}));
+    assert_eq!(
+        json_of(&r),
+        json!({"apns_status": 200, "apns_reason": null})
+    );
     assert_eq!(h.store.all()[0].outcome, "accepted");
 }
 
 #[tokio::test]
-async fn apns_refusing_the_push_is_recorded_rejected_and_the_relay_still_answers_200_with_apples_reason() {
+async fn apns_refusing_the_push_is_recorded_rejected_and_the_relay_still_answers_200_with_apples_reason(
+) {
     for (status, reason) in [
         (400, "BadDeviceToken"),
         (403, "InvalidProviderToken"),
@@ -896,10 +992,22 @@ async fn apns_refusing_the_push_is_recorded_rejected_and_the_relay_still_answers
 #[tokio::test]
 async fn only_a_short_camel_case_reason_from_apple_is_passed_on() {
     let cases: Vec<(ResponseTemplate, Option<&str>)> = vec![
-        (ResponseTemplate::new(400).set_body_string("<html>LEAKMARK</html>"), None),
-        (ResponseTemplate::new(400).set_body_json(json!({"reason": "Bad Device <b>"})), None),
-        (ResponseTemplate::new(400).set_body_json(json!({"reason": "a".repeat(65)})), None),
-        (ResponseTemplate::new(400).set_body_json(json!({"reason": 7})), None),
+        (
+            ResponseTemplate::new(400).set_body_string("<html>LEAKMARK</html>"),
+            None,
+        ),
+        (
+            ResponseTemplate::new(400).set_body_json(json!({"reason": "Bad Device <b>"})),
+            None,
+        ),
+        (
+            ResponseTemplate::new(400).set_body_json(json!({"reason": "a".repeat(65)})),
+            None,
+        ),
+        (
+            ResponseTemplate::new(400).set_body_json(json!({"reason": 7})),
+            None,
+        ),
         (ResponseTemplate::new(400).set_body_json(json!({})), None),
         (ResponseTemplate::new(400), None),
     ];
@@ -910,14 +1018,20 @@ async fn only_a_short_camel_case_reason_from_apple_is_passed_on() {
         let v = json_of(&r);
         assert_eq!(v["apns_status"], 400, "case {i}");
         assert_eq!(v["apns_reason"], json!(expect), "case {i}");
-        assert!(!r.body.contains("LEAKMARK"), "case {i}: relay echoed Apple's body");
+        assert!(
+            !r.body.contains("LEAKMARK"),
+            "case {i}: relay echoed Apple's body"
+        );
     }
     // The boundary: 64 alphanumeric characters is a reason.
     let h = Harness::with_response(
         ResponseTemplate::new(400).set_body_json(json!({"reason": "a".repeat(64)})),
     )
     .await;
-    assert_eq!(json_of(&h.post(&valid()).await)["apns_reason"], "a".repeat(64));
+    assert_eq!(
+        json_of(&h.post(&valid()).await)["apns_reason"],
+        "a".repeat(64)
+    );
 }
 
 #[tokio::test]
@@ -925,7 +1039,10 @@ async fn an_unreachable_apns_is_a_502_with_an_error_record_and_no_retry() {
     let h = Harness::unreachable().await;
     let r = h.post(&valid()).await;
     assert_eq!(r.status, 502, "{}", r.body);
-    assert!(!r.body.contains("127.0.0.1"), "502 leaked the upstream address");
+    assert!(
+        !r.body.contains("127.0.0.1"),
+        "502 leaked the upstream address"
+    );
     let stored = h.store.all();
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].outcome, "error");
@@ -946,7 +1063,10 @@ async fn records_are_returned_for_the_requested_device_only() {
     assert_eq!(theirs.len(), 1);
     assert_eq!(theirs[0]["push_id"], OTHER_PUSH_ID);
     // A device with no pushes has none.
-    assert!(h.records_for("00000000000000000000000000000000").await.is_empty());
+    assert!(h
+        .records_for("00000000000000000000000000000000")
+        .await
+        .is_empty());
 }
 
 #[tokio::test]
@@ -963,7 +1083,11 @@ async fn a_store_that_returns_other_devices_records_still_leaks_none() {
 #[tokio::test]
 async fn records_come_back_sorted_by_time_whatever_order_the_store_holds_them() {
     let h = Harness::new().await;
-    for (ts, kind) in [(T0 - 100, "review"), (T0 - 300, "mother"), (T0 - 200, "decision")] {
+    for (ts, kind) in [
+        (T0 - 100, "review"),
+        (T0 - 300, "mother"),
+        (T0 - 200, "decision"),
+    ] {
         h.store.insert(Record {
             push_id: PUSH_ID.into(),
             ts,
@@ -1163,7 +1287,8 @@ fn marked() -> Value {
         v["collapse_id"] = json!("COLLAPSEMARK");
         v["thread_id"] = json!("THREADMARK");
         v["apns_token"] = json!("c0ffee0badc0de5ec7e7a9");
-        v["data"] = json!({"item": "ITEMMARK", "kind": "decision", "host": "HOSTMARK", "ref": "REFMARK"});
+        v["data"] =
+            json!({"item": "ITEMMARK", "kind": "decision", "host": "HOSTMARK", "ref": "REFMARK"});
     })
 }
 
@@ -1202,11 +1327,21 @@ async fn a_handled_push_logs_only_its_kind_a_six_hex_device_prefix_and_the_apns_
             );
         }
     }
-    let seen: String = events.iter().map(LoggedEvent::text).collect::<Vec<_>>().join("\n");
+    let seen: String = events
+        .iter()
+        .map(LoggedEvent::text)
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(seen.contains("decision"), "kind not logged: {seen}");
-    assert!(seen.contains(&PUSH_ID[..6]), "push_id prefix not logged: {seen}");
+    assert!(
+        seen.contains(&PUSH_ID[..6]),
+        "push_id prefix not logged: {seen}"
+    );
     assert!(seen.contains("200"), "APNs status not logged: {seen}");
-    assert!(!seen.contains(&PUSH_ID[..7]), "more than six hex characters of push_id: {seen}");
+    assert!(
+        !seen.contains(&PUSH_ID[..7]),
+        "more than six hex characters of push_id: {seen}"
+    );
 }
 
 #[tokio::test]
@@ -1332,7 +1467,10 @@ fn the_public_function_has_a_concurrency_cap() {
     let cap = f["Properties"]["ReservedConcurrentExecutions"]
         .as_i64()
         .expect("ReservedConcurrentExecutions: the URL is public, so the function needs a cap");
-    assert!((1..=10).contains(&cap), "a cap of {cap} is not a small ceiling");
+    assert!(
+        (1..=10).contains(&cap),
+        "a cap of {cap} is not a small ceiling"
+    );
 }
 
 #[test]
@@ -1346,10 +1484,16 @@ fn a_monthly_cost_budget_emails_when_the_bill_runs_away() {
     assert!(!notifications.is_empty());
     let mut kinds = BTreeSet::new();
     for n in &notifications {
-        kinds.insert(n["Notification"]["NotificationType"].as_str().unwrap().to_string());
+        kinds.insert(
+            n["Notification"]["NotificationType"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
         let subs = list_of(&n["Subscribers"]);
         assert!(
-            subs.iter().any(|s| s["SubscriptionType"].as_str() == Some("EMAIL")),
+            subs.iter()
+                .any(|s| s["SubscriptionType"].as_str() == Some("EMAIL")),
             "a notification nobody receives"
         );
     }
@@ -1357,7 +1501,10 @@ fn a_monthly_cost_budget_emails_when_the_bill_runs_away() {
     // The address is a required parameter (no default that points anywhere).
     let params = t["Parameters"].as_mapping().unwrap();
     let email = &params[&serde_yaml::Value::from("BudgetAlertEmail")];
-    assert!(email.get("Default").is_none(), "BudgetAlertEmail must not default");
+    assert!(
+        email.get("Default").is_none(),
+        "BudgetAlertEmail must not default"
+    );
 }
 
 #[test]
@@ -1369,10 +1516,16 @@ fn the_function_may_only_put_query_and_update_the_table_and_read_the_two_secrets
     // No managed policies, only inline statements.
     let mut statements = Vec::new();
     for p in &policies {
-        let s = p.get("Statement").unwrap_or_else(|| panic!("policy {p:?} is not an inline statement"));
+        let s = p
+            .get("Statement")
+            .unwrap_or_else(|| panic!("policy {p:?} is not an inline statement"));
         statements.extend(list_of(s));
     }
-    assert_eq!(statements.len(), 2, "expected the table and the secrets, nothing else");
+    assert_eq!(
+        statements.len(),
+        2,
+        "expected the table and the secrets, nothing else"
+    );
 
     // No wildcard anywhere in what is granted.
     fn walk(v: &serde_yaml::Value, out: &mut Vec<String>) {
@@ -1385,7 +1538,10 @@ fn the_function_may_only_put_query_and_update_the_table_and_read_the_two_secrets
         }
     }
     let mut strings = Vec::new();
-    walk(&serde_yaml::Value::Sequence(statements.clone()), &mut strings);
+    walk(
+        &serde_yaml::Value::Sequence(statements.clone()),
+        &mut strings,
+    );
     assert!(
         strings.iter().all(|s| !s.contains('*')),
         "a wildcard in the policy: {strings:?}"
@@ -1405,7 +1561,10 @@ fn the_function_may_only_put_query_and_update_the_table_and_read_the_two_secrets
             .collect();
         if actions.iter().all(|a| a.starts_with("dynamodb:")) {
             table_actions = Some(actions);
-            assert_eq!(resources, vec![("!GetAtt".to_string(), "DeliveryTable.Arn".to_string())]);
+            assert_eq!(
+                resources,
+                vec![("!GetAtt".to_string(), "DeliveryTable.Arn".to_string())]
+            );
         } else {
             secret_actions = Some(actions);
             let names: BTreeSet<(String, String)> = resources.into_iter().collect();
@@ -1424,7 +1583,10 @@ fn the_function_may_only_put_query_and_update_the_table_and_read_the_two_secrets
         table_actions.unwrap(),
         set(&["dynamodb:PutItem", "dynamodb:Query", "dynamodb:UpdateItem"])
     );
-    assert_eq!(secret_actions.unwrap(), set(&["secretsmanager:GetSecretValue"]));
+    assert_eq!(
+        secret_actions.unwrap(),
+        set(&["secretsmanager:GetSecretValue"])
+    );
 }
 
 #[test]
@@ -1435,7 +1597,8 @@ fn the_apns_secret_is_shaped_the_way_the_relay_reads_it() {
         .find(|(n, _)| n == "ApnsSecret")
         .expect("ApnsSecret");
     let placeholder = secret["Properties"]["SecretString"].as_str().unwrap();
-    let creds: ApnsCredentials = serde_json::from_str(placeholder).expect("secret parses as credentials");
+    let creds: ApnsCredentials =
+        serde_json::from_str(placeholder).expect("secret parses as credentials");
     assert_eq!(creds.topic, "REPLACE");
 }
 
@@ -1512,7 +1675,9 @@ async fn the_provider_token_is_an_es256_jwt_for_the_team_and_key_that_verifies()
     v.required_spec_claims.clear();
     v.validate_exp = false;
     let good = DecodingKey::from_ec_pem(h.key.public_pem.as_bytes()).unwrap();
-    let claims = jsonwebtoken::decode::<Value>(&jwt, &good, &v).expect("signature verifies").claims;
+    let claims = jsonwebtoken::decode::<Value>(&jwt, &good, &v)
+        .expect("signature verifies")
+        .claims;
     assert_eq!(claims["iss"], TEAM_ID);
     assert_eq!(claims["iat"], T0 + 17);
 
@@ -1555,9 +1720,14 @@ async fn an_alert_carries_title_body_level_thread_sound_badge_and_the_routing_ke
 
 #[tokio::test]
 async fn an_active_alert_makes_a_sound_and_a_passive_one_does_not() {
-    for (level, sound) in [("active", true), ("time-sensitive", true), ("passive", false)] {
+    for (level, sound) in [
+        ("active", true),
+        ("time-sensitive", true),
+        ("passive", false),
+    ] {
         let h = Harness::new().await;
-        h.post(&with(|v| v["interruption_level"] = json!(level))).await;
+        h.post(&with(|v| v["interruption_level"] = json!(level)))
+            .await;
         let aps = apns_body(&h.only_apns_request().await)["aps"].clone();
         assert_eq!(aps["interruption-level"], level);
         assert_eq!(aps.get("sound").is_some(), sound, "{level}: {aps}");
@@ -1603,7 +1773,10 @@ async fn the_apns_body_carries_no_bearer_token_push_id_or_collapse_id() {
     h.post(&valid()).await;
     let req = h.only_apns_request().await;
     let body = String::from_utf8(req.body.clone()).unwrap();
-    assert!(!body.contains(PUSH_ID), "the relay's device reference reached Apple");
+    assert!(
+        !body.contains(PUSH_ID),
+        "the relay's device reference reached Apple"
+    );
     assert!(!body.contains(DAEMON_TOKEN));
     assert!(!body.contains("collapse-1"));
 }
@@ -1619,9 +1792,7 @@ impl reqwest::dns::Resolve for RecordingResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         self.asked.lock().unwrap().push(name.as_str().to_string());
         let addr = SocketAddr::from(([127, 0, 0, 1], self.port));
-        Box::pin(async move {
-            Ok(Box::new(std::iter::once(addr)) as reqwest::dns::Addrs)
-        })
+        Box::pin(async move { Ok(Box::new(std::iter::once(addr)) as reqwest::dns::Addrs) })
     }
 }
 
@@ -1645,7 +1816,11 @@ async fn the_environment_picks_apples_sandbox_or_production_host() {
             serde_json::from_value(with(|v| v["environment"] = json!(environment))).unwrap();
         let sent = push_relay::apns::send(&client, None, "jwt", TOPIC, &req).await;
         assert!(sent.is_err(), "nothing listens there");
-        assert_eq!(*asked.lock().unwrap(), vec![host.to_string()], "{environment}");
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![host.to_string()],
+            "{environment}"
+        );
     }
 }
 
@@ -1668,7 +1843,11 @@ async fn the_daemon_token_is_re_read_at_most_every_300_seconds() {
     );
     h.clock.set(T0 + 300);
     assert_eq!(h.post(&valid()).await.status, 200);
-    assert_eq!(h.secrets.token_reads.load(Ordering::SeqCst), 2, "not re-read at 300 s");
+    assert_eq!(
+        h.secrets.token_reads.load(Ordering::SeqCst),
+        2,
+        "not re-read at 300 s"
+    );
     h.clock.set(T0 + 599);
     h.post(&valid()).await;
     assert_eq!(h.secrets.token_reads.load(Ordering::SeqCst), 2);
@@ -1681,12 +1860,28 @@ async fn a_rotated_daemon_token_takes_effect_after_the_window_and_not_before() {
     h.secrets.set_token("daemon-token-v2");
 
     h.clock.set(T0 + 299);
-    assert_eq!(h.post_as("daemon-token-v1", &valid()).await.status, 200, "old token, inside window");
-    assert_eq!(h.post_as("daemon-token-v2", &valid()).await.status, 401, "new token, inside window");
+    assert_eq!(
+        h.post_as("daemon-token-v1", &valid()).await.status,
+        200,
+        "old token, inside window"
+    );
+    assert_eq!(
+        h.post_as("daemon-token-v2", &valid()).await.status,
+        401,
+        "new token, inside window"
+    );
 
     h.clock.set(T0 + 300);
-    assert_eq!(h.post_as("daemon-token-v2", &valid()).await.status, 200, "new token, after window");
-    assert_eq!(h.post_as("daemon-token-v1", &valid()).await.status, 401, "old token, after window");
+    assert_eq!(
+        h.post_as("daemon-token-v2", &valid()).await.status,
+        200,
+        "new token, after window"
+    );
+    assert_eq!(
+        h.post_as("daemon-token-v1", &valid()).await.status,
+        401,
+        "old token, after window"
+    );
 }
 
 #[tokio::test]
@@ -1719,7 +1914,9 @@ async fn the_apns_credentials_and_provider_token_last_50_minutes() {
         v.required_spec_claims.clear();
         v.validate_exp = false;
         let key = DecodingKey::from_ec_pem(h.key.public_pem.as_bytes()).unwrap();
-        jsonwebtoken::decode::<Value>(&jwt_of(r), &key, &v).unwrap().claims["iat"]
+        jsonwebtoken::decode::<Value>(&jwt_of(r), &key, &v)
+            .unwrap()
+            .claims["iat"]
             .as_i64()
             .unwrap()
     };
@@ -1794,7 +1991,11 @@ async fn varying_the_push_id_does_not_dodge_the_rate_ceiling() {
     }
     let fresh_id = with(|v| v["push_id"] = json!(OTHER_PUSH_ID));
     let r = h.post(&fresh_id).await;
-    assert_eq!(r.status, 429, "a 61st push to one token under a new push_id: {}", r.body);
+    assert_eq!(
+        r.status, 429,
+        "a 61st push to one token under a new push_id: {}",
+        r.body
+    );
     assert_eq!(h.apns_requests().await.len(), 60);
 }
 
@@ -1802,7 +2003,8 @@ async fn varying_the_push_id_does_not_dodge_the_rate_ceiling() {
 async fn the_hex_case_of_a_token_does_not_dodge_the_rate_ceiling() {
     let h = Harness::new().await;
     for _ in 0..60 {
-        h.post(&with(|v| v["apns_token"] = json!("ab".repeat(32)))).await;
+        h.post(&with(|v| v["apns_token"] = json!("ab".repeat(32))))
+            .await;
     }
     let upper = with(|v| v["apns_token"] = json!("AB".repeat(32)));
     assert_eq!(h.post(&upper).await.status, 429);
@@ -1814,23 +2016,42 @@ async fn the_rate_counter_is_keyed_on_a_hash_of_the_token_and_never_stores_the_t
     h.post(&valid()).await;
     let bumps = h.store.rate_expiry.lock().unwrap().clone();
     let keys: Vec<&String> = bumps.iter().map(|(k, _, _)| k).collect();
-    assert_eq!(keys.len(), 2, "one counter for the token, one for the bearer: {keys:?}");
+    assert_eq!(
+        keys.len(),
+        2,
+        "one counter for the token, one for the bearer: {keys:?}"
+    );
     for key in &keys {
-        assert!(!key.contains(&"0f".repeat(32)), "the token is stored: {key}");
+        assert!(
+            !key.contains(&"0f".repeat(32)),
+            "the token is stored: {key}"
+        );
         assert!(!key.contains(PUSH_ID), "the push_id keys a counter: {key}");
     }
-    assert!(keys.iter().any(|k| k.starts_with("tok#") && k.len() == 4 + 32), "{keys:?}");
-    assert!(keys.iter().any(|k| **k == push_relay::RATE_KEY_ALL), "{keys:?}");
+    assert!(
+        keys.iter()
+            .any(|k| k.starts_with("tok#") && k.len() == 4 + 32),
+        "{keys:?}"
+    );
+    assert!(
+        keys.iter().any(|k| **k == push_relay::RATE_KEY_ALL),
+        "{keys:?}"
+    );
 }
 
 #[tokio::test]
 async fn the_whole_bearer_has_a_ceiling_of_600_pushes_in_ten_minutes_across_tokens() {
     let h = Harness::new().await;
-    h.store.preload_rate(push_relay::RATE_KEY_ALL, T0 / 600, 599);
+    h.store
+        .preload_rate(push_relay::RATE_KEY_ALL, T0 / 600, 599);
     assert_eq!(h.post(&valid()).await.status, 200, "the 600th push");
     let other = with(|v| v["apns_token"] = json!("1e".repeat(32)));
     let r = h.post(&other).await;
-    assert_eq!(r.status, 429, "the 601st, on a token with its own budget left: {}", r.body);
+    assert_eq!(
+        r.status, 429,
+        "the 601st, on a token with its own budget left: {}",
+        r.body
+    );
     assert_eq!(h.apns_requests().await.len(), 1);
     // A new window has a new budget.
     h.clock.set(T0 + 600);
@@ -1845,7 +2066,11 @@ async fn the_rate_ceiling_resets_when_the_ten_minute_window_rolls_over() {
     }
     assert_eq!(h.post(&valid()).await.status, 429);
     h.clock.set(T0 + 599);
-    assert_eq!(h.post(&valid()).await.status, 429, "still the same window at 599 s");
+    assert_eq!(
+        h.post(&valid()).await.status,
+        429,
+        "still the same window at 599 s"
+    );
     h.clock.set(T0 + 600);
     assert_eq!(h.post(&valid()).await.status, 200, "a new window at 600 s");
     // And the new window has its own budget of 60.
@@ -1863,7 +2088,10 @@ async fn the_rate_counter_outlives_its_window() {
     let bumps = h.store.rate_expiry.lock().unwrap().clone();
     assert_eq!(bumps.len(), 2, "the token's counter and the bearer's");
     for (_, _, expires_at) in &bumps {
-        assert!(*expires_at >= T0 + 600, "the counter expires before its window ends");
+        assert!(
+            *expires_at >= T0 + 600,
+            "the counter expires before its window ends"
+        );
         assert!(*expires_at <= T0 + 3600, "the counter lingers for hours");
     }
 }
@@ -1872,13 +2100,13 @@ async fn the_rate_counter_outlives_its_window() {
 async fn refused_requests_do_not_spend_the_rate_budget() {
     let h = Harness::new().await;
     for _ in 0..70 {
-        assert_eq!(h.post(&with(|v| v["priority"] = json!(3))).await.status, 400);
+        assert_eq!(
+            h.post(&with(|v| v["priority"] = json!(3))).await.status,
+            400
+        );
     }
     for _ in 0..70 {
-        assert_eq!(
-            h.post_as("wrong", &valid()).await.status,
-            401
-        );
+        assert_eq!(h.post_as("wrong", &valid()).await.status, 401);
     }
     assert_eq!(h.post(&valid()).await.status, 200);
 }
@@ -1887,7 +2115,14 @@ async fn refused_requests_do_not_spend_the_rate_budget() {
 
 fn assert_opaque_503(r: &Response) {
     assert_eq!(r.status, 503, "{}", r.body);
-    for leak in ["SECRETDETAIL", "STOREDETAIL", "arn:aws", "AccessDenied", "dynamo", "secretsmanager"] {
+    for leak in [
+        "SECRETDETAIL",
+        "STOREDETAIL",
+        "arn:aws",
+        "AccessDenied",
+        "dynamo",
+        "secretsmanager",
+    ] {
         assert!(!r.body.contains(leak), "503 leaks {leak}: {}", r.body);
     }
 }
@@ -1912,7 +2147,8 @@ async fn unreadable_apns_credentials_are_a_503_without_detail_and_no_apns_call()
 #[tokio::test]
 async fn a_key_that_is_not_a_valid_signing_key_is_a_503_without_detail() {
     let h = Harness::new().await;
-    h.secrets.creds.lock().unwrap().key_pem = "-----BEGIN PRIVATE KEY-----\nLEAKMARK\n-----END PRIVATE KEY-----\n".into();
+    h.secrets.creds.lock().unwrap().key_pem =
+        "-----BEGIN PRIVATE KEY-----\nLEAKMARK\n-----END PRIVATE KEY-----\n".into();
     let r = h.post(&valid()).await;
     assert_opaque_503(&r);
     assert!(!r.body.contains("LEAKMARK"));
@@ -1940,10 +2176,17 @@ async fn a_failing_put_record_does_not_fail_the_push() {
     h.store.fail_put.store(true, Ordering::SeqCst);
     let r = h.post(&valid()).await;
     assert_eq!(r.status, 200, "{}", r.body);
-    assert_eq!(json_of(&r), json!({"apns_status": 200, "apns_reason": null}));
+    assert_eq!(
+        json_of(&r),
+        json!({"apns_status": 200, "apns_reason": null})
+    );
     assert!(!r.body.contains("STOREDETAIL"));
     assert_eq!(h.apns_requests().await.len(), 1);
-    assert_eq!(h.store.put_calls.load(Ordering::SeqCst), 1, "the write was attempted");
+    assert_eq!(
+        h.store.put_calls.load(Ordering::SeqCst),
+        1,
+        "the write was attempted"
+    );
 
     // The same for a push APNs refused.
     let h = Harness::with_response(
@@ -1969,7 +2212,11 @@ fn apns_credentials_never_print_the_key() {
         team_id: TEAM_ID.into(),
         topic: TOPIC.into(),
     };
-    for printed in [format!("{creds:?}"), format!("{creds:#?}"), format!("{:?}", Some(&creds))] {
+    for printed in [
+        format!("{creds:?}"),
+        format!("{creds:#?}"),
+        format!("{:?}", Some(&creds)),
+    ] {
         assert!(!printed.contains("KEYBODYMARK"), "{printed}");
         assert!(!printed.contains("PRIVATE KEY"), "{printed}");
     }
@@ -1982,7 +2229,12 @@ fn apns_credentials_parse_from_the_secret_json() {
     }))
     .unwrap();
     assert_eq!(
-        (creds.key_pem.as_str(), creds.key_id.as_str(), creds.team_id.as_str(), creds.topic.as_str()),
+        (
+            creds.key_pem.as_str(),
+            creds.key_id.as_str(),
+            creds.team_id.as_str(),
+            creds.topic.as_str()
+        ),
         ("pem", "kid", "team", "com.x.y")
     );
 }

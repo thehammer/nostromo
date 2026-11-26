@@ -166,7 +166,11 @@ impl SecretsManager {
 #[async_trait]
 impl Secrets for SecretsManager {
     async fn daemon_token(&self) -> Result<String, String> {
-        Ok(self.read(&self.daemon_token_secret).await?.trim().to_string())
+        Ok(self
+            .read(&self.daemon_token_secret)
+            .await?
+            .trim()
+            .to_string())
     }
 
     async fn apns(&self) -> Result<ApnsCredentials, String> {

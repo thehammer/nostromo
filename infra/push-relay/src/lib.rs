@@ -315,9 +315,8 @@ impl Relay {
                 return Ok(creds.clone());
             }
         }
-        let fresh = self.secrets.apns().await.map_err(|e| {
+        let fresh = self.secrets.apns().await.inspect_err(|_| {
             tracing::error!("APNs credentials unavailable");
-            e
         })?;
         cache.apns = Some((fresh.clone(), now));
         Ok(fresh)
