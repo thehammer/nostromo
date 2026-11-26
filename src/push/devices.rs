@@ -174,14 +174,21 @@ impl DeviceStore {
         record.environment = environment;
         record.capabilities = capabilities;
         record.prefs.tz = tz.to_string();
-        let changed = before.is_none_or(|b| {
+        let changed = before.as_ref().is_none_or(|b| {
             b.apns_token != record.apns_token
                 || b.environment != record.environment
                 || b.capabilities != record.capabilities
                 || b.prefs.tz != record.prefs.tz
         });
         if changed {
-            self.save()?;
+            if let Err(e) = self.save() {
+                // Not saved means not registered: the next identical register must try again.
+                match before {
+                    Some(b) => self.devices.insert(device_id.to_string(), b),
+                    None => self.devices.remove(device_id),
+                };
+                return Err(e);
+            }
         }
         Ok(changed)
     }
@@ -195,8 +202,13 @@ impl DeviceStore {
         if record.prefs == prefs {
             return Ok(false);
         }
-        record.prefs = prefs;
-        self.save()?;
+        let before = std::mem::replace(&mut record.prefs, prefs);
+        if let Err(e) = self.save() {
+            if let Some(record) = self.devices.get_mut(device_id) {
+                record.prefs = before;
+            }
+            return Err(e);
+        }
         Ok(true)
     }
 
@@ -330,6 +342,8 @@ mod tests {
             b"{ not json, but somebody's registrations",
             "the file is untouched"
         );
+
+        assert!(s.get("dev-1").is_none(), "not saved means not registered");
 
         // Handled: the operator moves it away, and saving works again.
         std::fs::remove_file(&path).unwrap();

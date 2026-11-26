@@ -6270,7 +6270,11 @@ mod tests {
                 assert_eq!(request_id, "req-9");
                 assert_eq!(repo.as_deref(), Some("admin-portal"));
                 assert_eq!(deadline, None);
-                assert_eq!(agent_class, None);
+                assert_eq!(
+                    agent_class,
+                    Some(crate::push::wire::AgentClass::Other),
+                    "an unknown class is `other`"
+                );
                 assert_eq!(operator_presence, None);
             }
             other => panic!("{other:?}"),
