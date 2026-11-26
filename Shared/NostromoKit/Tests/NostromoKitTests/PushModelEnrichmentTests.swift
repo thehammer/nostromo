@@ -45,7 +45,10 @@ private final class EnrichmentFakeTransport: DaemonTransport {
 private func enrichmentLoopTurn() async {
     for _ in 0..<3 {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            RunLoop.main.perform { continuation.resume() }
+            // The model's `receive(on: DispatchQueue.main)` delivers through this same queue, so what was
+            // sent before this call has been delivered by the time this block runs (a run-loop `perform`
+            // is not ordered with it).
+            DispatchQueue.main.async { continuation.resume() }
         }
     }
 }

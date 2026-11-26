@@ -150,7 +150,10 @@ final class NotificationContentComposerTests: XCTestCase {
             XCTAssertTrue(body.hasSuffix(suffix), "\(label) \(kind): suffix")
             body = String(body.dropLast(suffix.count))
         } else {
-            XCTAssertFalse(body.hasSuffix(suffix), "\(label) \(kind): only a decision has a suffix")
+            // Text a person wrote may itself end that way; only the composer adds the suffix, to decisions.
+            if !text.hasSuffix(suffix) {
+                XCTAssertFalse(body.hasSuffix(suffix), "\(label) \(kind): only a decision has a suffix")
+            }
         }
         XCTAssertFalse(body.isEmpty, "\(label) \(kind): an empty body is never shown")
         XCTAssertLessThanOrEqual(body.count, 140, "\(label) \(kind)")
