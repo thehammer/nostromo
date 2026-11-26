@@ -98,6 +98,12 @@ pub struct WsLimits {
     pub max_sockets_per_device: usize,
     /// What the primary accepts from a satellite's uplink.
     pub uplink: UplinkLimits,
+    /// How often an authenticated socket is sent a WebSocket ping.
+    pub ping_every: Duration,
+    /// How long an authenticated socket may go without answering one before it
+    /// is closed with 1001 (going away): a phone that left the network without
+    /// a close would otherwise hold its slot, and its queue, for ever.
+    pub pong_timeout: Duration,
 }
 
 impl Default for WsLimits {
@@ -108,6 +114,8 @@ impl Default for WsLimits {
             max_unauthenticated_per_ip: 8,
             max_sockets_per_device: 8,
             uplink: UplinkLimits::default(),
+            ping_every: Duration::from_secs(20),
+            pong_timeout: Duration::from_secs(60),
         }
     }
 }
@@ -184,6 +192,7 @@ fn ip_key(ip: IpAddr) -> IpAddr {
 /// Everything `handle_client` needs, bundled for the accept loop.
 pub(super) struct WsShared {
     pub tx: broadcast::Sender<ServerMsg>,
+    pub seq: Arc<super::seq::SeqHub>,
     pub session_mgr: Arc<Mutex<SessionManager>>,
     pub perri_state_dir: std::path::PathBuf,
     pub decisions: Arc<Mutex<DecisionRegistry>>,
@@ -405,6 +414,7 @@ async fn serve(
                 limits.max_sockets_per_device,
                 limits.uplink.clone(),
                 limits.handshake_timeout,
+                (limits.ping_every, limits.pong_timeout),
             )
             .await
         }
@@ -460,6 +470,7 @@ fn pairing_welcome() -> ServerMsg {
         operator_nonce: None,
         enabled_agents: None,
         disabled_agents: None,
+        seq_epoch: None,
     }
 }
 
@@ -673,6 +684,20 @@ async fn next_request(
 /// unwrapped into the bridge, what it publishes and the answers it gives to
 /// routed reads go through the router's checks, and what the handler writes
 /// is wrapped as `server`.
+/// Write one frame, giving up after `limit`: a peer that stopped reading would
+/// otherwise hold the socket's task (and its heartbeat with it) for ever once the
+/// buffers fill. `false`: the frame did not go out and the socket is to be dropped.
+async fn send_bounded<S>(sink: &mut S, msg: Message, limit: Duration) -> bool
+where
+    S: futures::Sink<Message> + Unpin,
+{
+    matches!(
+        tokio::time::timeout(limit, sink.send(msg)).await,
+        Ok(Ok(()))
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_paired(
     ws: WebSocketStream<TcpStream>,
     device_id: String,
@@ -681,6 +706,7 @@ async fn run_paired(
     max_sockets: usize,
     uplink_limits: UplinkLimits,
     hello_timeout: Duration,
+    (ping_every, pong_timeout): (Duration, Duration),
 ) -> Result<()> {
     let Some(_conn) = hub.try_connected(&device_id, max_sockets) else {
         let mut ws = ws;
@@ -758,7 +784,7 @@ async fn run_paired(
             role_refused: Arc::clone(&role_refused),
             admitted: Arc::clone(&admitted),
         },
-        shared.tx.subscribe(),
+        shared.seq.subscribe_counted(),
         shared.tx.clone(),
         Arc::clone(&shared.session_mgr),
         shared.perri_state_dir.clone(),
@@ -767,6 +793,7 @@ async fn run_paired(
         Arc::clone(&shared.held_mother_jobs),
         Arc::clone(&shared.terminals),
         Arc::clone(&shared.hub_slot),
+        Arc::clone(&shared.seq),
     ));
 
     // `read_frame` is not cancel-safe: read whole frames in a task of their own.
@@ -781,6 +808,12 @@ async fn run_paired(
 
     let mut touch = tokio::time::interval(TOUCH_EVERY);
     touch.tick().await;
+    // Heartbeat: a ping every `ping_every`; the socket is closed once no pong
+    // has come for `pong_timeout`. Only a pong counts, so a peer that keeps
+    // writing but never answers a ping is closed too.
+    let mut heartbeat = tokio::time::interval(ping_every);
+    heartbeat.tick().await;
+    let mut last_pong = tokio::time::Instant::now();
     let mut closing: Option<Message> = None;
     // A satellite must get its `Hello` accepted in the time a WebSocket
     // handshake may take; a silent socket does not hold its slot for ever.
@@ -811,6 +844,9 @@ async fn run_paired(
                     Some(Err(_)) => break,
                     Some(Ok(frame)) => frame,
                 };
+                if matches!(frame, Message::Pong(_)) {
+                    last_pong = tokio::time::Instant::now();
+                }
                 if let Some(close) = close_for_bad_frame(&frame) {
                     closing = Some(close);
                     break;
@@ -828,7 +864,7 @@ async fn run_paired(
                                     });
                                     if let Message::Text(body) = refusal {
                                         let body = wrap_server_bytes(&body);
-                                        if sink.send(Message::Text(body)).await.is_err() {
+                                        if !send_bounded(&mut sink, Message::Text(body), pong_timeout).await {
                                             break;
                                         }
                                     }
@@ -861,7 +897,7 @@ async fn run_paired(
                 };
                 let body = String::from_utf8_lossy(&bytes).into_owned();
                 let body = if uplink.is_some() { wrap_server_bytes(&body) } else { body };
-                if sink.send(Message::Text(body)).await.is_err() {
+                if !send_bounded(&mut sink, Message::Text(body), pong_timeout).await {
                     break;
                 }
             }
@@ -882,7 +918,7 @@ async fn run_paired(
                     continue;
                 };
                 let body = serde_json::to_string(&frame).unwrap_or_default();
-                if sink.send(Message::Text(body)).await.is_err() {
+                if !send_bounded(&mut sink, Message::Text(body), pong_timeout).await {
                     break;
                 }
             }
@@ -902,7 +938,7 @@ async fn run_paired(
                             (Some(_), Message::Text(body)) => Message::Text(wrap_server_bytes(&body)),
                             (_, other) => other,
                         };
-                        let _ = sink.send(revoked).await;
+                        let _ = send_bounded(&mut sink, revoked, pong_timeout).await;
                         closing = Some(close_msg(CLOSE_UNAUTHORIZED, "unauthorized"));
                         break;
                     }
@@ -918,6 +954,15 @@ async fn run_paired(
                 }
             }
             _ = touch.tick() => registry.touch(&device_id),
+            _ = heartbeat.tick() => {
+                if last_pong.elapsed() >= pong_timeout {
+                    closing = Some(close_msg(1001, "no pong"));
+                    break;
+                }
+                if !send_bounded(&mut sink, Message::Ping(Vec::new()), pong_timeout).await {
+                    break;
+                }
+            }
             _ = &mut hello_deadline, if uplink.is_some() && !admitted.load(Ordering::SeqCst) => {
                 closing = Some(close_msg(1008, "no hello"));
                 break;
@@ -926,10 +971,13 @@ async fn run_paired(
     }
 
     if let Some(close) = closing {
-        let _ = sink.send(close).await;
+        let _ = send_bounded(&mut sink, close, pong_timeout).await;
     }
-    let _ = sink.flush().await;
-    let _ = sink.close().await;
+    let _ = tokio::time::timeout(pong_timeout, async {
+        let _ = sink.flush().await;
+        let _ = sink.close().await;
+    })
+    .await;
     // End of the bridge: the handler reads EOF and cleans up.
     drop(bridge_wr);
     reader.abort();

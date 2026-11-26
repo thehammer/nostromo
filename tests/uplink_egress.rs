@@ -977,7 +977,7 @@ fn every_server_msg_variant_is_named_in_the_uplink_redaction_match() {
     let variants = server_msg_variants();
     assert_eq!(
         variants.len(),
-        105,
+        106,
         "ServerMsg gained or lost a variant: decide whether it may leave a work host, \
          add it to redact_for_uplink_metadata, then update this count"
     );

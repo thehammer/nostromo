@@ -382,6 +382,8 @@ impl Rig {
                 renders_approvals: renders,
                 capabilities: vec![],
                 operator_nonce: None,
+                resume: Default::default(),
+                seq_epoch: None,
             })
             .unwrap(),
         )
@@ -405,6 +407,8 @@ impl Rig {
                 renders_approvals: true,
                 capabilities: vec![],
                 operator_nonce: None,
+                resume: Default::default(),
+                seq_epoch: None,
             })
             .unwrap(),
         )
@@ -426,6 +430,8 @@ impl Rig {
                     renders_approvals: true,
                     capabilities: vec![],
                     operator_nonce: None,
+                    resume: Default::default(),
+                    seq_epoch: None,
                 })
                 .unwrap(),
             )
@@ -1040,6 +1046,8 @@ fn a_connection_that_resubscribes_with_renders_approvals_becomes_a_presenter() {
             renders_approvals: true,
             capabilities: vec![],
             operator_nonce: None,
+            resume: Default::default(),
+            seq_epoch: None,
         })
         .await;
         let snapshot = app.next("the snapshot", is_snapshot).await;
@@ -4140,6 +4148,8 @@ fn session_rules_are_replayed_once_per_focus_to_a_connection_that_renders_approv
                 renders_approvals: true,
                 capabilities: vec![],
                 operator_nonce: None,
+                resume: Default::default(),
+                seq_epoch: None,
             })
             .await;
         quiet.next("the snapshot", is_snapshot).await;
@@ -5269,6 +5279,8 @@ fn the_rules_list_is_replayed_to_a_connection_that_renders_approvals_even_when_e
                 renders_approvals: true,
                 capabilities: vec![],
                 operator_nonce: None,
+                resume: Default::default(),
+                seq_epoch: None,
             })
             .await;
         quiet.next("the snapshot", is_snapshot).await;

@@ -123,6 +123,11 @@ public final class DaemonStore: ObservableObject {
     /// The satellites connected to the primary, from `Hosts`.
     @Published public private(set) var hostInfos: [HostInfoWire] = []
 
+    /// Topics the daemon said (`gap`) may have missed updates for this client, by topic name
+    /// (`"mother_jobs"`, `"perri"`, ...). A list shows `MissedUpdatesNotice.text` while its topic is
+    /// here; `refreshMissedUpdates()` is the pull-to-refresh that clears them.
+    @Published public private(set) var missedUpdates: Set<String> = []
+
     /// What each host last reported it may do with content. Kept after the host disconnects, so its
     /// last-known rows keep their shape; a host never heard from is treated as `work`.
     @Published public private(set) var hostEgress: [String: HostEgress] = [:]
@@ -435,10 +440,22 @@ public final class DaemonStore: ObservableObject {
         lastKnownAt = snapshot.savedAt
     }
 
+    /// Pull to refresh after a `gap`: start the subscription over (fresh snapshots, no replay) and
+    /// forget the notices.
+    public func refreshMissedUpdates() {
+        missedUpdates = []
+        client.refreshNow()
+    }
+
     /// Forgets everything shown and deletes the cache file. Called when the pairing is gone (revoke,
     /// un-pair, pairing with a different server): after it, memory and disk hold no Nostromo content.
+    /// The client forgets its sequence numbers too: a client restarted after a failed pairing would
+    /// otherwise resume, be told its topics are "covered", and never be sent the snapshots the wiped
+    /// lists need.
     public func wipeAll() {
+        client.resetResume()
         isWiped = true
+        missedUpdates = []
         cache?.wipe()
         clearLastKnownContent()
         focusLayouts = [:]
@@ -608,6 +625,10 @@ public final class DaemonStore: ObservableObject {
 
         case .approvalPending(let tag, let count):
             refreshNeedsYouApprovals(host: "", tag: tag, count: count)
+
+        case .gap(let topic, _, _, _, let reason):
+            // A daemon restart came with the snapshots that replace the list: nothing to warn of.
+            if reason.mayHaveMissedUpdates { missedUpdates.insert(topic) }
 
         case .hosts(let list):
             hostInfos = list

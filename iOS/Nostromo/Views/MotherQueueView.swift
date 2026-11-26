@@ -24,6 +24,9 @@ struct MotherQueueView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: store.connected)
         .animation(.easeInOut(duration: 0.25), value: store.motherJobs.count)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            MissedUpdatesBanner(topics: MissedUpdatesNotice.motherTopics)
+        }
     }
 
     // MARK: - Sub-views
@@ -52,7 +55,10 @@ struct MotherQueueView: View {
         }
         .listStyle(.insetGrouped)
         .refreshable {
-            // Daemon pushes ~2s; no-op here.
+            // The daemon pushes every ~2 s, so a pull only matters after a `gap`.
+            if MissedUpdatesNotice.isDue(for: MissedUpdatesNotice.motherTopics, missed: store.missedUpdates) {
+                store.refreshMissedUpdates()
+            }
         }
     }
 

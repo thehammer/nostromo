@@ -660,6 +660,7 @@ pub fn redact_for_uplink_metadata(
         | ServerMsg::DeviceAdminError { .. }
         | ServerMsg::Hosts { .. }
         | ServerMsg::HostUnavailable { .. }
+        | ServerMsg::Gap { .. }
         | ServerMsg::DeviceAdminLevel { .. } => None,
     }
 }

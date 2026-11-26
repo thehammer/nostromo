@@ -199,6 +199,8 @@ async fn connect_unix_with_nonce(
             renders_approvals: false,
             capabilities: vec![],
             operator_nonce: None,
+            resume: Default::default(),
+            seq_epoch: None,
         },
     )
     .await;
@@ -248,6 +250,8 @@ async fn connect_tcp(env: &Env, topics: Vec<Topic>, renders_decisions: bool) -> 
             renders_approvals: false,
             capabilities: vec![],
             operator_nonce: None,
+            resume: Default::default(),
+            seq_epoch: None,
         },
     )
     .await;

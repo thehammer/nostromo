@@ -82,6 +82,8 @@ async fn codec_client_msg_subscribe_round_trip() {
         renders_approvals: false,
         capabilities: vec![],
         operator_nonce: None,
+        resume: Default::default(),
+        seq_epoch: None,
     };
     let bytes = serde_json::to_vec(&msg).unwrap();
     let (mut reader, mut writer) = tokio::io::duplex(256);
@@ -101,6 +103,7 @@ async fn codec_server_msg_welcome_round_trip() {
         operator_nonce: None,
         enabled_agents: None,
         disabled_agents: None,
+        seq_epoch: None,
     };
     let bytes = serde_json::to_vec(&msg).unwrap();
     let (mut reader, mut writer) = tokio::io::duplex(256);

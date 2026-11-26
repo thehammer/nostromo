@@ -408,6 +408,8 @@ fn subscribe() -> ClientMsg {
         renders_approvals: false,
         capabilities: vec![],
         operator_nonce: None,
+        resume: Default::default(),
+        seq_epoch: None,
     }
 }
 
@@ -845,6 +847,19 @@ async fn the_operator_app_links_and_unlinks_a_pr() {
 
 #[tokio::test]
 async fn the_operator_app_starts_a_session_selected_for_it_whose_first_message_is_the_preview() {
+    a_session_selected_for_the_operator_app_gets_the_preview_as_its_first_message().await;
+}
+
+/// The same on a runtime with four worker threads: the `FocusCreated` the
+/// spawn broadcasts reaches the connection through two tasks, so on several
+/// threads the answer can overtake it unless the connection orders them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_operator_app_starts_a_session_selected_for_it_whose_first_message_is_the_preview_on_four_threads(
+) {
+    a_session_selected_for_the_operator_app_gets_the_preview_as_its_first_message().await;
+}
+
+async fn a_session_selected_for_the_operator_app_gets_the_preview_as_its_first_message() {
     let env = env().await;
     let (mut app, _) = connect_unix(&env, Some("mac_app")).await;
     let current = current_digest(&env);

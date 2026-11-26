@@ -13,12 +13,14 @@ import NostromoKit
 struct NostromoApp: App {
 
     @StateObject private var session = AppSession()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(session)
                 .onOpenURL { session.handle(url: $0) }
+                .onChange(of: scenePhase) { _, phase in session.scenePhaseChanged(phase) }
         }
     }
 }

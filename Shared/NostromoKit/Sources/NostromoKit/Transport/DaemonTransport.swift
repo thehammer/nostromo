@@ -21,9 +21,18 @@ public protocol DaemonTransport: AnyObject {
     /// Whether this link may carry anything that changes state on the Mac (answer, approve, send,
     /// cancel...). The WebSocket transport cannot (`OutboundPolicy`), so views hide those controls.
     var canMutate: Bool { get }
+    /// Start the subscription over without resuming (the "pull to refresh" after a `gap`). A
+    /// transport with nothing to resume from does nothing.
+    func refreshNow()
+    /// Forget what was seen so far, so the next subscription resumes from nothing (the store's
+    /// content was wiped). A transport with nothing to resume from does nothing.
+    func resetResume()
 }
 
 extension DaemonTransport {
+    public func refreshNow() {}
+    public func resetResume() {}
+
     /// Fails safe: a transport says so explicitly to be allowed to mutate.
     public var canMutate: Bool { false }
 }

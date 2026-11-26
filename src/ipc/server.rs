@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch, Notify};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -43,9 +43,9 @@ use super::{
         MAC_APP_CLIENT_KIND,
     },
     protocol::{
-        ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, HelloRole, HostUnavailableReason,
-        MotherActionKind, QueueResultCode, QueueReturnedEntry, ServerMsg, SessionAction, Topic,
-        TrackerEditError, FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_MERGE,
+        ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, GapReason, HelloRole,
+        HostUnavailableReason, MotherActionKind, QueueResultCode, QueueReturnedEntry, ServerMsg,
+        SessionAction, Topic, TrackerEditError, FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_MERGE,
         FEATURE_AUTHORED_PRS_MERGE_QUEUE, FEATURE_AUTHORED_PRS_NOTIFY, FEATURE_AUTHORED_PRS_PERRI,
         FEATURE_CONVERSATION_HISTORY, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_MERGED_TURNS,
         FEATURE_SESSION_MCP, FEATURE_SESSION_QUEUE, FEATURE_SLASH_COMMANDS,
@@ -53,6 +53,10 @@ use super::{
         FEATURE_TRACKER_EDIT, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
     router::{client_host, Routed},
+    seq::{
+        self, encode_with_seq, DropLog, HubSubscription, Replay, SeqHub, Stamped, CLIENT_QUEUE_CAP,
+        CLIENT_QUEUE_RESUME_BELOW, FEATURE_SEQ, RESUME_BUDGET_LOCAL, RESUME_BUDGET_NETWORK,
+    },
     session_manager::{
         AppLabel, ModelRequestOutcome, QueueVerb, ResendTrigger, SessionManager, SwitchRequest,
     },
@@ -143,7 +147,10 @@ pub(super) use super::ws::{
 /// Handle to the running IPC server.  Drop to shut down.
 pub struct Server {
     socket_path: PathBuf,
+    /// Where producers send frames. Each is numbered by the sequencer task and
+    /// reaches clients through [`Server::seq`], not from here.
     pub tx: broadcast::Sender<ServerMsg>,
+    seq: Arc<SeqHub>,
     retained: RetainedCache,
     held_mother_jobs: HeldMotherJobs,
     /// Bumped when the retained cache lagged and must be repopulated; the
@@ -223,6 +230,11 @@ impl Server {
         // Agent follow delivers terminal output into the sessions' conversations.
         terminal::follow::FollowManager::install_with_sessions(&terminals, &session_mgr);
 
+        // Every frame a producer sends is numbered (and kept for replay) by one
+        // task before the connections see it.
+        let seq = SeqHub::new(session_mgr.lock().unwrap().sensitive_tags());
+        seq::spawn_sequencer(Arc::clone(&seq), tx.subscribe());
+
         // Subscribe before returning so no broadcast sent after `bind` can be missed.
         let retained: RetainedCache = Arc::new(Mutex::new(BTreeMap::new()));
         let (republish, _) = tokio::sync::watch::channel(0u64);
@@ -241,6 +253,7 @@ impl Server {
         let held_for_loop = Arc::clone(&held_mother_jobs);
         let unix_peers = UnixPeers { verifier, qa_mode };
         let terminals_for_loop = Arc::clone(&terminals);
+        let seq_for_loop = Arc::clone(&seq);
         let hub: HubSlot = Arc::new(HubCell::default());
         let hub_for_loop = Arc::clone(&hub);
         tokio::spawn(async move {
@@ -255,6 +268,7 @@ impl Server {
                 held_for_loop,
                 terminals_for_loop,
                 hub_for_loop,
+                seq_for_loop,
             )
             .await
             {
@@ -267,6 +281,7 @@ impl Server {
         Ok(Self {
             socket_path: path,
             tx,
+            seq,
             retained,
             held_mother_jobs,
             republish,
@@ -280,6 +295,11 @@ impl Server {
     /// state again. Pollers `select!` on `changed()` next to their own source.
     pub fn subscribe_republish(&self) -> tokio::sync::watch::Receiver<u64> {
         self.republish.subscribe()
+    }
+
+    /// The numbering and replay state behind this server's connections.
+    pub fn seq(&self) -> &Arc<SeqHub> {
+        &self.seq
     }
 
     /// Broadcast a message to all connected, subscribed clients.
@@ -307,6 +327,7 @@ impl Server {
         let held = Arc::clone(&self.held_mother_jobs);
         let terminals = Arc::clone(&self.terminals);
         let hub = Arc::clone(&self.hub);
+        let seq = Arc::clone(&self.seq);
         tokio::spawn(async move {
             if let Err(e) = accept_loop_tcp(
                 listener,
@@ -318,6 +339,7 @@ impl Server {
                 held,
                 terminals,
                 hub,
+                seq,
             )
             .await
             {
@@ -362,6 +384,7 @@ impl Server {
         let _ = self.hub.set(Arc::clone(&hub));
         let shared = super::ws::WsShared {
             tx: self.tx.clone(),
+            seq: Arc::clone(&self.seq),
             session_mgr,
             perri_state_dir,
             decisions,
@@ -700,13 +723,15 @@ async fn accept_loop(
     held_mother_jobs: HeldMotherJobs,
     terminals: Arc<Mutex<TerminalManager>>,
     hub: HubSlot,
+    seq: Arc<SeqHub>,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let terminals = Arc::clone(&terminals);
                 let hub = Arc::clone(&hub);
-                let rx = tx.subscribe();
+                let rx = seq.subscribe_counted();
+                let seq = Arc::clone(&seq);
                 let session_mgr = Arc::clone(&session_mgr);
                 let broadcast_tx = tx.clone();
                 let psd = perri_state_dir.clone();
@@ -742,6 +767,7 @@ async fn accept_loop(
                         held,
                         terminals,
                         hub,
+                        seq,
                     )
                     .await
                     {
@@ -767,6 +793,7 @@ async fn accept_loop_tcp(
     held_mother_jobs: HeldMotherJobs,
     terminals: Arc<Mutex<TerminalManager>>,
     hub: HubSlot,
+    seq: Arc<SeqHub>,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
@@ -774,7 +801,8 @@ async fn accept_loop_tcp(
                 let terminals = Arc::clone(&terminals);
                 let hub = Arc::clone(&hub);
                 info!(%addr, "TCP IPC client connected");
-                let rx = tx.subscribe();
+                let rx = seq.subscribe_counted();
+                let seq = Arc::clone(&seq);
                 let session_mgr = Arc::clone(&session_mgr);
                 let broadcast_tx = tx.clone();
                 let psd = perri_state_dir.clone();
@@ -794,6 +822,7 @@ async fn accept_loop_tcp(
                         held,
                         terminals,
                         hub,
+                        seq,
                     )
                     .await
                     {
@@ -833,6 +862,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
         FEATURE_WS.to_string(),
         FEATURE_PAIR.to_string(),
         FEATURE_DEVICES.to_string(),
+        FEATURE_SEQ.to_string(),
     ];
     if mgr.authored_prs().is_some() {
         features.push(FEATURE_AUTHORED_PRS.to_string());
@@ -850,6 +880,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
         operator_nonce,
         enabled_agents: Some(mgr.enabled_agents().wire_names()),
         disabled_agents: Some(mgr.enabled_agents().disabled_names()),
+        seq_epoch: None,
     }
 }
 
@@ -868,7 +899,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
 pub(super) async fn handle_client<S>(
     stream: S,
     mut origin: PeerOrigin,
-    mut broadcast_rx: broadcast::Receiver<ServerMsg>,
+    subscription: HubSubscription,
     broadcast_tx: broadcast::Sender<ServerMsg>,
     session_mgr: Arc<Mutex<SessionManager>>,
     perri_state_dir: PathBuf,
@@ -877,11 +908,19 @@ pub(super) async fn handle_client<S>(
     held_mother_jobs: HeldMotherJobs,
     terminals: Arc<Mutex<TerminalManager>>,
     hub: HubSlot,
+    seq: Arc<SeqHub>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
     let (mut reader, mut writer) = tokio::io::split(stream);
+    // Where every topic stood the moment the receiver was subscribed (the same
+    // instant, under the hub's lock): what a lag later is measured from.
+    let HubSubscription {
+        rx: broadcast_rx,
+        published: published_at_accept,
+        seen: seen_at_accept,
+    } = subscription;
 
     // ── Handshake ─────────────────────────────────────────────────────────────
 
@@ -972,6 +1011,10 @@ where
         features.push(FEATURE_HOSTS.to_string());
         features.push(FEATURE_UPLINK.to_string());
     }
+    // Which run of the daemon numbers the topics (the `"seq"` feature's epoch).
+    if let ServerMsg::Welcome { seq_epoch, .. } = &mut welcome {
+        *seq_epoch = Some(seq.epoch());
+    }
     write_frame(&mut writer, &serde_json::to_vec(&welcome)?).await?;
     // Never log the nonce.
     let peer_pid = origin.info().map(|i| i.pid);
@@ -1003,12 +1046,14 @@ where
     let sub_bytes = read_frame(&mut reader).await?;
     let sub: ClientMsg = serde_json::from_slice(&sub_bytes)?;
 
-    let (topics, renders_decisions, renders_approvals, capabilities, sub_nonce): (
+    #[allow(clippy::type_complexity)]
+    let (topics, renders_decisions, renders_approvals, capabilities, sub_nonce, resume): (
         Vec<Topic>,
         bool,
         bool,
         Vec<String>,
         Option<String>,
+        ResumeRequest,
     ) = match sub {
         ClientMsg::Subscribe {
             topics,
@@ -1016,16 +1061,22 @@ where
             renders_approvals,
             capabilities,
             operator_nonce,
+            resume,
+            seq_epoch,
         } => (
             topics,
             renders_decisions,
             renders_approvals,
             capabilities,
             operator_nonce,
+            ResumeRequest {
+                after: resume,
+                epoch: seq_epoch,
+            },
         ),
         ClientMsg::Ping => {
             write_frame(&mut writer, &serde_json::to_vec(&ServerMsg::Pong)?).await?;
-            (vec![], false, false, vec![], None)
+            (vec![], false, false, vec![], None, ResumeRequest::default())
         }
         _ => {
             // The frame's type only: its content is never logged.
@@ -1209,6 +1260,35 @@ where
     // app dedupes by request id).
     replay_messages(&mut writer, std::mem::take(&mut approvals_replay)).await;
 
+    // ── Resume — what the topics this client names published since ───────────
+    // First of the replays, so the fresh snapshots that follow are the last word
+    // on a topic: a replayed frame is older than they are. Each frame passes the
+    // same gate as the live path, so a peer is replayed nothing it would not have
+    // been sent live (the rings hold frames before any peer's trust filter).
+    let ResumePlan {
+        frames: resume_frames,
+        covered: resume_covered,
+        high_water: resume_high_water,
+        gaps: resume_gaps,
+    } = plan_resume(&seq, &resume, &topics, trust.is_network());
+    for stamped in resume_frames {
+        if let Some(bytes) = broadcast_bytes(
+            stamped,
+            &topics,
+            presents_approvals,
+            trust,
+            &sensitive,
+            origin.ws_device(),
+        ) {
+            if write_outbound(&mut writer, &bytes, &conn_key)
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+    }
+
     // ── Claude sign-in replay — who is waiting for one, as of now ─────────────
     // The whole picture (REPLACE semantics), so a client that connects while a
     // session waits shows it at once. `LocalOnly`: a network peer is sent none.
@@ -1306,7 +1386,7 @@ where
     // known focus and one health verdict are pushed immediately on attach,
     // mirroring the Layout replay above (D4).
     if topics.contains(&Topic::Activity) {
-        let (snapshots, health_msg): (Vec<ServerMsg>, ServerMsg) = {
+        let (snapshots, mut health_msg): (Vec<ServerMsg>, ServerMsg) = {
             let mgr = session_mgr.lock().unwrap();
             let snapshots = mgr
                 .known_focus_tags()
@@ -1323,6 +1403,10 @@ where
             let health_msg = activity_health_msg(&mgr, hook_installed);
             (snapshots, health_msg)
         };
+        // What the replay rings hold, for the operator's health read-out.
+        if let ServerMsg::ActivityHealth { replay, .. } = &mut health_msg {
+            *replay = Some(seq.usage());
+        }
         replay_messages(
             &mut writer,
             snapshots
@@ -1374,14 +1458,27 @@ where
         PeerTrust::Paired => {
             let frames = retained_matching(&retained, &topics, None)
                 .into_iter()
+                .filter(|m| !covered_by_resume(&resume_covered, m))
                 .filter_map(|m| outbound(trust, m, &sensitive))
                 .chain(std::iter::once(withheld_msg_for(trust)));
             replay_messages(&mut writer, frames).await;
         }
         PeerTrust::OperatorApp | PeerTrust::LocalOther => {
-            replay_messages(&mut writer, retained_matching(&retained, &topics, None)).await
+            let frames = retained_matching(&retained, &topics, None)
+                .into_iter()
+                .filter(|m| !covered_by_resume(&resume_covered, m));
+            replay_messages(&mut writer, frames).await
         }
     }
+    // A topic the ring could not catch up has just been replayed its snapshot:
+    // say that updates in between are lost.
+    replay_messages(
+        &mut writer,
+        resume_gaps
+            .into_iter()
+            .filter_map(|m| outbound(trust, m, &sensitive)),
+    )
+    .await;
 
     // ── Model replay — catalogue, defaults and every focus's model state ──────
     // Every peer: a network peer is withheld the state of a sensitive focus by
@@ -1396,6 +1493,35 @@ where
         )
         .await;
     }
+
+    // ── Broadcast queue ───────────────────────────────────────────────────────
+    // A task of its own takes the connection's frames off the broadcast channel
+    // into a bounded queue, so a client that reads slowly costs only itself:
+    // when the queue is full its frames are dropped (and remembered, to be
+    // reported as a `Gap`) instead of lagging the receiver unnoticed.
+    let filter = Arc::new(Mutex::new(BroadcastFilter {
+        topics: topics.clone(),
+        presents_approvals,
+    }));
+    let dropping = Arc::new(AtomicBool::new(false));
+    let drained = Arc::new(Notify::new());
+    let close_local = (!trust.is_network()).then(|| Arc::new(Notify::new()));
+    let (processed_tx, mut processed_rx) = watch::channel(0u64);
+    let (queue_tx, mut queue_rx) = mpsc::channel::<Queued>(CLIENT_QUEUE_CAP);
+    let forwarder = tokio::spawn(forward_broadcasts(
+        broadcast_rx,
+        queue_tx,
+        ForwardCtl {
+            filter: Arc::clone(&filter),
+            dropping: Arc::clone(&dropping),
+            drained: Arc::clone(&drained),
+            processed: processed_tx,
+            close_local: close_local.clone(),
+        },
+        resume_high_water,
+        seen_at_accept,
+        Arc::clone(&seq),
+    ));
 
     // ── Main loop (broadcast + targeted + client reads) ───────────────────────
 
@@ -1416,34 +1542,40 @@ where
 
     let result: Result<()> = loop {
         tokio::select! {
-            // Broadcast events (activity, Mother, etc.)
-            bcast = broadcast_rx.recv() => {
-                match bcast {
-                    Ok(msg) => {
-                        // Trust gate first: a network peer never gets a
-                        // sensitive frame, whatever its topic list says.
-                        if !deliver_broadcast(&msg, &topics, presents_approvals) {
-                            continue;
-                        }
-                        let Some(msg) = outbound(trust, msg, &sensitive) else {
-                            continue;
-                        };
-                        let msg = for_satellite(msg, trust, origin.ws_device());
-                        let bytes = match serde_json::to_vec(&msg) {
-                            Ok(b) => b,
-                            Err(e) => { warn!("serialise error: {e}"); continue; }
-                        };
-                        if write_outbound(&mut writer, &bytes, &conn_key).await.is_err() {
-                            break Ok(());
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(conn_key, "client lagged {n} broadcast messages");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        break Ok(());
-                    }
+            // Broadcast events (activity, Mother, etc.), from the bounded queue.
+            queued = queue_rx.recv() => {
+                let Some(queued) = queued else {
+                    // The broadcast channel closed: the daemon is going down.
+                    break Ok(());
+                };
+                if write_queued(
+                    &mut writer,
+                    queued,
+                    (&topics, presents_approvals),
+                    (trust, &sensitive, origin.ws_device()),
+                    &conn_key,
+                )
+                .await
+                .is_err()
+                {
+                    break Ok(());
                 }
+                // A queue that is dropping frames is told when it has drained.
+                if dropping.load(Ordering::Relaxed) && queue_rx.len() < CLIENT_QUEUE_RESUME_BELOW {
+                    drained.notify_one();
+                }
+            }
+
+            // A frame with no topic could not be queued for this (local) client:
+            // reconnecting is the only way to be sure nothing it needs is missing.
+            _ = async {
+                match &close_local {
+                    Some(close) => close.notified().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                warn!(conn_key, "closing a local connection that fell behind on frames with no topic");
+                break Ok(());
             }
 
             // Terminal replay/output for the terminals this connection is
@@ -1472,6 +1604,47 @@ where
 
             // Targeted messages (session replies, refusals, errors).
             Some(msg) = targeted_rx.recv() => {
+                // A broadcast frame published before this reply was produced (a
+                // spawn broadcasts `FocusCreated`, then answers) is written first,
+                // as it was when frames went straight from the channel to this
+                // loop. It passes two tasks on the way (the sequencer, then this
+                // connection's forwarder), so wait, a bounded time, until both
+                // have got through everything published so far, then write what
+                // the queue holds now (and no more: frames that keep arriving
+                // do not hold the reply up).
+                let target = seq.sync_point().await;
+                let timed_out = tokio::time::timeout(
+                    seq::ORDER_WAIT,
+                    processed_rx.wait_for(|got| published_at_accept + *got >= target),
+                )
+                .await
+                .is_err();
+                if timed_out {
+                    seq.note_ordering_timeout();
+                }
+                let mut failed = false;
+                for _ in 0..queue_rx.len() {
+                    let Ok(queued) = queue_rx.try_recv() else { break };
+                    if write_queued(
+                        &mut writer,
+                        queued,
+                        (&topics, presents_approvals),
+                        (trust, &sensitive, origin.ws_device()),
+                        &conn_key,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        failed = true;
+                        break;
+                    }
+                }
+                if failed {
+                    break Ok(());
+                }
+                if dropping.load(Ordering::Relaxed) && queue_rx.len() < CLIENT_QUEUE_RESUME_BELOW {
+                    drained.notify_one();
+                }
                 // Targeted frames (session transcripts, replies, summaries)
                 // go through the same gate as broadcasts; the only
                 // sensitive frames a network peer gets are refusals.
@@ -1543,7 +1716,7 @@ where
                         // A later `Subscribe` replaces the topic list: a client
                         // that learned from `Welcome.features` that the daemon
                         // serves `work` adds it this way.
-                        if let ClientMsg::Subscribe { topics: new_topics, renders_decisions, renders_approvals, capabilities, operator_nonce: sent } = msg {
+                        if let ClientMsg::Subscribe { topics: new_topics, renders_decisions, renders_approvals, capabilities, operator_nonce: sent, .. } = msg {
                             let new_topics = deliverable_topics(new_topics, trust);
                             if let Some(cap) = &cap {
                                 lock_terminals(&terminals).set_capabilities(cap, &conn_key, capabilities);
@@ -1619,6 +1792,10 @@ where
                                 }
                             }
                             topics = new_topics;
+                            *filter.lock().unwrap() = BroadcastFilter {
+                                topics: topics.clone(),
+                                presents_approvals,
+                            };
                             replay_messages(&mut writer, frames).await;
                             continue;
                         }
@@ -1749,6 +1926,7 @@ where
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
     reader_task.abort();
+    forwarder.abort();
     debug!(
         claimed_id,
         conn_key, "client handler exiting; detaching sessions"
@@ -1795,6 +1973,371 @@ where
     drop(terminal_stream_tx);
 
     result
+}
+
+// ── broadcast queue and resume ────────────────────────────────────────────────
+
+/// What a connection takes from the broadcast channel; changed by a later
+/// `Subscribe`.
+struct BroadcastFilter {
+    topics: Vec<Topic>,
+    presents_approvals: bool,
+}
+
+/// Is `topic`'s traffic something a connection subscribed to `topics` is sent?
+/// (`Model` is only for a client that names it, like its frames.)
+fn topic_wanted(topics: &[Topic], topic: &Topic) -> bool {
+    match topic {
+        Topic::Model => wants_model(topics),
+        other => subscribed(topics, other.clone()),
+    }
+}
+
+/// A frame as the connection is written it, or `None` if it is not sent:
+/// the topic filter, then the trust gate, exactly as the live path applies
+/// them, then its topic number as a `seq`.
+fn broadcast_bytes(
+    stamped: Stamped,
+    topics: &[Topic],
+    presents_approvals: bool,
+    trust: PeerTrust,
+    sensitive: &SensitiveTags,
+    device: Option<&str>,
+) -> Option<Vec<u8>> {
+    let Stamped { seq, msg } = stamped;
+    if !deliver_broadcast(&msg, topics, presents_approvals) {
+        return None;
+    }
+    let topic = msg.topic();
+    let msg = outbound(trust, msg, sensitive)?;
+    let msg = for_satellite(msg, trust, device);
+    // A frame the gate turned into something else is not the numbered one.
+    let seq = seq.filter(|_| msg.topic() == topic);
+    match encode_with_seq(&msg, seq) {
+        Ok(bytes) => Some(bytes),
+        Err(e) => {
+            warn!("serialise error: {e}");
+            None
+        }
+    }
+}
+
+/// Write one queued item: a frame as the connection is sent it (see
+/// [`broadcast_bytes`]) or a `Gap`, in the place of what the queue dropped.
+async fn write_queued<W>(
+    writer: &mut W,
+    queued: Queued,
+    (topics, presents_approvals): (&[Topic], bool),
+    (trust, sensitive, device): (PeerTrust, &SensitiveTags, Option<&str>),
+    conn: &str,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let bytes = match queued {
+        // Trust gate first: a network peer never gets a sensitive frame,
+        // whatever its topic list says.
+        Queued::Frame(stamped) => broadcast_bytes(
+            stamped,
+            topics,
+            presents_approvals,
+            trust,
+            sensitive,
+            device,
+        ),
+        Queued::Gap(gap) => {
+            outbound(trust, gap, sensitive).and_then(|gap| serde_json::to_vec(&gap).ok())
+        }
+    };
+    match bytes {
+        Some(bytes) => write_outbound(writer, &bytes, conn).await,
+        None => Ok(()),
+    }
+}
+
+/// What a `Subscribe.resume` came to.
+#[derive(Default)]
+struct ResumePlan {
+    /// The frames the rings hold after the numbers the client named, per topic
+    /// in order.
+    frames: Vec<Stamped>,
+    /// The topics whose ring reached back far enough: their frames are in
+    /// `frames`, so their retained snapshots are not sent.
+    covered: HashSet<Topic>,
+    /// Per covered topic, the last number replayed (or the client's own): a
+    /// live frame at or below it is the same one and is dropped.
+    high_water: BTreeMap<Topic, u64>,
+    /// A `Gap` per topic the ring could not reach back to.
+    gaps: Vec<ServerMsg>,
+}
+
+/// Was this retained frame's topic replayed from its ring?
+fn covered_by_resume(covered: &HashSet<Topic>, msg: &ServerMsg) -> bool {
+    msg.topic().is_some_and(|t| covered.contains(&t))
+}
+
+/// What a client's `Subscribe` asked to resume.
+#[derive(Default)]
+struct ResumeRequest {
+    /// Per topic, the last number the client saw.
+    after: BTreeMap<Topic, u64>,
+    /// The daemon run those numbers were given under, if the client says.
+    epoch: Option<u64>,
+}
+
+/// The numbers a `Gap` names for a client whose last number is `after` on a
+/// topic whose last number is `latest`: what it has not seen (from the first
+/// number when its own is from another run), never backwards (`from <= to`).
+fn gap_bounds(after: u64, latest: u64) -> (u64, u64) {
+    let from = if after > latest { 1 } else { after + 1 };
+    (from.min(latest), latest)
+}
+
+fn plan_resume(
+    seq: &SeqHub,
+    request: &ResumeRequest,
+    topics: &[Topic],
+    network: bool,
+) -> ResumePlan {
+    let mut plan = ResumePlan::default();
+    // Numbers given under another run of the daemon mean nothing here, whatever
+    // they are: not covered, so each topic gets its snapshot and a `Gap`.
+    let foreign_run = request.epoch.is_some_and(|epoch| epoch != seq.epoch());
+    // What one resume may have replayed: past it a topic is a snapshot and a `Gap`.
+    let mut budget = if network {
+        RESUME_BUDGET_NETWORK
+    } else {
+        RESUME_BUDGET_LOCAL
+    };
+    for (topic, &after) in &request.after {
+        if !topic.is_sequenced() || !topic_wanted(topics, topic) {
+            continue;
+        }
+        let gap = |after: u64, latest: u64, reason: GapReason| {
+            let (from, to) = gap_bounds(after, latest);
+            ServerMsg::Gap {
+                topic: topic.clone(),
+                host: None,
+                from,
+                to,
+                reason,
+            }
+        };
+        if foreign_run {
+            plan.gaps
+                .push(gap(0, seq.latest(topic), GapReason::DaemonRestarted));
+            continue;
+        }
+        match seq.replay_within(topic, after, network, budget) {
+            (Replay::Messages(frames), used) => {
+                budget = budget.saturating_sub(used);
+                let last = frames.last().and_then(|f| f.seq).unwrap_or(after);
+                plan.covered.insert(topic.clone());
+                plan.high_water.insert(topic.clone(), last.max(after));
+                plan.frames.extend(frames);
+            }
+            (Replay::Exceeded { latest, .. }, _) => {
+                plan.gaps
+                    .push(gap(after, latest, GapReason::ReplayWindowExceeded))
+            }
+        }
+    }
+    plan
+}
+
+/// What a connection's bounded queue carries.
+enum Queued {
+    Frame(Stamped),
+    /// What the queue dropped, written where the dropped frames would have been.
+    Gap(ServerMsg),
+}
+
+/// Is the queue below half full again?
+fn queue_drained(queue: &mpsc::Sender<Queued>) -> bool {
+    CLIENT_QUEUE_CAP - queue.capacity() < CLIENT_QUEUE_RESUME_BELOW
+}
+
+/// What the forwarder shares with its connection.
+struct ForwardCtl {
+    filter: Arc<Mutex<BroadcastFilter>>,
+    dropping: Arc<AtomicBool>,
+    drained: Arc<Notify>,
+    /// How many frames of its receiver the task has got through (queued,
+    /// dropped or filtered out; a lag counts what it skipped): the connection
+    /// waits on it, before a reply, for the frames published ahead of the reply.
+    processed: watch::Sender<u64>,
+    /// Only for a local client (the operator's app, a local process): told when
+    /// a frame with no topic could not be queued. Such a frame (an approval, a
+    /// reply to a request) is in no `Gap`, and dropping it silently would leave
+    /// the app wrong with nothing to say so, so the connection is closed instead;
+    /// reconnecting replays what it needs.
+    close_local: Option<Arc<Notify>>,
+}
+
+/// Move a connection's broadcast frames into its bounded queue.
+///
+/// When the queue is full the connection starts *dropping*: every frame is
+/// dropped (and remembered, per topic) until the queue is below half full
+/// again, then one `Gap { client_slow }` per topic goes into the queue, ahead of
+/// whatever comes next. So a client reads what was queued, then the `Gap`, then
+/// frames numbered after it: nothing it is sent in between falls inside the
+/// range the `Gap` names.
+async fn forward_broadcasts(
+    mut rx: broadcast::Receiver<Stamped>,
+    queue: mpsc::Sender<Queued>,
+    ctl: ForwardCtl,
+    mut high_water: BTreeMap<Topic, u64>,
+    mut seen: BTreeMap<Topic, u64>,
+    seq: Arc<SeqHub>,
+) {
+    // `seen` is the last number seen per topic (whether or not it is wanted), so
+    // what a lag skipped can be named.
+    let mut log = DropLog::default();
+    let mut dropping = false;
+    let ForwardCtl {
+        filter,
+        dropping: dropping_flag,
+        drained,
+        processed,
+        close_local,
+    } = ctl;
+    // A frame with no number that cannot be queued: a local client is closed (see
+    // `ForwardCtl::close_local`), any other remembers it was dropped.
+    let unsequenced_dropped = |log: &mut DropLog| -> bool {
+        match &close_local {
+            Some(close) => {
+                warn!("a frame with no topic could not be queued for a slow local client; closing its connection");
+                close.notify_one();
+                false
+            }
+            None => {
+                log.record_unsequenced();
+                true
+            }
+        }
+    };
+    // Remember a frame dropped for want of room. `false`: the connection is to
+    // be closed (see `unsequenced_dropped`). A numbered frame is its number; a
+    // `Gap` (the sequencer lost frames, see `SeqHub::lost_frames`) is the range
+    // it names, under its own topic, to be reported in the `client_slow` `Gap`
+    // that follows; anything else has no number to name.
+    let note_dropped = |dropped: &Stamped, log: &mut DropLog| -> bool {
+        match (dropped.seq, dropped.msg.topic(), &dropped.msg) {
+            (Some(n), Some(t), _) => log.record(t, n),
+            (
+                _,
+                _,
+                ServerMsg::Gap {
+                    topic, from, to, ..
+                },
+            ) => log.record_range(topic.clone(), *from, *to),
+            _ => return unsequenced_dropped(log),
+        }
+        true
+    };
+    // Queue the `Gap`s and stop dropping. `false`: the connection is gone.
+    let flush = |log: &mut DropLog, dropping: &mut bool| -> bool {
+        let unsequenced = log.unsequenced();
+        for gap in log.take_gaps() {
+            if matches!(
+                queue.try_send(Queued::Gap(gap)),
+                Err(mpsc::error::TrySendError::Closed(_))
+            ) {
+                return false;
+            }
+        }
+        if unsequenced > 0 {
+            debug!(
+                unsequenced,
+                "frames with no topic were dropped for a slow client"
+            );
+        }
+        *dropping = false;
+        dropping_flag.store(false, Ordering::Relaxed);
+        true
+    };
+    loop {
+        let stamped = tokio::select! {
+            _ = queue.closed() => return,
+            _ = drained.notified(), if dropping => {
+                if queue_drained(&queue) && !flush(&mut log, &mut dropping) {
+                    return;
+                }
+                continue;
+            }
+            received = rx.recv() => match received {
+                Ok(stamped) => stamped,
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    seq.note_lagged();
+                    // Frames were lost before this task saw them: whatever the
+                    // topics this connection follows have published since the
+                    // last number seen may be among them.
+                    {
+                        let f = filter.lock().unwrap();
+                        for (topic, last) in seen.iter_mut() {
+                            let latest = seq.latest(topic);
+                            if latest > *last && topic_wanted(&f.topics, topic) {
+                                log.record_range(topic.clone(), *last + 1, latest);
+                            }
+                            *last = (*last).max(latest);
+                        }
+                    }
+                    if !log.is_empty() {
+                        dropping = true;
+                        dropping_flag.store(true, Ordering::Relaxed);
+                        if queue_drained(&queue) && !flush(&mut log, &mut dropping) {
+                            return;
+                        }
+                    }
+                    processed.send_modify(|got| *got += skipped);
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+        };
+        'frame: {
+            let topic = stamped.msg.topic();
+            if let (Some(n), Some(t)) = (stamped.seq, &topic) {
+                let last = seen.entry(t.clone()).or_insert(0);
+                *last = (*last).max(n);
+            }
+            {
+                let f = filter.lock().unwrap();
+                if !deliver_broadcast(&stamped.msg, &f.topics, f.presents_approvals) {
+                    break 'frame;
+                }
+            }
+            // The same frame the resume replay already carried.
+            if let (Some(n), Some(t)) = (stamped.seq, &topic) {
+                if high_water.get(t).is_some_and(|hw| n <= *hw) {
+                    break 'frame;
+                }
+                high_water.remove(t);
+            }
+            if dropping && queue_drained(&queue) && !flush(&mut log, &mut dropping) {
+                return;
+            }
+            if dropping {
+                if !note_dropped(&stamped, &mut log) {
+                    return;
+                }
+                break 'frame;
+            }
+            match queue.try_send(Queued::Frame(stamped)) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(Queued::Frame(dropped))) => {
+                    dropping = true;
+                    dropping_flag.store(true, Ordering::Relaxed);
+                    if !note_dropped(&dropped, &mut log) {
+                        return;
+                    }
+                }
+                Err(mpsc::error::TrySendError::Full(Queued::Gap(_))) => {}
+                Err(mpsc::error::TrySendError::Closed(_)) => return,
+            }
+        }
+        processed.send_modify(|got| *got += 1);
+    }
 }
 
 /// Serialize and write each message in order, best-effort: a message that
@@ -5280,6 +5823,8 @@ pub(super) fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool 
         ServerMsg::ModelCatalog { .. }
         | ServerMsg::ModelDefaults { .. }
         | ServerMsg::SessionModelState(_) => wants_model(topics),
+        // What a connection missed on a topic: for those who follow the topic.
+        ServerMsg::Gap { topic, .. } => topic_wanted(topics, topic),
         // Terminal metadata, for anyone following terminals (an empty list
         // included). FND-1 keeps it off TCP whatever the topics say.
         ServerMsg::TerminalState { .. } | ServerMsg::TerminalClosed(_) => {
@@ -5330,6 +5875,7 @@ pub fn activity_health_msg(mgr: &SessionManager, hook_installed: bool) -> Server
         reason,
         last_event_at: health.last_event_at,
         hook_installed,
+        replay: None,
     }
 }
 
@@ -5876,6 +6422,7 @@ mod tests {
             reason: None,
             last_event_at: None,
             hook_installed: true,
+            replay: None,
         };
 
         assert!(message_matches_topics(&snapshot, &[Topic::Activity]));
@@ -6521,5 +7068,151 @@ mod satellite_retention_tests {
         assert_eq!(keys_of(&cache, "sendai"), 2);
         assert_eq!(keys_of(&cache, "kobe2"), 1);
         assert_eq!(keys_of(&cache, "kobe"), 512);
+    }
+}
+
+#[cfg(test)]
+mod forwarder_tests {
+    //! `forward_broadcasts` on its own: what a connection whose queue is full is
+    //! told afterwards about frames the sequencer lost (`SeqHub::lost_frames`).
+    use super::*;
+    use std::time::Duration;
+
+    fn jobs() -> ServerMsg {
+        ServerMsg::MotherJobs {
+            jobs: vec![],
+            host: None,
+        }
+    }
+
+    /// A forwarder for a connection following `mother_jobs` and `perri`, its
+    /// queue full of numbered frames that nobody reads, then the sequencer
+    /// loses frames; then the queue is read down below half. What the queue
+    /// holds afterwards, and whether a local connection was told to close.
+    async fn a_full_queue_then_lost_frames(local: bool) -> (Vec<ServerMsg>, bool) {
+        let hub = SeqHub::new(crate::ipc::peer::SensitiveTags::in_memory());
+        let sub = hub.subscribe_counted();
+        let (queue_tx, mut queue_rx) = mpsc::channel::<Queued>(CLIENT_QUEUE_CAP);
+        let dropping = Arc::new(AtomicBool::new(false));
+        let drained = Arc::new(Notify::new());
+        let close = Arc::new(Notify::new());
+        let (processed_tx, mut processed_rx) = watch::channel(0u64);
+        let task = tokio::spawn(forward_broadcasts(
+            sub.rx,
+            queue_tx,
+            ForwardCtl {
+                filter: Arc::new(Mutex::new(BroadcastFilter {
+                    topics: vec![Topic::MotherJobs, Topic::Perri],
+                    presents_approvals: false,
+                })),
+                dropping: Arc::clone(&dropping),
+                drained: Arc::clone(&drained),
+                processed: processed_tx,
+                close_local: local.then(|| Arc::clone(&close)),
+            },
+            BTreeMap::new(),
+            sub.seen,
+            Arc::clone(&hub),
+        ));
+
+        // The queue fills (256 frames) and one more is dropped; nothing reads.
+        let numbered = CLIENT_QUEUE_CAP as u64 + 1;
+        for _ in 0..numbered {
+            hub.publish(jobs());
+        }
+        // The sequencer loses frames: a `Gap` for each numbered topic follows
+        // the frames above on the stamped channel.
+        hub.lost_frames();
+        let sent = numbered + seq::SEQUENCED_TOPICS.len() as u64;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            processed_rx.wait_for(|got| *got >= sent),
+        )
+        .await
+        .expect("the forwarder got through every frame")
+        .unwrap();
+        assert!(
+            dropping.load(Ordering::Relaxed),
+            "the queue is full: dropping"
+        );
+
+        // The client reads again; the main loop says so once the queue is below half.
+        while queue_rx.len() >= CLIENT_QUEUE_RESUME_BELOW {
+            queue_rx.recv().await.expect("a queued frame");
+        }
+        drained.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while dropping.load(Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the forwarder stopped dropping");
+
+        let mut told = Vec::new();
+        while let Ok(queued) = queue_rx.try_recv() {
+            if let Queued::Gap(gap) = queued {
+                told.push(gap);
+            }
+        }
+        let closed = tokio::time::timeout(Duration::from_millis(100), close.notified())
+            .await
+            .is_ok();
+        task.abort();
+        (told, closed)
+    }
+
+    fn gap_of(told: &[ServerMsg], topic: Topic) -> (u64, u64, GapReason) {
+        let named: Vec<_> = told
+            .iter()
+            .filter_map(|m| match m {
+                ServerMsg::Gap {
+                    topic: t,
+                    from,
+                    to,
+                    reason,
+                    ..
+                } if *t == topic => Some((*from, *to, *reason)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(named.len(), 1, "exactly one Gap for {topic:?}: {told:?}");
+        named[0]
+    }
+
+    async fn the_gap_for_lost_frames_reaches_the_slow_client(local: bool) {
+        let (told, closed) = a_full_queue_then_lost_frames(local).await;
+        assert!(
+            !closed,
+            "a lost-frames Gap is not a reason to close a local client"
+        );
+        assert_eq!(
+            told.len(),
+            2,
+            "one Gap per followed topic, none for the others: {told:?}"
+        );
+        // mother_jobs: the 257th frame was dropped, and number 258 is the one the
+        // sequencer's loss skipped.
+        assert_eq!(
+            gap_of(&told, Topic::MotherJobs),
+            (
+                CLIENT_QUEUE_CAP as u64 + 1,
+                CLIENT_QUEUE_CAP as u64 + 2,
+                GapReason::ClientSlow
+            )
+        );
+        // perri had no frame at all, and still is told the number that was skipped.
+        assert_eq!(gap_of(&told, Topic::Perri), (1, 1, GapReason::ClientSlow));
+    }
+
+    #[tokio::test]
+    async fn a_network_client_with_a_full_queue_is_told_in_a_client_slow_gap_of_the_numbers_the_sequencer_lost(
+    ) {
+        the_gap_for_lost_frames_reaches_the_slow_client(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_local_client_with_a_full_queue_is_told_the_same_and_not_closed() {
+        the_gap_for_lost_frames_reaches_the_slow_client(true).await;
     }
 }

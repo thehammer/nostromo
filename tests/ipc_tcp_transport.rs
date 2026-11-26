@@ -96,6 +96,8 @@ async fn do_handshake(mut stream: &mut TcpStream) {
         renders_approvals: false,
         capabilities: vec![],
         operator_nonce: None,
+        resume: Default::default(),
+        seq_epoch: None,
     };
     write_frame(&mut stream, &serde_json::to_vec(&sub).unwrap())
         .await
@@ -184,6 +186,8 @@ async fn tcp_and_unix_share_broadcast() {
         renders_approvals: false,
         capabilities: vec![],
         operator_nonce: None,
+        resume: Default::default(),
+        seq_epoch: None,
     };
     write_frame(&mut stream, &serde_json::to_vec(&sub).unwrap())
         .await

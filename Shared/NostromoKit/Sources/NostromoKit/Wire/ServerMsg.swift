@@ -176,6 +176,9 @@ public enum ServerMsg {
     case hosts([HostInfoWire])
     /// A request naming `host` could not be routed.
     case hostUnavailable(host: String, reason: HostUnavailableReason)
+    /// Updates on `topic` between `from` and `to` (inclusive numbers) did not reach this connection:
+    /// the topic's list may be stale (W12). `host` is `nil` for the primary's own.
+    case gap(topic: String, host: String?, from: UInt64, to: UInt64, reason: GapReason)
 
     case unknown
 }
