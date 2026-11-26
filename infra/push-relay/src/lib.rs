@@ -27,9 +27,16 @@ use model::{PushRequest, Record};
 
 /// A delivery record is kept, and returned, for this long.
 pub const RECORD_TTL_SECS: i64 = 7 * 24 * 3600;
-/// Safety ceiling per anonymous device reference: this many pushes per window.
-/// Product-level rate shaping is the daemon's job.
+/// Safety ceiling per APNs token: this many pushes per window. Product-level
+/// rate shaping is the daemon's job. It is keyed on a hash of the token, never
+/// on the caller's `push_id` (the caller chooses that, so a flood could dodge a
+/// per-`push_id` ceiling by varying it).
 pub const RATE_LIMIT: u32 = 60;
+/// Safety ceiling for the whole bearer: this many pushes per window across every
+/// token, so a leaked bearer cannot be spent on many tokens at once.
+pub const RATE_LIMIT_ALL: u32 = 600;
+/// The counter key of the per-bearer ceiling.
+pub const RATE_KEY_ALL: &str = "all";
 pub const RATE_WINDOW_SECS: i64 = 600;
 /// The daemon bearer is re-read from Secrets Manager at most this often, so a
 /// rotated token takes effect without a redeploy.
@@ -38,6 +45,15 @@ pub const TOKEN_CACHE_SECS: i64 = 300;
 /// (Apple requires a fresh token every 20 to 60 minutes).
 pub const APNS_CACHE_SECS: i64 = 50 * 60;
 
+/// The rate-counter key for an APNs token: a hash of it (lower-cased, so the case
+/// of the hex cannot dodge the ceiling), so the token itself is never stored.
+pub fn rate_key(apns_token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(apns_token.to_ascii_lowercase().as_bytes());
+    let hex: String = digest.iter().take(16).map(|b| format!("{b:02x}")).collect();
+    format!("tok#{hex}")
+}
+
 /// Where delivery records and the rate counter live.
 #[async_trait]
 pub trait Store: Send + Sync {
@@ -45,9 +61,9 @@ pub trait Store: Send + Sync {
     /// Every record held for `push_id` (the handler filters by age: a table's TTL
     /// deletion is lazy).
     async fn records(&self, push_id: &str) -> Result<Vec<Record>, String>;
-    /// Count one push in the window and return the new count; the counter item
-    /// expires at `expires_at`.
-    async fn bump_rate(&self, push_id: &str, window: i64, expires_at: i64) -> Result<u32, String>;
+    /// Count one push against `key` ([`rate_key`] or [`RATE_KEY_ALL`]) in the
+    /// window and return the new count; the counter item expires at `expires_at`.
+    async fn bump_rate(&self, key: &str, window: i64, expires_at: i64) -> Result<u32, String>;
 }
 
 /// Where the two secrets live.
@@ -190,17 +206,22 @@ impl Relay {
         let now = self.clock.now();
 
         let window = now / RATE_WINDOW_SECS;
-        match self
-            .store
-            .bump_rate(&push.push_id, window, (window + 2) * RATE_WINDOW_SECS)
-            .await
-        {
-            Ok(n) if n > RATE_LIMIT => {
-                tracing::warn!(push = prefix(&push.push_id), "rate ceiling reached");
-                return Response::error(429, "rate_limited");
+        for (key, limit) in [
+            (rate_key(&push.apns_token), RATE_LIMIT),
+            (RATE_KEY_ALL.to_string(), RATE_LIMIT_ALL),
+        ] {
+            match self
+                .store
+                .bump_rate(&key, window, (window + 2) * RATE_WINDOW_SECS)
+                .await
+            {
+                Ok(n) if n > limit => {
+                    tracing::warn!(push = prefix(&push.push_id), "rate ceiling reached");
+                    return Response::error(429, "rate_limited");
+                }
+                Ok(_) => {}
+                Err(_) => return Response::error(503, "unavailable"),
             }
-            Ok(_) => {}
-            Err(_) => return Response::error(503, "unavailable"),
         }
 
         let jwt = match self.provider_token(now).await {

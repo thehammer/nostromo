@@ -3,7 +3,9 @@
 //! and sort key `sk`, with TTL on `expires_at`:
 //!
 //! - `sk = rec#<ts>#<random>`: a delivery record (`kind`, `outcome`, `ts`);
-//! - `sk = rate#<window>`: the safety-ceiling counter for one 10-minute window.
+//! - `pk = tok#<hash of the APNs token>` or `all`, `sk = rate#<window>`: a
+//!   safety-ceiling counter for one 10-minute window (a rate counter's `pk` is
+//!   never a `push_id`, so `records` cannot read one).
 
 use async_trait::async_trait;
 use aws_sdk_dynamodb::types::AttributeValue;
@@ -26,6 +28,13 @@ impl DynamoStore {
     }
 }
 
+/// `rec#<ts>#<64 random bits>`: unique per attempt even for two attempts in one
+/// second on one Lambda instance (the item overwrites on a duplicate key).
+fn record_sort_key(ts: i64) -> String {
+    use rand_core::RngCore;
+    format!("rec#{ts:012}#{:016x}", rand_core::OsRng.next_u64())
+}
+
 fn s(v: &str) -> AttributeValue {
     AttributeValue::S(v.to_string())
 }
@@ -45,12 +54,11 @@ fn number(item: &std::collections::HashMap<String, AttributeValue>, key: &str) -
 #[async_trait]
 impl Store for DynamoStore {
     async fn put_record(&self, r: &Record) -> Result<(), String> {
-        let suffix: u32 = r.ts.rem_euclid(1_000_000) as u32 ^ std::process::id();
         self.client
             .put_item()
             .table_name(&self.table)
             .item("pk", s(&r.push_id))
-            .item("sk", s(&format!("rec#{:012}#{suffix:08x}", r.ts)))
+            .item("sk", s(&record_sort_key(r.ts)))
             .item("ts", n(r.ts))
             .item("kind", s(&r.kind))
             .item("outcome", s(&r.outcome))
@@ -100,12 +108,12 @@ impl Store for DynamoStore {
         Ok(out)
     }
 
-    async fn bump_rate(&self, push_id: &str, window: i64, expires_at: i64) -> Result<u32, String> {
+    async fn bump_rate(&self, key: &str, window: i64, expires_at: i64) -> Result<u32, String> {
         let out = self
             .client
             .update_item()
             .table_name(&self.table)
-            .key("pk", s(push_id))
+            .key("pk", s(key))
             .key("sk", s(&format!("rate#{window}")))
             .update_expression("ADD cnt :one SET expires_at = :e")
             .expression_attribute_values(":one", n(1))
@@ -164,5 +172,29 @@ impl Secrets for SecretsManager {
     async fn apns(&self) -> Result<ApnsCredentials, String> {
         serde_json::from_str(&self.read(&self.apns_secret).await?)
             .map_err(|_| "the APNs secret is not the expected JSON".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::record_sort_key;
+    use std::collections::HashSet;
+
+    #[test]
+    fn two_records_in_the_same_second_never_share_a_sort_key() {
+        // The old suffix was `ts % 1e6 ^ pid`: identical for one instance within a
+        // second, so the second record overwrote the first.
+        let keys: HashSet<String> = (0..5000).map(|_| record_sort_key(1_800_000_000)).collect();
+        assert_eq!(keys.len(), 5000);
+    }
+
+    #[test]
+    fn a_sort_key_orders_by_time_then_carries_16_hex_digits() {
+        let key = record_sort_key(1_800_000_000);
+        let (head, suffix) = key.rsplit_once('#').unwrap();
+        assert_eq!(head, "rec#001800000000");
+        assert_eq!(suffix.len(), 16);
+        assert!(suffix.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(record_sort_key(1_800_000_001) > record_sort_key(1_800_000_000));
     }
 }

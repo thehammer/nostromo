@@ -600,6 +600,14 @@ async fn apns_token_must_be_non_empty_hex_of_at_most_200_characters() {
 }
 
 #[tokio::test]
+async fn an_empty_collapse_id_is_refused() {
+    // A push with no collapse id could never be replaced in place.
+    let h = Harness::new().await;
+    assert_refused(&h, "empty", &with(|v| v["collapse_id"] = json!(""))).await;
+    assert!(h.apns_requests().await.is_empty());
+}
+
+#[tokio::test]
 async fn collapse_id_is_bounded_at_64_bytes() {
     let h = Harness::new().await;
     assert_eq!(
@@ -1222,10 +1230,11 @@ async fn no_path_through_the_handler_logs_content() {
     // A wrong bearer.
     h.post_as("daemon-token-v1-wrong", &marked()).await;
     // The rate ceiling.
-    h.store.preload_rate(PUSH_ID, T0 / 600, 60);
+    let key = push_relay::rate_key("c0ffee0badc0de5ec7e7a9");
+    h.store.preload_rate(&key, T0 / 600, 60);
     assert_eq!(h.post(&marked()).await.status, 429);
     // A failing record write, and a failing secret.
-    h.store.preload_rate(PUSH_ID, T0 / 600, 0);
+    h.store.preload_rate(&key, T0 / 600, 0);
     h.store.fail_put.store(true, Ordering::SeqCst);
     h.post(&marked()).await;
     h.secrets.fail_apns.store(true, Ordering::SeqCst);
@@ -1314,6 +1323,41 @@ fn the_function_url_is_public_because_the_bearer_is_checked_in_code() {
         f["Properties"]["FunctionUrlConfig"]["AuthType"].as_str(),
         Some("NONE")
     );
+}
+
+#[test]
+fn the_public_function_has_a_concurrency_cap() {
+    let t = template();
+    let (_, f) = one(&t, "AWS::Serverless::Function");
+    let cap = f["Properties"]["ReservedConcurrentExecutions"]
+        .as_i64()
+        .expect("ReservedConcurrentExecutions: the URL is public, so the function needs a cap");
+    assert!((1..=10).contains(&cap), "a cap of {cap} is not a small ceiling");
+}
+
+#[test]
+fn a_monthly_cost_budget_emails_when_the_bill_runs_away() {
+    let t = template();
+    let (_, budget) = one(&t, "AWS::Budgets::Budget");
+    let b = &budget["Properties"]["Budget"];
+    assert_eq!(b["BudgetType"].as_str(), Some("COST"));
+    assert_eq!(b["TimeUnit"].as_str(), Some("MONTHLY"));
+    let notifications = list_of(&budget["Properties"]["NotificationsWithSubscribers"]);
+    assert!(!notifications.is_empty());
+    let mut kinds = BTreeSet::new();
+    for n in &notifications {
+        kinds.insert(n["Notification"]["NotificationType"].as_str().unwrap().to_string());
+        let subs = list_of(&n["Subscribers"]);
+        assert!(
+            subs.iter().any(|s| s["SubscriptionType"].as_str() == Some("EMAIL")),
+            "a notification nobody receives"
+        );
+    }
+    assert_eq!(kinds, set(&["ACTUAL", "FORECASTED"]));
+    // The address is a required parameter (no default that points anywhere).
+    let params = t["Parameters"].as_mapping().unwrap();
+    let email = &params[&serde_yaml::Value::from("BudgetAlertEmail")];
+    assert!(email.get("Default").is_none(), "BudgetAlertEmail must not default");
 }
 
 #[test]
@@ -1726,13 +1770,70 @@ async fn the_61st_push_for_one_device_in_ten_minutes_is_429_and_never_reaches_ap
 }
 
 #[tokio::test]
-async fn the_rate_ceiling_is_per_device() {
+async fn the_rate_ceiling_is_per_apns_token() {
     let h = Harness::new().await;
     for _ in 0..61 {
         h.post(&valid()).await;
     }
     assert_eq!(h.post(&valid()).await.status, 429);
-    let other = with(|v| v["push_id"] = json!(OTHER_PUSH_ID));
+    let other = with(|v| {
+        v["push_id"] = json!(OTHER_PUSH_ID);
+        v["apns_token"] = json!("1e".repeat(32));
+    });
+    assert_eq!(h.post(&other).await.status, 200);
+}
+
+#[tokio::test]
+async fn varying_the_push_id_does_not_dodge_the_rate_ceiling() {
+    // The caller chooses `push_id`; the ceiling is on the token it sends to.
+    let h = Harness::new().await;
+    for i in 0..60 {
+        let id = format!("{i:032x}");
+        let r = h.post(&with(|v| v["push_id"] = json!(id))).await;
+        assert_eq!(r.status, 200, "push {i}: {}", r.body);
+    }
+    let fresh_id = with(|v| v["push_id"] = json!(OTHER_PUSH_ID));
+    let r = h.post(&fresh_id).await;
+    assert_eq!(r.status, 429, "a 61st push to one token under a new push_id: {}", r.body);
+    assert_eq!(h.apns_requests().await.len(), 60);
+}
+
+#[tokio::test]
+async fn the_hex_case_of_a_token_does_not_dodge_the_rate_ceiling() {
+    let h = Harness::new().await;
+    for _ in 0..60 {
+        h.post(&with(|v| v["apns_token"] = json!("ab".repeat(32)))).await;
+    }
+    let upper = with(|v| v["apns_token"] = json!("AB".repeat(32)));
+    assert_eq!(h.post(&upper).await.status, 429);
+}
+
+#[tokio::test]
+async fn the_rate_counter_is_keyed_on_a_hash_of_the_token_and_never_stores_the_token_or_push_id() {
+    let h = Harness::new().await;
+    h.post(&valid()).await;
+    let bumps = h.store.rate_expiry.lock().unwrap().clone();
+    let keys: Vec<&String> = bumps.iter().map(|(k, _, _)| k).collect();
+    assert_eq!(keys.len(), 2, "one counter for the token, one for the bearer: {keys:?}");
+    for key in &keys {
+        assert!(!key.contains(&"0f".repeat(32)), "the token is stored: {key}");
+        assert!(!key.contains(PUSH_ID), "the push_id keys a counter: {key}");
+    }
+    assert!(keys.iter().any(|k| k.starts_with("tok#") && k.len() == 4 + 32), "{keys:?}");
+    assert!(keys.iter().any(|k| **k == push_relay::RATE_KEY_ALL), "{keys:?}");
+}
+
+#[tokio::test]
+async fn the_whole_bearer_has_a_ceiling_of_600_pushes_in_ten_minutes_across_tokens() {
+    let h = Harness::new().await;
+    h.store.preload_rate(push_relay::RATE_KEY_ALL, T0 / 600, 599);
+    assert_eq!(h.post(&valid()).await.status, 200, "the 600th push");
+    let other = with(|v| v["apns_token"] = json!("1e".repeat(32)));
+    let r = h.post(&other).await;
+    assert_eq!(r.status, 429, "the 601st, on a token with its own budget left: {}", r.body);
+    assert_eq!(h.apns_requests().await.len(), 1);
+    // A new window has a new budget.
+    h.clock.set(T0 + 600);
     assert_eq!(h.post(&other).await.status, 200);
 }
 
@@ -1760,10 +1861,11 @@ async fn the_rate_counter_outlives_its_window() {
     h.clock.set(T0 + 123);
     h.post(&valid()).await;
     let bumps = h.store.rate_expiry.lock().unwrap().clone();
-    assert_eq!(bumps.len(), 1);
-    let (_, _, expires_at) = &bumps[0];
-    assert!(*expires_at >= T0 + 600, "the counter expires before its window ends");
-    assert!(*expires_at <= T0 + 3600, "the counter lingers for hours");
+    assert_eq!(bumps.len(), 2, "the token's counter and the bearer's");
+    for (_, _, expires_at) in &bumps {
+        assert!(*expires_at >= T0 + 600, "the counter expires before its window ends");
+        assert!(*expires_at <= T0 + 3600, "the counter lingers for hours");
+    }
 }
 
 #[tokio::test]

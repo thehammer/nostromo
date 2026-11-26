@@ -11,6 +11,17 @@ Parameters:
     Type: String
     Default: nostromo-push-relay
     Description: Also names the log group, /aws/lambda/<FunctionName>.
+  BudgetAlertEmail:
+    Type: String
+    AllowedPattern: "^[^@\\s]+@[^@\\s]+$"
+    Description: >
+      Where the monthly cost alarm writes. The function URL is public (AuthType
+      NONE), so a flood of bad requests is a cost; this is the tripwire.
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    Description: Monthly cost (USD) the alarm watches. Expected spend is cents.
 
 Globals:
   Function:
@@ -30,6 +41,9 @@ Resources:
       BuildMethod: rust-cargolambda
     Properties:
       FunctionName: !Ref FunctionName
+      # The URL is public: this caps how much of the account's concurrency, and how
+      # fast the bill, a flood of requests can use.
+      ReservedConcurrentExecutions: 5
       CodeUri: .
       Handler: bootstrap
       Environment:
@@ -85,6 +99,36 @@ Resources:
     Properties:
       Description: APNs auth key (.p8), key id, team id and app bundle id
       SecretString: '{"key_pem":"REPLACE","key_id":"REPLACE","team_id":"REPLACE","topic":"REPLACE"}'
+
+  # ── a cost tripwire ────────────────────────────────────────────────────────
+  # The function URL has AuthType NONE (the bearer is checked in code), so anyone
+  # can send it requests and each one is billed. Email when the month's actual
+  # spend passes 80% of the budget, and when it is forecast to pass 100%.
+  CostBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub "${FunctionName}-monthly"
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: EMAIL, Address: !Ref BudgetAlertEmail }
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: EMAIL, Address: !Ref BudgetAlertEmail }
 
   # ── logs ───────────────────────────────────────────────────────────────────
   # Seven days, to match the delivery record. The handler logs only the kind, a
