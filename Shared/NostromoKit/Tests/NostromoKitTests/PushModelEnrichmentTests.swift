@@ -190,7 +190,8 @@ final class PushModelEnrichmentTests: XCTestCase {
 
     func testAPushStatusWritesTheHostClassesIntoTheAppGroup() async {
         let shared = SharedPushState(defaults: defaults)
-        let (_, transport) = await makeModel(shared: shared)
+        let (model, transport) = await makeModel(shared: shared)
+        defer { withExtendedLifetime(model) {} }
 
         await deliverStatus(hostClasses: ["sendai": .personal, "kobe": .work], via: transport)
 
@@ -199,7 +200,8 @@ final class PushModelEnrichmentTests: XCTestCase {
 
     func testALaterPushStatusReplacesTheHostClasses() async {
         let shared = SharedPushState(defaults: defaults)
-        let (_, transport) = await makeModel(shared: shared)
+        let (model, transport) = await makeModel(shared: shared)
+        defer { withExtendedLifetime(model) {} }
         await deliverStatus(hostClasses: ["sendai": .personal, "kobe": .work], via: transport)
 
         await deliverStatus(hostClasses: ["sendai": .work], via: transport)
@@ -210,7 +212,8 @@ final class PushModelEnrichmentTests: XCTestCase {
     func testAPushStatusRelayedFromASatelliteDoesNotTouchTheAppGroup() async {
         let shared = SharedPushState(defaults: defaults)
         shared.hostClasses = ["sendai": .work]
-        let (_, transport) = await makeModel(shared: shared)
+        let (model, transport) = await makeModel(shared: shared)
+        defer { withExtendedLifetime(model) {} }
 
         await deliverStatus(hostClasses: ["sendai": .personal], from: "kobe", via: transport)
 
