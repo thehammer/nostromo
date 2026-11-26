@@ -6104,6 +6104,55 @@ mod tests {
         out
     }
 
+    /// The combined presence after `trust` sends `OperatorPresence { away }` on a
+    /// connection the registry already counts as an operator app's.
+    fn presence_after_away_from(trust: PeerTrust) -> Option<crate::push::wire::Presence> {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+            dir.path().join("s.json"),
+        )));
+        let (ttx, _trx) = mpsc::unbounded_channel();
+        let (btx, _brx) = broadcast::channel(8);
+        let decisions = Arc::new(Mutex::new(DecisionRegistry::new()));
+        decisions.lock().unwrap().add_operator("conn");
+        handle_client_msg(
+            ClientMsg::OperatorPresence {
+                state: crate::push::wire::Presence::Away,
+            },
+            trust,
+            None,
+            None,
+            &SensitiveTags::in_memory(),
+            "conn",
+            "client",
+            &mgr,
+            &ttx,
+            &btx,
+            dir.path(),
+            &decisions,
+            &Arc::new(Mutex::new(HashSet::new())),
+            None,
+            &TerminalManager::in_memory(),
+        );
+        let presence = decisions.lock().unwrap().combined_presence();
+        presence
+    }
+
+    #[test]
+    fn operator_presence_is_honoured_only_from_the_verified_app() {
+        use crate::push::wire::Presence;
+        assert_eq!(
+            presence_after_away_from(PeerTrust::OperatorApp),
+            Some(Presence::Away),
+            "the verified app's report counts"
+        );
+        // Any other peer, even on a connection registered as an operator, changes nothing:
+        // a spoofed `away` would make the engine push decisions the operator can see.
+        for trust in [PeerTrust::LocalOther, PeerTrust::Paired, PeerTrust::Tcp] {
+            assert_eq!(presence_after_away_from(trust), None, "{trust:?}");
+        }
+    }
+
     #[test]
     fn a_session_spawn_frame_claiming_no_codebase_without_a_folder_is_refused_by_the_daemon() {
         // The focus registry knows nothing of this tag: only the frame's own flag
