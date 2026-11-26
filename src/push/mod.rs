@@ -1114,6 +1114,60 @@ mod tests {
         }
     }
 
+    fn decision_frame(request_id: &str) -> ServerMsg {
+        ServerMsg::DecisionRequest {
+            tag: "t".into(),
+            request_id: request_id.into(),
+            prompt: "Which one?".into(),
+            detail: None,
+            choices: vec![],
+            context_pane_id: None,
+            host: None,
+            deadline: None,
+            agent_class: None,
+            operator_presence: None,
+            repo: None,
+            repo_owner: None,
+        }
+    }
+
+    /// The text kept for a decision goes with the decision: not only at the next plan, but at once,
+    /// so a flood of requests cannot grow the text map between plans.
+    #[test]
+    fn a_flood_of_decisions_never_holds_more_texts_than_the_per_host_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = pc("http://127.0.0.1:9", dir.path());
+        let engine =
+            PushEngine::new(Arc::new(move || cfg.clone()), "local".into(), None).expect("engine");
+        for i in 0..MAX_DECISIONS_PER_HOST * 3 {
+            engine.ingest(decision_frame(&format!("r{i}")), Utc::now());
+        }
+        let st = engine.state.lock().unwrap();
+        assert_eq!(st.decisions.len(), MAX_DECISIONS_PER_HOST);
+        assert_eq!(st.texts.len(), MAX_DECISIONS_PER_HOST);
+    }
+
+    #[test]
+    fn a_resolved_decision_loses_its_text_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = pc("http://127.0.0.1:9", dir.path());
+        let engine =
+            PushEngine::new(Arc::new(move || cfg.clone()), "local".into(), None).expect("engine");
+        engine.ingest(decision_frame("r1"), Utc::now());
+        assert_eq!(engine.state.lock().unwrap().texts.len(), 1);
+        engine.ingest(
+            ServerMsg::DecisionResolved {
+                tag: "t".into(),
+                request_id: "r1".into(),
+                resolution: crate::ipc::protocol::DecisionResolution::Answered,
+                choice_id: None,
+                host: None,
+            },
+            Utc::now(),
+        );
+        assert!(engine.state.lock().unwrap().texts.is_empty());
+    }
+
     #[tokio::test]
     async fn the_config_is_never_read_while_the_state_lock_is_held() {
         let dir = tempfile::tempdir().unwrap();

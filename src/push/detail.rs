@@ -229,6 +229,58 @@ mod tests {
         assert_eq!(line.chars().count(), MAX_TEXT_CHARS);
     }
 
+    fn personal_cfg() -> PushConfig {
+        let mut cfg = PushConfig::default();
+        cfg.hosts.insert("sendai".into(), HostClass::Personal);
+        cfg
+    }
+
+    fn waiting_with_owner(owner: &str) -> Waiting {
+        Waiting {
+            key: ItemKey::Mother {
+                host: "sendai".into(),
+                job_id: "20261126T100000Z-0a1b2c3d".into(),
+            },
+            item_ref: "0123456789abcdef".into(),
+            host: "sendai".into(),
+            start: None,
+            detail: crate::push::items::Detail::Mother {
+                job_ref: None,
+                reason: crate::push::items::MotherReason::Asked,
+                repo: Some("nostromo".into()),
+                owner: Some(owner.into()),
+            },
+            preexisting: false,
+        }
+    }
+
+    fn job(label: Option<&str>) -> MotherJob {
+        serde_json::from_value(serde_json::json!({
+            "id": "20261126T100000Z-0a1b2c3d", "state": "awaiting", "repo": "nostromo",
+            "title": "t", "question": "Which branch?",
+            "origin": { "label": label },
+        }))
+        .unwrap()
+    }
+
+    /// `mother_items` already drops a work-send job's owner, so through the engine the owner rule
+    /// denies it first; this proves the work-send flag denies it on its own.
+    #[test]
+    fn a_work_send_job_has_no_text_even_when_every_other_rule_allows_it() {
+        let cfg = personal_cfg();
+        let sensitive = SensitiveTags::in_memory();
+        let item = waiting_with_owner("thehammer");
+
+        let allowed = Capture::mother(&job(None));
+        assert_eq!(
+            text_for(&item, Some(&allowed), &cfg, &sensitive),
+            Some("Which branch?".into()),
+            "control: the same job, not queued from a work item"
+        );
+        let work = Capture::mother(&job(Some(crate::mother::WORK_SEND_JOB_LABEL)));
+        assert_eq!(text_for(&item, Some(&work), &cfg, &sensitive), None);
+    }
+
     #[test]
     fn control_characters_never_survive() {
         assert_eq!(first_line("a\u{1b}[31mb\u{0}c"), Some("a[31mbc".into()));
