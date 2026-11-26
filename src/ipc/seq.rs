@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tracing::warn;
 
+use super::peer::{may_receive, PeerTrust, SensitiveTags};
 use super::protocol::{GapReason, ReplayUsage, ServerMsg, Topic};
 
 /// The `Welcome.features` entry of a daemon that numbers its topics and
@@ -123,7 +124,12 @@ impl SeqStamper {
 struct RingEntry {
     seq: u64,
     size: usize,
-    msg: ServerMsg,
+    /// Shared, so a replay takes its copies after the hub's lock is released.
+    msg: Arc<ServerMsg>,
+    /// Could a network peer have been sent this frame when it was published?
+    /// What was sensitive then is judged then: a tag that stops being
+    /// sensitive later does not open the frames it withheld.
+    network_ok: bool,
 }
 
 /// The newest frames of one topic, bounded by count and by serialized size.
@@ -148,8 +154,13 @@ impl ReplayRing {
     /// Keep `msg` (numbered `seq`, `size` bytes serialized), dropping the
     /// oldest frames until both limits hold again. A frame larger than the
     /// byte limit is not kept at all.
-    pub fn push(&mut self, seq: u64, size: usize, msg: ServerMsg) {
-        self.frames.push_back(RingEntry { seq, size, msg });
+    pub fn push(&mut self, seq: u64, size: usize, msg: Arc<ServerMsg>, network_ok: bool) {
+        self.frames.push_back(RingEntry {
+            seq,
+            size,
+            msg,
+            network_ok,
+        });
         self.bytes += size;
         while self.frames.len() > self.max_msgs || self.bytes > self.max_bytes {
             match self.frames.pop_front() {
@@ -178,23 +189,28 @@ impl ReplayRing {
 
     /// What a client that last saw `after` (of a topic whose last number is
     /// `latest`) missed, or why that is not known any more.
-    pub fn replay(&self, after: u64, latest: u64) -> Replay {
+    ///
+    /// For a network peer (`network`) only the frames that could have been sent
+    /// to one when they were published.
+    fn replay(&self, after: u64, latest: u64, network: bool) -> RingReplay {
         // The first number the ring would have to hold.
         let oldest = self.frames.front().map_or(latest + 1, |e| e.seq);
         if after > latest || after + 1 < oldest {
-            return Replay::Exceeded { oldest, latest };
+            return RingReplay::Exceeded { oldest, latest };
         }
-        Replay::Messages(
+        RingReplay::Entries(
             self.frames
                 .iter()
-                .filter(|e| e.seq > after)
-                .map(|e| Stamped {
-                    seq: Some(e.seq),
-                    msg: e.msg.clone(),
-                })
+                .filter(|e| e.seq > after && (!network || e.network_ok))
+                .map(|e| (e.seq, Arc::clone(&e.msg)))
                 .collect(),
         )
     }
+}
+
+enum RingReplay {
+    Entries(Vec<(u64, Arc<ServerMsg>)>),
+    Exceeded { oldest: u64, latest: u64 },
 }
 
 /// The answer to a resume.
@@ -218,10 +234,10 @@ struct HubState {
 
 /// Numbers and keeps every topic-bearing frame, and fans the numbered frames
 /// out. One per daemon.
-#[derive(Debug)]
 pub struct SeqHub {
     state: Mutex<HubState>,
     out: broadcast::Sender<Stamped>,
+    tags: SensitiveTags,
     max_msgs: usize,
     max_bytes: usize,
     /// How often a connection's receiver fell behind the stamped channel.
@@ -229,11 +245,13 @@ pub struct SeqHub {
 }
 
 impl SeqHub {
-    pub fn new() -> Arc<Self> {
-        Self::with_limits(MAX_RING_MSGS, MAX_RING_BYTES)
+    /// `tags` is the daemon's record of which focuses and jobs are sensitive,
+    /// consulted when a frame is published (see `RingEntry::network_ok`).
+    pub fn new(tags: SensitiveTags) -> Arc<Self> {
+        Self::with_limits(tags, MAX_RING_MSGS, MAX_RING_BYTES)
     }
 
-    pub fn with_limits(max_msgs: usize, max_bytes: usize) -> Arc<Self> {
+    pub fn with_limits(tags: SensitiveTags, max_msgs: usize, max_bytes: usize) -> Arc<Self> {
         let (out, _) = broadcast::channel(STAMPED_CHANNEL_CAP);
         Arc::new(Self {
             state: Mutex::new(HubState {
@@ -241,6 +259,7 @@ impl SeqHub {
                 rings: BTreeMap::new(),
             }),
             out,
+            tags,
             max_msgs,
             max_bytes,
             lagged: AtomicU64::new(0),
@@ -261,12 +280,13 @@ impl SeqHub {
         let seq = msg.topic().map(|topic| {
             let seq = state.stamper.next(&topic);
             let size = serde_json::to_vec(&msg).map_or(0, |b| b.len());
+            let network_ok = may_receive(PeerTrust::Paired, &msg, &self.tags);
             let (max_msgs, max_bytes) = (self.max_msgs, self.max_bytes);
             state
                 .rings
                 .entry(topic)
                 .or_insert_with(|| ReplayRing::with_limits(max_msgs, max_bytes))
-                .push(seq, size, msg.clone());
+                .push(seq, size, Arc::new(msg.clone()), network_ok);
             seq
         });
         // Sent under the lock: a replay taken after this returns sees every
@@ -274,17 +294,34 @@ impl SeqHub {
         let _ = self.out.send(Stamped { seq, msg });
     }
 
-    /// What `topic` published after `after`, or that the ring cannot say.
-    pub fn replay(&self, topic: &Topic, after: u64) -> Replay {
-        let state = self.state.lock().unwrap();
-        let latest = state.stamper.last(topic);
-        match state.rings.get(topic) {
-            Some(ring) => ring.replay(after, latest),
-            None if after == latest => Replay::Messages(Vec::new()),
-            None => Replay::Exceeded {
-                oldest: latest + 1,
-                latest,
-            },
+    /// What `topic` published after `after`, or that the ring cannot say. For a
+    /// `network` peer only frames a network peer could have been sent when they
+    /// were published; the caller still runs each through the peer's own gate.
+    pub fn replay(&self, topic: &Topic, after: u64, network: bool) -> Replay {
+        let found = {
+            let state = self.state.lock().unwrap();
+            let latest = state.stamper.last(topic);
+            match state.rings.get(topic) {
+                Some(ring) => ring.replay(after, latest, network),
+                None if after == latest => RingReplay::Entries(Vec::new()),
+                None => RingReplay::Exceeded {
+                    oldest: latest + 1,
+                    latest,
+                },
+            }
+        };
+        // Copied after the lock is released: publishing is never held up by it.
+        match found {
+            RingReplay::Entries(entries) => Replay::Messages(
+                entries
+                    .into_iter()
+                    .map(|(seq, msg)| Stamped {
+                        seq: Some(seq),
+                        msg: (*msg).clone(),
+                    })
+                    .collect(),
+            ),
+            RingReplay::Exceeded { oldest, latest } => Replay::Exceeded { oldest, latest },
         }
     }
 
@@ -424,6 +461,13 @@ mod tests {
         }
     }
 
+    fn ring_seqs(replay: RingReplay) -> Vec<u64> {
+        match replay {
+            RingReplay::Entries(v) => v.into_iter().map(|(seq, _)| seq).collect(),
+            RingReplay::Exceeded { .. } => panic!("expected entries, got exceeded"),
+        }
+    }
+
     #[test]
     fn numbers_are_strictly_increasing_per_topic_and_independent() {
         let mut s = SeqStamper::default();
@@ -439,13 +483,13 @@ mod tests {
     fn the_ring_keeps_at_most_the_message_limit() {
         let mut ring = ReplayRing::with_limits(3, usize::MAX);
         for seq in 1..=5 {
-            ring.push(seq, 10, jobs());
+            ring.push(seq, 10, Arc::new(jobs()), true);
         }
         assert_eq!(ring.len(), 3);
-        assert_eq!(seqs(ring.replay(2, 5)), vec![3, 4, 5]);
+        assert_eq!(ring_seqs(ring.replay(2, 5, false)), vec![3, 4, 5]);
         assert!(matches!(
-            ring.replay(1, 5),
-            Replay::Exceeded {
+            ring.replay(1, 5, false),
+            RingReplay::Exceeded {
                 oldest: 3,
                 latest: 5
             }
@@ -456,55 +500,65 @@ mod tests {
     fn the_ring_keeps_at_most_the_byte_limit() {
         let mut ring = ReplayRing::with_limits(usize::MAX, 25);
         for seq in 1..=4 {
-            ring.push(seq, 10, jobs());
+            ring.push(seq, 10, Arc::new(jobs()), true);
         }
         // Two frames of 10 bytes fit in 25; the third does not.
         assert_eq!(ring.len(), 2);
         assert_eq!(ring.bytes(), 20);
-        assert_eq!(seqs(ring.replay(2, 4)), vec![3, 4]);
-        assert!(matches!(ring.replay(1, 4), Replay::Exceeded { .. }));
+        assert_eq!(ring_seqs(ring.replay(2, 4, false)), vec![3, 4]);
+        assert!(matches!(ring.replay(1, 4, false), RingReplay::Exceeded { .. }));
     }
 
     #[test]
     fn a_frame_larger_than_the_byte_limit_is_not_kept() {
         let mut ring = ReplayRing::with_limits(10, 5);
-        ring.push(1, 6, jobs());
+        ring.push(1, 6, Arc::new(jobs()), true);
         assert!(ring.is_empty());
         assert_eq!(ring.bytes(), 0);
         // Nothing to serve and the client is behind: it is told.
-        assert!(matches!(ring.replay(0, 1), Replay::Exceeded { .. }));
+        assert!(matches!(ring.replay(0, 1, false), RingReplay::Exceeded { .. }));
+    }
+
+    #[test]
+    fn a_network_peer_is_replayed_only_what_a_network_peer_could_have_been_sent() {
+        let mut ring = ReplayRing::with_limits(10, usize::MAX);
+        ring.push(1, 1, Arc::new(jobs()), true);
+        ring.push(2, 1, Arc::new(jobs()), false);
+        ring.push(3, 1, Arc::new(jobs()), true);
+        assert_eq!(ring_seqs(ring.replay(0, 3, true)), vec![1, 3]);
+        assert_eq!(ring_seqs(ring.replay(0, 3, false)), vec![1, 2, 3]);
     }
 
     #[test]
     fn replay_boundaries_are_exact() {
         let mut ring = ReplayRing::with_limits(3, usize::MAX);
         for seq in 1..=6 {
-            ring.push(seq, 1, jobs());
+            ring.push(seq, 1, Arc::new(jobs()), true);
         }
         // The ring holds 4, 5, 6.
         // Last seen 3: the next one it needs (4) is the oldest held: covered.
-        assert_eq!(seqs(ring.replay(3, 6)), vec![4, 5, 6]);
+        assert_eq!(ring_seqs(ring.replay(3, 6, false)), vec![4, 5, 6]);
         // Last seen 2: 3 was evicted: not covered.
         assert!(matches!(
-            ring.replay(2, 6),
-            Replay::Exceeded { oldest: 4, .. }
+            ring.replay(2, 6, false),
+            RingReplay::Exceeded { oldest: 4, .. }
         ));
         // Fully caught up: nothing, not a gap.
-        assert_eq!(seqs(ring.replay(6, 6)), Vec::<u64>::new());
+        assert_eq!(ring_seqs(ring.replay(6, 6, false)), Vec::<u64>::new());
         // From the future (a client of a daemon that restarted): a gap.
-        assert!(matches!(ring.replay(7, 6), Replay::Exceeded { .. }));
+        assert!(matches!(ring.replay(7, 6, false), RingReplay::Exceeded { .. }));
     }
 
     #[test]
     fn an_empty_ring_covers_a_client_that_is_caught_up() {
         let ring = ReplayRing::with_limits(3, 100);
-        assert_eq!(seqs(ring.replay(0, 0)), Vec::<u64>::new());
-        assert!(matches!(ring.replay(1, 0), Replay::Exceeded { .. }));
+        assert_eq!(ring_seqs(ring.replay(0, 0, false)), Vec::<u64>::new());
+        assert!(matches!(ring.replay(1, 0, false), RingReplay::Exceeded { .. }));
     }
 
     #[test]
     fn publish_numbers_topic_frames_and_leaves_others_unnumbered() {
-        let hub = SeqHub::new();
+        let hub = SeqHub::new(SensitiveTags::in_memory());
         let mut rx = hub.subscribe();
         hub.publish(jobs());
         hub.publish(statusline_free_frame());
@@ -513,32 +567,32 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap().seq, None);
         assert_eq!(rx.try_recv().unwrap().seq, Some(2));
         assert_eq!(hub.latest(&Topic::MotherJobs), 2);
-        assert_eq!(seqs(hub.replay(&Topic::MotherJobs, 0)), vec![1, 2]);
+        assert_eq!(seqs(hub.replay(&Topic::MotherJobs, 0, false)), vec![1, 2]);
     }
 
     #[test]
     fn a_hub_with_no_frames_for_a_topic_answers_by_the_counter() {
-        let hub = SeqHub::new();
+        let hub = SeqHub::new(SensitiveTags::in_memory());
         assert_eq!(
-            seqs(hub.replay(&Topic::Perri, 0)),
+            seqs(hub.replay(&Topic::Perri, 0, false)),
             Vec::<u64>::new(),
             "nothing published, nothing missed"
         );
         assert!(matches!(
-            hub.replay(&Topic::Perri, 9),
+            hub.replay(&Topic::Perri, 9, false),
             Replay::Exceeded { latest: 0, .. }
         ));
     }
 
     #[test]
     fn lost_frames_empty_the_rings_and_make_a_resume_a_gap() {
-        let hub = SeqHub::new();
+        let hub = SeqHub::new(SensitiveTags::in_memory());
         hub.publish(jobs());
         hub.publish(jobs());
         hub.lost_frames();
         assert_eq!(hub.usage().frames, 0);
         assert!(matches!(
-            hub.replay(&Topic::MotherJobs, 2),
+            hub.replay(&Topic::MotherJobs, 2, false),
             Replay::Exceeded { .. }
         ));
         hub.publish(jobs());
@@ -547,7 +601,7 @@ mod tests {
 
     #[test]
     fn usage_sums_every_ring() {
-        let hub = SeqHub::new();
+        let hub = SeqHub::new(SensitiveTags::in_memory());
         hub.publish(jobs());
         hub.publish(jobs());
         let usage = hub.usage();

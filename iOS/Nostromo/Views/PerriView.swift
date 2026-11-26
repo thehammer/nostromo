@@ -40,6 +40,9 @@ struct PerriView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: store.connected)
         .animation(.easeInOut(duration: 0.25), value: store.perriQueue.count)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            MissedUpdatesBanner(topics: MissedUpdatesNotice.perriTopics)
+        }
         // Confirmation gate — nothing reaches GitHub until the user taps "Approve" here.
         .confirmationDialog(
             pendingApproval.map { "Approve PR #\($0.number) in \($0.repo)?" } ?? "",

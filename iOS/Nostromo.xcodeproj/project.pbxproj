@@ -44,6 +44,7 @@
 		B1000000000000000000010F /* PairingErrorBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000010E /* PairingErrorBanner.swift */; };
 		B10000000000000000000111 /* NoLongerPairedView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000110 /* NoLongerPairedView.swift */; };
 		B10000000000000000000113 /* UnreachableBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000112 /* UnreachableBanner.swift */; };
+		B10000000000000000000A11 /* MissedUpdatesBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000A10 /* MissedUpdatesBanner.swift */; };
 		B10000000000000000000115 /* DeviceSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000114 /* DeviceSettingsView.swift */; };
 		B10000000000000000000117 /* MergedQueueList.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000116 /* MergedQueueList.swift */; };
 		B10000000000000000000119 /* AppSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000118 /* AppSession.swift */; };
@@ -105,6 +106,7 @@
 		B1000000000000000000010E /* PairingErrorBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingErrorBanner.swift; sourceTree = "<group>"; };
 		B10000000000000000000110 /* NoLongerPairedView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoLongerPairedView.swift; sourceTree = "<group>"; };
 		B10000000000000000000112 /* UnreachableBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnreachableBanner.swift; sourceTree = "<group>"; };
+		B10000000000000000000A10 /* MissedUpdatesBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MissedUpdatesBanner.swift; sourceTree = "<group>"; };
 		B10000000000000000000114 /* DeviceSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceSettingsView.swift; sourceTree = "<group>"; };
 		B10000000000000000000116 /* MergedQueueList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MergedQueueList.swift; sourceTree = "<group>"; };
 		B10000000000000000000118 /* AppSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSession.swift; sourceTree = "<group>"; };
@@ -162,6 +164,7 @@
 				B10000000000000000000116 /* MergedQueueList.swift */,
 				B10000000000000000000114 /* DeviceSettingsView.swift */,
 				B10000000000000000000112 /* UnreachableBanner.swift */,
+				B10000000000000000000A10 /* MissedUpdatesBanner.swift */,
 				B10000000000000000000110 /* NoLongerPairedView.swift */,
 				B10000000000000000000101 /* Pairing */,
 				AA000001000000000000000C /* FocusListView.swift */,
@@ -346,6 +349,7 @@
 				B10000000000000000000117 /* MergedQueueList.swift in Sources */,
 				B10000000000000000000115 /* DeviceSettingsView.swift in Sources */,
 				B10000000000000000000113 /* UnreachableBanner.swift in Sources */,
+				B10000000000000000000A11 /* MissedUpdatesBanner.swift in Sources */,
 				B10000000000000000000111 /* NoLongerPairedView.swift in Sources */,
 				B1000000000000000000010F /* PairingErrorBanner.swift in Sources */,
 				B1000000000000000000010D /* PairingSuccessView.swift in Sources */,

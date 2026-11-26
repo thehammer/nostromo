@@ -59,11 +59,16 @@ struct ClientSubscribe: Encodable {
     let topics:            [String]
     let rendersDecisions:  Bool
     let rendersApprovals:  Bool
+    /// The last `seq` seen per topic (W12). Sent only to a daemon that listed `"seq"` in
+    /// `Welcome.features`; `nil` (no key on the wire) means "no resume".
+    let resume:            [String: UInt64]?
 
-    init(topics: [String], rendersDecisions: Bool, rendersApprovals: Bool = false) {
+    init(topics: [String], rendersDecisions: Bool, rendersApprovals: Bool = false,
+         resume: [String: UInt64] = [:]) {
         self.topics = topics
         self.rendersDecisions = rendersDecisions
         self.rendersApprovals = rendersApprovals
+        self.resume = resume.isEmpty ? nil : resume
     }
 
     enum CodingKeys: String, CodingKey {
@@ -71,6 +76,7 @@ struct ClientSubscribe: Encodable {
         case topics
         case rendersDecisions = "renders_decisions"
         case rendersApprovals = "renders_approvals"
+        case resume
     }
 }
 

@@ -142,6 +142,12 @@ extension ServerMsg {
         case "host_unavailable":
             guard let host = json?["host"] as? String else { return .unknown }
             return .hostUnavailable(host: host, reason: HostUnavailableReason(wire: json?["reason"] as? String))
+        case "gap":
+            guard let topic = json?["topic"] as? String,
+                  let from = (json?["from"] as? NSNumber)?.uint64Value,
+                  let to = (json?["to"] as? NSNumber)?.uint64Value else { return .unknown }
+            return .gap(topic: topic, host: json?["host"] as? String, from: from, to: to,
+                        reason: GapReason(wire: json?["reason"] as? String))
         default:
             return nil
         }

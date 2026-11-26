@@ -92,6 +92,26 @@ final class AppSession: ObservableObject, PairingSideEffects {
         phase = .noLongerPaired            // 3. the screen
     }
 
+    // MARK: - Foreground
+
+    private var backgroundedAt: Date?
+
+    /// Coming back from the background reconnects (after a while away) with `resume`, so what the
+    /// daemon published in the meantime is replayed, or a `gap` says it cannot be (W12).
+    func scenePhaseChanged(_ phase: ScenePhase) {
+        switch phase {
+        case .background:
+            backgroundedAt = Date()
+        case .active:
+            if let since = backgroundedAt {
+                client?.foreground(backgroundedFor: Date().timeIntervalSince(since))
+            }
+            backgroundedAt = nil
+        default:
+            break
+        }
+    }
+
     // MARK: - Settings
 
     var credential: DeviceCredential? { credentials.load() }

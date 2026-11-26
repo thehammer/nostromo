@@ -261,6 +261,107 @@ final class WebSocketClientTests: XCTestCase {
         XCTAssertEqual(states.last, .connected)
     }
 
+    // MARK: - Resume (W12)
+
+    private let seqWelcome = #"{"type":"welcome","protocol_version":4,"daemon_pid":1,"features":["ws","pair","seq"]}"#
+
+    private func subscribeFrame(of server: TestWebSocketServer, connection index: Int) -> [String: Any]? {
+        texts(of: server, connection: index).map(parseWireJSON).first { $0["type"] as? String == "subscribe" }
+    }
+
+    func testAReconnectSendsTheLastSeqPerTopicInSubscribeWhenTheDaemonListsSeq() async throws {
+        let welcome = seqWelcome
+        let server = try await startServer(onReady: { connection in
+            connection.send(welcome)
+            if connection.index == 0 {
+                connection.send(#"{"type":"perri_state","tag":"perri","queue":[],"seq":4}"#)
+                connection.send(#"{"type":"mother_jobs","jobs":[],"seq":9}"#)
+                connection.send(#"{"type":"perri_state","tag":"perri","queue":[],"seq":5}"#)
+                connection.send(#"{"type":"session_state","tag":"a","state":"idle","seq":99}"#)
+            }
+        })
+        let client = makeClient(port: server.port)
+        client.start()
+        await assertEventually("the frames were seen") { client.resumePoints["perri"] == 5 }
+        XCTAssertEqual(client.resumePoints, ["perri": 5, "mother_jobs": 9], "a topic-less frame is not tracked")
+        // The first connection had nothing to resume from: a plain Subscribe.
+        await assertEventually("first subscribe") { self.subscribeFrame(of: server, connection: 0) != nil }
+        XCTAssertNil(subscribeFrame(of: server, connection: 0)?["resume"])
+
+        server.connection(at: 0)?.close(code: .protocolCode(.goingAway))
+        await assertEventually("the client reconnects and subscribes again") {
+            self.subscribeFrame(of: server, connection: 1) != nil
+        }
+        let resume = subscribeFrame(of: server, connection: 1)?["resume"] as? [String: Int]
+        XCTAssertEqual(resume, ["perri": 5, "mother_jobs": 9])
+    }
+
+    func testADaemonWithoutSeqIsSubscribedToExactlyAsBefore() async throws {
+        // Welcome has no "seq": even a client that holds numbers must send none.
+        let server = try await startServer(onReady: { connection in
+            connection.send(welcomeFrame)
+            if connection.index == 0 { connection.send(#"{"type":"perri_state","tag":"perri","queue":[],"seq":4}"#) }
+        })
+        let client = makeClient(port: server.port)
+        client.start()
+        await assertEventually("a number was seen") { client.resumePoints["perri"] == 4 }
+        server.connection(at: 0)?.close(code: .protocolCode(.goingAway))
+        await assertEventually("subscribed again") { self.subscribeFrame(of: server, connection: 1) != nil }
+        let again = try XCTUnwrap(subscribeFrame(of: server, connection: 1))
+        XCTAssertNil(again["resume"], "no resume to a daemon that did not list seq")
+        XCTAssertEqual(again["topics"] as? [String], [])
+        XCTAssertEqual(again["renders_decisions"] as? Bool, true)
+    }
+
+    func testRefreshNowStartsOverWithoutResume() async throws {
+        let welcome = seqWelcome
+        let server = try await startServer(onReady: { connection in
+            connection.send(welcome)
+            if connection.index == 0 { connection.send(#"{"type":"perri_state","tag":"perri","queue":[],"seq":4}"#) }
+        })
+        let client = makeClient(port: server.port)
+        client.start()
+        await assertEventually("a number was seen") { client.resumePoints["perri"] == 4 }
+        client.refreshNow()
+        XCTAssertTrue(client.resumePoints.isEmpty)
+        await assertEventually("subscribed again") { self.subscribeFrame(of: server, connection: 1) != nil }
+        XCTAssertNil(subscribeFrame(of: server, connection: 1)?["resume"])
+    }
+
+    func testAForegroundAfterALongAbsenceReconnectsWithResumeAndAShortOneDoesNot() async throws {
+        let welcome = seqWelcome
+        let server = try await startServer(onReady: { connection in
+            connection.send(welcome)
+            if connection.index == 0 { connection.send(#"{"type":"perri_state","tag":"perri","queue":[],"seq":4}"#) }
+        })
+        let client = makeClient(port: server.port)
+        client.start()
+        await assertEventually("connected with a number") { client.connected && client.resumePoints["perri"] == 4 }
+
+        client.foreground(backgroundedFor: 2)
+        await observationWindow(0.4)
+        XCTAssertEqual(server.acceptedConnectionCount, 1, "a short absence changes nothing")
+
+        client.foreground(backgroundedFor: 60)
+        await assertEventually("a long absence reconnects") { self.subscribeFrame(of: server, connection: 1) != nil }
+        XCTAssertEqual(subscribeFrame(of: server, connection: 1)?["resume"] as? [String: Int], ["perri": 4])
+    }
+
+    func testAGapFromTheDaemonIsPublishedToTheApp() async throws {
+        let welcome = seqWelcome
+        let server = try await startServer(onReady: { connection in
+            connection.send(welcome)
+            connection.send(#"{"type":"gap","topic":"mother_jobs","from":3,"to":8,"reason":"replay_window_exceeded"}"#)
+        })
+        let client = makeClient(port: server.port)
+        let recorder = ClientRecorder(client)
+        client.start()
+        await assertEventually("the gap arrives") {
+            recorder.messages.contains { if case .gap = $0 { return true } else { return false } }
+        }
+        XCTAssertEqual(client.resumePoints["mother_jobs"], 8)
+    }
+
     // MARK: - Local Network permission
 
     func testWhenTheProbeSaysTheLocalNetworkIsDeniedTheStateIsLocalNetworkDenied() async throws {

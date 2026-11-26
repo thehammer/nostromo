@@ -98,6 +98,12 @@ pub struct WsLimits {
     pub max_sockets_per_device: usize,
     /// What the primary accepts from a satellite's uplink.
     pub uplink: UplinkLimits,
+    /// How often an authenticated socket is sent a WebSocket ping.
+    pub ping_every: Duration,
+    /// How long an authenticated socket may go without answering one before it
+    /// is closed with 1001 (going away): a phone that left the network without
+    /// a close would otherwise hold its slot, and its queue, for ever.
+    pub pong_timeout: Duration,
 }
 
 impl Default for WsLimits {
@@ -108,6 +114,8 @@ impl Default for WsLimits {
             max_unauthenticated_per_ip: 8,
             max_sockets_per_device: 8,
             uplink: UplinkLimits::default(),
+            ping_every: Duration::from_secs(20),
+            pong_timeout: Duration::from_secs(60),
         }
     }
 }
@@ -406,6 +414,7 @@ async fn serve(
                 limits.max_sockets_per_device,
                 limits.uplink.clone(),
                 limits.handshake_timeout,
+                (limits.ping_every, limits.pong_timeout),
             )
             .await
         }
@@ -682,6 +691,7 @@ async fn run_paired(
     max_sockets: usize,
     uplink_limits: UplinkLimits,
     hello_timeout: Duration,
+    (ping_every, pong_timeout): (Duration, Duration),
 ) -> Result<()> {
     let Some(_conn) = hub.try_connected(&device_id, max_sockets) else {
         let mut ws = ws;
@@ -783,6 +793,12 @@ async fn run_paired(
 
     let mut touch = tokio::time::interval(TOUCH_EVERY);
     touch.tick().await;
+    // Heartbeat: a ping every `ping_every`; the socket is closed once no pong
+    // has come for `pong_timeout`. Only a pong counts, so a peer that keeps
+    // writing but never answers a ping is closed too.
+    let mut heartbeat = tokio::time::interval(ping_every);
+    heartbeat.tick().await;
+    let mut last_pong = tokio::time::Instant::now();
     let mut closing: Option<Message> = None;
     // A satellite must get its `Hello` accepted in the time a WebSocket
     // handshake may take; a silent socket does not hold its slot for ever.
@@ -813,6 +829,9 @@ async fn run_paired(
                     Some(Err(_)) => break,
                     Some(Ok(frame)) => frame,
                 };
+                if matches!(frame, Message::Pong(_)) {
+                    last_pong = tokio::time::Instant::now();
+                }
                 if let Some(close) = close_for_bad_frame(&frame) {
                     closing = Some(close);
                     break;
@@ -920,6 +939,15 @@ async fn run_paired(
                 }
             }
             _ = touch.tick() => registry.touch(&device_id),
+            _ = heartbeat.tick() => {
+                if last_pong.elapsed() >= pong_timeout {
+                    closing = Some(close_msg(1001, "no pong"));
+                    break;
+                }
+                if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                    break;
+                }
+            }
             _ = &mut hello_deadline, if uplink.is_some() && !admitted.load(Ordering::SeqCst) => {
                 closing = Some(close_msg(1008, "no hello"));
                 break;

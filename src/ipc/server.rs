@@ -232,7 +232,7 @@ impl Server {
 
         // Every frame a producer sends is numbered (and kept for replay) by one
         // task before the connections see it.
-        let seq = SeqHub::new();
+        let seq = SeqHub::new(session_mgr.lock().unwrap().sensitive_tags());
         seq::spawn_sequencer(Arc::clone(&seq), tx.subscribe());
 
         // Subscribe before returning so no broadcast sent after `bind` can be missed.
@@ -1253,7 +1253,7 @@ where
         covered: resume_covered,
         high_water: resume_high_water,
         gaps: resume_gaps,
-    } = plan_resume(&seq, &resume, &topics);
+    } = plan_resume(&seq, &resume, &topics, trust.is_network());
     for stamped in resume_frames {
         if let Some(bytes) = broadcast_bytes(
             stamped,
@@ -1982,13 +1982,18 @@ fn covered_by_resume(covered: &HashSet<Topic>, msg: &ServerMsg) -> bool {
     msg.topic().is_some_and(|t| covered.contains(&t))
 }
 
-fn plan_resume(seq: &SeqHub, resume: &BTreeMap<Topic, u64>, topics: &[Topic]) -> ResumePlan {
+fn plan_resume(
+    seq: &SeqHub,
+    resume: &BTreeMap<Topic, u64>,
+    topics: &[Topic],
+    network: bool,
+) -> ResumePlan {
     let mut plan = ResumePlan::default();
     for (topic, &after) in resume {
         if !topic.is_sequenced() || !topic_wanted(topics, topic) {
             continue;
         }
-        match seq.replay(topic, after) {
+        match seq.replay(topic, after, network) {
             Replay::Messages(frames) => {
                 let last = frames.last().and_then(|f| f.seq).unwrap_or(after);
                 plan.covered.insert(topic.clone());

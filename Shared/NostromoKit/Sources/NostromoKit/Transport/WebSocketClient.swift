@@ -7,6 +7,9 @@
 //
 // Lifecycle:
 //   start() → connect → send Hello + Subscribe → read frames → publish
+//   reconnect: when the client has seen numbered frames it sends `resume` (the last `seq` per topic)
+//   in Subscribe, but only once the Welcome lists `"seq"`: a daemon without it is subscribed to
+//   exactly as before (W12).
 //   any failure → classify (`ConnectionFailure.state`) → back off 1 s → 30 s → connect again
 //   `Unauthorized` frame or close code 4001 → `.notPaired`, and stop: a revoked token will not come
 //   back, so reconnecting would only hammer the daemon.
@@ -57,6 +60,8 @@ public final class WebSocketClient: ObservableObject {
     @Published public private(set) var state: ConnectionState = .connecting
     /// `Welcome.features` from the server: `"ws"`, `"pair"`, `"hosts"`, ...
     @Published public private(set) var serverFeatures: Set<String> = []
+    /// The last `seq` seen per topic: what the next Subscribe asks to resume from.
+    public var resumePoints: [String: UInt64] { seqTracker.resume }
 
     /// Decoded server messages, delivered on the main actor.
     public let messages = PassthroughSubject<ServerMsg, Never>()
@@ -65,8 +70,8 @@ public final class WebSocketClient: ObservableObject {
 
     // MARK: - Configuration
 
-    public var host: String { didSet { if host != oldValue { restartIfRunning() } } }
-    public var port: UInt16 { didSet { if port != oldValue { restartIfRunning() } } }
+    public var host: String { didSet { if host != oldValue { seqTracker.reset(); restartIfRunning() } } }
+    public var port: UInt16 { didSet { if port != oldValue { seqTracker.reset(); restartIfRunning() } } }
 
     // MARK: - Private state
 
@@ -80,6 +85,9 @@ public final class WebSocketClient: ObservableObject {
     private var runTask: Task<Void, Never>?
     private var channel: WebSocketChannel?
     private let encoder = JSONEncoder()
+    /// Survives reconnects (and is cleared when the address changes: another daemon's numbers mean
+    /// nothing here).
+    private var seqTracker = SeqTracker()
 
     // MARK: - Init
 
@@ -112,6 +120,25 @@ public final class WebSocketClient: ObservableObject {
         channel?.cancel()
         channel = nil
         connected = false
+    }
+
+    // MARK: - Foreground and refresh
+
+    /// The app came back to the foreground after `backgroundedFor` seconds. A socket that sat in the
+    /// background is usually dead without knowing it, so after a while the connection is dropped and
+    /// made again at once: the new Subscribe carries `resume`, so what the topics published in the
+    /// meantime is replayed (or a `gap` says it cannot be). A short absence changes nothing.
+    public func foreground(backgroundedFor: TimeInterval, threshold: TimeInterval = 10) {
+        guard runTask != nil, connected, backgroundedFor >= threshold else { return }
+        channel?.cancel()
+    }
+
+    /// Start over without `resume`: the next connection is a fresh subscribe (retained snapshots,
+    /// no replay). What a `gap`'s "pull to refresh" does.
+    public func refreshNow() {
+        seqTracker.reset()
+        guard runTask != nil else { return }
+        channel?.cancel()
     }
 
     // MARK: - Send
@@ -183,16 +210,21 @@ public final class WebSocketClient: ObservableObject {
         channel.resume()
 
         // Hello first, then Subscribe, as `NetworkClient` does: every topic, decisions rendered.
+        // With numbered frames behind it the client waits for the Welcome before it subscribes, so
+        // `resume` goes only to a daemon that lists "seq"; with none it subscribes at once as before.
+        let resume = seqTracker.resume
         let hello = ClientHello(clientId: UUID().uuidString, protocolVersion: 4)
         let subscribe = ClientSubscribe(topics: [], rendersDecisions: true)
         guard let helloBody = try? encoder.encode(hello), let subscribeBody = try? encoder.encode(subscribe) else {
             channel.cancel()
             return Outcome(failure: .other, wasConnected: false)
         }
+        let subscribeAtOnce = resume.isEmpty
         let sends = Task { [channel] in
             try await channel.send(helloBody)
-            try await channel.send(subscribeBody)
+            if subscribeAtOnce { try await channel.send(subscribeBody) }
         }
+        var lateSubscribe: Task<Void, Never>?
 
         // Nothing answered Hello in time: give up on this socket.
         let deadline = Task { [channel, handshakeTimeout] in
@@ -203,6 +235,7 @@ public final class WebSocketClient: ObservableObject {
         var wasConnected = false
         defer {
             sends.cancel()
+            lateSubscribe?.cancel()
             deadline.cancel()
             pinger?.cancel()
             channel.cancel()
@@ -221,10 +254,19 @@ public final class WebSocketClient: ObservableObject {
                 wasConnected = true
                 deadline.cancel()
                 serverFeatures = Set(ServerMsg.welcomeFeatures(from: data))
+                if !subscribeAtOnce {
+                    let sendResume = serverFeatures.contains(SeqWire.feature) ? resume : [:]
+                    let body = try? encoder.encode(ClientSubscribe(topics: [], rendersDecisions: true,
+                                                                   resume: sendResume))
+                    lateSubscribe = Task { [channel] in
+                        if let body { try? await channel.send(body) }
+                    }
+                }
                 connected = true
                 setState(.connected)
                 pinger = startPinging(channel)
             }
+            seqTracker.observe(data)
             messages.send(hosted.msg)
             hostedMessages.send(hosted)
         }

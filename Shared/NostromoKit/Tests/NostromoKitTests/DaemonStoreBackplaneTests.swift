@@ -26,8 +26,11 @@ private final class FakeDaemonTransport: DaemonTransport {
     var framePublisher: AnyPublisher<HostedServerMsg, Never> { frames.eraseToAnyPublisher() }
     var connectionStatePublisher: AnyPublisher<ConnectionState, Never> { stateSubject.eraseToAnyPublisher() }
 
+    private(set) var refreshes = 0
+
     func start() {}
     func stop() {}
+    func refreshNow() { refreshes += 1 }
     func send(_ msg: some Encodable) {
         if let data = try? JSONEncoder().encode(msg),
            let type = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["type"] as? String {
@@ -619,5 +622,41 @@ final class DaemonStoreBackplaneTests: XCTestCase {
         await deliver(#"{"type":"focus_registry_updated","focuses":[\#(updated)]}"#, via: transport)
         XCTAssertEqual(Set(store.focuses.keys), ["g1"])
         XCTAssertEqual(store.focuses["g1"]?.displayName, "B")
+    }
+
+    // MARK: - Missed updates (W12)
+
+    func testAGapMarksItsTopicAndRefreshingClearsItAndStartsTheSubscriptionOver() async throws {
+        let (store, transport) = await makeStore(cache: makeCache())
+        transport.connectedSubject.send(true)
+        await letMainLoopTurn()
+        XCTAssertTrue(store.missedUpdates.isEmpty)
+
+        await deliver(#"{"type":"gap","topic":"mother_jobs","from":3,"to":8,"reason":"client_slow"}"#, via: transport)
+        XCTAssertEqual(store.missedUpdates, ["mother_jobs"])
+        XCTAssertTrue(MissedUpdatesNotice.isDue(for: MissedUpdatesNotice.motherTopics, missed: store.missedUpdates))
+        XCTAssertFalse(MissedUpdatesNotice.isDue(for: MissedUpdatesNotice.perriTopics, missed: store.missedUpdates),
+                       "a gap on one topic does not mark another list")
+
+        store.refreshMissedUpdates()
+        XCTAssertTrue(store.missedUpdates.isEmpty)
+        XCTAssertEqual(transport.refreshes, 1)
+    }
+
+    func testWipeAllForgetsMissedUpdates() async throws {
+        let (store, transport) = await makeStore(cache: makeCache())
+        await deliver(#"{"type":"gap","topic":"perri","from":1,"to":2,"reason":"replay_window_exceeded"}"#, via: transport)
+        XCTAssertFalse(store.missedUpdates.isEmpty)
+        store.wipeAll()
+        XCTAssertTrue(store.missedUpdates.isEmpty)
+    }
+
+    func testAGapIsNeverWrittenToTheContentCache() async throws {
+        let cache = makeCache()
+        let (_, transport) = await makeStore(cache: cache)
+        await deliver(#"{"type":"gap","topic":"perri","from":1,"to":2,"reason":"client_slow"}"#, via: transport)
+        cache.flush()
+        let onDisk = (try? String(contentsOf: cacheURL, encoding: .utf8)) ?? ""
+        XCTAssertFalse(onDisk.contains("client_slow"), "only the allow-listed frame types are cached")
     }
 }
