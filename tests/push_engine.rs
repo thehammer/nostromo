@@ -3362,23 +3362,24 @@ async fn a_retained_frame_built_before_any_fetch_does_not_seed_a_host_at_reconci
     // for it that says "queue never fetched" is no baseline: seeding from it would
     // make every review pushed once the host's first real queue arrives.
     let mut rig = Rig::new().await;
-    // The reconcile is due 30 s after the engine's own (real) start: real clock.
-    let t0 = Utc::now();
+    let t0 = base();
     rig.register("dev-1", &token_a());
     rig.start(&[], t0).await;
 
     let retained: nostromo::push::RetainedSource =
         Arc::new(|| vec![unfetched_frame(Some("osaka"))]);
-    let later = t0 + secs(31);
-    rig.engine.housekeeping(Some(&retained), later);
-    rig.engine.step_at(later).await;
+    // The reconcile is due 30 s after the engine's own (real) start, so only this
+    // call is on the real clock; everything else stays on the fabricated one.
+    rig.engine
+        .housekeeping(Some(&retained), Utc::now() + secs(31));
+    rig.engine.step_at(t0 + secs(1)).await;
 
     rig.engine.ingest(
         fetched_frame(Some("osaka"), vec![requested(4821), requested(4822)]),
-        later + secs(5),
+        t0 + secs(5),
     );
     for t in [5, 125, 600] {
-        rig.engine.step_at(later + secs(t)).await;
+        rig.engine.step_at(t0 + secs(t)).await;
     }
     assert!(
         rig.posts().await.is_empty(),
