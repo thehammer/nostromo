@@ -62,13 +62,17 @@ struct ClientSubscribe: Encodable {
     /// The last `seq` seen per topic (W12). Sent only to a daemon that listed `"seq"` in
     /// `Welcome.features`; `nil` (no key on the wire) means "no resume".
     let resume:            [String: UInt64]?
+    /// The daemon run (`Welcome.seq_epoch`) the numbers in `resume` were given under; sent with a
+    /// resume so a restarted daemon can tell the numbers are not its own. `nil` when not resuming.
+    let seqEpoch:          UInt64?
 
     init(topics: [String], rendersDecisions: Bool, rendersApprovals: Bool = false,
-         resume: [String: UInt64] = [:]) {
+         resume: [String: UInt64] = [:], seqEpoch: UInt64? = nil) {
         self.topics = topics
         self.rendersDecisions = rendersDecisions
         self.rendersApprovals = rendersApprovals
         self.resume = resume.isEmpty ? nil : resume
+        self.seqEpoch = resume.isEmpty ? nil : seqEpoch
     }
 
     enum CodingKeys: String, CodingKey {
@@ -77,6 +81,7 @@ struct ClientSubscribe: Encodable {
         case rendersDecisions = "renders_decisions"
         case rendersApprovals = "renders_approvals"
         case resume
+        case seqEpoch = "seq_epoch"
     }
 }
 

@@ -294,6 +294,137 @@ final class WebSocketClientTests: XCTestCase {
         }
         let resume = subscribeFrame(of: server, connection: 1)?["resume"] as? [String: Int]
         XCTAssertEqual(resume, ["perri": 5, "mother_jobs": 9])
+        XCTAssertNil(subscribeFrame(of: server, connection: 1)?["seq_epoch"],
+                     "a daemon that named no epoch is not sent one")
+    }
+
+    private func seqWelcomeFrame(epoch: Int) -> String {
+        #"{"type":"welcome","protocol_version":4,"daemon_pid":1,"features":["ws","pair","seq"],"seq_epoch":\#(epoch)}"#
+    }
+
+    func testAReconnectToTheSameDaemonRunResumesAndNamesItsEpoch() async throws {
+        let welcome = seqWelcomeFrame(epoch: 7)
+        let server = try await startServer(onReady: { connection in
+            connection.send(welcome)
+            if connection.index == 0 { connection.send(#"{"type":"perri_state","tag":"perri","queue":[],"seq":4}"#) }
+        })
+        let client = makeClient(port: server.port)
+        client.start()
+        await assertEventually("a number was seen") { client.resumePoints["perri"] == 4 }
+        await assertEventually("first subscribe") { self.subscribeFrame(of: server, connection: 0) != nil }
+        XCTAssertNil(subscribeFrame(of: server, connection: 0)?["resume"])
+        XCTAssertNil(subscribeFrame(of: server, connection: 0)?["seq_epoch"], "no resume: no epoch either")
+
+        server.connection(at: 0)?.close(code: .protocolCode(.goingAway))
+        await assertEventually("subscribed again") { self.subscribeFrame(of: server, connection: 1) != nil }
+        let again = try XCTUnwrap(subscribeFrame(of: server, connection: 1))
+        XCTAssertEqual(again["resume"] as? [String: Int], ["perri": 4])
+        XCTAssertEqual(again["seq_epoch"] as? Int, 7, "the numbers are offered together with the run they came from")
+    }
+
+    func testAReconnectToARestartedDaemonSubscribesWithNoResumeAndFollowsTheNewRun() async throws {
+        let first = seqWelcomeFrame(epoch: 7)
+        let second = seqWelcomeFrame(epoch: 8)
+        let server = try await startServer(onReady: { connection in
+            connection.send(connection.index == 0 ? first : second)
+            if connection.index == 0 { connection.send(#"{"type":"perri_state","tag":"perri","queue":[],"seq":40}"#) }
+            if connection.index == 1 { connection.send(#"{"type":"perri_state","tag":"perri","queue":[],"seq":1}"#) }
+        })
+        let client = makeClient(port: server.port)
+        client.start()
+        await assertEventually("a number of the first run was seen") { client.resumePoints["perri"] == 40 }
+
+        // The daemon restarted: another epoch, numbers from 1.
+        server.connection(at: 0)?.close(code: .protocolCode(.goingAway))
+        await assertEventually("subscribed again") { self.subscribeFrame(of: server, connection: 1) != nil }
+        let again = try XCTUnwrap(subscribeFrame(of: server, connection: 1))
+        XCTAssertNil(again["resume"], "the old numbers are the old run's: a plain Subscribe gets the snapshots")
+        XCTAssertNil(again["seq_epoch"])
+        XCTAssertEqual(again["renders_decisions"] as? Bool, true)
+
+        // The new run is followed from its own numbers, under its own epoch.
+        await assertEventually("the new run's number was seen") { client.resumePoints == ["perri": 1] }
+        server.connection(at: 1)?.close(code: .protocolCode(.goingAway))
+        await assertEventually("subscribed a third time") { self.subscribeFrame(of: server, connection: 2) != nil }
+        let third = try XCTUnwrap(subscribeFrame(of: server, connection: 2))
+        XCTAssertEqual(third["resume"] as? [String: Int], ["perri": 1])
+        XCTAssertEqual(third["seq_epoch"] as? Int, 8)
+    }
+
+    func testAfterResetResumeTheNextConnectionSubscribesWithNoResume() async throws {
+        let welcome = seqWelcomeFrame(epoch: 7)
+        let server = try await startServer(onReady: { connection in
+            connection.send(welcome)
+            if connection.index == 0 { connection.send(#"{"type":"perri_state","tag":"perri","queue":[],"seq":4}"#) }
+        })
+        let client = makeClient(port: server.port)
+        client.start()
+        await assertEventually("a number was seen") { client.resumePoints["perri"] == 4 }
+
+        client.resetResume()
+        XCTAssertTrue(client.resumePoints.isEmpty)
+
+        server.connection(at: 0)?.close(code: .protocolCode(.goingAway))
+        await assertEventually("subscribed again") { self.subscribeFrame(of: server, connection: 1) != nil }
+        let again = try XCTUnwrap(subscribeFrame(of: server, connection: 1))
+        XCTAssertNil(again["resume"], "what the numbers stood for was wiped: nothing may be resumed")
+        XCTAssertNil(again["seq_epoch"])
+    }
+
+    // MARK: Skipped numbers (W12)
+
+    private func isFocusFrame(_ msg: ServerMsg) -> Bool {
+        if case .focusRegistryUpdated = msg { return true }
+        return false
+    }
+
+    func testASkippedNumberOnFocusesIsPublishedAsANumberJumpGapBeforeTheFrameThatRevealedIt() async throws {
+        let welcome = seqWelcome
+        let server = try await startServer(onReady: { connection in
+            connection.send(welcome)
+            connection.send(#"{"type":"focus_registry_updated","focuses":[],"seq":3}"#)
+            connection.send(#"{"type":"focus_registry_updated","focuses":[],"seq":5}"#)
+        })
+        let client = makeClient(port: server.port)
+        let recorder = ClientRecorder(client)
+        client.start()
+        await assertEventually("both frames arrive") { recorder.messages.filter(self.isFocusFrame).count == 2 }
+
+        let gaps = recorder.messages.enumerated().compactMap { index, msg -> (Int, String, UInt64, UInt64, GapReason)? in
+            if case .gap(let topic, _, let from, let to, let reason) = msg { return (index, topic, from, to, reason) }
+            return nil
+        }
+        XCTAssertEqual(gaps.count, 1, "exactly one skip")
+        let gap = try XCTUnwrap(gaps.first)
+        XCTAssertEqual(gap.1, "focuses")
+        XCTAssertEqual(gap.2, 4)
+        XCTAssertEqual(gap.3, 4)
+        XCTAssertEqual(gap.4, .numberJump)
+        let focusIndexes = recorder.messages.enumerated().filter { isFocusFrame($0.element) }.map(\.offset)
+        XCTAssertEqual(focusIndexes.count, 2)
+        XCTAssertLessThan(gap.0, focusIndexes[1], "the loss is told before the frame that follows it")
+        XCTAssertGreaterThan(gap.0, focusIndexes[0])
+        XCTAssertTrue(recorder.hosted.contains { if case .gap(_, _, _, _, .numberJump) = $0.msg { return true } else { return false } },
+                      "the hosted stream the store listens to carries it too")
+        XCTAssertEqual(client.resumePoints["focuses"], 5)
+    }
+
+    func testASkippedNumberOnATopicWhereNumbersLegitimatelySkipPublishesNoGap() async throws {
+        let welcome = seqWelcome
+        let server = try await startServer(onReady: { connection in
+            connection.send(welcome)
+            connection.send(#"{"type":"mother_jobs","jobs":[],"seq":1}"#)
+            connection.send(#"{"type":"mother_jobs","jobs":[],"seq":3}"#)
+            connection.send(#"{"type":"mother_jobs","jobs":[],"seq":9}"#)
+        })
+        let client = makeClient(port: server.port)
+        let recorder = ClientRecorder(client)
+        client.start()
+        await assertEventually("all three frames arrive") {
+            recorder.messages.filter { if case .motherJobs = $0 { return true } else { return false } }.count == 3
+        }
+        XCTAssertFalse(recorder.messages.contains { if case .gap = $0 { return true } else { return false } },
+                       "the phone is not sent every mother_jobs frame: a skip there is not a loss")
     }
 
     func testADaemonWithoutSeqIsSubscribedToExactlyAsBefore() async throws {

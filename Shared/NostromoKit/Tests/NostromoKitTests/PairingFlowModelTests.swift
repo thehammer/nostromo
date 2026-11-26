@@ -403,6 +403,34 @@ final class PairingFlowModelTests: XCTestCase {
         XCTAssertEqual(h.model.step, .failed(.unreachable, address: address, confirmation: shown))
     }
 
+    func testAFailedPairOnADifferentServerLeavesTheOldContentWipedBeforeTheOldClientComesBack() async throws {
+        let store = InMemoryDeviceCredentialStore(oldCredential)
+        let h = harness(store: store, checks: [.success(offer()), .success(offer(knows: false))],
+                        pair: .failure(PairingError.invalid), currentServer: ("192.168.1.9", 47100))
+        await h.model.begin(address: address, port: port, code: code)
+        let beforeConfirm = h.log.events.count
+
+        await h.model.confirm()
+
+        let events = Array(h.log.events.dropFirst(beforeConfirm))
+        XCTAssertEqual(h.log.count("effects.wipeContent"), 1, "the other server's content is gone either way")
+        let wiped = try XCTUnwrap(events.firstIndex(of: "effects.wipeContent"))
+        let restarted = try XCTUnwrap(events.firstIndex(of: "effects.restartCurrentClient"))
+        XCTAssertLessThan(wiped, restarted, "the old client comes back after the wipe, never before it")
+    }
+
+    func testAFailedPairOnTheSameServerNeverWipesTheContent() async throws {
+        let store = InMemoryDeviceCredentialStore(oldCredential)
+        let h = harness(store: store, checks: [.success(offer()), .success(offer(knows: true))],
+                        pair: .failure(PairingError.unreachable), currentServer: ("10.0.0.5", 47101))
+        await h.model.begin(address: address, port: port, code: code)
+
+        await h.model.confirm()
+
+        XCTAssertEqual(h.log.count("effects.wipeContent"), 0)
+        XCTAssertGreaterThanOrEqual(h.log.count("effects.restartCurrentClient"), 1)
+    }
+
     func testAFailedPairOnADifferentServerRestartsTheOldClientAndDoesNotTouchTheOldServer() async throws {
         let store = InMemoryDeviceCredentialStore(oldCredential)
         let h = harness(store: store, checks: [.success(offer()), .success(offer(knows: false))],

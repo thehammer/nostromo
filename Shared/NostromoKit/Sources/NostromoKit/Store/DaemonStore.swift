@@ -440,8 +440,6 @@ public final class DaemonStore: ObservableObject {
         lastKnownAt = snapshot.savedAt
     }
 
-    /// Forgets everything shown and deletes the cache file. Called when the pairing is gone (revoke,
-    /// un-pair, pairing with a different server): after it, memory and disk hold no Nostromo content.
     /// Pull to refresh after a `gap`: start the subscription over (fresh snapshots, no replay) and
     /// forget the notices.
     public func refreshMissedUpdates() {
@@ -449,7 +447,13 @@ public final class DaemonStore: ObservableObject {
         client.refreshNow()
     }
 
+    /// Forgets everything shown and deletes the cache file. Called when the pairing is gone (revoke,
+    /// un-pair, pairing with a different server): after it, memory and disk hold no Nostromo content.
+    /// The client forgets its sequence numbers too: a client restarted after a failed pairing would
+    /// otherwise resume, be told its topics are "covered", and never be sent the snapshots the wiped
+    /// lists need.
     public func wipeAll() {
+        client.resetResume()
         isWiped = true
         missedUpdates = []
         cache?.wipe()
@@ -622,8 +626,9 @@ public final class DaemonStore: ObservableObject {
         case .approvalPending(let tag, let count):
             refreshNeedsYouApprovals(host: "", tag: tag, count: count)
 
-        case .gap(let topic, _, _, _, _):
-            missedUpdates.insert(topic)
+        case .gap(let topic, _, _, _, let reason):
+            // A daemon restart came with the snapshots that replace the list: nothing to warn of.
+            if reason.mayHaveMissedUpdates { missedUpdates.insert(topic) }
 
         case .hosts(let list):
             hostInfos = list

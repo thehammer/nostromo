@@ -133,6 +133,14 @@ public final class WebSocketClient: ObservableObject {
         channel?.cancel()
     }
 
+    /// Forget the numbers seen so far without touching the connection: the next Subscribe asks for
+    /// nothing to resume. For when what the numbers stood for was wiped (`DaemonStore.wipeAll`): a
+    /// resume then would be answered with "covered", and the wiped lists would stay empty until the
+    /// next live frame.
+    public func resetResume() {
+        seqTracker.reset()
+    }
+
     /// Start over without `resume`: the next connection is a fresh subscribe (retained snapshots,
     /// no replay). What a `gap`'s "pull to refresh" does.
     public func refreshNow() {
@@ -255,9 +263,14 @@ public final class WebSocketClient: ObservableObject {
                 deadline.cancel()
                 serverFeatures = Set(ServerMsg.welcomeFeatures(from: data))
                 if !subscribeAtOnce {
-                    let sendResume = serverFeatures.contains(SeqWire.feature) ? resume : [:]
+                    // A daemon run other than the one the numbers came from (it restarted) numbers
+                    // from 1 again: the tracker drops them here, and the Subscribe asks for nothing
+                    // to resume, so the snapshots come back as for a fresh client.
+                    seqTracker.observe(data)
+                    let sendResume = serverFeatures.contains(SeqWire.feature) ? seqTracker.resume : [:]
                     let body = try? encoder.encode(ClientSubscribe(topics: [], rendersDecisions: true,
-                                                                   resume: sendResume))
+                                                                   resume: sendResume,
+                                                                   seqEpoch: seqTracker.epoch))
                     lateSubscribe = Task { [channel] in
                         if let body { try? await channel.send(body) }
                     }
@@ -266,7 +279,12 @@ public final class WebSocketClient: ObservableObject {
                 setState(.connected)
                 pinger = startPinging(channel)
             }
-            seqTracker.observe(data)
+            // A number skipped where none can be withheld is a loss the daemon did not name.
+            if case .jumped(let topic, let from, let to) = seqTracker.observe(data) {
+                let skipped = ServerMsg.gap(topic: topic, host: nil, from: from, to: to, reason: .numberJump)
+                messages.send(skipped)
+                hostedMessages.send(HostedServerMsg(host: nil, msg: skipped))
+            }
             messages.send(hosted.msg)
             hostedMessages.send(hosted)
         }

@@ -46,8 +46,10 @@ use nostromo::data::teri_todos::TeriTodosSnapshot;
 use nostromo::data::work::{WorkItem, WorkSource};
 use nostromo::ipc::peer::SensitiveTags;
 use nostromo::ipc::protocol::{
-    ClientMsg, GapReason, NotificationLevel, ReplayUsage, ServerMsg, Topic,
+    ClientMsg, FocusMeta, GapReason, NotificationLevel, ReplayUsage, ServerMsg, Topic,
 };
+use nostromo::mother::origin::{OriginKind, OriginView};
+use nostromo::mother::JobAnnotation;
 use nostromo::ipc::seq::{self, Replay, SeqHub};
 use nostromo::ipc::server::Server;
 use nostromo::mother::decode::parse_jobs;
@@ -1329,6 +1331,189 @@ async fn a_frame_of_a_tag_that_became_sensitive_since_is_not_replayed_to_a_devic
     assert_eq!(seqs_of(&mac, "notification"), vec![1]);
 }
 
+// A frame that was *sent* to a network peer but trimmed (a sensitive focus's
+// title and tag, a sensitive job's origin names) is trimmed again at replay.
+// What it was trimmed of is decided when it is published: a tag that stops
+// being sensitive afterwards must not make the replay show what the live
+// stream hid.
+
+const SECRET_TITLE: &str = "SECRET-HELD-TITLE";
+const SECRET_TAG: &str = "secret-held-tag";
+
+fn secret_meta() -> FocusMeta {
+    FocusMeta {
+        no_codebase: None,
+        tag: SECRET_TAG.into(),
+        display_name: SECRET_TITLE.into(),
+        agent_name: "cody".into(),
+        project_name: None,
+        org: None,
+        is_built_in: false,
+        session_summary: None,
+        label: None,
+        project_path: None,
+        select_for_client: None,
+        initial_model: None,
+        initial_effort: None,
+    }
+}
+
+/// A job queued by the (held-sensitive) focus, named on the wire by its title.
+fn secret_job() -> MotherJob {
+    MotherJob {
+        id: "trim-job-1".to_string(),
+        state: "running".to_string(),
+        nostromo: Some(JobAnnotation {
+            origin: OriginView {
+                kind: OriginKind::Focus,
+                focus_tag: Some(SECRET_TAG.into()),
+                name_snapshot: Some(SECRET_TITLE.into()),
+                focus_name: Some(SECRET_TITLE.into()),
+                closed: None,
+                session_prefix: None,
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Trimmed {
+    FocusRegistryUpdated,
+    FocusCreated,
+    MotherJobs,
+    MotherAwaitDetected,
+}
+
+impl Trimmed {
+    fn frame(self) -> ServerMsg {
+        match self {
+            Trimmed::FocusRegistryUpdated => ServerMsg::FocusRegistryUpdated {
+                focuses: vec![secret_meta()],
+                host: None,
+            },
+            Trimmed::FocusCreated => ServerMsg::FocusCreated {
+                meta: secret_meta(),
+                host: None,
+            },
+            Trimmed::MotherJobs => ServerMsg::MotherJobs {
+                jobs: vec![secret_job()],
+                host: None,
+            },
+            Trimmed::MotherAwaitDetected => ServerMsg::MotherAwaitDetected(Box::new(secret_job())),
+        }
+    }
+
+    fn topic(self) -> Topic {
+        self.frame().topic().expect("a numbered topic")
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Net {
+    Paired,
+    Tcp,
+}
+
+/// Hold the tag sensitive, publish the frame, release the hold. The live peer
+/// (connected before) was sent the trimmed frame; a peer that then resumes
+/// from 0 must not be handed what that frame hid.
+async fn a_trimmed_frame_stays_trimmed_in_the_replay(variant: Trimmed, net: Net) {
+    let rig = Rig::new().await;
+    let phone = rig.mint_device("phone");
+    let tags = rig.session_mgr.lock().unwrap().sensitive_tags();
+    let topic = variant.topic();
+    let topics = [topic.clone()];
+    let resume = [(topic.clone(), 0)];
+
+    let mut live = match net {
+        Net::Paired => paired(&rig, &phone.token, &topics, &[]).await,
+        Net::Tcp => tcp(&rig, &topics, &[]).await,
+    };
+
+    let hold = tags.hold_sensitive(SECRET_TAG);
+    publish(&rig.server, vec![variant.frame()]).await;
+    barrier(&rig.server, &mut live, "done").await;
+    drop(hold);
+
+    assert_eq!(
+        numbered(&live).len(),
+        1,
+        "{variant:?} over {net:?}: the live peer is sent the (trimmed) frame: {:?}",
+        live.raw
+    );
+    assert!(
+        !live.raw.iter().any(|r| r.contains(SECRET_TITLE)),
+        "{variant:?} over {net:?}: the live stream must hide the title: {:?}",
+        live.raw
+    );
+
+    let resumed = match net {
+        Net::Paired => paired(&rig, &phone.token, &topics, &resume).await,
+        Net::Tcp => tcp(&rig, &topics, &resume).await,
+    };
+    assert!(
+        !resumed.raw.iter().any(|r| r.contains(SECRET_TITLE)),
+        "{variant:?} over {net:?}: the replay must not show what the live stream hid: {:?}",
+        resumed.raw
+    );
+    if matches!(variant, Trimmed::FocusRegistryUpdated | Trimmed::FocusCreated) {
+        assert!(
+            !resumed.raw.iter().any(|r| r.contains(SECRET_TAG)),
+            "{variant:?} over {net:?}: nor the tag, which is a slug of the title: {:?}",
+            resumed.raw
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_paired_device_is_not_replayed_the_title_a_focus_registry_update_hid_while_its_tag_was_sensitive(
+) {
+    a_trimmed_frame_stays_trimmed_in_the_replay(Trimmed::FocusRegistryUpdated, Net::Paired).await;
+}
+
+#[tokio::test]
+async fn a_tcp_peer_is_not_replayed_the_title_a_focus_registry_update_hid_while_its_tag_was_sensitive(
+) {
+    a_trimmed_frame_stays_trimmed_in_the_replay(Trimmed::FocusRegistryUpdated, Net::Tcp).await;
+}
+
+#[tokio::test]
+async fn a_paired_device_is_not_replayed_the_title_a_focus_created_hid_while_its_tag_was_sensitive()
+{
+    a_trimmed_frame_stays_trimmed_in_the_replay(Trimmed::FocusCreated, Net::Paired).await;
+}
+
+#[tokio::test]
+async fn a_tcp_peer_is_not_replayed_the_title_a_focus_created_hid_while_its_tag_was_sensitive() {
+    a_trimmed_frame_stays_trimmed_in_the_replay(Trimmed::FocusCreated, Net::Tcp).await;
+}
+
+#[tokio::test]
+async fn a_paired_device_is_not_replayed_the_origin_name_a_mother_jobs_frame_hid_while_its_tag_was_sensitive(
+) {
+    a_trimmed_frame_stays_trimmed_in_the_replay(Trimmed::MotherJobs, Net::Paired).await;
+}
+
+#[tokio::test]
+async fn a_tcp_peer_is_not_replayed_the_origin_name_a_mother_jobs_frame_hid_while_its_tag_was_sensitive(
+) {
+    a_trimmed_frame_stays_trimmed_in_the_replay(Trimmed::MotherJobs, Net::Tcp).await;
+}
+
+#[tokio::test]
+async fn a_paired_device_is_not_replayed_the_origin_name_a_mother_await_detected_hid_while_its_tag_was_sensitive(
+) {
+    a_trimmed_frame_stays_trimmed_in_the_replay(Trimmed::MotherAwaitDetected, Net::Paired).await;
+}
+
+#[tokio::test]
+async fn a_tcp_peer_is_not_replayed_the_origin_name_a_mother_await_detected_hid_while_its_tag_was_sensitive(
+) {
+    a_trimmed_frame_stays_trimmed_in_the_replay(Trimmed::MotherAwaitDetected, Net::Tcp).await;
+}
+
 /// The command-bearing approval frames have no topic, so no ring ever holds
 /// one; the count (`approval_pending`) is the one approval frame a device may
 /// be sent, for a focus that is not sensitive.
@@ -1950,5 +2135,95 @@ async fn a_flood_to_a_client_that_never_reads_stays_bounded_and_the_daemon_stays
         delivered.len() as u64 + (to - from + 1),
         s.jobs_published,
         "delivered plus the Gap's range is every frame published"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// A reply never overtakes a broadcast frame sent before it, on a runtime with
+// several worker threads (a broadcast crosses two tasks, the sequencer and the
+// connection's forwarder, before it is in the connection's queue)
+// ════════════════════════════════════════════════════════════════════════════
+
+fn is_pong(text: &str) -> bool {
+    serde_json::from_str::<Value>(text).is_ok_and(|v| ty(&v) == "pong")
+}
+
+/// A frame of a numbered topic that is rarely identical to another.
+fn flood_frame(i: u64) -> ServerMsg {
+    match i % 6 {
+        0 => notification("flood", &format!("n-{i}")),
+        1 => jobs_frame(&format!("flood-{i}"), None),
+        2 => focuses_frame(None),
+        3 => activity(i),
+        4 => teri_state(),
+        _ => work_snapshot(),
+    }
+}
+
+/// Producers that never stop must not hold a reply back: it is written once the
+/// frames already queued ahead of it are, not when the queue is quiet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reply_arrives_within_2s_while_other_producers_publish_continuously() {
+    let rig = Rig::new().await;
+    let mut conn = local(&rig, &[], &[]).await; // every topic
+
+    let tx = rig.server.tx.clone();
+    let publisher = tokio::spawn(async move {
+        let mut i = 0u64;
+        loop {
+            let _ = tx.send(flood_frame(i));
+            i += 1;
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    });
+
+    // Let the flood reach this client's queue first.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for round in 0..40 {
+        tokio::time::timeout(Duration::from_secs(2), conn.sync())
+            .await
+            .unwrap_or_else(|_| panic!("round {round}: no Pong within 2s while frames flow"));
+        conn.take_all();
+    }
+    publisher.abort();
+    assert!(
+        conn.raw.len() > 40,
+        "the flood must have been reaching the client, or this proves nothing ({} frames)",
+        conn.raw.len()
+    );
+}
+
+/// The frame a producer published, then the reply the same connection asks for
+/// at once: the frame first, every time. (A client's `Ping` is the reply; the
+/// Pong comes from the main loop, the frame by way of the sequencer and the
+/// forwarder, which on several threads can be late.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_broadcast_frame_is_on_the_wire_before_the_reply_asked_for_right_after_it() {
+    let rig = Rig::new().await;
+    let mut conn = local(&rig, &[Topic::Layout], &[]).await;
+
+    let mut overtaken = Vec::new();
+    for i in 0..200 {
+        let label = format!("ord-{i}");
+        let start = conn.raw.len();
+        rig.server.broadcast(notification("ord", &label));
+        conn.send(&ClientMsg::Ping).await;
+        conn.next_matching("the Pong", |m| matches!(m, ServerMsg::Pong))
+            .await;
+        conn.next_matching("the broadcast frame", |m| {
+            matches!(m, ServerMsg::Notification { message, .. } if *message == label)
+        })
+        .await;
+        let new = &conn.raw[start..];
+        let frame_at = new.iter().position(|r| r.contains(&label)).unwrap();
+        let pong_at = new.iter().position(|r| is_pong(r)).unwrap();
+        if pong_at < frame_at {
+            overtaken.push(i);
+        }
+    }
+    assert!(
+        overtaken.is_empty(),
+        "the Pong came before the frame published ahead of it in {} of 200 rounds: {overtaken:?}",
+        overtaken.len()
     );
 }
