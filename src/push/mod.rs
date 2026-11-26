@@ -563,18 +563,21 @@ impl PushEngine {
     /// each send. [`PushEngine::spawn`] drives the engine from the clock; this
     /// is public so a test can drive it on a fabricated one.
     pub async fn step_at(&self, now: DateTime<Utc>) {
+        // The config is read before the state lock is taken: it may read a file.
+        let cfg = (self.config)();
         let sends = {
             let mut st = self.state.lock().unwrap();
-            self.plan(&mut st, now)
+            self.plan(&mut st, now, &cfg)
         };
         self.deliver(sends, now).await;
     }
 
     /// Step every device's schedule and send what is due, without waiting.
     fn run(self: &Arc<Self>, now: DateTime<Utc>) {
+        let cfg = (self.config)();
         let sends = {
             let mut st = self.state.lock().unwrap();
-            self.plan(&mut st, now)
+            self.plan(&mut st, now, &cfg)
         };
         if sends.is_empty() {
             return;
@@ -583,8 +586,14 @@ impl PushEngine {
         tokio::spawn(async move { engine.deliver(sends, now).await });
     }
 
-    fn plan(&self, st: &mut State, now: DateTime<Utc>) -> Vec<Outgoing> {
-        let cfg = (self.config)();
+    fn plan(&self, st: &mut State, now: DateTime<Utc>, cfg: &PushConfig) -> Vec<Outgoing> {
+        // `enabled = false` in the config file takes effect at once. Schedules are
+        // dropped, so turning it back on baselines what is waiting then instead of
+        // pushing everything that arrived meanwhile.
+        if !cfg.enabled {
+            st.schedules.clear();
+            return Vec::new();
+        }
         let schedule_cfg = ScheduleCfg {
             grace: ChronoDuration::seconds(cfg.grace_secs.unwrap_or(120) as i64),
             decision_grace: ChronoDuration::seconds(cfg.decision_grace_secs.unwrap_or(30) as i64),
@@ -909,14 +918,28 @@ fn log_line(
 /// two seconds), so `nostromo push host` takes effect without a restart. A file
 /// that cannot be read keeps the last good table.
 pub fn config_from_file(startup: PushConfig) -> ConfigSource {
+    config_reloading(startup, Duration::from_secs(2), || {
+        Ok(crate::config::Config::load(None)?.push)
+    })
+}
+
+/// [`config_from_file`] over any loader, so the reload rules can be tested: the
+/// table is re-read at most every `every`; a loader error (a file that does not
+/// parse) is logged at warn and the last good table is kept; an absent table
+/// keeps the last good one too.
+fn config_reloading(
+    startup: PushConfig,
+    every: Duration,
+    load: impl Fn() -> anyhow::Result<Option<PushConfig>> + Send + Sync + 'static,
+) -> ConfigSource {
     let memo = Mutex::new((std::time::Instant::now(), startup));
     Arc::new(move || {
         let mut memo = memo.lock().unwrap();
-        if memo.0.elapsed() >= Duration::from_secs(2) {
-            if let Ok(cfg) = crate::config::Config::load(None) {
-                if let Some(push) = cfg.push {
-                    memo.1 = push;
-                }
+        if memo.0.elapsed() >= every {
+            match load() {
+                Ok(Some(push)) => memo.1 = push,
+                Ok(None) => {}
+                Err(e) => warn!("push config not reloaded, keeping the last good one: {e:#}"),
             }
             memo.0 = std::time::Instant::now();
         }
@@ -940,4 +963,115 @@ pub fn local_host_label(configured: Option<&str>) -> String {
 /// What the host classification says about `host` (absent = work).
 pub fn host_class(cfg: &PushConfig, host: &str) -> HostClass {
     cfg.hosts.get(host).copied().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::OnceLock;
+
+    fn pc(url: &str, dir: &Path) -> PushConfig {
+        PushConfig {
+            relay_url: Some(url.to_string()),
+            relay_token_path: Some(dir.join("token")),
+            state_dir: Some(dir.join("push")),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn the_config_is_never_read_while_the_state_lock_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = pc("http://127.0.0.1:9", dir.path());
+        let engine_cell: Arc<OnceLock<std::sync::Weak<PushEngine>>> = Arc::new(OnceLock::new());
+        let held = Arc::new(AtomicBool::new(false));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let source: ConfigSource = {
+            let (cell, held, reads) = (
+                Arc::clone(&engine_cell),
+                Arc::clone(&held),
+                Arc::clone(&reads),
+            );
+            Arc::new(move || {
+                if let Some(engine) = cell.get().and_then(std::sync::Weak::upgrade) {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    // A lock that cannot be taken here is held by the caller.
+                    if engine.state.try_lock().is_err() {
+                        held.store(true, Ordering::SeqCst);
+                    }
+                }
+                base.clone()
+            })
+        };
+        let engine = PushEngine::new(source, "local".into(), None).expect("an enabled engine");
+        engine_cell.set(Arc::downgrade(&engine)).unwrap();
+
+        engine.step_at(Utc::now()).await;
+        engine.run(Utc::now());
+
+        assert!(reads.load(Ordering::SeqCst) >= 2, "the config was read");
+        assert!(
+            !held.load(Ordering::SeqCst),
+            "the config source ran with the engine's state lock held"
+        );
+    }
+
+    #[test]
+    fn a_config_that_stops_parsing_keeps_the_last_good_table_and_a_fixed_one_is_picked_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let startup = pc("http://relay.example", dir.path());
+        let answers: Arc<Mutex<Vec<anyhow::Result<Option<PushConfig>>>>> =
+            Arc::new(Mutex::new(vec![
+                Err(anyhow::anyhow!("expected `=` at line 3")),
+                Ok(None),
+                Ok(Some(PushConfig {
+                    grace_secs: Some(7),
+                    ..startup.clone()
+                })),
+            ]));
+        let source = {
+            let answers = Arc::clone(&answers);
+            config_reloading(startup.clone(), Duration::ZERO, move || {
+                answers.lock().unwrap().remove(0)
+            })
+        };
+        assert_eq!(
+            source().grace_secs,
+            None,
+            "a parse error keeps the last good table"
+        );
+        assert_eq!(source().grace_secs, None, "an absent table keeps it too");
+        assert_eq!(
+            source().grace_secs,
+            Some(7),
+            "a fixed file is picked up without a restart"
+        );
+    }
+
+    #[test]
+    fn the_table_is_re_read_at_most_once_per_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let loads = Arc::new(AtomicUsize::new(0));
+        let source = {
+            let loads = Arc::clone(&loads);
+            config_reloading(
+                pc("http://relay.example", dir.path()),
+                Duration::from_secs(3600),
+                move || {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    Ok(None)
+                },
+            )
+        };
+        for _ in 0..5 {
+            source();
+        }
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            0,
+            "inside the interval nothing is re-read"
+        );
+    }
 }

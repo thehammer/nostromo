@@ -3236,3 +3236,48 @@ async fn a_satellite_restart_neither_withdraws_nor_re_pushes_what_the_primary_re
     let (items, badge) = rig.waiting("dev-1");
     assert_eq!((items.len(), badge), (2, 2));
 }
+
+// ── the kill switch is live ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn turning_enabled_off_in_the_config_stops_pushes_without_a_restart_and_back_on_does_not_flood() {
+    let mut rig = Rig::new().await;
+    let t0 = base();
+    rig.register("dev-1", &token_a());
+    rig.start(&["kobe"], t0).await;
+
+    rig.engine.ingest(
+        jobs_frame(Some("kobe"), vec![awaiting("aaaa0001", t0)]),
+        t0,
+    );
+    rig.cfg.lock().unwrap().enabled = false;
+    rig.engine.step_at(t0).await;
+    rig.engine.step_at(t0 + secs(120)).await;
+    rig.engine.step_at(t0 + secs(600)).await;
+    assert!(
+        rig.posts().await.is_empty(),
+        "disabled in the config: nothing is sent, and the engine was not restarted"
+    );
+
+    // Back on: what arrived while it was off is not news, what arrives now is.
+    rig.cfg.lock().unwrap().enabled = true;
+    rig.engine.step_at(t0 + secs(700)).await;
+    rig.engine.step_at(t0 + secs(900)).await;
+    assert!(
+        rig.posts().await.is_empty(),
+        "turning it back on does not push everything that waited: {:#?}",
+        rig.posts().await
+    );
+    rig.engine.ingest(
+        jobs_frame(
+            Some("kobe"),
+            vec![awaiting("aaaa0001", t0), awaiting("aaaa0002", t0 + secs(950))],
+        ),
+        t0 + secs(950),
+    );
+    rig.engine.step_at(t0 + secs(950)).await;
+    rig.engine.step_at(t0 + secs(1080)).await;
+    let posts = rig.posts().await;
+    assert_eq!(posts.len(), 1, "{posts:#?}");
+    assert!(posts[0]["body"].as_str().unwrap().contains("aaaa0002"));
+}

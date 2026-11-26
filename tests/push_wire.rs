@@ -916,13 +916,17 @@ const PUSH_SOURCES: [(&str, &str); 10] = [
 #[test]
 fn the_push_engine_source_builds_no_answer_and_sends_only_relay_requests() {
     // A file added to src/push/ must be added to the list above, or it escapes the scan.
-    let mut on_disk: Vec<String> = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src/push"))
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
+    let mut on_disk: Vec<String> =
+        std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src/push"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
     on_disk.sort();
     let listed: Vec<String> = PUSH_SOURCES.iter().map(|(n, _)| n.to_string()).collect();
-    assert_eq!(on_disk, listed, "src/push/ changed: list the new file in PUSH_SOURCES");
+    assert_eq!(
+        on_disk, listed,
+        "src/push/ changed: list the new file in PUSH_SOURCES"
+    );
 
     for (name, src) in PUSH_SOURCES {
         assert_eq!(engine_answer_violations(name, src), Vec::<String>::new());
