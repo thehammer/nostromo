@@ -140,7 +140,7 @@ public final class PushModel: ObservableObject {
 
     /// The delivered notifications to remove: those naming an item that is no longer waiting. A
     /// summary stays (it is not one item). `delivered` is each delivered notification's payload.
-    public static func staleItems(delivered: [PushPayload], waiting: [PushWaitingItemWire]) -> [String] {
+    nonisolated public static func staleItems(delivered: [PushPayload], waiting: [PushWaitingItemWire]) -> [String] {
         let live = Set(waiting.map(\.itemRef))
         return delivered
             .filter { $0.kind != .summary && !live.contains($0.item) }
@@ -149,7 +149,7 @@ public final class PushModel: ObservableObject {
 
     /// The banner for notifications that are not getting through: shown when the failure is older than
     /// 15 minutes. `Notifications haven't been delivered since 2:14 pm`.
-    public static func bannerText(failingSince: Date?, now: Date, timeZone: TimeZone = .current) -> String? {
+    nonisolated public static func bannerText(failingSince: Date?, now: Date, timeZone: TimeZone = .current) -> String? {
         guard let since = failingSince, now.timeIntervalSince(since) > 15 * 60 else { return nil }
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
@@ -161,7 +161,7 @@ public final class PushModel: ObservableObject {
     }
 
     /// `Details stay on kobe`: how the settings screen lists a work host (no toggle, operator Q3).
-    public static func workHosts(in classes: [String: HostClassWire], seen: [String]) -> [String] {
+    nonisolated public static func workHosts(in classes: [String: HostClassWire], seen: [String]) -> [String] {
         Set(seen + classes.keys).filter { classes[$0] != .personal }.sorted()
     }
 }
