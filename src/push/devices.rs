@@ -50,6 +50,10 @@ struct File {
 pub struct DeviceStore {
     path: PathBuf,
     devices: BTreeMap<String, PushDevice>,
+    /// Set when the file existed but could not be read or parsed: the registrations
+    /// in it are unknown, so nothing is written over it until the operator has
+    /// moved or fixed it. (A copy is kept beside it.)
+    unreadable: Option<String>,
 }
 
 /// An APNs token as the phone sends it: non-empty hex, bounded.
@@ -73,15 +77,57 @@ pub fn sanitize_prefs(prefs: PushPrefs) -> Option<PushPrefs> {
 }
 
 impl DeviceStore {
-    /// The records at `path`; none if the file is missing or unreadable.
+    /// The records at `path`; none if the file is missing. A file that exists but
+    /// cannot be read or parsed is NOT treated as empty: it is logged at error,
+    /// copied to `devices.json.corrupt-<unix seconds>`, and every save is refused
+    /// until the operator moves or removes it (the next save would otherwise wipe
+    /// every phone's registration).
     pub fn load(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let devices = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<File>(&bytes).ok())
-            .map(|f| f.devices)
-            .unwrap_or_default();
-        Self { path, devices }
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Self {
+                    path,
+                    devices: BTreeMap::new(),
+                    unreadable: None,
+                };
+            }
+            Err(e) => return Self::unreadable(path, None, format!("{e}")),
+        };
+        match serde_json::from_slice::<File>(&bytes) {
+            Ok(file) => Self {
+                path,
+                devices: file.devices,
+                unreadable: None,
+            },
+            Err(e) => Self::unreadable(path, Some(bytes), format!("{e}")),
+        }
+    }
+
+    fn unreadable(path: PathBuf, bytes: Option<Vec<u8>>, why: String) -> Self {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let aside = PathBuf::from(format!("{}.corrupt-{stamp}", path.display()));
+        let kept = bytes
+            .as_deref()
+            .is_some_and(|b| write_private_atomic(&aside, b).is_ok());
+        tracing::error!(
+            path = %path.display(),
+            "push registrations are unreadable ({why}); not starting from an empty store. {} \
+             Registrations are not saved until this file is moved or removed.",
+            if kept {
+                format!("A copy is at {}.", aside.display())
+            } else {
+                "No copy could be made.".to_string()
+            }
+        );
+        Self {
+            path,
+            devices: BTreeMap::new(),
+            unreadable: Some(why),
+        }
     }
 
     pub fn get(&self, device_id: &str) -> Option<&PushDevice> {
@@ -163,7 +209,17 @@ impl DeviceStore {
         Ok(removed)
     }
 
-    fn save(&self) -> Result<()> {
+    fn save(&mut self) -> Result<()> {
+        if let Some(why) = &self.unreadable {
+            // Handled once the operator has moved or removed the unreadable file.
+            if self.path.exists() {
+                anyhow::bail!(
+                    "{} is unreadable ({why}); move or remove it, then register again",
+                    self.path.display()
+                );
+            }
+            self.unreadable = None;
+        }
         write_private_atomic(
             &self.path,
             &serde_json::to_vec_pretty(&File {
@@ -235,6 +291,57 @@ mod tests {
             PushCapabilities::default(),
         )
         .unwrap()
+    }
+
+    // ── an unreadable file ───────────────────────────────────────────────────
+
+    #[test]
+    fn a_corrupt_devices_file_is_kept_aside_and_never_overwritten_until_handled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        std::fs::write(&path, b"{ not json, but somebody's registrations").unwrap();
+
+        let mut s = DeviceStore::load(&path);
+        assert!(s.ids().is_empty());
+        let aside: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.to_string_lossy().contains(".corrupt-"))
+            .collect();
+        assert_eq!(aside.len(), 1, "a copy is kept beside it");
+        assert_eq!(
+            std::fs::read(&aside[0]).unwrap(),
+            b"{ not json, but somebody's registrations"
+        );
+
+        // A registration is refused rather than wiping what the file held.
+        let err = s
+            .register(
+                "dev-1",
+                &token(),
+                PushEnvironment::Sandbox,
+                "UTC",
+                PushCapabilities::default(),
+            )
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("unreadable"), "{err:#}");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"{ not json, but somebody's registrations",
+            "the file is untouched"
+        );
+
+        // Handled: the operator moves it away, and saving works again.
+        std::fs::remove_file(&path).unwrap();
+        assert!(register(&mut s, "dev-1", &token(), "UTC"));
+        assert!(DeviceStore::load(&path).get("dev-1").is_some());
+    }
+
+    #[test]
+    fn a_missing_devices_file_is_simply_empty_and_saves() {
+        let (_dir, mut s) = store();
+        assert!(s.ids().is_empty());
+        assert!(register(&mut s, "dev-1", &token(), "UTC"));
     }
 
     // ── tokens ───────────────────────────────────────────────────────────────

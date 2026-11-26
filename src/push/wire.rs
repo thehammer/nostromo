@@ -28,6 +28,8 @@ pub enum AgentClass {
     Fred,
     Teri,
     Claudia,
+    /// Also what a class this build does not know decodes to.
+    #[serde(other)]
     Other,
 }
 
@@ -245,6 +247,14 @@ fn default_tz() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_class_from_a_newer_build_reads_as_other() {
+        let class: AgentClass = serde_json::from_str("\"robot_butler\"").unwrap();
+        assert_eq!(class, AgentClass::Other);
+        let known: AgentClass = serde_json::from_str("\"perri\"").unwrap();
+        assert_eq!(known, AgentClass::Perri);
+    }
 
     #[test]
     fn an_agent_name_maps_to_the_fixed_set_ignoring_case_and_padding() {

@@ -153,6 +153,19 @@ where
         .collect())
 }
 
+/// Decode an optional field leniently: a value this build cannot read (an enum
+/// variant or timestamp format only a newer peer sends) becomes `None` instead
+/// of failing the whole frame. Used for the W13 facts on `DecisionRequest`, so
+/// a newer satellite's decision still reaches the primary.
+fn lenient_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw.and_then(|v| serde_json::from_value(v).ok()))
+}
+
 /// Decode `Subscribe.resume` leniently: a topic this build does not know (a
 /// newer client's) or a value that is not an unsigned integer is dropped
 /// instead of failing the whole frame.
@@ -3569,14 +3582,26 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host: Option<String>,
         /// When the asking agent stops waiting (W13). Absent: no timeout.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
         deadline: Option<chrono::DateTime<chrono::Utc>>,
         /// The asking agent mapped to a fixed set on the originating daemon (W13).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
         agent_class: Option<crate::push::wire::AgentClass>,
         /// Whether the Mac(s) presenting decisions are being used (W13, S7a).
         /// Stripped from the frame before any `Paired` or `Tcp` peer gets it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
         operator_presence: Option<crate::push::wire::Presence>,
         /// The focus's project repository name, and its `github.com` owner
         /// (resolved locally from the `origin` remote): only so the primary can
@@ -6216,6 +6241,62 @@ mod tests {
             repo: None,
             repo_owner: None,
         });
+    }
+
+    #[test]
+    fn a_decision_request_with_facts_this_build_cannot_read_still_decodes_without_them() {
+        // A newer satellite's agent class, presence word or deadline format must not
+        // make the primary lose the decision itself.
+        let frame = serde_json::json!({
+            "type": "decision_request",
+            "tag": "mother",
+            "request_id": "req-9",
+            "prompt": "Ship it?",
+            "choices": [],
+            "deadline": "soon",
+            "agent_class": "robot_butler",
+            "operator_presence": "napping",
+            "repo": "admin-portal",
+        });
+        match serde_json::from_value::<ServerMsg>(frame).expect("the decision still decodes") {
+            ServerMsg::DecisionRequest {
+                request_id,
+                deadline,
+                agent_class,
+                operator_presence,
+                repo,
+                ..
+            } => {
+                assert_eq!(request_id, "req-9");
+                assert_eq!(repo.as_deref(), Some("admin-portal"));
+                assert_eq!(deadline, None);
+                assert_eq!(agent_class, None);
+                assert_eq!(operator_presence, None);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_decision_request_still_reads_the_facts_it_knows() {
+        let frame = serde_json::json!({
+            "type": "decision_request", "tag": "t", "request_id": "r", "prompt": "p",
+            "choices": [], "deadline": "2026-11-26T18:00:00Z",
+            "agent_class": "perri", "operator_presence": "away",
+        });
+        match serde_json::from_value::<ServerMsg>(frame).unwrap() {
+            ServerMsg::DecisionRequest {
+                deadline,
+                agent_class,
+                operator_presence,
+                ..
+            } => {
+                assert!(deadline.is_some());
+                assert_eq!(agent_class, Some(crate::push::wire::AgentClass::Perri));
+                assert_eq!(operator_presence, Some(crate::push::wire::Presence::Away));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
