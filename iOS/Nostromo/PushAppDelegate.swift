@@ -17,6 +17,13 @@ import UserNotifications
 import Combine
 import NostromoKit
 
+extension SharedPushState {
+    /// The App Group's defaults, shared with the Notification Service Extension.
+    static var app: SharedPushState {
+        SharedPushState(defaults: UserDefaults(suiteName: SharedPushState.defaultAppGroup) ?? .standard)
+    }
+}
+
 /// Holds the model the delegate reports to. `AppSession` sets `model` when the phone is paired and
 /// clears it when it is not.
 @MainActor
@@ -75,6 +82,7 @@ final class PushCoordinator {
     /// to this install, and the token is forgotten. (The primary deletes the device's push record when
     /// it is revoked or unpaired, so it sends nothing more.)
     func reset() {
+        SharedPushState.app.clear()
         let center = UNUserNotificationCenter.current()
         center.removeAllDeliveredNotifications()
         center.removeAllPendingNotificationRequests()

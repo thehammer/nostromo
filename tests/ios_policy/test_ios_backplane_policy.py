@@ -14,8 +14,8 @@ sentence lives in Kit's `PairingCopy.notShared` exactly as written.
 
 W11 fix round 1 adds five more source checks (each with a "bites" test):
   - the client's `allowedTypes` equals the daemon's `NETWORK_ALLOWED` (`src/ipc/peer.rs`), and its
-    separate `pairedDeviceTypes` is exactly the four W13 push verbs (`register_push`,
-    `set_push_prefs`, `push_sent_log`, `push_waiting`), none of them in `NETWORK_ALLOWED`, and
+    separate `pairedDeviceTypes` is exactly the five push verbs (W13's `register_push`,
+    `set_push_prefs`, `push_sent_log`, `push_waiting` and W16's `push_detail`), none of them in `NETWORK_ALLOWED`, and
     `operator_presence` in neither list;
   - `Info.plist` allows local networking for App Transport Security and never arbitrary loads;
   - the pairing start screen reaches the legacy local-network transport;
@@ -120,7 +120,7 @@ def allow_list_violations(rust_source, swift_source):
     return out
 
 
-PUSH_VERBS = {"register_push", "set_push_prefs", "push_sent_log", "push_waiting"}
+PUSH_VERBS = {"register_push", "set_push_prefs", "push_sent_log", "push_waiting", "push_detail"}
 SWIFT_PAIRED_RE = re.compile(r"static let pairedDeviceTypes: Set<String> = \[(.*?)\]", re.S)
 
 
@@ -133,7 +133,7 @@ def swift_paired_device_types(source):
 
 
 def paired_device_violations(rust_source, swift_source):
-    """`pairedDeviceTypes` is exactly the four push verbs, outside NETWORK_ALLOWED and `allowedTypes`;
+    """`pairedDeviceTypes` is exactly the five push verbs, outside NETWORK_ALLOWED and `allowedTypes`;
     `operator_presence` (the Mac app's verb) is on neither list."""
     paired = swift_paired_device_types(swift_source)
     allowed = swift_allowed_types(swift_source)
@@ -254,10 +254,10 @@ class OutboundAllowListTests(unittest.TestCase):
         def swift(paired, allowed='"hello"'):
             return ('static let allowedTypes: Set<String> = [%s]\n'
                     'static let pairedDeviceTypes: Set<String> = [%s]' % (allowed, paired))
-        four = '"register_push", "set_push_prefs", "push_sent_log", "push_waiting"'
+        four = '"register_push", "set_push_prefs", "push_sent_log", "push_waiting", "push_detail"'
         self.assertEqual(paired_device_violations(rust, swift(four)), [])
         self.assertEqual(len(paired_device_violations(rust, swift(four + ', "mother_action"'))), 1)
-        self.assertEqual(len(paired_device_violations(rust, swift('"register_push", "set_push_prefs", "push_waiting"'))), 1)
+        self.assertEqual(len(paired_device_violations(rust, swift('"register_push", "set_push_prefs", "push_waiting", "push_detail"'))), 1)
         self.assertEqual(len(paired_device_violations(rust, swift(four + ', "operator_presence"'))), 2)
         self.assertEqual(len(paired_device_violations(rust, swift(four, '"hello", "push_waiting"'))), 1)
         self.assertEqual(len(paired_device_violations(

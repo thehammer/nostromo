@@ -100,17 +100,26 @@ struct NotificationSettingsView: View {
                 let classes = status.hostClasses
                 let seen = store.hostInfos.map(\.name)
                 ForEach(Array(Set(seen + classes.keys)).sorted(), id: \.self) { host in
-                    HStack {
-                        Text(host)
-                        Spacer()
-                        if classes[host] == .personal {
-                            Text("Personal").foregroundStyle(.secondary)
-                        } else {
+                    if classes[host] == .personal {
+                        // Personal hosts only (operator Q3): on by default, and enforced by the
+                        // notification extension on this phone.
+                        Toggle(isOn: Binding(
+                            get: { push.enrichment.isEnabled(host: host) },
+                            set: { push.setDetails($0, host: host) })) {
+                            VStack(alignment: .leading) {
+                                Text(host)
+                                Text("Show full details").font(.footnote).foregroundStyle(.secondary)
+                            }
+                        }
+                    } else {
+                        HStack {
+                            Text(host)
+                            Spacer()
                             Text("Details stay on \(host)").foregroundStyle(.secondary)
                         }
                     }
                 }
-                Text("Which machines are personal, and which owners count as work, is set on the primary.")
+                Text("Which machines are personal, and which owners count as work, is set on the primary. Full details are fetched from your Mac over the VPN as a notification arrives, and never pass through Apple.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             Section("Work owners") {

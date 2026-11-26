@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		BP1600000000000000000021 /* NotificationExtensionBundleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP1600000000000000000020 /* NotificationExtensionBundleTests.swift */; };
+		BP1600000000000000000002 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP1600000000000000000001 /* NotificationService.swift */; };
+		BP1600000000000000000006 /* NostromoNotificationService.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = BP1600000000000000000005 /* NostromoNotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		BP160000000000000000000A /* NostromoKit in Frameworks */ = {isa = PBXBuildFile; productRef = BP160000000000000000000B /* NostromoKit */; };
 		5318BC5A2FD5A28A00957D5C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5318BC592FD5A28A00957D5C /* Assets.xcassets */; };
 		AA000001000000000000000B /* NostromoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000000A /* NostromoApp.swift */; };
 		AA000001000000000000000D /* FocusListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000000C /* FocusListView.swift */; };
@@ -62,6 +66,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		BP1600000000000000000011 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AA000001000000000000004A /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = BP160000000000000000000C;
+			remoteInfo = NostromoNotificationService;
+		};
 		AC0000010000000000000006 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = AA000001000000000000004A /* Project object */;
@@ -71,7 +82,26 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		BP1600000000000000000010 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				BP1600000000000000000006 /* NostromoNotificationService.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		BP1600000000000000000020 /* NotificationExtensionBundleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationExtensionBundleTests.swift; sourceTree = "<group>"; };
+		BP1600000000000000000001 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
+		BP1600000000000000000003 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		BP1600000000000000000004 /* NostromoNotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NostromoNotificationService.entitlements; sourceTree = "<group>"; };
+		BP1600000000000000000005 /* NostromoNotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NostromoNotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		5318BC592FD5A28A00957D5C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		AA000001000000000000000A /* NostromoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostromoApp.swift; sourceTree = "<group>"; };
 		AA000001000000000000000C /* FocusListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusListView.swift; sourceTree = "<group>"; };
@@ -129,6 +159,14 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		BP1600000000000000000009 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BP160000000000000000000A /* NostromoKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		AA000001000000000000001E /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -147,11 +185,22 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		BP1600000000000000000007 /* NostromoNotificationService */ = {
+			isa = PBXGroup;
+			children = (
+				BP1600000000000000000001 /* NotificationService.swift */,
+				BP1600000000000000000003 /* Info.plist */,
+				BP1600000000000000000004 /* NostromoNotificationService.entitlements */,
+			);
+			path = NostromoNotificationService;
+			sourceTree = "<group>";
+		};
 		AA000001000000000000002A /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				AA00000100000000000000A0 /* Nostromo.app */,
 				AC0000010000000000000005 /* NostromoTests.xctest */,
+				BP1600000000000000000005 /* NostromoNotificationService.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -229,6 +278,7 @@
 			children = (
 				AA000001000000000000002B /* Nostromo */,
 				AC0000010000000000000009 /* NostromoTests */,
+				BP1600000000000000000007 /* NostromoNotificationService */,
 				AA000001000000000000002A /* Products */,
 			);
 			sourceTree = "<group>";
@@ -236,6 +286,7 @@
 		AC0000010000000000000009 /* NostromoTests */ = {
 			isa = PBXGroup;
 			children = (
+				BP1600000000000000000020 /* NotificationExtensionBundleTests.swift */,
 				B20000000000000000000211 /* LoopbackWebSocketServer.swift */,
 				B20000000000000000000213 /* AppTransportSecurityTests.swift */,
 				B20000000000000000000215 /* AppSessionLaunchTests.swift */,
@@ -273,10 +324,12 @@
 				AA000001000000000000001C /* Sources */,
 				AA000001000000000000001E /* Frameworks */,
 				AA000001000000000000001F /* Resources */,
+				BP1600000000000000000010 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				BP1600000000000000000012 /* PBXTargetDependency */,
 			);
 			name = Nostromo;
 			packageProductDependencies = (
@@ -303,6 +356,25 @@
 			productReference = AC0000010000000000000005 /* NostromoTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		BP160000000000000000000C /* NostromoNotificationService */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BP160000000000000000000D /* Build configuration list for PBXNativeTarget "NostromoNotificationService" */;
+			buildPhases = (
+				BP1600000000000000000008 /* Sources */,
+				BP1600000000000000000009 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = NostromoNotificationService;
+			packageProductDependencies = (
+				BP160000000000000000000B /* NostromoKit */,
+			);
+			productName = NostromoNotificationService;
+			productReference = BP1600000000000000000005 /* NostromoNotificationService.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -314,6 +386,9 @@
 				LastUpgradeCheck = 2640;
 				TargetAttributes = {
 					AA000001000000000000003A = {
+						CreatedOnToolsVersion = 16.0;
+					};
+					BP160000000000000000000C = {
 						CreatedOnToolsVersion = 16.0;
 					};
 					AC000001000000000000000A = {
@@ -340,6 +415,7 @@
 			targets = (
 				AA000001000000000000003A /* Nostromo */,
 				AC000001000000000000000A /* NostromoTests */,
+				BP160000000000000000000C /* NostromoNotificationService */,
 			);
 		};
 /* End PBXProject section */
@@ -356,6 +432,14 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		BP1600000000000000000008 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BP1600000000000000000002 /* NotificationService.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		AA000001000000000000001C /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -408,6 +492,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				BP1600000000000000000021 /* NotificationExtensionBundleTests.swift in Sources */,
 				AC0000010000000000000001 /* NostromoSmokeTests.swift in Sources */,
 				B20000000000000000000212 /* LoopbackWebSocketServer.swift in Sources */,
 				B20000000000000000000214 /* AppTransportSecurityTests.swift in Sources */,
@@ -423,6 +508,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		BP1600000000000000000012 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = BP160000000000000000000C /* NostromoNotificationService */;
+			targetProxy = BP1600000000000000000011 /* PBXContainerItemProxy */;
+		};
 		AC0000010000000000000007 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = AA000001000000000000003A /* Nostromo */;
@@ -664,6 +754,60 @@
 			};
 			name = Release;
 		};
+		BP160000000000000000000E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = NostromoNotificationService/NostromoNotificationService.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = NostromoNotificationService/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = NostromoNotificationService;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.hammer.nostromo.ios.NotificationService;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		BP160000000000000000000F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = NostromoNotificationService/NostromoNotificationService.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = NostromoNotificationService/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = NostromoNotificationService;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.hammer.nostromo.ios.NotificationService;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -694,6 +838,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		BP160000000000000000000D /* Build configuration list for PBXNativeTarget "NostromoNotificationService" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BP160000000000000000000E /* Debug */,
+				BP160000000000000000000F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -705,6 +858,11 @@
 
 /* Begin XCSwiftPackageProductDependency section */
 		AA00000100000000000000AA /* NostromoKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA00000100000000000000A9 /* XCLocalSwiftPackageReference "../Shared/NostromoKit" */;
+			productName = NostromoKit;
+		};
+		BP160000000000000000000B /* NostromoKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = AA00000100000000000000A9 /* XCLocalSwiftPackageReference "../Shared/NostromoKit" */;
 			productName = NostromoKit;
