@@ -26,3 +26,6 @@ iOS/Nostromo.xcodeproj/xcuserdata/
 # rwx sandbox local files (logs from `rwx logs`, sync state and patch-rejected diffs)
 .rwx/downloads/
 .rwx/sandboxes/
+
+# The push relay (W13) is its own crate; its build output is not synced or tracked.
+/infra/push-relay/target

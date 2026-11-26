@@ -1,0 +1,53 @@
+# The push relay (W13): a stateless AWS Lambda between the Nostromo primary and
+# Apple's push service. A standalone crate, NOT a member of the daemon's build
+# (the daemon is a single crate, not a workspace); build and test it on its own:
+#
+#   cargo test --manifest-path infra/push-relay/Cargo.toml
+#   cargo lambda build --release --arm64      # in infra/push-relay (see README.md)
+#
+# The handler logic (`lib.rs`) has no AWS dependency: the DynamoDB and Secrets
+# Manager implementations are behind the `aws` feature (on by default), so tests
+# of the handler can run with `--no-default-features` and compile quickly.
+[package]
+name = "push-relay"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Stateless relay from the Nostromo primary to APNs: closed-vocabulary notifications only"
+
+[features]
+default = ["aws"]
+aws = ["dep:tracing-subscriber", "dep:aws-config", "dep:aws-sdk-dynamodb", "dep:aws-sdk-secretsmanager", "dep:lambda_http"]
+
+[dependencies]
+async-trait = "0.1"
+jsonwebtoken = "9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+tracing = "0.1"
+
+aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
+aws-sdk-dynamodb = { version = "1", optional = true }
+aws-sdk-secretsmanager = { version = "1", optional = true }
+lambda_http = { version = "0.14", optional = true }
+tracing-subscriber = { version = "0.3", features = ["json", "fmt"], optional = true }
+
+[dev-dependencies]
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+wiremock = "0.6"
+
+[[bin]]
+name = "bootstrap"
+path = "src/main.rs"
+required-features = ["aws"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
