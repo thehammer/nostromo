@@ -77,32 +77,35 @@ spend. The function URL is public (`AuthType: NONE`), so every request anyone se
 billed: the concurrency cap and the budget are the tripwires. Note the
 `FunctionUrl`, `DaemonTokenSecretArn` and `ApnsSecretArn` outputs.
 
-### A new AWS account: "decreases account's UnreservedConcurrentExecution"
+### A new AWS account: reserved concurrency needs a quota increase
 
 The function reserves 5 of the account's concurrent executions
-(`ReservedConcurrentExecutions: 5`), and Lambda will not let a reservation take the
-account's *unreserved* concurrency below its minimum (10 on an account whose quota is
-still the new-account default of 10). So on a brand-new account the deploy rolls back
-with `PushRelayFunction` in `CREATE_FAILED` and this message in the stack events:
+(`ReservedConcurrentExecutions: 5`). Lambda always keeps 100 units unreserved, whatever
+the account's limit, so you can reserve at most *(unreserved account concurrency − 100)*
+([AWS docs](https://docs.aws.amazon.com/lambda/latest/dg/configuration-concurrency.html)).
+A new account whose quota is still the low default (for example 10) cannot reserve
+anything, so the deploy rolls back with `PushRelayFunction` in `CREATE_FAILED` (you may see
+an error like "decreases account's UnreservedConcurrentExecution below its minimum value").
+Lowering the reservation does not help.
 
-```
-Specified ReservedConcurrentExecutions for function decreases account's
-UnreservedConcurrentExecution below its minimum value of [10].
+Before deploying, check the account (read-only):
+
+```bash
+aws lambda get-account-settings   # read AccountLimit.UnreservedConcurrentExecutions
 ```
 
-(The number in brackets is the account's minimum, 10 or 100.) Lowering the reservation
-does not help: with a quota of 10 no reservation, however small, leaves 10 unreserved.
-Either:
+If it is 105 or more (most established accounts default to 1,000) there is nothing to do.
+If it is below 105, either:
 
 1. **Request a quota increase** (the fix): *Service Quotas* → *AWS Lambda* →
-   *Concurrent executions* → request at least 15 (the 5 reserved here plus the minimum
-   10 unreserved; 110 if the message said 100). Approval is usually minutes to a day. Then
-   `sam deploy` again (a stack that rolled back on creation must be deleted first:
-   `sam delete`).
+   *Concurrent executions* → request at least 105 (100 always unreserved plus the 5
+   reserved here), *before* `sam deploy`. Approval is usually minutes to a day. A stack
+   that rolled back on creation must be deleted first: `sam delete`.
 2. **Or deploy without the cap** until the increase lands: remove the
-   `ReservedConcurrentExecutions: 5` line from `template.yaml`. The function URL is then
-   limited only by the account's quota, so the monthly cost budget is the only tripwire:
-   put the line back once the quota allows it.
+   `ReservedConcurrentExecutions: 5` line from `template.yaml` (the template has no
+   parameter for it). The function URL is then limited only by the account's quota, so the
+   monthly cost budget is the only spend limit: put the line back once the quota allows it.
+
 
 ## 3. Fill in the secrets
 
