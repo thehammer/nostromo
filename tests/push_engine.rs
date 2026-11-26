@@ -2951,6 +2951,32 @@ async fn a_satellite_that_is_gone_and_silent_is_forgotten_and_its_items_stop_cou
 }
 
 #[tokio::test]
+async fn a_restart_just_after_the_evening_summary_time_does_not_send_the_summary_again() {
+    // The daemon starts at 17:35 UTC, five minutes after the 17:30 summary, with
+    // something waiting. The device's first step only baselines: the summary is
+    // marked done, not sent (it was sent, or not, before the restart).
+    let mut rig = Rig::new().await;
+    let t = Utc::now()
+        .date_naive()
+        .and_hms_opt(17, 35, 0)
+        .unwrap()
+        .and_utc();
+    rig.register("dev-1", &token_a());
+    rig.engine.ingest(
+        jobs_frame(Some("kobe"), vec![awaiting("aaaa0001", t - secs(3600))]),
+        t,
+    );
+    rig.engine.step_at(t).await;
+    rig.engine.step_at(t + secs(30)).await;
+    assert!(
+        rig.posts().await.is_empty(),
+        "the baseline step sends no summary: {:#?}",
+        rig.posts().await
+    );
+    assert_eq!(rig.waiting("dev-1").1, 1, "but the item is counted");
+}
+
+#[tokio::test]
 async fn a_satellite_that_comes_back_after_being_forgotten_is_baselined_again() {
     // What it reports on coming back was already waiting; none of it is news.
     // (If the forgotten host stayed "seeded", every job it still has would be pushed.)
