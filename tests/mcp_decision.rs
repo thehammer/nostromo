@@ -33,6 +33,9 @@ use tokio::sync::broadcast;
 struct Harness {
     state: McpSharedState,
     decisions: Arc<Mutex<DecisionRegistry>>,
+    /// The daemon's broadcast sender: a test subscribes to see what `ask_decision` broadcasts.
+    tx: broadcast::Sender<ServerMsg>,
+    session_mgr: Arc<Mutex<SessionManager>>,
     _dir: TempDir,
 }
 
@@ -49,8 +52,8 @@ fn make_daemon_state() -> Harness {
 
     let backend = DaemonMcpBackend {
         pane_registry,
-        session_mgr,
-        broadcast_tx,
+        session_mgr: Arc::clone(&session_mgr),
+        broadcast_tx: broadcast_tx.clone(),
         perri: nostromo::mcp::PerriDaemonState::default(),
         decisions: decisions.clone(),
         tickets: Default::default(),
@@ -60,6 +63,8 @@ fn make_daemon_state() -> Harness {
     Harness {
         state: McpSharedState::for_daemon(backend),
         decisions,
+        tx: broadcast_tx,
+        session_mgr,
         _dir: dir,
     }
 }
@@ -1263,5 +1268,281 @@ async fn a_connection_whose_second_frame_is_ping_instead_of_subscribe_does_not_c
     .await
     .expect("a ping-only connection must not count as an operator, so this must fail fast");
 
+    assert_eq!(result["error"], "no_operator");
+}
+
+// ── W13: the closed-vocabulary facts `ask_decision` stamps for the push engine ──
+//
+// A decision's deadline (when the asker stops waiting), the asking agent mapped
+// to a fixed set on the originating daemon, and the repository's owner read from
+// the focus's local `origin` remote. The agent's own session name, the project
+// path and the prompt are not among them.
+
+/// Call `ask_decision` with `args`, return the `DecisionRequest` it broadcast and
+/// the time window around the call, then dismiss it so the call ends.
+async fn ask_and_read_frame(
+    harness: &Harness,
+    args: Value,
+) -> (
+    ServerMsg,
+    chrono::DateTime<chrono::Utc>,
+    chrono::DateTime<chrono::Utc>,
+) {
+    let mut rx = harness.tx.subscribe();
+    let before = chrono::Utc::now();
+    let state = harness.state.clone();
+    let call = tokio::spawn(async move {
+        nostromo::mcp::tools::ask_decision::handle(&state, &args, None).await
+    });
+    let frame = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(m @ ServerMsg::DecisionRequest { .. }) => return m,
+                Ok(_) => {}
+                Err(e) => panic!("the broadcast channel failed: {e}"),
+            }
+        }
+    })
+    .await
+    .expect("a DecisionRequest was broadcast");
+    let after = chrono::Utc::now();
+    if let ServerMsg::DecisionRequest { request_id, .. } = &frame {
+        harness.decisions.lock().unwrap().answer(request_id, None);
+    }
+    let _ = call.await;
+    (frame, before, after)
+}
+
+fn ask_args_for(tag: &str, timeout_secs: Option<u64>) -> Value {
+    let mut v = json!({
+        "prompt": "MARKER-prompt",
+        "detail": "MARKER-detail",
+        "choices": [{"id": "yes", "label": "MARKER-yes"}, {"id": "no", "label": "MARKER-no"}],
+        "view_id": tag,
+    });
+    if let Some(t) = timeout_secs {
+        v["timeout_secs"] = json!(t);
+    }
+    v
+}
+
+fn operator_harness() -> Harness {
+    let h = make_daemon_state();
+    h.decisions.lock().unwrap().add_operator("operator-conn");
+    h
+}
+
+fn deadline_of(frame: &ServerMsg) -> Option<chrono::DateTime<chrono::Utc>> {
+    match frame {
+        ServerMsg::DecisionRequest { deadline, .. } => *deadline,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ask_decision_stamps_a_deadline_of_now_plus_the_timeout() {
+    let harness = operator_harness();
+    let (frame, before, after) =
+        ask_and_read_frame(&harness, ask_args_for("perri", Some(120))).await;
+    let deadline = deadline_of(&frame).expect("the deadline is stamped");
+    assert!(
+        deadline >= before + chrono::Duration::seconds(120)
+            && deadline <= after + chrono::Duration::seconds(120),
+        "deadline {deadline} is not now + 120 s (window {before} .. {after})"
+    );
+}
+
+#[tokio::test]
+async fn the_deadline_follows_the_default_and_the_clamped_timeouts() {
+    // (timeout_secs given, the seconds the deadline must be from now)
+    let cases: [(Option<u64>, i64); 4] = [
+        (None, 300),           // the default
+        (Some(100_000), 3600), // clamped to the maximum
+        (Some(0), 1),          // clamped to the minimum
+        (Some(45), 45),
+    ];
+    for (given, want) in cases {
+        let harness = operator_harness();
+        let (frame, before, after) =
+            ask_and_read_frame(&harness, ask_args_for("perri", given)).await;
+        let deadline = deadline_of(&frame).expect("the deadline is stamped");
+        assert!(
+            deadline >= before + chrono::Duration::seconds(want) && deadline <= after + chrono::Duration::seconds(want),
+            "timeout {given:?}: deadline {deadline} is not now + {want} s (window {before} .. {after})"
+        );
+    }
+}
+
+fn agent_class_of(frame: &ServerMsg) -> Option<nostromo::push::wire::AgentClass> {
+    match frame {
+        ServerMsg::DecisionRequest { agent_class, .. } => *agent_class,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ask_decision_stamps_the_agent_as_one_of_the_fixed_set_and_never_a_session_name() {
+    use nostromo::push::wire::AgentClass;
+    let harness = operator_harness();
+    // Built-in focuses are named by their agent; a dynamic one is `<agent>-<id>`.
+    for (tag, want) in [
+        ("perri", AgentClass::Perri),
+        ("claudia", AgentClass::Claudia),
+        ("mother", AgentClass::Mother),
+        ("fred", AgentClass::Fred),
+        ("teri", AgentClass::Teri),
+        ("claudia-3f2a", AgentClass::Claudia),
+        ("cody-3f2a", AgentClass::Other),
+        ("marty-secret-project", AgentClass::Other),
+    ] {
+        let (frame, _, _) = ask_and_read_frame(&harness, ask_args_for(tag, Some(30))).await;
+        assert_eq!(agent_class_of(&frame), Some(want), "{tag}");
+    }
+
+    // A focus the registry knows is classed by its agent, not by what it is called.
+    let focuses: Vec<nostromo::ipc::protocol::FocusMeta> = serde_json::from_value(json!([
+        {"tag": "x1", "display_name": "Claudia in my-secret-project", "agent_name": "claudia", "is_built_in": false},
+        {"tag": "x2", "display_name": "Secret-Agent-Man", "agent_name": "secret-agent-man", "is_built_in": false},
+    ]))
+    .unwrap();
+    harness
+        .session_mgr
+        .lock()
+        .unwrap()
+        .set_focus_registry(focuses);
+    let (frame, _, _) = ask_and_read_frame(&harness, ask_args_for("x1", Some(30))).await;
+    assert_eq!(agent_class_of(&frame), Some(AgentClass::Claudia));
+    let (frame, _, _) = ask_and_read_frame(&harness, ask_args_for("x2", Some(30))).await;
+    assert_eq!(agent_class_of(&frame), Some(AgentClass::Other));
+    let wire = serde_json::to_value(&frame).unwrap();
+    assert_eq!(
+        wire["agent_class"], "other",
+        "a fixed word on the wire: {wire}"
+    );
+    assert!(
+        !wire.to_string().to_lowercase().contains("secret"),
+        "the raw name leaked: {wire}"
+    );
+}
+
+fn run_git(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("git is available");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn focus_at(tag: &str, path: &std::path::Path) -> nostromo::ipc::protocol::FocusMeta {
+    serde_json::from_value(json!({
+        "tag": tag, "display_name": "Claudia", "agent_name": "claudia", "is_built_in": false,
+        "project_path": path.to_string_lossy(),
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn ask_decision_stamps_the_repository_and_owner_from_the_focuss_origin_remote_and_never_its_path(
+) {
+    let harness = operator_harness();
+    let work = TempDir::new().unwrap();
+    let mut focuses = Vec::new();
+    // (tag, origin remote, expected (repo, owner))
+    type Case<'a> = (&'a str, Option<&'a str>, Option<(&'a str, &'a str)>);
+    let cases: [Case; 4] = [
+        (
+            "p1",
+            Some("https://github.com/thehammer/bishop.git"),
+            Some(("bishop", "thehammer")),
+        ),
+        (
+            "p2",
+            Some("git@github.com:Carefeed/admin-portal.git"),
+            Some(("admin-portal", "Carefeed")),
+        ),
+        ("p3", None, None),
+        ("p4", Some("https://gitlab.com/thehammer/bishop.git"), None),
+    ];
+    for (tag, remote, _) in cases {
+        let dir = work.path().join(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        run_git(&dir, &["init", "-q"]);
+        if let Some(url) = remote {
+            run_git(&dir, &["remote", "add", "origin", url]);
+        }
+        focuses.push(focus_at(tag, &dir));
+    }
+    harness
+        .session_mgr
+        .lock()
+        .unwrap()
+        .set_focus_registry(focuses);
+    for (tag, _, want) in cases {
+        let (frame, _, _) = ask_and_read_frame(&harness, ask_args_for(tag, Some(30))).await;
+        match &frame {
+            ServerMsg::DecisionRequest {
+                repo, repo_owner, ..
+            } => {
+                assert_eq!(
+                    (repo.as_deref(), repo_owner.as_deref()),
+                    (want.map(|w| w.0), want.map(|w| w.1)),
+                    "{tag}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        // The project path never goes on the wire.
+        let text = serde_json::to_string(&frame).unwrap();
+        assert!(
+            !text.contains(work.path().to_str().unwrap()),
+            "{tag}: the path leaked: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_focus_that_is_not_a_repository_has_no_repository_and_costs_nothing() {
+    let harness = operator_harness();
+    let dir = TempDir::new().unwrap(); // not a git repository
+    harness
+        .session_mgr
+        .lock()
+        .unwrap()
+        .set_focus_registry(vec![focus_at("n1", dir.path())]);
+    let (frame, _, _) = ask_and_read_frame(&harness, ask_args_for("n1", Some(30))).await;
+    match &frame {
+        ServerMsg::DecisionRequest {
+            repo, repo_owner, ..
+        } => assert_eq!((repo.as_deref(), repo_owner.as_deref()), (None, None)),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn presence_reports_do_not_make_anyone_an_operator() {
+    // B10 / W13-19: only a verified app that renders decisions is an operator. A
+    // presence report on its own (or a phone that can receive a push) is not one.
+    let harness = make_daemon_state();
+    harness
+        .decisions
+        .lock()
+        .unwrap()
+        .set_presence("some-connection", nostromo::push::wire::Presence::Away);
+    let result = tokio::time::timeout(
+        Duration::from_millis(500),
+        nostromo::mcp::tools::ask_decision::handle(
+            &harness.state,
+            &ask_args_for("perri", Some(30)),
+            None,
+        ),
+    )
+    .await
+    .expect("with no operator the ask must fail fast");
     assert_eq!(result["error"], "no_operator");
 }

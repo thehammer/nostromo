@@ -118,6 +118,63 @@ fn nostromo_dir() -> PathBuf {
     home_dir().join(".nostromo")
 }
 
+/// The `[push]` table (W13). The key is `push.relay_url`, not the top-level
+/// `relay_url`, which is the GitHub relay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PushConfig {
+    /// The push relay's function URL. Absent: the engine does not start.
+    pub relay_url: Option<String>,
+    /// Where the relay's bearer token lives (default `~/.nostromo/push-relay-token`).
+    pub relay_token_path: Option<PathBuf>,
+    /// Kill switch (default `true`).
+    pub enabled: bool,
+    /// How the operator classified each host. An absent host is `work`.
+    pub hosts: std::collections::BTreeMap<String, crate::push::wire::HostClass>,
+    /// Owners whose repositories never show a name. `Carefeed` is always in
+    /// it: the list can only grow.
+    pub work_owners: Vec<String>,
+    /// Seconds a decision waits before it is pushed when the Mac is in use (default 30).
+    pub decision_grace_secs: Option<u64>,
+    /// Seconds a Mother job or review waits before it is pushed (default 120; tests only).
+    pub grace_secs: Option<u64>,
+    /// Where the device records and the sent log live (default `~/.nostromo/push`).
+    pub state_dir: Option<PathBuf>,
+}
+
+impl Default for PushConfig {
+    fn default() -> Self {
+        Self {
+            relay_url: None,
+            relay_token_path: None,
+            enabled: true,
+            hosts: Default::default(),
+            work_owners: Vec::new(),
+            decision_grace_secs: None,
+            grace_secs: None,
+            state_dir: None,
+        }
+    }
+}
+
+/// The work owner that is always in `push.work_owners`.
+pub const DEFAULT_WORK_OWNER: &str = "Carefeed";
+
+impl PushConfig {
+    /// `Carefeed` plus the configured owners, de-duplicated ignoring case. The
+    /// default cannot be removed by configuration.
+    pub fn resolved_work_owners(&self) -> Vec<String> {
+        let mut owners = vec![DEFAULT_WORK_OWNER.to_string()];
+        for owner in &self.work_owners {
+            let owner = owner.trim();
+            if !owner.is_empty() && !owners.iter().any(|o| o.eq_ignore_ascii_case(owner)) {
+                owners.push(owner.to_string());
+            }
+        }
+        owners
+    }
+}
+
 /// What a satellite daemon runs with, once validated.
 #[derive(Debug, Clone)]
 pub struct SatelliteSetup {
@@ -178,6 +235,10 @@ pub struct Config {
 
     /// The `[uplink]` table: where a satellite dials and what it may publish.
     pub uplink: Option<UplinkConfig>,
+
+    /// The `[push]` table (W13), read on the primary only: the push relay, and
+    /// how each host is classified. Absent: no push engine.
+    pub push: Option<PushConfig>,
 
     /// Folder whose children are your code repos (default: `~/Code`).
     ///
@@ -330,6 +391,7 @@ impl Default for Config {
             mode: DaemonMode::Primary,
             host_name: None,
             uplink: None,
+            push: None,
             code_root: None,
             agents: None,
             fred_accounts: None,
@@ -809,7 +871,8 @@ fn expand_tilde(path: &str, home: &Path) -> PathBuf {
     }
 }
 
-fn default_config_path() -> Result<PathBuf> {
+/// Where `config.toml` lives by default.
+pub fn default_config_path() -> Result<PathBuf> {
     if let Some(proj) = directories::ProjectDirs::from("", "", "nostromo") {
         Ok(proj.config_dir().join("config.toml"))
     } else {
@@ -1238,5 +1301,129 @@ mod ws_addr_tests {
             parse("pair_host = \"mac.vpn\"").resolve_pair_host(bound),
             "mac.vpn"
         );
+    }
+}
+
+/// The `[push]` table (W13).
+#[cfg(test)]
+mod push_config_tests {
+    use super::*;
+    use crate::push::wire::HostClass;
+
+    fn parse(text: &str) -> Config {
+        toml::from_str(text).unwrap_or_else(|e| panic!("{text}: {e}"))
+    }
+
+    #[test]
+    fn there_is_no_push_table_unless_the_config_has_one() {
+        assert!(parse("").push.is_none());
+        assert!(Config::default().push.is_none());
+    }
+
+    #[test]
+    fn the_engine_is_enabled_unless_the_table_says_otherwise() {
+        assert!(PushConfig::default().enabled);
+        assert!(
+            parse("[push]\nrelay_url = \"https://relay.example\"\n")
+                .push
+                .unwrap()
+                .enabled
+        );
+        assert!(parse("[push]\n").push.unwrap().enabled);
+        assert!(!parse("[push]\nenabled = false\n").push.unwrap().enabled);
+    }
+
+    #[test]
+    fn the_tables_keys_are_read() {
+        let cfg = parse(
+            r#"
+relay_url = "https://github-relay.example"
+
+[push]
+relay_url = "https://push.example/"
+relay_token_path = "/tmp/token"
+decision_grace_secs = 5
+grace_secs = 7
+state_dir = "/tmp/push"
+work_owners = ["Acme"]
+
+[push.hosts]
+kobe = "work"
+sendai = "personal"
+"#,
+        );
+        let push = cfg.push.unwrap();
+        assert_eq!(
+            push.relay_url.as_deref(),
+            Some("https://push.example/"),
+            "not the GitHub relay's"
+        );
+        assert_eq!(push.relay_token_path, Some(PathBuf::from("/tmp/token")));
+        assert_eq!(push.decision_grace_secs, Some(5));
+        assert_eq!(push.grace_secs, Some(7));
+        assert_eq!(push.state_dir, Some(PathBuf::from("/tmp/push")));
+        assert_eq!(push.hosts.get("kobe"), Some(&HostClass::Work));
+        assert_eq!(push.hosts.get("sendai"), Some(&HostClass::Personal));
+        assert_eq!(
+            cfg.relay_url.as_deref(),
+            Some("https://github-relay.example")
+        );
+    }
+
+    #[test]
+    fn the_timings_default_to_none_so_the_engine_uses_the_prds_numbers() {
+        let push = parse("[push]\n").push.unwrap();
+        assert_eq!(push.grace_secs, None);
+        assert_eq!(push.decision_grace_secs, None);
+        assert!(push.hosts.is_empty(), "every host is work until classified");
+    }
+
+    fn owners(configured: &[&str]) -> Vec<String> {
+        PushConfig {
+            work_owners: configured.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+        .resolved_work_owners()
+    }
+
+    #[test]
+    fn carefeed_is_always_a_work_owner_whatever_the_config_says() {
+        assert_eq!(owners(&[]), ["Carefeed"]);
+        assert_eq!(owners(&["Acme"]), ["Carefeed", "Acme"]);
+        assert_eq!(
+            owners(&["carefeed"]),
+            ["Carefeed"],
+            "the default's own spelling wins, once"
+        );
+        assert_eq!(owners(&["CAREFEED", "Acme"]), ["Carefeed", "Acme"]);
+        assert_eq!(
+            owners(&["", "  ", "Acme"]),
+            ["Carefeed", "Acme"],
+            "blank entries are ignored"
+        );
+    }
+
+    #[test]
+    fn the_list_can_only_grow_and_never_repeats_an_owner() {
+        assert_eq!(owners(&["Acme", "acme", "ACME"]), ["Carefeed", "Acme"]);
+        assert_eq!(owners(&[" Acme "]), ["Carefeed", "Acme"], "trimmed");
+        for configured in [
+            &["Acme"][..],
+            &["Acme", "Initech"][..],
+            &[][..],
+            &["initech", "Acme"][..],
+        ] {
+            let resolved = owners(configured);
+            assert_eq!(resolved[0], "Carefeed");
+            for c in configured {
+                assert!(
+                    resolved.iter().any(|r| r.eq_ignore_ascii_case(c)),
+                    "{c} is kept: {resolved:?}"
+                );
+            }
+            let lower: std::collections::BTreeSet<String> =
+                resolved.iter().map(|o| o.to_ascii_lowercase()).collect();
+            assert_eq!(lower.len(), resolved.len(), "no repeats: {resolved:?}");
+        }
     }
 }

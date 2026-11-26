@@ -402,6 +402,24 @@ impl Server {
 }
 
 impl Server {
+    /// Start the push engine (W13), on a primary that serves device pairing:
+    /// it needs the device registry to tell a revoked phone from a live one.
+    /// `false` when there is no registry or `[push]` does not configure a relay.
+    /// Call after [`Server::bind_ws`].
+    pub fn start_push(&self, config: crate::push::ConfigSource, local_host: String) -> bool {
+        let Some(registry) = self.hub.get().map(|h| Arc::clone(h.registry())) else {
+            return false;
+        };
+        let Some(engine) = crate::push::PushEngine::new(config, local_host, Some(registry)) else {
+            return false;
+        };
+        let retained = Arc::clone(&self.retained);
+        let source: crate::push::RetainedSource =
+            Arc::new(move || retained.lock().unwrap().values().cloned().collect());
+        engine.spawn(self.tx.subscribe(), Some(source));
+        self.hub.set_push(engine).is_ok()
+    }
+
     /// Start a satellite's uplink: dial `setup.uplink.url` with the token in
     /// `token_path`, publish this server's filtered broadcasts upstream and
     /// answer the reads the primary routes back. Local admin verbs are relayed
@@ -863,6 +881,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
         FEATURE_PAIR.to_string(),
         FEATURE_DEVICES.to_string(),
         FEATURE_SEQ.to_string(),
+        crate::push::FEATURE_PRESENCE.to_string(),
     ];
     if mgr.authored_prs().is_some() {
         features.push(FEATURE_AUTHORED_PRS.to_string());
@@ -1011,6 +1030,10 @@ where
         features.push(FEATURE_HOSTS.to_string());
         features.push(FEATURE_UPLINK.to_string());
     }
+    // A primary that runs the push engine (W13).
+    if let (ServerMsg::Welcome { features, .. }, Some(_)) = (&mut welcome, hub.push()) {
+        features.push(crate::push::FEATURE_PUSH.to_string());
+    }
     // Which run of the daemon numbers the topics (the `"seq"` feature's epoch).
     if let ServerMsg::Welcome { seq_epoch, .. } = &mut welcome {
         *seq_epoch = Some(seq.epoch());
@@ -1114,7 +1137,14 @@ where
     let can_answer = trust == PeerTrust::OperatorApp;
     let mut is_operator = can_answer && (topics.contains(&Topic::Decision) || renders_decisions);
     if is_operator {
-        decisions.lock().unwrap().add_operator(&conn_key);
+        let frames = {
+            let mut registry = decisions.lock().unwrap();
+            registry.add_operator(&conn_key);
+            registry.presence_frames()
+        };
+        for frame in frames {
+            let _ = broadcast_tx.send(frame);
+        }
     }
 
     // ── Approval presenters (AP0b) ────────────────────────────────────────────
@@ -1655,6 +1685,7 @@ where
                     continue;
                 };
                 let msg = for_satellite(msg, trust, origin.ws_device());
+                let msg = without_operator_presence(msg, trust);
                 let bytes = match serde_json::to_vec(&msg) {
                     Ok(b) => b,
                     Err(e) => { warn!("serialise targeted msg: {e}"); continue; }
@@ -1860,6 +1891,15 @@ where
                                 }
                             }
                         }
+                        // A paired phone's push verbs (W13), scoped to its own device
+                        // record. Every other peer falls through to the refusal.
+                        if let Some(push) = hub.push() {
+                            if push.dispatch(&msg, trust, origin.ws_device(), &targeted_tx)
+                                == crate::push::Dispatched::Handled
+                            {
+                                continue;
+                            }
+                        }
                         // Pairing and device administration (see `DeviceHub::dispatch`).
                         match hub.get() {
                             Some(h) => match h.dispatch(&msg, trust, origin.ws_device(), &conn_key, &targeted_tx) {
@@ -1960,6 +2000,12 @@ where
     if is_operator {
         decisions.lock().unwrap().remove_operator(&conn_key);
     }
+    // What the app last said about the operator goes with its connection; if that
+    // leaves every remaining app `away`, open decisions are re-broadcast (S7a).
+    let presence_frames = decisions.lock().unwrap().drop_presence(&conn_key);
+    for frame in presence_frames {
+        let _ = broadcast_tx.send(frame);
+    }
     // A closed connection's demand for the author's PR list goes with it.
     if let Some(board) = session_mgr.lock().unwrap().authored_prs() {
         board.remove(&conn_key);
@@ -2011,6 +2057,7 @@ fn broadcast_bytes(
     let topic = msg.topic();
     let msg = outbound(trust, msg, sensitive)?;
     let msg = for_satellite(msg, trust, device);
+    let msg = without_operator_presence(msg, trust);
     // A frame the gate turned into something else is not the numbered one.
     let seq = seq.filter(|_| msg.topic() == topic);
     match encode_with_seq(&msg, seq) {
@@ -4329,6 +4376,29 @@ fn handle_client_msg(
             debug!(?trust, "device verb ignored on this connection");
         }
 
+        // Whether the operator is at the Mac (W13, S7a): from the verified app
+        // only; from any other local peer it is ignored. (A network peer was
+        // refused above: it is not a network verb.) No reply.
+        ClientMsg::OperatorPresence { state } => {
+            if trust == PeerTrust::OperatorApp {
+                let changed = decisions.lock().unwrap().set_presence(conn_key, state);
+                for frame in changed {
+                    let _ = broadcast_tx.send(frame);
+                }
+            } else {
+                debug!(?trust, "operator presence ignored: not the verified Nostromo app");
+            }
+        }
+
+        // The push verbs are a paired phone's, handled by the push engine before
+        // this function runs; what reaches here is from a peer it does not serve.
+        ClientMsg::RegisterPush { .. }
+        | ClientMsg::SetPushPrefs { .. }
+        | ClientMsg::PushSentLog
+        | ClientMsg::PushWaiting => {
+            debug!(?trust, "push verb ignored on this connection");
+        }
+
         // The commands a session's CLI reports: a local answer to the asking
         // client, from what the daemon already read. Network refused earlier.
         ClientMsg::SessionCommandsGet { request_id, tag } => {
@@ -4898,6 +4968,32 @@ fn for_satellite(msg: ServerMsg, trust: PeerTrust, device_id: Option<&str>) -> S
         }
         other => other,
     }
+}
+
+/// What a `Paired` or `Tcp` peer's connection is written of a `DecisionRequest`:
+/// without `operator_presence` (whether the operator is at the Mac) and without
+/// the repository name and owner (W13). Done here, in the per-connection write
+/// step, and not in `redact_for_network`: a `personal` satellite's uplink sends
+/// through that function and the primary needs the presence it carries.
+fn without_operator_presence(mut msg: ServerMsg, trust: PeerTrust) -> ServerMsg {
+    if !matches!(
+        trust,
+        PeerTrust::Paired | PeerTrust::Tcp | PeerTrust::Routed
+    ) {
+        return msg;
+    }
+    if let ServerMsg::DecisionRequest {
+        operator_presence,
+        repo,
+        repo_owner,
+        ..
+    } = &mut msg
+    {
+        *operator_presence = None;
+        *repo = None;
+        *repo_owner = None;
+    }
+    msg
 }
 
 fn wants_authored_prs(topics: &[Topic]) -> bool {
@@ -5798,6 +5894,9 @@ pub(super) fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool 
         | ServerMsg::Paired { .. }
         | ServerMsg::PairRefused { .. }
         | ServerMsg::Unauthorized { .. }
+        | ServerMsg::PushSentLog { .. }
+        | ServerMsg::PushWaiting { .. }
+        | ServerMsg::PushStatus(_)
         | ServerMsg::DeviceUnpaired => false,
         ServerMsg::MotherPeek { .. } => subscribed(topics, Topic::MotherPeek),
         ServerMsg::TeriState { .. } => subscribed(topics, Topic::Teri),
@@ -6006,6 +6105,104 @@ mod tests {
             out.push(m);
         }
         out
+    }
+
+    fn decision_with_push_facts() -> ServerMsg {
+        ServerMsg::DecisionRequest {
+            tag: "t".into(),
+            request_id: "r".into(),
+            prompt: "p".into(),
+            detail: None,
+            choices: vec![],
+            context_pane_id: None,
+            host: None,
+            deadline: None,
+            agent_class: None,
+            operator_presence: Some(crate::push::wire::Presence::Away),
+            repo: Some("admin-portal".into()),
+            repo_owner: Some("Carefeed".into()),
+        }
+    }
+
+    #[test]
+    fn presence_repo_and_owner_are_stripped_for_every_network_style_peer_and_kept_for_the_rest() {
+        let facts = |msg: ServerMsg| match msg {
+            ServerMsg::DecisionRequest {
+                operator_presence,
+                repo,
+                repo_owner,
+                ..
+            } => (
+                operator_presence.is_some(),
+                repo.is_some(),
+                repo_owner.is_some(),
+            ),
+            other => panic!("{other:?}"),
+        };
+        for trust in [PeerTrust::Paired, PeerTrust::Tcp, PeerTrust::Routed] {
+            assert_eq!(
+                facts(without_operator_presence(decision_with_push_facts(), trust)),
+                (false, false, false),
+                "{trust:?}"
+            );
+        }
+        // A local peer and a satellite's uplink (the primary needs these) keep them.
+        for trust in [PeerTrust::OperatorApp, PeerTrust::LocalOther] {
+            assert_eq!(
+                facts(without_operator_presence(decision_with_push_facts(), trust)),
+                (true, true, true),
+                "{trust:?}"
+            );
+        }
+    }
+
+    /// The combined presence after `trust` sends `OperatorPresence { away }` on a
+    /// connection the registry already counts as an operator app's.
+    fn presence_after_away_from(trust: PeerTrust) -> Option<crate::push::wire::Presence> {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+            dir.path().join("s.json"),
+        )));
+        let (ttx, _trx) = mpsc::unbounded_channel();
+        let (btx, _brx) = broadcast::channel(8);
+        let decisions = Arc::new(Mutex::new(DecisionRegistry::new()));
+        decisions.lock().unwrap().add_operator("conn");
+        handle_client_msg(
+            ClientMsg::OperatorPresence {
+                state: crate::push::wire::Presence::Away,
+            },
+            trust,
+            None,
+            None,
+            &SensitiveTags::in_memory(),
+            "conn",
+            "client",
+            &mgr,
+            &ttx,
+            &btx,
+            dir.path(),
+            &decisions,
+            &Arc::new(Mutex::new(HashSet::new())),
+            None,
+            &TerminalManager::in_memory(),
+        );
+        let presence = decisions.lock().unwrap().combined_presence();
+        presence
+    }
+
+    #[test]
+    fn operator_presence_is_honoured_only_from_the_verified_app() {
+        use crate::push::wire::Presence;
+        assert_eq!(
+            presence_after_away_from(PeerTrust::OperatorApp),
+            Some(Presence::Away),
+            "the verified app's report counts"
+        );
+        // Any other peer, even on a connection registered as an operator, changes nothing:
+        // a spoofed `away` would make the engine push decisions the operator can see.
+        for trust in [PeerTrust::LocalOther, PeerTrust::Paired, PeerTrust::Tcp] {
+            assert_eq!(presence_after_away_from(trust), None, "{trust:?}");
+        }
     }
 
     #[test]
@@ -6288,6 +6485,11 @@ mod tests {
             ],
             context_pane_id: None,
             host: None,
+            deadline: None,
+            agent_class: None,
+            operator_presence: None,
+            repo: None,
+            repo_owner: None,
         }
     }
 

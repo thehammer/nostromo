@@ -867,7 +867,14 @@ iOS:
 - [ ] **W13-29** Acknowledgement and withdrawal (tests, paused clock): a job fixture
   whose `attention_reasons` entry flips to `acked: true` on the next poll
   produces the replacement push (same `collapse_id`, *no longer needs you*) and drops the item from
-  summaries; flipping back with a new `since` is a new item. No `ClientMsg` for
+  summaries; flipping back with a new `since` is a new item.
+  **Amended (PR #542, deviation 2):** an *attention* item never pushes (W13-34), so it
+  never has a notification to replace. When one is acked it leaves the badge and the
+  summaries with a **badge-only** push, and no `no longer needs you` replacement is sent
+  for it; the replacement exists only for an item that had its own notification. A held,
+  coalesced or pre-existing item behaves like an attention item. W13-29 is therefore met
+  for items that were pushed, and read as badge-only for those that were not; it is not
+  ticked as written. No `ClientMsg` for
   `ack`, `answer` or `resume` is added or allowed for a `Paired` peer, and the
   existing `Refused` cases still pass.
 - [ ] **W13-30** `tests/push_items.rs` passes against the shared golden table, and no

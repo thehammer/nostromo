@@ -266,6 +266,9 @@ pub fn server_msg_tag(msg: &ServerMsg) -> MsgTag<'_> {
         | ServerMsg::PairRefused { .. }
         | ServerMsg::Unauthorized { .. }
         | ServerMsg::DeviceUnpaired
+        | ServerMsg::PushSentLog { .. }
+        | ServerMsg::PushWaiting { .. }
+        | ServerMsg::PushStatus(_)
         | ServerMsg::DevicePairing { .. }
         | ServerMsg::DevicePairOutcome { .. }
         | ServerMsg::Devices { .. }

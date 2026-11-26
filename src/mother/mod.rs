@@ -193,6 +193,15 @@ pub struct MotherJob {
     /// `"user"` when paused by an explicit `mother await`; `"adherence_blocked"` when
     /// the Perri adherence reviewer blocked the job for human inspection.
     pub paused_reason: Option<String>,
+    /// When the job last paused (Mother's `paused_at`), read leniently: a
+    /// value that is not a timestamp is none. The push engine's grace delay
+    /// starts here (W13).
+    #[serde(
+        default,
+        deserialize_with = "lenient_paused_at",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub paused_at: Option<DateTime<Utc>>,
     /// Narrative from the Perri adherence reviewer explaining what to inspect or fix.
     pub adherence_notes: Option<String>,
     /// Result of the Perri adherence pass: `"passed"`, `"blocked_for_human"`, etc.
@@ -344,6 +353,18 @@ pub struct MotherJobOrigin {
     pub focus_name: Option<String>,
     #[serde(default, deserialize_with = "lenient_text", skip_serializing)]
     pub session: Option<String>,
+}
+
+fn lenient_paused_at<'de, D>(d: D) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // A malformed time is no time; it never costs the job.
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(value
+        .as_str()
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&Utc)))
 }
 
 fn lenient_text<'de, D>(d: D) -> Result<Option<String>, D::Error>

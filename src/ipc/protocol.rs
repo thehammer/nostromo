@@ -153,6 +153,19 @@ where
         .collect())
 }
 
+/// Decode an optional field leniently: a value this build cannot read (an enum
+/// variant or timestamp format only a newer peer sends) becomes `None` instead
+/// of failing the whole frame. Used for the W13 facts on `DecisionRequest`, so
+/// a newer satellite's decision still reaches the primary.
+fn lenient_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw.and_then(|v| serde_json::from_value(v).ok()))
+}
+
 /// Decode `Subscribe.resume` leniently: a topic this build does not know (a
 /// newer client's) or a value that is not an unsigned integer is dropped
 /// instead of failing the whole frame.
@@ -2791,6 +2804,33 @@ pub enum ClientMsg {
         host: String,
         admin: crate::ipc::devices::SatelliteAdmin,
     },
+
+    // ── push notifications (W13) ──────────────────────────────────────────────
+    // The first four are a paired phone's, scoped to its own device record and
+    // handled before `handle_client_msg` (see `push::PushEngine::dispatch`);
+    // `network_policy` refuses them for every network peer, like the admin verbs.
+    /// A phone's Apple push token. `capabilities` is what this build can do;
+    /// absent means every flag is `false`.
+    RegisterPush {
+        apns_token: String,
+        environment: crate::push::wire::PushEnvironment,
+        tz: String,
+        #[serde(default)]
+        capabilities: crate::push::wire::PushCapabilities,
+    },
+    /// Replace this device's notification settings.
+    SetPushPrefs {
+        prefs: crate::push::wire::PushPrefs,
+    },
+    /// This device's notifications of the last 7 days (reply: `PushSentLog`).
+    PushSentLog,
+    /// What waits on the operator now (reply: `PushWaiting`).
+    PushWaiting,
+    /// Whether the operator is at this Mac, from the verified app only
+    /// (W15's reporter sends it when the daemon advertises `presence`). No reply.
+    OperatorPresence {
+        state: crate::push::wire::Presence,
+    },
 }
 
 // ── background tasks ──────────────────────────────────────────────────────────
@@ -3338,6 +3378,12 @@ pub enum ServerMsg {
         /// The satellite this frame came from; `None` is the daemon's own.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host: Option<String>,
+        /// True when no queue fetch has landed yet, so `queue` is empty because it
+        /// is *unknown*, not because nothing is waiting. Absent otherwise. The
+        /// push engine does not take a baseline from such a frame (a restart
+        /// would otherwise push every requested review once the fetch lands).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        queue_unfetched: bool,
     },
 
     /// Broadcast snapshot of Fred's mailbox + calendar state. Re-sent whenever
@@ -3535,6 +3581,36 @@ pub enum ServerMsg {
         /// The satellite this frame came from; `None` is the daemon's own.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host: Option<String>,
+        /// When the asking agent stops waiting (W13). Absent: no timeout.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        deadline: Option<chrono::DateTime<chrono::Utc>>,
+        /// The asking agent mapped to a fixed set on the originating daemon (W13).
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        agent_class: Option<crate::push::wire::AgentClass>,
+        /// Whether the Mac(s) presenting decisions are being used (W13, S7a).
+        /// Stripped from the frame before any `Paired` or `Tcp` peer gets it.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        operator_presence: Option<crate::push::wire::Presence>,
+        /// The focus's project repository name, and its `github.com` owner
+        /// (resolved locally from the `origin` remote): only so the primary can
+        /// apply the personal-host rule (W13, S5). Never in a relay request for
+        /// a work host; a `work` satellite's uplink drops both.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo_owner: Option<String>,
     },
 
     /// A `DecisionRequest` has been resolved — answered, dismissed, timed
@@ -4226,6 +4302,21 @@ pub enum ServerMsg {
         reason: String,
     },
     DeviceUnpaired,
+
+    // ── push notifications (W13): targeted replies to one paired device ──────
+    /// The device's own notifications of the last 7 days, newest last.
+    PushSentLog {
+        entries: Vec<crate::push::wire::PushSentEntry>,
+    },
+    /// Everything waiting on the operator for this device, and the badge it
+    /// should show (the waiting count, minus the kinds this device turned off).
+    PushWaiting {
+        items: Vec<crate::push::wire::PushWaitingItem>,
+        badge: u32,
+    },
+    /// This device's settings, the read-only host classes and work owners, and
+    /// whether notifications are getting through.
+    PushStatus(crate::push::wire::PushStatusBody),
 
     // ── device administration (daemon → local admin client) ───────────────────
     DevicePairing {
@@ -5541,6 +5632,7 @@ mod tests {
             current: None,
             jira_site: None,
             host: None,
+            queue_unfetched: false,
         });
     }
 
@@ -5563,6 +5655,7 @@ mod tests {
             head_sha: "abc123".into(),
             is_bot: false,
             tickets: vec![],
+            changed_lines: None,
         };
         let snap = PrSnapshot {
             pr_number: Some(42),
@@ -5593,6 +5686,7 @@ mod tests {
             current: Some(Box::new(snap)),
             jira_site: Some("carefeed.atlassian.net".into()),
             host: None,
+            queue_unfetched: false,
         });
     }
 
@@ -5604,6 +5698,7 @@ mod tests {
             current: None,
             jira_site: None,
             host: None,
+            queue_unfetched: false,
         })
         .unwrap();
         assert_eq!(v["type"], "perri_state");
@@ -5627,6 +5722,7 @@ mod tests {
             current: None,
             jira_site: Some("carefeed.atlassian.net".into()),
             host: None,
+            queue_unfetched: false,
         })
         .unwrap();
         assert_eq!(v["jira_site"], "carefeed.atlassian.net");
@@ -6095,6 +6191,11 @@ mod tests {
             choices: sample_decision_choices(),
             context_pane_id: Some("diff".into()),
             host: None,
+            deadline: None,
+            agent_class: None,
+            operator_presence: None,
+            repo: None,
+            repo_owner: None,
         });
     }
 
@@ -6108,6 +6209,11 @@ mod tests {
             choices: sample_decision_choices(),
             context_pane_id: None,
             host: None,
+            deadline: None,
+            agent_class: None,
+            operator_presence: None,
+            repo: None,
+            repo_owner: None,
         })
         .unwrap();
         let obj = v.as_object().unwrap();
@@ -6129,7 +6235,72 @@ mod tests {
             choices: sample_decision_choices(),
             context_pane_id: None,
             host: None,
+            deadline: None,
+            agent_class: None,
+            operator_presence: None,
+            repo: None,
+            repo_owner: None,
         });
+    }
+
+    #[test]
+    fn a_decision_request_with_facts_this_build_cannot_read_still_decodes_without_them() {
+        // A newer satellite's agent class, presence word or deadline format must not
+        // make the primary lose the decision itself.
+        let frame = serde_json::json!({
+            "type": "decision_request",
+            "tag": "mother",
+            "request_id": "req-9",
+            "prompt": "Ship it?",
+            "choices": [],
+            "deadline": "soon",
+            "agent_class": "robot_butler",
+            "operator_presence": "napping",
+            "repo": "admin-portal",
+        });
+        match serde_json::from_value::<ServerMsg>(frame).expect("the decision still decodes") {
+            ServerMsg::DecisionRequest {
+                request_id,
+                deadline,
+                agent_class,
+                operator_presence,
+                repo,
+                ..
+            } => {
+                assert_eq!(request_id, "req-9");
+                assert_eq!(repo.as_deref(), Some("admin-portal"));
+                assert_eq!(deadline, None);
+                assert_eq!(
+                    agent_class,
+                    Some(crate::push::wire::AgentClass::Other),
+                    "an unknown class is `other`"
+                );
+                assert_eq!(operator_presence, None);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_decision_request_still_reads_the_facts_it_knows() {
+        let frame = serde_json::json!({
+            "type": "decision_request", "tag": "t", "request_id": "r", "prompt": "p",
+            "choices": [], "deadline": "2026-11-26T18:00:00Z",
+            "agent_class": "perri", "operator_presence": "away",
+        });
+        match serde_json::from_value::<ServerMsg>(frame).unwrap() {
+            ServerMsg::DecisionRequest {
+                deadline,
+                agent_class,
+                operator_presence,
+                ..
+            } => {
+                assert!(deadline.is_some());
+                assert_eq!(agent_class, Some(crate::push::wire::AgentClass::Perri));
+                assert_eq!(operator_presence, Some(crate::push::wire::Presence::Away));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -6142,6 +6313,11 @@ mod tests {
             choices: sample_decision_choices(),
             context_pane_id: None,
             host: None,
+            deadline: None,
+            agent_class: None,
+            operator_presence: None,
+            repo: None,
+            repo_owner: None,
         })
         .unwrap();
         assert_eq!(v["type"], "decision_request");

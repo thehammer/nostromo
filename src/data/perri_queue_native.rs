@@ -411,6 +411,8 @@ pub struct Candidate {
     pub targeted_seen_at: Option<u64>,
     /// Head branch name; empty until a `/pulls/{n}` read or a probe supplies it.
     pub head_ref: String,
+    /// Lines added plus deleted, from the same `/pulls/{n}` read or probe.
+    pub changed_lines: Option<u64>,
     /// Keys pre-scanned from the PR body. The body itself is never kept.
     pub body_keys: Vec<BodyKey>,
 }
@@ -454,6 +456,7 @@ impl Candidate {
                 my_review: None,
                 targeted_seen_at: None,
                 head_ref: String::new(),
+                changed_lines: None,
                 body_keys: item.body_keys.clone(),
             }
         })
@@ -526,6 +529,7 @@ pub fn classify(
         head_sha: c.head_sha.clone(),
         is_bot: c.is_bot,
         tickets: scope.resolve(&c.title, &c.head_ref, &c.body_keys),
+        changed_lines: c.changed_lines,
     })
 }
 
@@ -693,11 +697,7 @@ impl PerriQueueNativeSource {
             Ok(c) => c,
             Err(e) => {
                 warn!("github client init failed: {e:#}");
-                let _ = tx.send(Some(PrQueueSnapshot {
-                    error: Some(format!("GitHub client init failed: {e:#}")),
-                    stale: true,
-                    ..Default::default()
-                }));
+                let _ = tx.send(Some(client_init_failed_snapshot(&e)));
                 return;
             }
         };
@@ -1158,6 +1158,7 @@ impl PerriQueueNativeSource {
                 c.actions_failed = failed;
                 c.head_sha = head_sha;
                 c.head_ref = cached_head_ref(&endpoint_body_cache, &key.0, key.1);
+                c.changed_lines = cached_changed_lines(&endpoint_body_cache, &key.0, key.1);
                 if !failed {
                     known_urls.insert(c.url.clone());
                     b12_survivors += 1;
@@ -1309,6 +1310,8 @@ impl PerriQueueNativeSource {
                 c.actions_failed = failed;
                 c.head_sha = head_sha;
                 c.head_ref = cached_head_ref(&endpoint_body_cache, &outcome.key.0, outcome.key.1);
+                c.changed_lines =
+                    cached_changed_lines(&endpoint_body_cache, &outcome.key.0, outcome.key.1);
             }
         }
 
@@ -1404,6 +1407,17 @@ impl PerriQueueNativeSource {
     fn build_client(&self) -> Result<GithubClient> {
         let hosts_path = self.config.github_token_path.as_deref();
         GithubClient::new(hosts_path)
+    }
+}
+
+/// What the run loop publishes when the GitHub client cannot be built. No fetch
+/// has ever succeeded, so it carries no `generated_at`: consumers read its empty
+/// queue as "unknown", not "nothing waiting".
+fn client_init_failed_snapshot(e: &anyhow::Error) -> PrQueueSnapshot {
+    PrQueueSnapshot {
+        error: Some(format!("GitHub client init failed: {e:#}")),
+        stale: true,
+        ..Default::default()
     }
 }
 
@@ -1984,6 +1998,26 @@ fn cached_head_ref(
     body.and_then(|b| serde_json::from_str::<Pr>(&b).ok())
         .map(|p| p.head.head_ref)
         .unwrap_or_default()
+}
+
+/// Lines added plus deleted, from the `/pulls/{n}` body `get_pr_head_sha`
+/// already cached. Issues no request (the queue's request counts do not
+/// change); `None` when that read never succeeded or GitHub omitted the counts.
+fn cached_changed_lines(
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+    repo: &str,
+    number: u64,
+) -> Option<u64> {
+    #[derive(Deserialize)]
+    struct Lines {
+        additions: Option<u64>,
+        deletions: Option<u64>,
+    }
+    let url = format!("{}/repos/{repo}/pulls/{number}", api_base());
+    let key = format!("{GITHUB_JSON_ACCEPT}|{url}");
+    let body = body_cache.lock().unwrap().get(&key).cloned()?;
+    let lines: Lines = serde_json::from_str(&body).ok()?;
+    Some(lines.additions? + lines.deletions?)
 }
 
 async fn get_pr_head_sha(
@@ -2634,6 +2668,104 @@ mod tests {
         (PerriQueueNativeSource::new(cfg), dir)
     }
 
+    // ── a first GitHub failure is "unknown", not "nothing waiting" ────────────
+    //
+    // Each way the run loop can fail before its first successful fetch publishes
+    // a snapshot with an empty queue. The daemon's `PerriState` builder must flag
+    // all three as unfetched, or the push engine baselines from the empty queue
+    // and pushes every requested review again once GitHub recovers.
+
+    fn is_unfetched(snap: &PrQueueSnapshot) -> bool {
+        match crate::ipc::perri_state::build_perri_state("perri", Some(snap), None, None) {
+            crate::ipc::protocol::ServerMsg::PerriState {
+                queue_unfetched, ..
+            } => queue_unfetched,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The first snapshot `run()` publishes against `server`'s GitHub.
+    async fn first_published(server: &wiremock::MockServer) -> PrQueueSnapshot {
+        API_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+        let (source, dir) = make_source();
+        let suppress = Arc::new(Mutex::new(SuppressStore::new(
+            dir.path().join("approvals-state.json"),
+            std::time::Duration::from_secs(900),
+        )));
+        let (tx, mut rx) = watch::channel(None);
+        let (_dirty_tx, mut dirty_rx) = mpsc::unbounded_channel();
+        let (_refresh_tx, mut refresh_rx) = mpsc::unbounded_channel();
+        let (_approvals_tx, mut approvals_rx) = mpsc::unbounded_channel();
+        let (_relay_tx, mut relay_rx) = mpsc::unbounded_channel();
+        let run = source.run(
+            tx,
+            &mut dirty_rx,
+            &mut refresh_rx,
+            &mut approvals_rx,
+            &mut relay_rx,
+            suppress,
+            3600,
+        );
+        tokio::pin!(run);
+        tokio::select! {
+            _ = &mut run => panic!("run() returned before publishing"),
+            changed = rx.changed() => changed.expect("run() published"),
+        }
+        let snap = rx.borrow().clone();
+        snap.expect("a snapshot")
+    }
+
+    #[test]
+    fn a_github_client_that_cannot_be_built_publishes_an_unfetched_snapshot() {
+        let snap = client_init_failed_snapshot(&anyhow::anyhow!("No GitHub token found"));
+        assert!(snap.stale && snap.items.is_empty());
+        assert!(snap
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("client init failed"));
+        assert!(is_unfetched(&snap));
+    }
+
+    #[tokio::test]
+    async fn a_failed_startup_auth_check_publishes_an_unfetched_snapshot() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let snap = first_published(&server).await;
+        assert!(snap.stale && snap.items.is_empty());
+        assert!(snap.error.as_deref().unwrap().contains("auth check failed"));
+        assert!(is_unfetched(&snap), "{snap:?}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_first_fetch_publishes_an_unfetched_snapshot() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"login": "tester"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let snap = first_published(&server).await;
+        assert!(snap.stale && snap.items.is_empty());
+        assert!(snap.error.is_some());
+        assert!(is_unfetched(&snap), "{snap:?}");
+    }
+
     /// Call `fetch()` with the given suppress store, returning the snapshot.
     async fn run_fetch(
         source: &PerriQueueNativeSource,
@@ -2648,8 +2780,24 @@ mod tests {
     }
 
     /// Register the three GitHub mock endpoints needed to return PR #42 in
-    /// `review:required` with head SHA `head_sha` and passing CI.
+    /// `review:required` with head SHA `head_sha` and passing CI. The PR detail
+    /// reports 30 additions and 12 deletions (42 changed lines, W13).
     async fn mount_pr_mocks(server: &wiremock::MockServer, head_sha: &str) {
+        mount_pr_mocks_sized(
+            server,
+            head_sha,
+            serde_json::json!({"additions": 30, "deletions": 12}),
+        )
+        .await;
+    }
+
+    /// [`mount_pr_mocks`] with `size` as the line-count keys of the `/pulls/{n}`
+    /// body (`{}` is a GitHub that omits them).
+    async fn mount_pr_mocks_sized(
+        server: &wiremock::MockServer,
+        head_sha: &str,
+        size: serde_json::Value,
+    ) {
         use serde_json::json;
         use wiremock::matchers::{method, path, path_regex, query_param};
         use wiremock::{Mock, ResponseTemplate};
@@ -2706,13 +2854,14 @@ mod tests {
             .mount(server)
             .await;
 
-        // PR detail — head SHA
-        let head_sha = head_sha.to_owned();
+        // PR detail — head SHA and, when GitHub says, the line counts
+        let mut detail = json!({ "head": { "sha": head_sha } });
+        if let (Some(d), Some(s)) = (detail.as_object_mut(), size.as_object()) {
+            d.extend(s.clone());
+        }
         Mock::given(method("GET"))
             .and(path("/repos/Carefeed/admin-portal/pulls/42"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "head": { "sha": head_sha }
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(detail))
             .mount(server)
             .await;
 
@@ -2784,6 +2933,107 @@ mod tests {
             "PR with different sha should appear in snapshot"
         );
         assert_eq!(snap.items[0].number, 42);
+    }
+
+    // ── changed_lines (W13: the size of a review notification) ────────────────
+
+    /// Fetch PR #42 against a GitHub whose `/pulls/42` body carries `size`.
+    async fn fetch_with_size(size: serde_json::Value) -> (PrQueueSnapshot, wiremock::MockServer) {
+        let server = wiremock::MockServer::start().await;
+        API_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+        mount_pr_mocks_sized(&server, "sha-size", size).await;
+        let (source, dir) = make_source();
+        let state_path = source.config.perri_state_dir().join("approvals-state.json");
+        let suppress = Arc::new(Mutex::new(SuppressStore::new(
+            state_path,
+            std::time::Duration::from_secs(900),
+        )));
+        let snap = run_fetch(&source, suppress).await;
+        drop(dir);
+        (snap, server)
+    }
+
+    #[tokio::test]
+    async fn changed_lines_are_additions_plus_deletions_from_the_pr_detail() {
+        let (snap, _server) =
+            fetch_with_size(serde_json::json!({"additions": 30, "deletions": 12})).await;
+        assert_eq!(snap.items.len(), 1);
+        assert_eq!(snap.items[0].changed_lines, Some(42));
+    }
+
+    #[tokio::test]
+    async fn the_default_mock_reports_42_changed_lines() {
+        let server = wiremock::MockServer::start().await;
+        API_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+        mount_pr_mocks(&server, "sha-abc").await;
+        let (source, _dir) = make_source();
+        let state_path = source.config.perri_state_dir().join("approvals-state.json");
+        let suppress = Arc::new(Mutex::new(SuppressStore::new(
+            state_path,
+            std::time::Duration::from_secs(900),
+        )));
+        let snap = run_fetch(&source, suppress).await;
+        assert_eq!(snap.items[0].changed_lines, Some(42));
+    }
+
+    #[tokio::test]
+    async fn changed_lines_are_none_when_github_omits_the_counts_or_gives_only_one() {
+        for (size, what) in [
+            (serde_json::json!({}), "neither"),
+            (serde_json::json!({"additions": 30}), "only additions"),
+            (serde_json::json!({"deletions": 12}), "only deletions"),
+            (
+                serde_json::json!({"additions": null, "deletions": null}),
+                "nulls",
+            ),
+        ] {
+            let (snap, _server) = fetch_with_size(size).await;
+            assert_eq!(snap.items.len(), 1, "{what}: the PR is still in the queue");
+            assert_eq!(snap.items[0].changed_lines, None, "{what}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pr_with_no_changed_lines_is_zero_not_unknown() {
+        let (snap, _server) =
+            fetch_with_size(serde_json::json!({"additions": 0, "deletions": 0})).await;
+        assert_eq!(snap.items[0].changed_lines, Some(0));
+    }
+
+    #[tokio::test]
+    async fn reading_the_line_counts_costs_no_request() {
+        // The counts come from the `/pulls/{n}` body the head-SHA read already
+        // fetched: the same requests reach GitHub with the counts as without.
+        let (with, with_server) =
+            fetch_with_size(serde_json::json!({"additions": 30, "deletions": 12})).await;
+        let (without, without_server) = fetch_with_size(serde_json::json!({})).await;
+        assert_eq!(with.items[0].changed_lines, Some(42));
+        assert_eq!(without.items[0].changed_lines, None);
+        async fn paths(s: &wiremock::MockServer) -> Vec<String> {
+            let mut p: Vec<String> = s
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.url.path().to_string())
+                .collect();
+            p.sort();
+            p
+        }
+        let a = paths(&with_server).await;
+        let b = paths(&without_server).await;
+        assert_eq!(a, b, "no request was added for the line counts");
+        assert_eq!(
+            a.iter()
+                .filter(|p| p.as_str() == "/repos/Carefeed/admin-portal/pulls/42")
+                .count(),
+            1,
+            "the PR detail is read once: {a:?}"
+        );
+        assert!(
+            a.iter().all(|p| !p.ends_with("/files") && p != "/graphql"),
+            "{a:?}"
+        );
     }
 
     /// A PR not in the suppression store always appears normally.

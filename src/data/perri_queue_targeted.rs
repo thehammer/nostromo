@@ -763,6 +763,7 @@ pub(crate) fn upsert_from_probe(
             my_review: probed.my_review.clone(),
             targeted_seen_at: Some(unix_now_secs()),
             head_ref: probed.head_ref.clone(),
+            changed_lines: probed.changed_lines,
             body_keys: probed.body_keys.clone(),
         },
     );
@@ -803,6 +804,8 @@ pub struct ProbedPr {
     pub head_sha: String,
     /// Head branch name.
     pub head_ref: String,
+    /// Lines added plus deleted, when the probe returned both counts.
+    pub changed_lines: Option<u64>,
     /// Keys scanned from the PR body; the body itself is dropped in `probe_pr`.
     pub body_keys: Vec<BodyKey>,
     /// `review-requested:@me` — bucket 1.
@@ -863,6 +866,8 @@ const PR_PROBE_QUERY: &str = r#"query PrProbe($owner: String!, $name: String!, $
       updatedAt
       headRefOid
       headRefName
+      additions
+      deletions
       body
       reviewDecision
       author { login __typename }
@@ -1016,6 +1021,7 @@ pub async fn probe_pr(client: &GithubClient, repo: &str, number: u64, me: &str) 
         updated_at: pr.updated_at,
         head_sha: pr.head_ref_oid,
         head_ref: pr.head_ref_name,
+        changed_lines: pr.additions.zip(pr.deletions).map(|(a, d)| a + d),
         body_keys: scan_body(pr.body.as_deref().unwrap_or_default()),
         in_requested,
         // The per-PR equivalent of the `review:required` search qualifier.
@@ -1084,6 +1090,10 @@ struct GqlPullRequest {
     head_ref_oid: String,
     #[serde(default)]
     head_ref_name: String,
+    #[serde(default)]
+    additions: Option<u64>,
+    #[serde(default)]
+    deletions: Option<u64>,
     /// Only scanned for ticket keys; never stored or logged.
     #[serde(default)]
     body: Option<String>,

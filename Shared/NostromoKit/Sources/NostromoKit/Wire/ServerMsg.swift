@@ -180,6 +180,14 @@ public enum ServerMsg {
     /// the topic's list may be stale (W12). `host` is `nil` for the primary's own.
     case gap(topic: String, host: String?, from: UInt64, to: UInt64, reason: GapReason)
 
+    // ── push notifications (W13): replies to this device's own push verbs ──────
+    /// This device's notifications of the last seven days (the answer to `push_sent_log`).
+    case pushSentLog([PushSentEntryWire])
+    /// What waits on the operator now, and the badge the app should show (the answer to `push_waiting`).
+    case pushWaiting(items: [PushWaitingItemWire], badge: Int)
+    /// This device's settings and whether notifications are getting through.
+    case pushStatus(PushStatusWire)
+
     case unknown
 }
 
@@ -1012,6 +1020,7 @@ extension ServerMsg {
         let dec = JSONDecoder.nostromo
 
         if let pairing = decodePairingFrame(type_: type_, data: data) { return pairing }
+        if let push = decodePushFrame(type_: type_, data: data) { return push }
 
         switch type_ {
         case "welcome":

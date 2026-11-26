@@ -479,6 +479,14 @@ Lock screen and lifecycle:
   including "no longer needs you" replacements, once the app reaches the
   operator's machines and before the operator can
   interact with the first screen.
+  **(amended 2026-11-26, fix round 2)** The hold on the first screen (up to
+  2 s) applies to a launch only. A foreground, or any reconnect, still asks
+  what waits and removes what no longer does, but in the background: the
+  screen is not held again. Holding it on every foreground would delay the
+  operator's input for a cleanup that, on a foreground, rarely has anything
+  to remove. The hold is also taken when notifications are not authorized
+  (there is nothing to remove then); that is a known small cost, not a
+  requirement.
 - A phone that is offline for longer than 4 hours (or past a decision's
   timeout) does not receive that notification when it reconnects.
 - Decision notifications are delivered at the time-sensitive interruption

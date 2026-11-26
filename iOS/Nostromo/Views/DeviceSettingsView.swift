@@ -31,6 +31,13 @@ struct DeviceSettingsView: View {
                     LabeledContent("Name", value: session.credential?.name ?? "")
                     Text(PairingCopy.notShared).foregroundStyle(.secondary)
                 }
+                if let push = session.push {
+                    Section {
+                        NavigationLink("Notifications") {
+                            NotificationSettingsView().environmentObject(push)
+                        }
+                    }
+                }
                 Section {
                     Button("Un-pair This \(session.kindName)", role: .destructive) { confirmUnpair = true }
                         .disabled(working)

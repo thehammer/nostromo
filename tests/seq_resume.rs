@@ -2359,6 +2359,7 @@ fn perri_frame(site: &str, host: Option<&str>) -> ServerMsg {
         current: None,
         jira_site: Some(site.into()),
         host: host.map(str::to_string),
+        queue_unfetched: false,
     }
 }
 

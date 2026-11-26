@@ -71,6 +71,16 @@ const REASONS: &[&str] = &[
     "failed",
     "cancelled",
     "none",
+    // What the primary's push engine reads (W13): the reasons a job waits and
+    // the attention kinds it counts. Mother's own fixed words, never text.
+    "user",
+    "adherence_blocked",
+    "operator_hold",
+    "cost_cap",
+    "pipeline_blocked",
+    "progress_stalled",
+    "burn_ahead",
+    "gates_incomplete",
 ];
 const STAGES: &[&str] = &["build", "rework", "gates", "review", "present", "done"];
 const RESULTS: &[&str] = &[
@@ -117,10 +127,15 @@ fn hex8(bytes: &[u8]) -> String {
     bytes.iter().take(4).map(|b| format!("{b:02x}")).collect()
 }
 
-/// `f-` plus 8 hex of HMAC-SHA256(host_key, tag): stable per host, opaque
-/// to everyone without the key.
+/// `f-` plus 8 hex of HMAC-SHA256(host_key, `tag:` + tag): stable per host,
+/// opaque to everyone without the key. The `tag:` prefix keeps this domain apart
+/// from the repository pseudonyms, so one string used as both never maps to
+/// matching digests.
 pub fn pseudonymous_tag(host_key: &[u8; 32], tag: &str) -> String {
-    format!("f-{}", hex8(&hmac_sha256(host_key, tag.as_bytes())))
+    format!(
+        "f-{}",
+        hex8(&hmac_sha256(host_key, format!("tag:{tag}").as_bytes()))
+    )
 }
 
 /// A short, lower-case-hex reference to a Mother job: the id's last eight
@@ -147,6 +162,23 @@ fn is_hex8(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// `r-` plus 8 hex of HMAC-SHA256(host_key, `repo:` + repo): stable per host,
+/// opaque to everyone without the key (and apart from the tag pseudonyms by the
+/// prefix). Empty stays empty.
+fn pseudonymous_repo(host_key: &[u8; 32], repo: &str) -> String {
+    if repo.is_empty() {
+        return String::new();
+    }
+    format!(
+        "r-{}",
+        hex8(&hmac_sha256(host_key, format!("repo:{repo}").as_bytes()))
+    )
+}
+
+fn is_pseudonymous_repo(s: &str) -> bool {
+    s.is_empty() || s.strip_prefix("r-").is_some_and(is_hex8)
+}
+
 fn is_focus_tag(s: &str) -> bool {
     s.strip_prefix("f-").is_some_and(is_hex8)
 }
@@ -165,6 +197,20 @@ fn vocab(s: &str, set: &[&str]) -> String {
 
 fn vocab_opt(s: &Option<String>, set: &[&str]) -> Option<String> {
     s.as_deref().map(|v| vocab(v, set))
+}
+
+/// The one token any quota pause is sent as. The push engine must tell a quota
+/// pause (which resumes on its own) from a hold, and needs only the prefix; the
+/// rest of the value (`quota_5h`, ...) is never sent.
+const QUOTA_PAUSE: &str = "quota_limit";
+
+/// A pause reason: the crew vocabulary, or [`QUOTA_PAUSE`] for any `quota_*`.
+fn paused_reason(s: &str) -> String {
+    if s.starts_with("quota_") {
+        QUOTA_PAUSE.to_string()
+    } else {
+        vocab(s, REASONS)
+    }
 }
 
 fn agent(name: &str) -> String {
@@ -207,7 +253,9 @@ fn metadata_job(job: &MotherJob, key: &[u8; 32]) -> MotherJob {
     let mut out = MotherJob {
         id: short_ref(key, &job.id),
         state: vocab(&job.state, STATES),
-        paused_reason: vocab_opt(&job.paused_reason, REASONS),
+        paused_reason: job.paused_reason.as_deref().map(paused_reason),
+        // A timestamp is a number, not text: the push engine's grace delay starts here.
+        paused_at: job.paused_at,
         activity: vocab_opt(&job.activity, REASONS),
         crew_opt_in: job.crew_opt_in,
         ..MotherJob::default()
@@ -436,7 +484,11 @@ pub fn redact_for_uplink_metadata(
             None
         }
         ServerMsg::PerriState {
-            tag, queue, host, ..
+            tag,
+            queue,
+            host,
+            queue_unfetched,
+            ..
         } => Some(ServerMsg::PerriState {
             tag: pseudonymous_tag(host_key, &tag),
             queue: queue
@@ -445,12 +497,17 @@ pub fn redact_for_uplink_metadata(
                 .map(|q| crate::data::perri_queue::PrQueueItem {
                     number: q.number,
                     bucket: vocab(&q.bucket, BUCKETS),
+                    // The repository is pseudonymous (so two PRs with one number
+                    // in two repositories stay two items), and the size is a number.
+                    repo: pseudonymous_repo(host_key, &q.repo),
+                    changed_lines: cap64(q.changed_lines),
                     ..Default::default()
                 })
                 .collect(),
             current: None,
             jira_site: None,
             host,
+            queue_unfetched,
         }),
         ServerMsg::SessionState { tag, state, host } => Some(ServerMsg::SessionState {
             tag: pseudonymous_tag(host_key, &tag),
@@ -509,6 +566,9 @@ pub fn redact_for_uplink_metadata(
             request_id,
             choices,
             host,
+            deadline,
+            agent_class,
+            operator_presence,
             ..
         } => {
             if !tag_ok_request_id(&request_id) {
@@ -529,6 +589,14 @@ pub fn redact_for_uplink_metadata(
                     .collect(),
                 context_pane_id: None,
                 host,
+                // Closed-vocabulary facts the primary's push engine needs (W13):
+                // a timestamp, an enum mapped before egress, an enum. The
+                // repository name and owner are dropped: a work host's is work data.
+                deadline,
+                agent_class,
+                operator_presence,
+                repo: None,
+                repo_owner: None,
             })
         }
         ServerMsg::DecisionResolved {
@@ -653,6 +721,9 @@ pub fn redact_for_uplink_metadata(
         | ServerMsg::PairRefused { .. }
         | ServerMsg::Unauthorized { .. }
         | ServerMsg::DeviceUnpaired
+        | ServerMsg::PushSentLog { .. }
+        | ServerMsg::PushWaiting { .. }
+        | ServerMsg::PushStatus(_)
         | ServerMsg::DevicePairing { .. }
         | ServerMsg::DevicePairOutcome { .. }
         | ServerMsg::Devices { .. }
@@ -693,7 +764,8 @@ pub fn is_uplink_metadata_shape(msg: &ServerMsg) -> bool {
                 && queue.len() <= MAX_LIST
                 && queue.iter().all(|q| {
                     in_vocab(&q.bucket, BUCKETS)
-                        && q.repo.is_empty()
+                        && q.changed_lines.is_none_or(|n| n <= MAX_COUNT)
+                        && is_pseudonymous_repo(&q.repo)
                         && q.title.is_empty()
                         && q.author.is_empty()
                         && q.url.is_empty()
@@ -724,10 +796,14 @@ pub fn is_uplink_metadata_shape(msg: &ServerMsg) -> bool {
             detail,
             choices,
             context_pane_id,
+            repo,
+            repo_owner,
             ..
         } => {
             is_focus_tag(tag)
                 && tag_ok_request_id(request_id)
+                && repo.is_none()
+                && repo_owner.is_none()
                 && prompt.is_empty()
                 && detail.is_none()
                 && context_pane_id.is_none()
@@ -758,5 +834,30 @@ pub fn is_uplink_metadata_shape(msg: &ServerMsg) -> bool {
                 .all(|n| *n as u64 <= MAX_COUNT)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY: [u8; 32] = [7; 32];
+
+    #[test]
+    fn tag_and_repo_pseudonyms_are_domain_separated() {
+        // One string used as both a tag and a repository must not give the same
+        // digest: a primary could otherwise equate the two.
+        for s in ["perri", "Carefeed/admin-portal", "x"] {
+            assert_ne!(
+                &pseudonymous_tag(&KEY, s)[2..],
+                &pseudonymous_repo(&KEY, s)[2..],
+                "{s}"
+            );
+            // And neither is the bare keyed hash of the string.
+            let bare = hex8(&hmac_sha256(&KEY, s.as_bytes()));
+            assert_ne!(&pseudonymous_tag(&KEY, s)[2..], bare, "{s}");
+            assert_ne!(&pseudonymous_repo(&KEY, s)[2..], bare, "{s}");
+        }
+        assert_eq!(pseudonymous_repo(&KEY, ""), "", "empty stays empty");
     }
 }

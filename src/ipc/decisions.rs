@@ -28,7 +28,22 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
+use chrono::{DateTime, Utc};
+
 use crate::ipc::protocol::{DecisionChoice, DecisionResolution, ServerMsg};
+use crate::push::wire::{AgentClass, Presence};
+
+/// What the originating daemon knows about a decision besides its prompt (W13):
+/// closed-vocabulary facts for the push engine. Never the agent's own name.
+#[derive(Debug, Clone, Default)]
+pub struct DecisionMeta {
+    /// When the asker stops waiting; `None` means no timeout.
+    pub deadline: Option<DateTime<Utc>>,
+    pub agent_class: Option<AgentClass>,
+    /// The focus's project repository name and its `github.com` owner.
+    pub repo: Option<String>,
+    pub repo_owner: Option<String>,
+}
 
 // ── outcomes ──────────────────────────────────────────────────────────────────
 
@@ -78,6 +93,8 @@ enum ResolveResult {
 /// One outstanding (on-the-wire) decision request for a tag.
 struct ActiveEntry {
     tag: String,
+    /// The request as broadcast, kept so a change of presence can re-send it.
+    msg: ServerMsg,
     /// The ids of the choices the request offered; the only ids an answer may name.
     choice_ids: Vec<String>,
     reply: oneshot::Sender<DecisionOutcome>,
@@ -124,6 +141,11 @@ pub struct DecisionRegistry {
     /// Ids of active requests whose answer-time refusal was already logged
     /// (see [`Self::first_refusal`]). Same growth argument as `resolved`.
     refusals_logged: HashSet<String>,
+    /// What each connected operator app last said about the operator (W13,
+    /// S7a), by connection key. Dropped with the connection.
+    presence: HashMap<String, Presence>,
+    /// The combined presence the last time it was computed, to tell a change.
+    last_presence: Option<Presence>,
     /// Wired by [`DecisionRegistry::configure_broadcast`] so every resolution
     /// path can announce a [`ServerMsg::DecisionResolved`] notice — the fix
     /// for the multi-window decision-sheet bug: every presenting window (not
@@ -176,6 +198,30 @@ impl DecisionRegistry {
         oneshot::Receiver<DecisionOutcome>,
         Option<ServerMsg>,
     ) {
+        self.submit_with(
+            tag,
+            prompt,
+            detail,
+            choices,
+            context_pane_id,
+            DecisionMeta::default(),
+        )
+    }
+
+    /// [`Self::submit`] with the closed-vocabulary facts the push engine needs.
+    pub fn submit_with(
+        &mut self,
+        tag: String,
+        prompt: String,
+        detail: Option<String>,
+        choices: Vec<DecisionChoice>,
+        context_pane_id: Option<String>,
+        meta: DecisionMeta,
+    ) -> (
+        String,
+        oneshot::Receiver<DecisionOutcome>,
+        Option<ServerMsg>,
+    ) {
         let request_id = Uuid::new_v4().to_string();
         let (reply, rx) = oneshot::channel();
         let choice_ids = choices.iter().map(|c| c.id.clone()).collect();
@@ -187,6 +233,11 @@ impl DecisionRegistry {
             choices,
             context_pane_id,
             host: None,
+            deadline: meta.deadline,
+            agent_class: meta.agent_class,
+            operator_presence: None,
+            repo: meta.repo,
+            repo_owner: meta.repo_owner,
         };
 
         if self.active_by_tag.contains_key(&tag) {
@@ -197,10 +248,12 @@ impl DecisionRegistry {
             (request_id, rx, None)
         } else {
             self.active_by_tag.insert(tag.clone(), request_id.clone());
+            let msg = self.stamped(msg);
             self.active.insert(
                 request_id.clone(),
                 ActiveEntry {
                     tag,
+                    msg: msg.clone(),
                     choice_ids,
                     reply,
                 },
@@ -366,15 +419,17 @@ impl DecisionRegistry {
         };
         self.active_by_tag
             .insert(tag.to_string(), request_id.clone());
+        let msg = self.stamped(next.msg);
         self.active.insert(
             request_id,
             ActiveEntry {
                 tag: tag.to_string(),
+                msg: msg.clone(),
                 choice_ids,
                 reply: next.reply,
             },
         );
-        Some(next.msg)
+        Some(msg)
     }
 
     // ── operator subscription ──────────────────────────────────────────────
@@ -405,6 +460,63 @@ impl DecisionRegistry {
         self.operators.remove(conn_key);
     }
 
+    // ── operator presence (W13, S7a) ─────────────────────────────────────────
+
+    /// Record what the verified Mac app on `conn_key` says about the operator.
+    /// Returns the open decisions to re-broadcast if the combined state just
+    /// became `away` (the push engine sends such a decision at once).
+    pub fn set_presence(&mut self, conn_key: &str, state: Presence) -> Vec<ServerMsg> {
+        self.presence.insert(conn_key.to_string(), state);
+        self.presence_frames()
+    }
+
+    /// Forget a closed connection's presence; see [`Self::set_presence`].
+    pub fn drop_presence(&mut self, conn_key: &str) -> Vec<ServerMsg> {
+        self.presence.remove(conn_key);
+        self.presence_frames()
+    }
+
+    /// The combined presence: `away` only if every connected app that renders
+    /// decisions has reported `away`, `active` if any reports `active`, and
+    /// `None` when no app has reported or one has not yet (an app older than
+    /// the reporter, or one that just connected).
+    pub fn combined_presence(&self) -> Option<Presence> {
+        let reports: Vec<Presence> = self
+            .operators
+            .iter()
+            .filter_map(|conn| self.presence.get(conn).copied())
+            .collect();
+        if reports.contains(&Presence::Active) {
+            Some(Presence::Active)
+        } else if !reports.is_empty() && reports.len() == self.operators.len() {
+            Some(Presence::Away)
+        } else {
+            None
+        }
+    }
+
+    /// Recompute the combined presence; the frames to re-broadcast when it
+    /// changed to `away` (each active request, with the new value).
+    pub fn presence_frames(&mut self) -> Vec<ServerMsg> {
+        let now = self.combined_presence();
+        let was = std::mem::replace(&mut self.last_presence, now);
+        if now != Some(Presence::Away) || was == now {
+            return Vec::new();
+        }
+        self.active
+            .values_mut()
+            .map(|entry| {
+                entry.msg = stamp_presence(entry.msg.clone(), now);
+                entry.msg.clone()
+            })
+            .collect()
+    }
+
+    /// A request about to be broadcast, with the presence as it stands.
+    fn stamped(&self, msg: ServerMsg) -> ServerMsg {
+        stamp_presence(msg, self.combined_presence())
+    }
+
     // ── test/diagnostic visibility ────────────────────────────────────────────
 
     /// The focus tag an active request belongs to, if `request_id` is active.
@@ -421,6 +533,16 @@ impl DecisionRegistry {
     pub fn queued_count(&self, tag: &str) -> usize {
         self.queues.get(tag).map(VecDeque::len).unwrap_or(0)
     }
+}
+
+fn stamp_presence(mut msg: ServerMsg, now: Option<Presence>) -> ServerMsg {
+    if let ServerMsg::DecisionRequest {
+        operator_presence, ..
+    } = &mut msg
+    {
+        *operator_presence = now;
+    }
+    msg
 }
 
 #[cfg(test)]
@@ -1377,5 +1499,339 @@ mod tests {
             "a later genuine answer",
         );
         assert!(matches!(rx.try_recv(), Ok(DecisionOutcome::Answered(id)) if id == "approve"));
+    }
+}
+
+/// What the originating daemon stamps on a decision for the push engine (W13):
+/// the deadline, the asking agent's class, the presence of the operator's Mac.
+#[cfg(test)]
+mod push_tests {
+    use super::*;
+    use crate::ipc::protocol::DecisionChoice;
+    use chrono::TimeZone;
+    use tokio::sync::oneshot;
+
+    fn choices() -> Vec<DecisionChoice> {
+        ["approve", "reject"]
+            .into_iter()
+            .map(|id| DecisionChoice {
+                id: id.into(),
+                label: id.into(),
+                detail: None,
+                is_default: false,
+            })
+            .collect()
+    }
+
+    fn deadline() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 26, 10, 5, 0).unwrap()
+    }
+
+    fn meta() -> DecisionMeta {
+        DecisionMeta {
+            deadline: Some(deadline()),
+            agent_class: Some(AgentClass::Claudia),
+            repo: Some("bishop".into()),
+            repo_owner: Some("thehammer".into()),
+        }
+    }
+
+    /// Raise a decision on `tag`: its id, the receiver that keeps it open, and
+    /// the frame to broadcast (none if it is queued behind another on the tag).
+    fn raise(
+        registry: &mut DecisionRegistry,
+        tag: &str,
+    ) -> (
+        String,
+        oneshot::Receiver<DecisionOutcome>,
+        Option<ServerMsg>,
+    ) {
+        registry.submit_with(tag.into(), "Which?".into(), None, choices(), None, meta())
+    }
+
+    fn presence_of(msg: &ServerMsg) -> Option<Presence> {
+        match msg {
+            ServerMsg::DecisionRequest {
+                operator_presence, ..
+            } => *operator_presence,
+            other => panic!("not a DecisionRequest: {other:?}"),
+        }
+    }
+
+    fn request_id_of(msg: &ServerMsg) -> &str {
+        match msg {
+            ServerMsg::DecisionRequest { request_id, .. } => request_id,
+            other => panic!("not a DecisionRequest: {other:?}"),
+        }
+    }
+
+    // ── the facts on the broadcast ───────────────────────────────────────────
+
+    #[test]
+    fn the_broadcast_carries_the_deadline_agent_class_and_repository_facts() {
+        let mut r = DecisionRegistry::new();
+        let (_id, _rx, msg) = raise(&mut r, "claudia");
+        match msg.expect("an active request is broadcast") {
+            ServerMsg::DecisionRequest {
+                deadline: d,
+                agent_class,
+                repo,
+                repo_owner,
+                host,
+                ..
+            } => {
+                assert_eq!(d, Some(deadline()));
+                assert_eq!(agent_class, Some(AgentClass::Claudia));
+                assert_eq!(repo.as_deref(), Some("bishop"));
+                assert_eq!(repo_owner.as_deref(), Some("thehammer"));
+                assert_eq!(host, None, "the daemon's own frame");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_plain_submit_leaves_every_new_fact_absent() {
+        let mut r = DecisionRegistry::new();
+        let (_id, _rx, msg) = r.submit("claudia".into(), "Which?".into(), None, choices(), None);
+        match msg.unwrap() {
+            ServerMsg::DecisionRequest {
+                deadline,
+                agent_class,
+                operator_presence,
+                repo,
+                repo_owner,
+                ..
+            } => {
+                assert_eq!(deadline, None);
+                assert_eq!(agent_class, None);
+                assert_eq!(operator_presence, None);
+                assert_eq!(repo, None);
+                assert_eq!(repo_owner, None);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // ── the combined presence ────────────────────────────────────────────────
+
+    #[test]
+    fn with_no_app_reporting_the_presence_is_none() {
+        let mut r = DecisionRegistry::new();
+        assert_eq!(r.combined_presence(), None, "no app at all");
+        r.add_operator("a");
+        assert_eq!(r.combined_presence(), None, "an app that has not reported");
+        let (_id, _rx, msg) = raise(&mut r, "claudia");
+        assert_eq!(presence_of(&msg.unwrap()), None);
+    }
+
+    #[test]
+    fn one_app_that_is_away_makes_the_decision_away() {
+        let mut r = DecisionRegistry::new();
+        r.add_operator("a");
+        r.set_presence("a", Presence::Away);
+        assert_eq!(r.combined_presence(), Some(Presence::Away));
+        let (_id, _rx, msg) = raise(&mut r, "claudia");
+        assert_eq!(presence_of(&msg.unwrap()), Some(Presence::Away));
+    }
+
+    #[test]
+    fn one_away_and_one_active_is_active() {
+        let mut r = DecisionRegistry::new();
+        r.add_operator("a");
+        r.add_operator("b");
+        r.set_presence("a", Presence::Away);
+        r.set_presence("b", Presence::Active);
+        assert_eq!(r.combined_presence(), Some(Presence::Active));
+        let (_id, _rx, msg) = raise(&mut r, "claudia");
+        assert_eq!(presence_of(&msg.unwrap()), Some(Presence::Active));
+    }
+
+    #[test]
+    fn an_operator_that_has_not_reported_prevents_away() {
+        let mut r = DecisionRegistry::new();
+        r.add_operator("a");
+        r.add_operator("b");
+        r.set_presence("a", Presence::Away);
+        assert_eq!(r.combined_presence(), None, "b has not said");
+        r.set_presence("b", Presence::Away);
+        assert_eq!(r.combined_presence(), Some(Presence::Away));
+    }
+
+    #[test]
+    fn a_report_from_a_connection_that_is_not_an_operator_counts_for_nothing() {
+        let mut r = DecisionRegistry::new();
+        r.set_presence("ghost", Presence::Away);
+        assert_eq!(r.combined_presence(), None);
+        r.add_operator("a");
+        r.set_presence("a", Presence::Active);
+        r.set_presence("ghost", Presence::Away);
+        assert_eq!(r.combined_presence(), Some(Presence::Active));
+    }
+
+    #[test]
+    fn the_latest_report_of_an_app_replaces_its_earlier_one() {
+        let mut r = DecisionRegistry::new();
+        r.add_operator("a");
+        for (state, want) in [
+            (Presence::Away, Presence::Away),
+            (Presence::Active, Presence::Active),
+            (Presence::Away, Presence::Away),
+        ] {
+            r.set_presence("a", state);
+            assert_eq!(r.combined_presence(), Some(want));
+        }
+    }
+
+    // ── re-broadcast on a change to away ─────────────────────────────────────
+
+    #[test]
+    fn a_change_to_away_rebroadcasts_each_active_decision_with_presence_set_and_not_again_while_away(
+    ) {
+        let mut r = DecisionRegistry::new();
+        r.add_operator("a");
+        let (first, _rx1, original) = raise(&mut r, "claudia");
+        let (second, _rx2, _) = raise(&mut r, "perri");
+        let (_queued, _rx3, queued_msg) = raise(&mut r, "claudia");
+        assert!(
+            queued_msg.is_none(),
+            "the third waits behind the first on its tag"
+        );
+
+        let frames = r.set_presence("a", Presence::Away);
+        let mut ids: Vec<&str> = frames.iter().map(request_id_of).collect();
+        ids.sort();
+        let mut want = vec![first.as_str(), second.as_str()];
+        want.sort();
+        assert_eq!(ids, want, "each active decision, and not the queued one");
+        assert!(frames
+            .iter()
+            .all(|f| presence_of(f) == Some(Presence::Away)));
+
+        // A re-broadcast is the same request: only the presence differs.
+        let mut a = serde_json::to_value(original.unwrap()).unwrap();
+        let mut b =
+            serde_json::to_value(frames.iter().find(|f| request_id_of(f) == first).unwrap())
+                .unwrap();
+        a.as_object_mut().unwrap().remove("operator_presence");
+        b.as_object_mut().unwrap().remove("operator_presence");
+        assert_eq!(a, b);
+
+        // Still away: nothing more. Active: nothing. Away again: each is re-sent.
+        assert!(r.set_presence("a", Presence::Away).is_empty());
+        assert!(r.set_presence("a", Presence::Active).is_empty());
+        assert_eq!(r.set_presence("a", Presence::Away).len(), 2);
+    }
+
+    #[test]
+    fn a_decision_resolved_before_the_change_is_not_rebroadcast() {
+        let mut r = DecisionRegistry::new();
+        r.add_operator("a");
+        let (done, _rx1, _) = raise(&mut r, "claudia");
+        let (open, _rx2, _) = raise(&mut r, "perri");
+        r.answer(&done, Some("approve".into()));
+        let frames = r.set_presence("a", Presence::Away);
+        assert_eq!(
+            frames.iter().map(request_id_of).collect::<Vec<_>>(),
+            vec![open.as_str()]
+        );
+    }
+
+    #[test]
+    fn nothing_is_rebroadcast_when_the_change_is_not_to_away_or_nothing_is_open() {
+        let mut r = DecisionRegistry::new();
+        r.add_operator("a");
+        assert!(
+            r.set_presence("a", Presence::Away).is_empty(),
+            "nothing open"
+        );
+        assert!(r.set_presence("a", Presence::Active).is_empty());
+        let (_id, _rx, _) = raise(&mut r, "claudia");
+        assert!(
+            r.set_presence("a", Presence::Active).is_empty(),
+            "not a change to away"
+        );
+    }
+
+    #[test]
+    fn a_decision_promoted_from_the_queue_while_away_carries_away() {
+        let mut r = DecisionRegistry::new();
+        r.add_operator("a");
+        let (first, _rx1, _) = raise(&mut r, "claudia");
+        let (_second, _rx2, queued) = raise(&mut r, "claudia");
+        assert!(queued.is_none());
+        r.set_presence("a", Presence::Away);
+        match r.answer(&first, Some("approve".into())) {
+            AnswerOutcome::Answered {
+                promoted: Some(msg),
+            } => {
+                assert_eq!(presence_of(&msg), Some(Presence::Away));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_decision_raised_while_active_says_active() {
+        let mut r = DecisionRegistry::new();
+        r.add_operator("a");
+        r.set_presence("a", Presence::Active);
+        let (_id, _rx, msg) = raise(&mut r, "claudia");
+        assert_eq!(presence_of(&msg.unwrap()), Some(Presence::Active));
+    }
+
+    #[test]
+    fn dropping_the_active_app_leaves_the_remaining_away_app_and_rebroadcasts() {
+        let mut r = DecisionRegistry::new();
+        r.add_operator("a");
+        r.add_operator("b");
+        r.set_presence("a", Presence::Away);
+        r.set_presence("b", Presence::Active);
+        let (id, _rx, _) = raise(&mut r, "claudia");
+        assert_eq!(r.combined_presence(), Some(Presence::Active));
+        // What the server does when `b` closes: it stops being an operator, then its report is dropped.
+        r.remove_operator("b");
+        let frames = r.drop_presence("b");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(request_id_of(&frames[0]), id);
+        assert_eq!(presence_of(&frames[0]), Some(Presence::Away));
+        assert_eq!(r.combined_presence(), Some(Presence::Away));
+    }
+
+    #[test]
+    fn dropping_the_last_app_leaves_none_and_rebroadcasts_nothing() {
+        let mut r = DecisionRegistry::new();
+        r.add_operator("a");
+        r.set_presence("a", Presence::Away);
+        let (_id, _rx, _) = raise(&mut r, "claudia");
+        r.remove_operator("a");
+        assert!(r.drop_presence("a").is_empty());
+        assert_eq!(r.combined_presence(), None);
+    }
+
+    // ── who counts as an operator is unchanged ───────────────────────────────
+
+    #[test]
+    fn has_operator_for_is_not_changed_by_presence() {
+        let mut r = DecisionRegistry::new();
+        assert!(!r.has_operator_for(false) && !r.has_operator_for(true));
+        // A report with no app behind it makes nobody an operator.
+        r.set_presence("some-phone-or-script", Presence::Away);
+        r.set_presence("some-phone-or-script", Presence::Active);
+        assert!(!r.has_operator_for(false) && !r.has_operator_for(true));
+        assert!(!r.has_operator());
+
+        r.add_operator("app");
+        assert!(r.has_operator_for(false) && r.has_operator_for(true));
+        for state in [Presence::Away, Presence::Active, Presence::Away] {
+            r.set_presence("app", state);
+            assert!(
+                r.has_operator_for(false) && r.has_operator_for(true),
+                "{state:?}"
+            );
+        }
+        r.remove_operator("app");
+        r.drop_presence("app");
+        assert!(!r.has_operator_for(false) && !r.has_operator_for(true));
     }
 }

@@ -12,6 +12,7 @@ import NostromoKit
 @main
 struct NostromoApp: App {
 
+    @UIApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
     @StateObject private var session = AppSession()
     @Environment(\.scenePhase) private var scenePhase
 
@@ -48,9 +49,17 @@ struct RootView: View {
                 if let name = session.successName {
                     PairingSuccessView(name: name)
                 } else if let store = session.store {
-                    ContentView()
-                        .environmentObject(store)
-                        .onAppear { store.start() }
+                    if let push = session.push {
+                        PushGate(push: push, store: store) {
+                            ContentView()
+                                .environmentObject(store)
+                                .onAppear { store.start() }
+                        }
+                    } else {
+                        ContentView()
+                            .environmentObject(store)
+                            .onAppear { store.start() }
+                    }
                 }
             }
         }
@@ -72,9 +81,35 @@ struct RootView: View {
     }
 }
 
+/// Holds the first screen back until the push reconcile has run (stale notifications removed, badge
+/// set), or 2 s have passed, so nothing can be tapped against a notification the app is about to
+/// remove. Also opens the screen for a tapped notification.
+struct PushGate<Content: View>: View {
+    @ObservedObject var push: PushModel
+    /// The sheet is its own presentation: it does not inherit what `content` is given below, so the
+    /// store is passed here and injected on the sheet explicitly.
+    let store: DaemonStore
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        content()
+            .environmentObject(push)
+            .allowsHitTesting(push.reconciled)
+            .sheet(isPresented: Binding(
+                get: { push.tapped != nil },
+                set: { if !$0 { push.tapped = nil } }
+            )) {
+                if let payload = push.tapped {
+                    PushItemView(payload: payload).environmentObject(push).environmentObject(store)
+                }
+            }
+    }
+}
+
 /// Root content view — TabView with Sessions, Queue, Perri, Fred, and Teri tabs.
 struct ContentView: View {
     @EnvironmentObject var store: DaemonStore
+    @EnvironmentObject var session: AppSession
     /// Decisions the operator closed on this phone. Over the WebSocket transport the phone answers
     /// nothing (B10, Q4), so closing only hides the sheet here.
     @State private var locallyClosedDecisions: Set<String> = []
@@ -97,6 +132,7 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             ConnectionBanner()
+            if let push = session.push { PushDeliveryBanner(push: push) }
             tabs
         }
     }
