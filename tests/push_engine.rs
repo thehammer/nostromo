@@ -2951,6 +2951,37 @@ async fn a_satellite_that_is_gone_and_silent_is_forgotten_and_its_items_stop_cou
 }
 
 #[tokio::test]
+async fn a_satellite_that_comes_back_after_being_forgotten_is_baselined_again() {
+    // What it reports on coming back was already waiting; none of it is news.
+    // (If the forgotten host stayed "seeded", every job it still has would be pushed.)
+    let mut rig = Rig::new().await;
+    let t0 = base();
+    rig.register("dev-1", &token_a());
+    rig.start(&["kobe"], t0).await;
+    rig.engine
+        .ingest(jobs_frame(Some("kobe"), vec![awaiting("aaaa0001", t0)]), t0);
+    rig.engine.step_at(t0).await;
+
+    rig.engine.housekeeping(None, t0 + secs(601));
+    rig.engine.step_at(t0 + secs(601)).await;
+    assert_eq!(rig.waiting("dev-1").1, 0, "kobe was forgotten");
+
+    let back = t0 + secs(700);
+    rig.engine.ingest(jobs_frame(Some("kobe"), vec![awaiting("aaaa0001", t0)]), back);
+    rig.engine.ingest(queue_frame(Some("kobe"), vec![requested(4821)]), back);
+    for t in [0, 130, 600] {
+        rig.engine.step_at(back + secs(t)).await;
+    }
+
+    assert!(
+        rig.posts().await.is_empty(),
+        "what was already waiting when it reconnected is not pushed: {:#?}",
+        rig.posts().await
+    );
+    assert_eq!(rig.waiting("dev-1").1, 2, "but it is counted again");
+}
+
+#[tokio::test]
 async fn the_retained_frames_fill_in_a_host_the_engine_has_not_heard_from_but_do_not_overwrite_what_it_has(
 ) {
     let mut rig = Rig::new().await;
