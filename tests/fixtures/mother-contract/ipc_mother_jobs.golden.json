@@ -278,6 +278,7 @@
       "plan_path": "/tmp/mother-root/events/j-hold1-plan.md",
       "question": "Quality gates are still failing after 2/2 attempt(s): unit.\nBranch: pushed to origin/feature/rec-gate_hold_answered at c0ac7882bfdd.\nGate output and hints: mother status j-hold1\nChoose one:\n  mother resume j-hold1 \"<guidance>\"            resume this worker session with your guidance\n  mother resume j-hold1 --option escalate       re-run one model tier higher\n  mother resume j-hold1 --option override_open  open the PR for review anyway (override recorded)\n  mother resume j-hold1 --option cancel         cancel the job; the branch is left in place",
       "paused_reason": "gate_hold",
+      "paused_at": "2026-10-18T11:11:40Z",
       "adherence_notes": null,
       "adherence_status": null,
       "current_tier": "tier_0",
