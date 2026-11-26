@@ -86,6 +86,15 @@ final class PushModelTests: XCTestCase {
         XCTAssertTrue(model.reconciled)
     }
 
+    func testTheLinksFirstDownReportDoesNotUseUpTheHoldTheFirstConnectOwes() async {
+        // The transport says "down" before it ever connects; the connect after it still holds the screen.
+        let (model, transport) = await make()
+        await letMainLoopTurn()
+        XCTAssertTrue(model.reconciled)
+        await connect(transport)
+        XCTAssertFalse(model.reconciled)
+    }
+
     func testAReconnectReconcilesAgainButNeverHoldsTheScreenBack() async {
         let (model, transport) = await make()
         await connect(transport)
@@ -134,13 +143,13 @@ final class PushModelTests: XCTestCase {
     func testAnEditThePrimaryDidNotKeepIsMarkedFailedAndKeptOnScreen() async {
         let (model, transport) = await make()
         await connect(transport)
-        model.update { $0.quiet.enabled = true }
+        model.update { $0.kinds.mother = false }
         XCTAssertEqual(model.prefsSave, .pending)
 
         await deliverStatus(.default, via: transport)   // the primary kept the old settings
 
         XCTAssertEqual(model.prefsSave, .failed)
-        XCTAssertTrue(model.prefs.quiet.enabled, "the screen keeps what the operator chose")
+        XCTAssertFalse(model.prefs.kinds.mother, "the screen keeps what the operator chose")
     }
 
     func testWithNothingPendingThePrimarysSettingsReplaceTheScreens() async {

@@ -63,9 +63,10 @@ public final class PushModel: ObservableObject {
     private var reconcileDeadline: Task<Void, Never>?
     /// The settings the primary has not acknowledged yet.
     private var pendingPrefs: PushPrefsWire?
-    /// True once the first screen's reconcile has finished (answered, timed out, or the link was
-    /// down). Later reconnects reconcile again but never hold the screen back.
+    /// True once a connect has held the first screen and that hold has ended (answered, timed out, or
+    /// the link dropped). Later reconnects reconcile again but never hold the screen back.
     private var firstScreenReleased = false
+    private var gateArmed = false
 
     public init(transport: DaemonTransport, environment: PushEnvironmentWire = .production,
                 reconcileTimeout: TimeInterval = 2) {
@@ -129,6 +130,7 @@ public final class PushModel: ObservableObject {
         requestWaiting()
         // Only the first screen is held back; a reconnect reconciles in the background.
         guard !firstScreenReleased else { return }
+        gateArmed = true
         reconciled = false
         reconcileDeadline?.cancel()
         let timeout = reconcileTimeout
@@ -145,8 +147,10 @@ public final class PushModel: ObservableObject {
         releaseFirstScreen()
     }
 
+    /// Open the screen. Only a hold that a connect actually started counts as spent: the link's first
+    /// report is "down", and that must not use up the hold the first real connect owes.
     private func releaseFirstScreen() {
-        firstScreenReleased = true
+        if gateArmed { firstScreenReleased = true }
         reconciled = true
     }
 
