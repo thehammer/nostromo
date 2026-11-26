@@ -50,13 +50,14 @@ public enum OutboundPolicy {
     /// The push verbs (W13): a paired phone's, scoped to its own device record. They are not in the
     /// daemon's `NETWORK_ALLOWED`: the daemon handles them at its pre-dispatch site, only for a
     /// paired device, and refuses them for every other network peer. So they are listed apart from
-    /// `allowedTypes`; they change nothing on the Mac and answer nothing. Exactly these four;
+    /// `allowedTypes`; they change nothing on the Mac and answer nothing. Exactly these five;
     /// `tests/ios_policy` pins the set.
     public static let pairedDeviceTypes: Set<String> = [
         "register_push",
         "set_push_prefs",
         "push_sent_log",
         "push_waiting",
+        "push_detail",
     ]
 
     public static func allows(type: String) -> Bool {
