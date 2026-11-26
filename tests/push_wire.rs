@@ -95,12 +95,19 @@ fn register_push_round_trips_and_names_its_fields() {
         tz: "UTC".into(),
         capabilities: PushCapabilities {
             nse_withdraw: false,
+            ..Default::default()
         },
     };
     let v = serde_json::to_value(&msg).unwrap();
     assert_eq!(v["type"], "register_push");
     assert_eq!(v["environment"], "production");
-    assert_eq!(v["capabilities"], json!({"nse_withdraw": false}));
+    assert_eq!(v["capabilities"]["nse_withdraw"], false);
+    assert!(
+        v["capabilities"]
+            .get("nse")
+            .is_none_or(|nse| nse.as_bool() == Some(false)),
+        "W16 added the `nse` flag: it is absent or false here: {v}"
+    );
     let back: ClientMsg = serde_json::from_value(v).unwrap();
     assert_eq!(
         serde_json::to_value(&back).unwrap(),
@@ -869,10 +876,16 @@ fn a_work_satellites_review_frame_keeps_the_changed_lines_number() {
 
 // ── W13-19: the engine never answers anything ────────────────────────────────
 
-/// The only `ClientMsg` variants `src/push/` may name: the paired phone's four
-/// verbs, which it matches (never builds) in `PushEngine::dispatch`.
-const PUSH_ENGINE_CLIENT_VERBS: [&str; 4] =
-    ["RegisterPush", "SetPushPrefs", "PushSentLog", "PushWaiting"];
+/// The only `ClientMsg` variants `src/push/` may name: the paired phone's
+/// verbs (the four of W13 and W16's `PushDetail`), which it matches (never
+/// builds) in `PushEngine::dispatch`.
+const PUSH_ENGINE_CLIENT_VERBS: [&str; 5] = [
+    "RegisterPush",
+    "SetPushPrefs",
+    "PushSentLog",
+    "PushWaiting",
+    "PushDetail",
+];
 
 /// What in `src` (a `src/push/` file) would let the engine answer something:
 /// an answer type, or a `ClientMsg::` variant outside the four push verbs.
@@ -900,8 +913,9 @@ fn engine_answer_violations(file: &str, src: &str) -> Vec<String> {
     out
 }
 
-const PUSH_SOURCES: [(&str, &str); 10] = [
+const PUSH_SOURCES: [(&str, &str); 11] = [
     ("cli.rs", include_str!("../src/push/cli.rs")),
+    ("detail.rs", include_str!("../src/push/detail.rs")),
     ("devices.rs", include_str!("../src/push/devices.rs")),
     ("items.rs", include_str!("../src/push/items.rs")),
     ("mod.rs", include_str!("../src/push/mod.rs")),
@@ -952,4 +966,186 @@ fn the_answer_scan_bites_on_an_answer_a_foreign_verb_and_ignores_comments() {
     );
     assert!(engine_answer_violations("x.rs", "ClientMsg::PushWaiting => {}").is_empty());
     assert!(engine_answer_violations("x.rs", "// never ClientMsg::DecisionAnswer").is_empty());
+}
+
+// ── W16: the `nse` capability and PushDetail ─────────────────────────────────
+
+#[test]
+fn capabilities_decode_each_flag_on_its_own_and_an_empty_object_is_all_false() {
+    let decode = |text: &str| -> PushCapabilities {
+        serde_json::from_str(text).unwrap_or_else(|e| panic!("{text}: {e}"))
+    };
+    let none = decode("{}");
+    assert!(!none.nse && !none.nse_withdraw, "{none:?}");
+    assert_eq!(none, PushCapabilities::default());
+
+    let nse_only = decode(r#"{"nse":true}"#);
+    assert!(nse_only.nse && !nse_only.nse_withdraw, "{nse_only:?}");
+
+    let withdraw_only = decode(r#"{"nse_withdraw":true}"#);
+    assert!(
+        !withdraw_only.nse && withdraw_only.nse_withdraw,
+        "{withdraw_only:?}"
+    );
+
+    let both = decode(r#"{"nse":true,"nse_withdraw":true}"#);
+    assert!(both.nse && both.nse_withdraw, "{both:?}");
+
+    let explicit_false = decode(r#"{"nse":false,"nse_withdraw":false}"#);
+    assert_eq!(explicit_false, PushCapabilities::default());
+
+    // A flag a later build adds does not stop an older daemon reading the ones it knows.
+    let future = decode(r#"{"nse":true,"some_future_flag":true}"#);
+    assert!(future.nse && !future.nse_withdraw, "{future:?}");
+}
+
+#[test]
+fn register_push_carries_the_nse_flag_and_without_capabilities_it_is_false() {
+    match register_push(
+        r#"{"type":"register_push","apns_token":"abab","environment":"sandbox","tz":"UTC","capabilities":{"nse":true}}"#,
+    ) {
+        ClientMsg::RegisterPush { capabilities, .. } => {
+            assert!(capabilities.nse, "{capabilities:?}");
+            assert!(
+                !capabilities.nse_withdraw,
+                "independent of the withdrawal flag"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    match register_push(
+        r#"{"type":"register_push","apns_token":"abab","environment":"sandbox","tz":"UTC"}"#,
+    ) {
+        ClientMsg::RegisterPush { capabilities, .. } => {
+            assert!(
+                !capabilities.nse && !capabilities.nse_withdraw,
+                "{capabilities:?}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn the_nse_flag_survives_a_round_trip_and_is_named_nse() {
+    let caps = PushCapabilities {
+        nse: true,
+        nse_withdraw: false,
+    };
+    let v = serde_json::to_value(caps).unwrap();
+    assert_eq!(v["nse"], true);
+    assert_ne!(v.get("nse_withdraw"), Some(&json!(true)), "{v}");
+    let back: PushCapabilities = serde_json::from_value(v).unwrap();
+    assert_eq!(back, caps);
+}
+
+#[test]
+fn push_detail_verb_is_a_type_and_an_item_ref_and_nothing_else() {
+    let msg = ClientMsg::PushDetail {
+        item_ref: "0123456789abcdef".into(),
+    };
+    let v = serde_json::to_value(&msg).unwrap();
+    assert_eq!(
+        v,
+        json!({"type": "push_detail", "item_ref": "0123456789abcdef"})
+    );
+
+    let back: ClientMsg = serde_json::from_value(v.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&back).unwrap(), v);
+    match back {
+        ClientMsg::PushDetail { item_ref } => assert_eq!(item_ref, "0123456789abcdef"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_push_detail_verb_with_a_field_this_daemon_does_not_know_still_decodes_and_without_a_ref_does_not(
+) {
+    let msg: ClientMsg = serde_json::from_str(
+        r#"{"type":"push_detail","item_ref":"0123456789abcdef","future_field":{"a":1}}"#,
+    )
+    .unwrap();
+    assert!(matches!(msg, ClientMsg::PushDetail { .. }), "{msg:?}");
+
+    assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"push_detail"}"#).is_err());
+}
+
+#[test]
+fn a_push_detail_reply_names_its_fields_and_omits_text_and_host_when_absent() {
+    let with_text = ServerMsg::PushDetail {
+        item_ref: "0123456789abcdef".into(),
+        waiting: true,
+        text: Some("Should I split the uploader module?".into()),
+        host: Some("sendai".into()),
+    };
+    assert_eq!(
+        serde_json::to_value(&with_text).unwrap(),
+        json!({
+            "type": "push_detail",
+            "item_ref": "0123456789abcdef",
+            "waiting": true,
+            "text": "Should I split the uploader module?",
+            "host": "sendai",
+        })
+    );
+
+    // Not waiting, or nothing may be shown: no `text` key and no `host` key,
+    // not `null`s.
+    let bare = ServerMsg::PushDetail {
+        item_ref: "fedcba9876543210".into(),
+        waiting: false,
+        text: None,
+        host: None,
+    };
+    let v = serde_json::to_value(&bare).unwrap();
+    assert_eq!(
+        v,
+        json!({"type": "push_detail", "item_ref": "fedcba9876543210", "waiting": false})
+    );
+    assert!(v.get("text").is_none() && v.get("host").is_none(), "{v}");
+
+    // Waiting, but with no text to show (a work host, PHI, a work owner...).
+    let no_text = ServerMsg::PushDetail {
+        item_ref: "0123456789abcdef".into(),
+        waiting: true,
+        text: None,
+        host: Some("kobe".into()),
+    };
+    let v = serde_json::to_value(&no_text).unwrap();
+    assert_eq!(
+        v,
+        json!({"type": "push_detail", "item_ref": "0123456789abcdef", "waiting": true, "host": "kobe"})
+    );
+}
+
+#[test]
+fn a_push_detail_reply_round_trips_and_tolerates_unknown_fields_and_absent_optionals() {
+    for frame in [
+        json!({"type":"push_detail","item_ref":"0123456789abcdef","waiting":true,"text":"One line","host":"sendai"}),
+        json!({"type":"push_detail","item_ref":"0123456789abcdef","waiting":false}),
+        json!({"type":"push_detail","item_ref":"0123456789abcdef","waiting":true,"host":"kobe"}),
+    ] {
+        let msg: ServerMsg = serde_json::from_value(frame.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&msg).unwrap(), frame);
+    }
+
+    // A later daemon's extra field, and explicit nulls, still decode.
+    let msg: ServerMsg = serde_json::from_str(
+        r#"{"type":"push_detail","item_ref":"0123456789abcdef","waiting":true,"text":null,"host":"sendai","future":[1,2]}"#,
+    )
+    .unwrap();
+    match msg {
+        ServerMsg::PushDetail {
+            item_ref,
+            waiting,
+            text,
+            host,
+        } => {
+            assert_eq!(item_ref, "0123456789abcdef");
+            assert!(waiting);
+            assert_eq!(text, None);
+            assert_eq!(host.as_deref(), Some("sendai"));
+        }
+        other => panic!("{other:?}"),
+    }
 }

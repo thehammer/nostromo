@@ -117,7 +117,7 @@ impl PhiScope {
 
     /// Is this one name (a path component or a project name) a PHI repo, or a
     /// worktree or checkout named after one (`admin-portal-feat-x`)?
-    fn name_is_phi(&self, name: &str) -> bool {
+    pub fn name_is_phi(&self, name: &str) -> bool {
         let n = norm(name);
         self.repos
             .iter()
@@ -126,7 +126,7 @@ impl PhiScope {
 
     /// Any component of the path names a PHI repo: a worktree inside the repo,
     /// or a checkout beside it, is PHI too.
-    fn path_is_phi(&self, path: &str) -> bool {
+    pub fn path_is_phi(&self, path: &str) -> bool {
         path.split(['/', '\\'])
             .filter(|c| !c.is_empty())
             .any(|c| self.name_is_phi(c))

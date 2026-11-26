@@ -268,6 +268,7 @@ pub fn server_msg_tag(msg: &ServerMsg) -> MsgTag<'_> {
         | ServerMsg::DeviceUnpaired
         | ServerMsg::PushSentLog { .. }
         | ServerMsg::PushWaiting { .. }
+        | ServerMsg::PushDetail { .. }
         | ServerMsg::PushStatus(_)
         | ServerMsg::DevicePairing { .. }
         | ServerMsg::DevicePairOutcome { .. }

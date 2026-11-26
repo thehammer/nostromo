@@ -1672,7 +1672,10 @@ fn every_push_verb() -> Vec<ClientMsg> {
             apns_token: token_a(),
             environment: PushEnvironment::Production,
             tz: "America/Chicago".into(),
-            capabilities: PushCapabilities { nse_withdraw: true },
+            capabilities: PushCapabilities {
+                nse_withdraw: true,
+                ..Default::default()
+            },
         },
         ClientMsg::SetPushPrefs {
             prefs: PushPrefs::default(),
@@ -2145,7 +2148,10 @@ async fn register_push_stores_the_latest_capabilities() {
         "dev-1",
         &token_a(),
         "UTC",
-        PushCapabilities { nse_withdraw: true },
+        PushCapabilities {
+            nse_withdraw: true,
+            ..Default::default()
+        },
     );
     assert_eq!(
         read(&rig)["devices"]["dev-1"]["capabilities"]["nse_withdraw"],
@@ -2157,6 +2163,7 @@ async fn register_push_stores_the_latest_capabilities() {
         "UTC",
         PushCapabilities {
             nse_withdraw: false,
+            ..Default::default()
         },
     );
     assert_eq!(
@@ -3590,4 +3597,303 @@ async fn a_dropped_token_keeps_the_devices_settings_for_the_fresh_registration()
         let status_after = rig.register("dev-1", &token_b());
         assert_eq!(status_after.prefs, prefs, "{status} {reason}");
     }
+}
+
+// ── W16-13: `mutable_content` follows the device's `nse` capability ──────────
+//
+// A phone whose build embeds the Notification Service Extension says so at
+// registration (`capabilities.nse`). Every alert push to it then asks Apple to run
+// the extension (`mutable_content: true`), whatever the push is and whatever
+// `nse_withdraw` says; every push to any other phone says `false`.
+
+fn capabilities(nse: bool, nse_withdraw: bool) -> PushCapabilities {
+    PushCapabilities { nse, nse_withdraw }
+}
+
+/// Both values of `nse_withdraw` for one value of `nse`: the extension flag must
+/// not depend on the withdrawal one.
+fn with_both_withdraw_settings(nse: bool) -> [PushCapabilities; 2] {
+    [capabilities(nse, false), capabilities(nse, true)]
+}
+
+fn assert_mutable_content(posts: &[Value], expected: bool, what: &str) {
+    assert!(!posts.is_empty(), "{what}: nothing was pushed");
+    for p in posts {
+        assert_eq!(p["push_type"], "alert", "{what}: {p}");
+        assert_eq!(p["mutable_content"], expected, "{what}: {p}");
+    }
+}
+
+/// An original Mother alert, a decision alert, a review alert and a withdrawal
+/// replacement (passive, same collapse id), each pushed on its own.
+async fn posts_for_every_alert_kind(capabilities: PushCapabilities) -> Vec<Value> {
+    let mut rig = Rig::new().await;
+    let t0 = base();
+    rig.register_with("dev-1", &token_a(), "UTC", capabilities);
+    rig.start(&["kobe"], t0).await;
+
+    rig.engine
+        .ingest(jobs_frame(Some("kobe"), vec![awaiting("aaaa0001", t0)]), t0);
+    rig.engine.step_at(t0).await;
+    rig.engine.step_at(t0 + secs(120)).await;
+
+    rig.engine.ingest(
+        decision_frame(
+            Some("kobe"),
+            "req-1",
+            Some(t0 + secs(3600)),
+            Some(AgentClass::Claudia),
+            Some(Presence::Active),
+        ),
+        t0 + secs(200),
+    );
+    rig.engine.step_at(t0 + secs(200)).await;
+    rig.engine.step_at(t0 + secs(230)).await;
+
+    rig.engine.ingest(
+        queue_frame(
+            Some("kobe"),
+            vec![pr("Carefeed/admin-portal", 4821, "requested", Some(10))],
+        ),
+        t0 + secs(300),
+    );
+    rig.engine.step_at(t0 + secs(300)).await;
+    rig.engine.step_at(t0 + secs(420)).await;
+
+    rig.engine.ingest(
+        jobs_frame(Some("kobe"), vec![running("aaaa0001")]),
+        t0 + secs(500),
+    );
+    rig.engine.step_at(t0 + secs(500)).await;
+
+    let posts = rig.posts().await;
+    let kinds: Vec<&str> = posts.iter().map(data_kind).collect();
+    assert_eq!(
+        kinds,
+        vec!["mother", "decision", "review", "mother"],
+        "the scenario pushes each kind once, then the withdrawal: {posts:#?}"
+    );
+    assert_eq!(posts[3]["interruption_level"], "passive");
+    assert_eq!(posts[3]["collapse_id"], posts[0]["collapse_id"]);
+    assert_eq!(posts[3]["data"]["resolved"], true);
+    posts
+}
+
+/// Four items due together: one Summary and no individual alerts.
+async fn posts_for_a_summary(capabilities: PushCapabilities) -> Vec<Value> {
+    let mut rig = Rig::new().await;
+    let t0 = base();
+    rig.register_with("dev-1", &token_a(), "UTC", capabilities);
+    rig.start(&["kobe"], t0).await;
+    let jobs: Vec<MotherJob> = (1..=4)
+        .map(|n| awaiting(&format!("aaaa000{n}"), t0))
+        .collect();
+    rig.engine.ingest(jobs_frame(Some("kobe"), jobs), t0);
+    rig.engine.step_at(t0).await;
+    rig.engine.step_at(t0 + secs(120)).await;
+    let posts = rig.posts().await;
+    assert_eq!(posts.len(), 1, "{posts:#?}");
+    assert_eq!(data_kind(&posts[0]), "summary", "{posts:#?}");
+    posts
+}
+
+/// An item that was already waiting at the first snapshot (never pushed) leaves:
+/// the engine sends a push that corrects the badge and carries no title or body.
+async fn posts_for_a_badge_only_push(capabilities: PushCapabilities) -> Vec<Value> {
+    let mut rig = Rig::new().await;
+    let t0 = base();
+    rig.register_with("dev-1", &token_a(), "UTC", capabilities);
+    rig.engine.ingest(
+        jobs_frame(Some("kobe"), vec![awaiting("3f9a1c2e", t0 - secs(3600))]),
+        t0,
+    );
+    rig.engine.step_at(t0).await;
+    for t in [30, 120, 600] {
+        rig.engine.step_at(t0 + secs(t)).await;
+    }
+    assert!(rig.posts().await.is_empty(), "counted, never pushed");
+    rig.engine
+        .ingest(jobs_frame(Some("kobe"), vec![]), t0 + secs(4000));
+    rig.engine.step_at(t0 + secs(4000)).await;
+    let posts = rig.posts().await;
+    assert_eq!(posts.len(), 1, "{posts:#?}");
+    assert!(
+        posts[0].get("title").is_none() && posts[0].get("body").is_none(),
+        "a badge-only push has no text: {posts:#?}"
+    );
+    posts
+}
+
+async fn pushes_of_every_kind(capabilities: PushCapabilities) -> Vec<(&'static str, Vec<Value>)> {
+    vec![
+        (
+            "an alert or a withdrawal",
+            posts_for_every_alert_kind(capabilities).await,
+        ),
+        ("a summary", posts_for_a_summary(capabilities).await),
+        (
+            "a badge-only push",
+            posts_for_a_badge_only_push(capabilities).await,
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn a_device_with_the_extension_gets_mutable_content_on_every_alert_whatever_nse_withdraw_says(
+) {
+    for caps in with_both_withdraw_settings(true) {
+        let alerts = posts_for_every_alert_kind(caps).await;
+        for p in &alerts {
+            assert_mutable_content(
+                std::slice::from_ref(p),
+                true,
+                &format!("{caps:?}, {} push", data_kind(p)),
+            );
+        }
+        assert_mutable_content(
+            &posts_for_a_summary(caps).await,
+            true,
+            &format!("{caps:?}, a summary"),
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_badge_only_push_to_a_device_with_the_extension_also_carries_the_flag() {
+    // Actual behaviour, pinned: the engine builds every request the same way, so
+    // the badge correction (no title, no body) says `mutable_content: true` too,
+    // even though the extension will find nothing to enrich in it.
+    for caps in with_both_withdraw_settings(true) {
+        assert_mutable_content(
+            &posts_for_a_badge_only_push(caps).await,
+            true,
+            &format!("{caps:?}, a badge-only push"),
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_device_without_the_extension_gets_mutable_content_false_on_every_push_whatever_nse_withdraw_says(
+) {
+    for caps in with_both_withdraw_settings(false) {
+        for (what, posts) in pushes_of_every_kind(caps).await {
+            assert_mutable_content(&posts, false, &format!("{caps:?}, {what}"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_device_that_registered_before_the_flag_existed_gets_mutable_content_false() {
+    // `capabilities` absent (an older build): every flag is false.
+    let mut rig = Rig::new().await;
+    let t0 = base();
+    let msg: ClientMsg = serde_json::from_str(&format!(
+        r#"{{"type":"register_push","apns_token":"{}","environment":"sandbox","tz":"UTC"}}"#,
+        token_a()
+    ))
+    .unwrap();
+    assert_eq!(
+        rig.verb(&msg, PeerTrust::Paired, Some("dev-1")).0,
+        Dispatched::Handled
+    );
+    rig.start(&["kobe"], t0).await;
+    rig.engine
+        .ingest(jobs_frame(Some("kobe"), vec![awaiting("aaaa0001", t0)]), t0);
+    rig.engine.step_at(t0).await;
+    rig.engine.step_at(t0 + secs(120)).await;
+    assert_mutable_content(&rig.posts().await, false, "no capabilities sent");
+}
+
+#[tokio::test]
+async fn re_registering_with_different_capabilities_changes_the_flag_on_later_pushes_and_the_same_ones_change_nothing(
+) {
+    let mut rig = Rig::new().await;
+    let t0 = base();
+    rig.register_with("dev-1", &token_a(), "UTC", capabilities(true, false));
+    rig.start(&["kobe"], t0).await;
+
+    // The first alert, with the extension on.
+    rig.engine
+        .ingest(jobs_frame(Some("kobe"), vec![awaiting("aaaa0001", t0)]), t0);
+    rig.engine.step_at(t0).await;
+    rig.engine.step_at(t0 + secs(120)).await;
+    assert_eq!(rig.posts().await.len(), 1);
+
+    // The same registration again is idempotent: no push of its own, same flag.
+    rig.register_with("dev-1", &token_a(), "UTC", capabilities(true, false));
+    let t1 = t0 + secs(130);
+    rig.engine.ingest(
+        jobs_frame(
+            Some("kobe"),
+            vec![awaiting("aaaa0001", t0), awaiting("aaaa0002", t1)],
+        ),
+        t1,
+    );
+    rig.engine.step_at(t1).await;
+    rig.engine.step_at(t1 + secs(120)).await;
+    assert_eq!(rig.posts().await.len(), 2, "one alert per item, no repeats");
+
+    // The phone's build lost the extension (or was reinstalled without it).
+    rig.register_with("dev-1", &token_a(), "UTC", capabilities(false, false));
+    let t2 = t1 + secs(130);
+    rig.engine.ingest(
+        jobs_frame(
+            Some("kobe"),
+            vec![
+                awaiting("aaaa0001", t0),
+                awaiting("aaaa0002", t1),
+                awaiting("aaaa0003", t2),
+            ],
+        ),
+        t2,
+    );
+    rig.engine.step_at(t2).await;
+    rig.engine.step_at(t2 + secs(120)).await;
+    assert_eq!(rig.posts().await.len(), 3);
+
+    // And it came back.
+    rig.register_with("dev-1", &token_a(), "UTC", capabilities(true, true));
+    let t3 = t2 + secs(130);
+    rig.engine.ingest(
+        jobs_frame(
+            Some("kobe"),
+            vec![
+                awaiting("aaaa0001", t0),
+                awaiting("aaaa0002", t1),
+                awaiting("aaaa0003", t2),
+                awaiting("aaaa0004", t3),
+            ],
+        ),
+        t3,
+    );
+    rig.engine.step_at(t3).await;
+    rig.engine.step_at(t3 + secs(120)).await;
+
+    let posts = rig.posts().await;
+    assert_eq!(posts.len(), 4, "{posts:#?}");
+    let flags: Vec<&Value> = posts.iter().map(|p| &p["mutable_content"]).collect();
+    assert_eq!(
+        flags,
+        vec![&json!(true), &json!(true), &json!(false), &json!(true)],
+        "each push follows the registration in force when it was sent: {posts:#?}"
+    );
+}
+
+#[tokio::test]
+async fn each_device_gets_the_flag_it_registered_with() {
+    let mut rig = Rig::new().await;
+    let t0 = base();
+    rig.register_with("dev-1", &token_a(), "UTC", capabilities(true, false));
+    rig.register_with("dev-2", &token_b(), "UTC", capabilities(false, false));
+    rig.start(&["kobe"], t0).await;
+    rig.engine
+        .ingest(jobs_frame(Some("kobe"), vec![awaiting("aaaa0001", t0)]), t0);
+    rig.engine.step_at(t0).await;
+    rig.engine.step_at(t0 + secs(120)).await;
+
+    let with = rig.posts_to(&token_a()).await;
+    let without = rig.posts_to(&token_b()).await;
+    assert_eq!((with.len(), without.len()), (1, 1));
+    assert_mutable_content(&with, true, "the device with the extension");
+    assert_mutable_content(&without, false, "the device without it");
 }

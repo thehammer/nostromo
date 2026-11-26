@@ -723,6 +723,7 @@ pub fn redact_for_uplink_metadata(
         | ServerMsg::DeviceUnpaired
         | ServerMsg::PushSentLog { .. }
         | ServerMsg::PushWaiting { .. }
+        | ServerMsg::PushDetail { .. }
         | ServerMsg::PushStatus(_)
         | ServerMsg::DevicePairing { .. }
         | ServerMsg::DevicePairOutcome { .. }

@@ -10,6 +10,7 @@
 //! request: see [`vocab`] and [`items`].
 
 pub mod cli;
+pub mod detail;
 pub mod devices;
 pub mod items;
 pub mod owner;
@@ -29,11 +30,16 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
 use crate::config::PushConfig;
+use crate::data::perri_queue::PrQueueItem;
 use crate::ipc::devices::{DeviceRegistry, DeviceStanding};
-use crate::ipc::peer::PeerTrust;
+use crate::ipc::peer::{PeerTrust, SensitiveTags};
 use crate::ipc::protocol::{ClientMsg, ServerMsg};
+use crate::mother::MotherJob;
+use detail::{Capture, ItemText};
 use devices::{sanitize_prefs, valid_apns_token, DeviceStore, PushDevice};
-use items::{decision_item, mother_items, review_items, DecisionFacts, Detail, ItemKey, Waiting};
+use items::{
+    decision_item, job_waits, mother_items, review_items, DecisionFacts, Detail, ItemKey, Waiting,
+};
 use publisher::{Delivery, InterruptionLevel, Publisher, PushType, RelayData, RelayRequest};
 use schedule::{enabled_waiting, DeviceSchedule, Effect, ScheduleCfg};
 use sent_log::{SentLine, SentLog};
@@ -45,6 +51,8 @@ use wire::{
 
 /// Advertised in `Welcome.features` by a primary that runs the engine.
 pub const FEATURE_PUSH: &str = "push";
+/// Advertised by a primary that runs the engine: it answers `PushDetail` (W16).
+pub const FEATURE_PUSH_DETAIL: &str = "push_detail";
 /// Advertised by every daemon: it accepts `operator_presence` from the verified app.
 pub const FEATURE_PRESENCE: &str = "presence";
 
@@ -87,6 +95,9 @@ struct State {
     mother: BTreeMap<String, Vec<Waiting>>,
     reviews: BTreeMap<String, Vec<Waiting>>,
     decisions: BTreeMap<(String, String), DecisionEntry>,
+    // What an item's notification may say on the phone (W16), by item: captured
+    // with the frame, pruned with the item, and judged again on every request.
+    texts: BTreeMap<ItemKey, ItemText>,
     // Bookkeeping that follows an item's life.
     first_seen: BTreeMap<ItemKey, DateTime<Utc>>,
     refs: BTreeMap<ItemKey, String>,
@@ -116,6 +127,8 @@ pub struct PushEngine {
     publisher: Publisher,
     registry: Option<Arc<DeviceRegistry>>,
     local_host: String,
+    /// The daemon's sensitive-tag registry, for `PushDetail` (W16). Empty until set.
+    sensitive: Mutex<SensitiveTags>,
     state: Mutex<State>,
     /// Serialises sends, so a notification and its replacement reach the relay
     /// in the order they were decided.
@@ -149,6 +162,7 @@ impl PushEngine {
             config,
             registry,
             local_host,
+            sensitive: Mutex::new(SensitiveTags::in_memory()),
             state: Mutex::new(State {
                 devices: DeviceStore::load(state_dir.join("devices.json")),
                 sent: SentLog::load(state_dir.join("sent.jsonl"), now),
@@ -156,6 +170,7 @@ impl PushEngine {
                 mother: BTreeMap::new(),
                 reviews: BTreeMap::new(),
                 decisions: BTreeMap::new(),
+                texts: BTreeMap::new(),
                 first_seen: BTreeMap::new(),
                 refs: BTreeMap::new(),
                 preexisting: BTreeSet::new(),
@@ -170,6 +185,12 @@ impl PushEngine {
             }),
             gate: tokio::sync::Mutex::new(()),
         }))
+    }
+
+    /// Use the daemon's sensitive-tag registry when deciding whether an item's
+    /// text may be shown on the phone (W16). Without it nothing is sensitive.
+    pub fn set_sensitive_tags(&self, tags: SensitiveTags) {
+        *self.sensitive.lock().unwrap() = tags;
     }
 
     /// Run the engine: watch the broadcast channel, and step every device's
@@ -248,6 +269,9 @@ impl PushEngine {
             }
             ClientMsg::PushWaiting => {
                 let _ = reply.send(self.waiting_for(device_id, now));
+            }
+            ClientMsg::PushDetail { item_ref } => {
+                let _ = reply.send(self.detail_for(item_ref, now));
             }
             _ => return Dispatched::NotHandled,
         }
@@ -329,6 +353,33 @@ impl PushEngine {
         }
     }
 
+    /// The answer to `PushDetail`: whether the item still waits and, only when
+    /// [`detail::text_for`] allows it, its first line. The config is read before
+    /// the state lock is taken.
+    fn detail_for(&self, item_ref: &str, now: DateTime<Utc>) -> ServerMsg {
+        let cfg = (self.config)();
+        let sensitive = self.sensitive.lock().unwrap().clone();
+        let mut st = self.state.lock().unwrap();
+        let waiting = self.waiting(&mut st, now);
+        match waiting.iter().find(|w| w.item_ref == item_ref) {
+            Some(w) => ServerMsg::PushDetail {
+                item_ref: w.item_ref.clone(),
+                waiting: true,
+                text: detail::text_for(w, st.texts.get(&w.key), &cfg, &sensitive),
+                host: Some(vocab::host_label(&w.host).to_string()),
+            },
+            None => ServerMsg::PushDetail {
+                item_ref: item_ref
+                    .chars()
+                    .take(detail::MAX_ITEM_REF_BYTES)
+                    .collect::<String>(),
+                waiting: false,
+                text: None,
+                host: None,
+            },
+        }
+    }
+
     // ── sources ──────────────────────────────────────────────────────────────
 
     fn label(&self, host: Option<String>) -> String {
@@ -353,6 +404,7 @@ impl PushEngine {
             ServerMsg::MotherJobs { jobs, host } => {
                 let host = self.label(host);
                 self.put_mother(&mut st, &host, mother_items(&host, &jobs), now);
+                put_mother_texts(&mut st, &host, &jobs);
                 true
             }
             // A frame built before any queue fetch landed says nothing: its empty
@@ -365,9 +417,12 @@ impl PushEngine {
             ServerMsg::PerriState { queue, host, .. } => {
                 let host = self.label(host);
                 self.put_reviews(&mut st, &host, review_items(&host, &queue), now);
+                put_review_texts(&mut st, &host, &queue);
                 true
             }
             ServerMsg::DecisionRequest {
+                tag,
+                prompt,
                 request_id,
                 choices,
                 host,
@@ -392,9 +447,20 @@ impl PushEngine {
                         let evict = mine.len() + 1 - MAX_DECISIONS_PER_HOST;
                         for (_, k) in mine.into_iter().take(evict) {
                             st.decisions.remove(&k);
+                            st.texts.remove(&ItemKey::Decision {
+                                host: k.0,
+                                request_id: k.1,
+                            });
                         }
                     }
                 }
+                st.texts.insert(
+                    ItemKey::Decision {
+                        host: host.clone(),
+                        request_id: request_id.clone(),
+                    },
+                    Capture::decision(&tag, repo.as_deref(), &prompt),
+                );
                 st.host_seen.insert(host.clone(), now);
                 let raised = st.decisions.get(&key).map_or(now, |d| d.raised);
                 st.decisions.insert(
@@ -419,6 +485,10 @@ impl PushEngine {
                 request_id, host, ..
             } => {
                 let host = self.label(host);
+                st.texts.remove(&ItemKey::Decision {
+                    host: host.clone(),
+                    request_id: request_id.clone(),
+                });
                 st.decisions.remove(&(host, request_id)).is_some()
             }
             ServerMsg::Hosts { hosts } => {
@@ -468,6 +538,7 @@ impl PushEngine {
                         host: Some(host),
                     } if overwrite || !st.mother.contains_key(&host) => {
                         self.put_mother(&mut st, &host, mother_items(&host, &jobs), now);
+                        put_mother_texts(&mut st, &host, &jobs);
                     }
                     ServerMsg::PerriState {
                         queue,
@@ -476,6 +547,7 @@ impl PushEngine {
                         ..
                     } if overwrite || !st.reviews.contains_key(&host) => {
                         self.put_reviews(&mut st, &host, review_items(&host, &queue), now);
+                        put_review_texts(&mut st, &host, &queue);
                     }
                     _ => {}
                 }
@@ -551,6 +623,7 @@ impl PushEngine {
                 .clone();
             w.preexisting = st.preexisting.contains(&w.key);
         }
+        st.texts.retain(|k, _| present.contains(k));
         st.first_seen.retain(|k, _| present.contains(k));
         st.refs.retain(|k, _| present.contains(k));
         st.preexisting.retain(|k| present.contains(k));
@@ -746,6 +819,37 @@ fn token_is_dead(status: u16, reason: Option<&str>) -> bool {
     status == 410 || (status == 400 && reason == Some("BadDeviceToken"))
 }
 
+/// Replace the texts kept for `host`'s Mother jobs with those of the jobs that wait.
+fn put_mother_texts(st: &mut State, host: &str, jobs: &[MotherJob]) {
+    st.texts
+        .retain(|k, _| !matches!(k, ItemKey::Mother { host: h, .. } if h == host));
+    for job in jobs.iter().filter(|j| job_waits(j)) {
+        st.texts.insert(
+            ItemKey::Mother {
+                host: host.to_string(),
+                job_id: job.id.clone(),
+            },
+            Capture::mother(job),
+        );
+    }
+}
+
+/// Replace the texts kept for `host`'s requested reviews.
+fn put_review_texts(st: &mut State, host: &str, queue: &[PrQueueItem]) {
+    st.texts
+        .retain(|k, _| !matches!(k, ItemKey::Review { host: h, .. } if h == host));
+    for pr in queue.iter().filter(|pr| pr.bucket == "requested") {
+        st.texts.insert(
+            ItemKey::Review {
+                host: host.to_string(),
+                repo: pr.repo.clone(),
+                number: pr.number,
+            },
+            Capture::review(pr),
+        );
+    }
+}
+
 // ── building a request ───────────────────────────────────────────────────────
 
 fn new_item_ref() -> String {
@@ -784,7 +888,8 @@ fn request(
         title: text.map(|t| t.title.clone()),
         body: text.map(|t| t.body.clone()),
         badge,
-        mutable_content: false,
+        // The extension runs only for a push that says so (W16).
+        mutable_content: device.capabilities.nse,
         data,
     }
 }

@@ -159,6 +159,16 @@ fn reason_of(job: &MotherJob) -> MotherReason {
     }
 }
 
+/// Is this job waiting on the operator: awaiting or held, and not a quota pause
+/// (which resumes on its own)?
+pub fn job_waits(job: &MotherJob) -> bool {
+    let quota = job
+        .paused_reason
+        .as_deref()
+        .is_some_and(|r| r.starts_with("quota_"));
+    (job.is_awaiting() || job.is_held_for_operator()) && !quota
+}
+
 /// The items a Mother snapshot holds for `host`: one per awaiting or held job
 /// (not a quota pause, which resumes on its own), plus one per unacknowledged
 /// attention reason of the three counted kinds. Works on a full job and on a
@@ -166,11 +176,7 @@ fn reason_of(job: &MotherJob) -> MotherReason {
 pub fn mother_items(host: &str, jobs: &[MotherJob]) -> Vec<Waiting> {
     let mut items = Vec::new();
     for job in jobs {
-        let quota = job
-            .paused_reason
-            .as_deref()
-            .is_some_and(|r| r.starts_with("quota_"));
-        if (job.is_awaiting() || job.is_held_for_operator()) && !quota {
+        if job_waits(job) {
             // A job queued from a work item is work data: no repository, ever.
             let remote = if job.is_work_send() {
                 None
