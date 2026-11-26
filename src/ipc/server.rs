@@ -6132,7 +6132,11 @@ mod tests {
                 repo,
                 repo_owner,
                 ..
-            } => (operator_presence.is_some(), repo.is_some(), repo_owner.is_some()),
+            } => (
+                operator_presence.is_some(),
+                repo.is_some(),
+                repo_owner.is_some(),
+            ),
             other => panic!("{other:?}"),
         };
         for trust in [PeerTrust::Paired, PeerTrust::Tcp, PeerTrust::Routed] {

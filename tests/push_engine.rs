@@ -2993,8 +2993,12 @@ async fn a_satellite_that_comes_back_after_being_forgotten_is_baselined_again() 
     assert_eq!(rig.waiting("dev-1").1, 0, "kobe was forgotten");
 
     let back = t0 + secs(700);
-    rig.engine.ingest(jobs_frame(Some("kobe"), vec![awaiting("aaaa0001", t0)]), back);
-    rig.engine.ingest(queue_frame(Some("kobe"), vec![requested(4821)]), back);
+    rig.engine.ingest(
+        jobs_frame(Some("kobe"), vec![awaiting("aaaa0001", t0)]),
+        back,
+    );
+    rig.engine
+        .ingest(queue_frame(Some("kobe"), vec![requested(4821)]), back);
     for t in [0, 130, 600] {
         rig.engine.step_at(back + secs(t)).await;
     }
@@ -3297,16 +3301,15 @@ async fn a_satellite_restart_neither_withdraws_nor_re_pushes_what_the_primary_re
 // ── the kill switch is live ──────────────────────────────────────────────────
 
 #[tokio::test]
-async fn turning_enabled_off_in_the_config_stops_pushes_without_a_restart_and_back_on_does_not_flood() {
+async fn turning_enabled_off_in_the_config_stops_pushes_without_a_restart_and_back_on_does_not_flood(
+) {
     let mut rig = Rig::new().await;
     let t0 = base();
     rig.register("dev-1", &token_a());
     rig.start(&["kobe"], t0).await;
 
-    rig.engine.ingest(
-        jobs_frame(Some("kobe"), vec![awaiting("aaaa0001", t0)]),
-        t0,
-    );
+    rig.engine
+        .ingest(jobs_frame(Some("kobe"), vec![awaiting("aaaa0001", t0)]), t0);
     rig.cfg.lock().unwrap().enabled = false;
     rig.engine.step_at(t0).await;
     rig.engine.step_at(t0 + secs(120)).await;
@@ -3328,7 +3331,10 @@ async fn turning_enabled_off_in_the_config_stops_pushes_without_a_restart_and_ba
     rig.engine.ingest(
         jobs_frame(
             Some("kobe"),
-            vec![awaiting("aaaa0001", t0), awaiting("aaaa0002", t0 + secs(950))],
+            vec![
+                awaiting("aaaa0001", t0),
+                awaiting("aaaa0002", t0 + secs(950)),
+            ],
         ),
         t0 + secs(950),
     );
