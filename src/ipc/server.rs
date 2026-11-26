@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Notify};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -913,6 +913,9 @@ where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
     let (mut reader, mut writer) = tokio::io::split(stream);
+    // Where every topic stood when the connection was accepted (its receiver was
+    // subscribed just before): what a lag later is measured from.
+    let seen_at_accept = seq.latest_all();
 
     // ── Handshake ─────────────────────────────────────────────────────────────
 
@@ -1034,6 +1037,7 @@ where
     let sub_bytes = read_frame(&mut reader).await?;
     let sub: ClientMsg = serde_json::from_slice(&sub_bytes)?;
 
+    #[allow(clippy::type_complexity)]
     let (topics, renders_decisions, renders_approvals, capabilities, sub_nonce, resume): (
         Vec<Topic>,
         bool,
@@ -1486,14 +1490,16 @@ where
         topics: topics.clone(),
         presents_approvals,
     }));
-    let drops = Arc::new(Mutex::new(DropLog::default()));
-    let (queue_tx, mut queue_rx) = mpsc::channel::<Stamped>(CLIENT_QUEUE_CAP);
+    let dropping = Arc::new(AtomicBool::new(false));
+    let drained = Arc::new(Notify::new());
+    let (queue_tx, mut queue_rx) = mpsc::channel::<Queued>(CLIENT_QUEUE_CAP);
     let forwarder = tokio::spawn(forward_broadcasts(
         broadcast_rx,
         queue_tx,
         Arc::clone(&filter),
-        Arc::clone(&drops),
+        (Arc::clone(&dropping), Arc::clone(&drained)),
         resume_high_water,
+        seen_at_accept,
         Arc::clone(&seq),
     ));
 
@@ -1518,43 +1524,33 @@ where
         tokio::select! {
             // Broadcast events (activity, Mother, etc.), from the bounded queue.
             queued = queue_rx.recv() => {
-                let Some(stamped) = queued else {
+                let Some(queued) = queued else {
                     // The broadcast channel closed: the daemon is going down.
                     break Ok(());
                 };
-                // Trust gate first: a network peer never gets a sensitive
-                // frame, whatever its topic list says.
-                if let Some(bytes) = broadcast_bytes(
-                    stamped,
-                    &topics,
-                    presents_approvals,
-                    trust,
-                    &sensitive,
-                    origin.ws_device(),
-                ) {
+                let bytes = match queued {
+                    // Trust gate first: a network peer never gets a sensitive
+                    // frame, whatever its topic list says.
+                    Queued::Frame(stamped) => broadcast_bytes(
+                        stamped,
+                        &topics,
+                        presents_approvals,
+                        trust,
+                        &sensitive,
+                        origin.ws_device(),
+                    ),
+                    // What the queue dropped, in the place of what it dropped.
+                    Queued::Gap(gap) => outbound(trust, gap, &sensitive)
+                        .and_then(|gap| serde_json::to_vec(&gap).ok()),
+                };
+                if let Some(bytes) = bytes {
                     if write_outbound(&mut writer, &bytes, &conn_key).await.is_err() {
                         break Ok(());
                     }
                 }
-                // Once the queue has drained below half, say what it dropped.
-                if queue_rx.len() < CLIENT_QUEUE_RESUME_BELOW {
-                    let gaps = drops.lock().unwrap().take_gaps();
-                    let mut failed = false;
-                    for gap in gaps {
-                        let Some(gap) = outbound(trust, gap, &sensitive) else {
-                            continue;
-                        };
-                        let Ok(bytes) = serde_json::to_vec(&gap) else {
-                            continue;
-                        };
-                        if write_outbound(&mut writer, &bytes, &conn_key).await.is_err() {
-                            failed = true;
-                            break;
-                        }
-                    }
-                    if failed {
-                        break Ok(());
-                    }
+                // A queue that is dropping frames is told when it has drained.
+                if dropping.load(Ordering::Relaxed) && queue_rx.len() < CLIENT_QUEUE_RESUME_BELOW {
+                    drained.notify_one();
                 }
             }
 
@@ -2014,21 +2010,69 @@ fn plan_resume(
     plan
 }
 
+/// What a connection's bounded queue carries.
+enum Queued {
+    Frame(Stamped),
+    /// What the queue dropped, written where the dropped frames would have been.
+    Gap(ServerMsg),
+}
+
+/// Is the queue below half full again?
+fn queue_drained(queue: &mpsc::Sender<Queued>) -> bool {
+    CLIENT_QUEUE_CAP - queue.capacity() < CLIENT_QUEUE_RESUME_BELOW
+}
+
 /// Move a connection's broadcast frames into its bounded queue.
+///
+/// When the queue is full the connection starts *dropping*: every frame is
+/// dropped (and remembered, per topic) until the queue is below half full
+/// again, then one `Gap { client_slow }` per topic goes into the queue, ahead of
+/// whatever comes next. So a client reads what was queued, then the `Gap`, then
+/// frames numbered after it: nothing it is sent in between falls inside the
+/// range the `Gap` names.
 async fn forward_broadcasts(
     mut rx: broadcast::Receiver<Stamped>,
-    queue: mpsc::Sender<Stamped>,
+    queue: mpsc::Sender<Queued>,
     filter: Arc<Mutex<BroadcastFilter>>,
-    drops: Arc<Mutex<DropLog>>,
+    (dropping_flag, drained): (Arc<AtomicBool>, Arc<Notify>),
     mut high_water: BTreeMap<Topic, u64>,
+    mut seen: BTreeMap<Topic, u64>,
     seq: Arc<SeqHub>,
 ) {
-    // The last number seen per topic (whether or not it is wanted), so what a
-    // lag skipped can be named.
-    let mut seen = seq.latest_all();
+    // `seen` is the last number seen per topic (whether or not it is wanted), so
+    // what a lag skipped can be named.
+    let mut log = DropLog::default();
+    let mut dropping = false;
+    // Queue the `Gap`s and stop dropping. `false`: the connection is gone.
+    let flush = |log: &mut DropLog, dropping: &mut bool| -> bool {
+        let unsequenced = log.unsequenced();
+        for gap in log.take_gaps() {
+            if matches!(
+                queue.try_send(Queued::Gap(gap)),
+                Err(mpsc::error::TrySendError::Closed(_))
+            ) {
+                return false;
+            }
+        }
+        if unsequenced > 0 {
+            debug!(
+                unsequenced,
+                "frames with no topic were dropped for a slow client"
+            );
+        }
+        *dropping = false;
+        dropping_flag.store(false, Ordering::Relaxed);
+        true
+    };
     loop {
         let stamped = tokio::select! {
             _ = queue.closed() => return,
+            _ = drained.notified(), if dropping => {
+                if queue_drained(&queue) && !flush(&mut log, &mut dropping) {
+                    return;
+                }
+                continue;
+            }
             received = rx.recv() => match received {
                 Ok(stamped) => stamped,
                 Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -2036,14 +2080,22 @@ async fn forward_broadcasts(
                     // Frames were lost before this task saw them: whatever the
                     // topics this connection follows have published since the
                     // last number seen may be among them.
-                    let f = filter.lock().unwrap();
-                    let mut log = drops.lock().unwrap();
-                    for (topic, last) in seen.iter_mut() {
-                        let latest = seq.latest(topic);
-                        if latest > *last && topic_wanted(&f.topics, topic) {
-                            log.record_range(topic.clone(), *last + 1, latest);
+                    {
+                        let f = filter.lock().unwrap();
+                        for (topic, last) in seen.iter_mut() {
+                            let latest = seq.latest(topic);
+                            if latest > *last && topic_wanted(&f.topics, topic) {
+                                log.record_range(topic.clone(), *last + 1, latest);
+                            }
+                            *last = (*last).max(latest);
                         }
-                        *last = (*last).max(latest);
+                    }
+                    if !log.is_empty() {
+                        dropping = true;
+                        dropping_flag.store(true, Ordering::Relaxed);
+                        if queue_drained(&queue) && !flush(&mut log, &mut dropping) {
+                            return;
+                        }
                     }
                     continue;
                 }
@@ -2068,15 +2120,27 @@ async fn forward_broadcasts(
             }
             high_water.remove(t);
         }
-        match queue.try_send(stamped) {
+        if dropping && queue_drained(&queue) && !flush(&mut log, &mut dropping) {
+            return;
+        }
+        if dropping {
+            match (stamped.seq, topic) {
+                (Some(n), Some(t)) => log.record(t, n),
+                _ => log.record_unsequenced(),
+            }
+            continue;
+        }
+        match queue.try_send(Queued::Frame(stamped)) {
             Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(dropped)) => {
-                let mut log = drops.lock().unwrap();
-                match (dropped.seq, topic) {
+            Err(mpsc::error::TrySendError::Full(Queued::Frame(dropped))) => {
+                dropping = true;
+                dropping_flag.store(true, Ordering::Relaxed);
+                match (dropped.seq, dropped.msg.topic()) {
                     (Some(n), Some(t)) => log.record(t, n),
                     _ => log.record_unsequenced(),
                 }
             }
+            Err(mpsc::error::TrySendError::Full(Queued::Gap(_))) => {}
             Err(mpsc::error::TrySendError::Closed(_)) => return,
         }
     }

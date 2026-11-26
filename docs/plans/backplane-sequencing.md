@@ -1267,3 +1267,50 @@ first step, to be opened up later), and the entitlement finding.
 | — (Archie, not an operator answer) | How do `DeviceAdminLevel` and the admin frames reach a satellite through W9's `may_receive`, which drops `Admin` for every network trust? | A new `ServerClass::SatelliteControl` (`DeviceAdminLevel`, `DeviceAdminError`) passes for `Satellite` at every level including `off` and is refused for `Paired`, `Tcp`, `Routed`; `Admin` passes for `Satellite` when its level is not `off`; a level change closes the uplink with 1012 so it is re-admitted with the new trust. (Perri's #522 item.) | W10 ("Refreshed 2026-11-24") |
 | — (Archie, after Perri's review of #529) | May a satellite change other satellites' records, and what may it see and publish? | Satellite records change only from the primary's CLI: from a satellite, `DeviceRevoke` targets phones and iPads only, at every level (W15's "reducing access is safe from any surface" read as applying to devices), and `DeviceSetAdmin` is refused. A satellite sees only its own row in `Devices.hosts`, receives only `Topic::Devices`, sends nothing routable, and the primary re-checks every frame it publishes (host = record name; only host-carrying variants; admin, control, local-only, `MotherPeek` and `MotherAwaitDetected` frames dropped; rate- and size-capped) and accepts a routed reply only for a request id it issued to that host. The operator can widen the revoke rule later. | W10 ("Trust boundary on the primary") |
 | — (Archie) | Where are future `Paired`-only verbs gated now that `paired_extra_allowed` is gone (#528)? | At the pre-dispatch site in `handle_client` (`server.rs:1379-1395`), as `DeviceUnpairSelf` is in `DeviceHub::dispatch`: a push-engine hook for W13's four verbs and W16's `PushDetail`, acting only for `(Paired, Some(device_id))`. | W13, W16 |
+
+## W12 as built (2026-11-25)
+
+What the wedge shipped where it differs from, or fills a gap in, the plan above. Code: `src/ipc/seq.rs`
+(hub, rings, drop log), `handle_client` in `src/ipc/server.rs`, `src/ipc/ws.rs` (heartbeat), Kit
+`SeqWire.swift` / `WebSocketClient.swift`.
+
+- **One numbering point, not a wrapped sender.** Producers hold a bare `broadcast::Sender<ServerMsg>`
+  in dozens of places, so there is no single `publish()` to wrap. A *sequencer task* subscribes to that
+  raw channel, numbers each frame (`ServerMsg::topic()`), keeps it in the topic's ring and sends it on a
+  second, stamped channel that the Unix, TCP and WebSocket connections read. The retained cache and the
+  satellite uplink still read the raw channel (so a satellite publishes upstream exactly what it did
+  before, with no `seq`; the primary numbers it on arrival).
+- **The number is a wire key, not a per-variant field.** `seq` is added to the JSON of a numbered frame
+  by `seq::encode_with_seq`; `ServerMsg` variants did not change (a field on ~30 variants would have
+  touched every construction site). `ServerMsg::Activity` already has its own per-stream `seq`
+  (`ActivityEvent.seq`), so its topic number is `topic_seq`. Frames with no topic (session frames,
+  `hosts`, approvals, `claude_login_state`) and the local-only topics `terminal`, `authored_prs`,
+  `devices` carry none and have no ring.
+- **Snapshots are not numbered.** Attach-time snapshots (layout, activity, Perri, model, tracker) and
+  the retained cache are *state*, not events of the topic's stream: they carry no `seq`. A resuming
+  client whose ring is covered gets the missed frames in order and no retained frame for that topic;
+  one whose ring is not covered gets the retained snapshot, then one `Gap`.
+- **Satellite frames.** Numbers are per topic on the primary. A satellite's host-tagged frame is the
+  primary's broadcast: it gets the next number in its topic whatever its `host` says; per-host retained
+  keys are unchanged. `Gap.host` is `None` for primary-numbered gaps. A satellite's own uplink needs no
+  resume in this wedge (it replays its filtered cache on reconnect, W10c), so `GapReason::UplinkReconnect`
+  exists on the wire but nothing sends it yet, and W12-8 is not part of this wedge.
+- **Replay passes the live gate.** Every replayed frame goes through `deliver_broadcast` and
+  `peer::outbound` for the subscribing peer; for a network peer only frames that a network peer could
+  have been sent *when they were published* (`RingEntry::network_ok`) are replayed, so a tag that stops
+  being sensitive later does not open frames it withheld.
+- **Bounded client queue.** A forwarder task moves a connection's frames into a 256-frame `mpsc`; when it
+  is full frames are dropped and remembered per topic, and once the queue is below 128 the main loop writes
+  one `Gap { client_slow }` per topic (from/to bound the dropped numbers; it may over-report after a
+  broadcast `Lagged`, never under-report). `SeqHub::lag_count()` counts forwarder lags.
+- **Health.** The attach-time `ActivityHealth` carries `replay: { topics, frames, bytes }`; the bound is
+  `topics × 8 MiB`.
+- **Heartbeat.** `WsLimits.ping_every` (20 s) and `pong_timeout` (60 s): only a pong counts; a socket
+  with none is closed 1001.
+- **Client.** `SeqTracker` keeps the last number per topic across reconnects. With numbers in hand the
+  client waits for `Welcome` before subscribing and sends `resume` only if `features` has `"seq"`; with
+  none it subscribes at once as before. `foreground(backgroundedFor:)` drops and remakes the socket after a
+  long absence so the new Subscribe resumes; `refreshNow()` starts over without `resume`. A `gap` marks its
+  topic in `DaemonStore.missedUpdates` and the Mother and Perri tabs show the notice.
+- **Not done:** durable replay across daemon restarts (a restarted daemon starts every topic at 1; a client
+  resuming from a higher number gets `Gap { replay_window_exceeded }` with `from = 1`).

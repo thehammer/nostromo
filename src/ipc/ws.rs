@@ -683,6 +683,20 @@ async fn next_request(
 /// unwrapped into the bridge, what it publishes and the answers it gives to
 /// routed reads go through the router's checks, and what the handler writes
 /// is wrapped as `server`.
+/// Write one frame, giving up after `limit`: a peer that stopped reading would
+/// otherwise hold the socket's task (and its heartbeat with it) for ever once the
+/// buffers fill. `false`: the frame did not go out and the socket is to be dropped.
+async fn send_bounded<S>(sink: &mut S, msg: Message, limit: Duration) -> bool
+where
+    S: futures::Sink<Message> + Unpin,
+{
+    matches!(
+        tokio::time::timeout(limit, sink.send(msg)).await,
+        Ok(Ok(()))
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_paired(
     ws: WebSocketStream<TcpStream>,
     device_id: String,
@@ -849,7 +863,7 @@ async fn run_paired(
                                     });
                                     if let Message::Text(body) = refusal {
                                         let body = wrap_server_bytes(&body);
-                                        if sink.send(Message::Text(body)).await.is_err() {
+                                        if !send_bounded(&mut sink, Message::Text(body), pong_timeout).await {
                                             break;
                                         }
                                     }
@@ -882,7 +896,7 @@ async fn run_paired(
                 };
                 let body = String::from_utf8_lossy(&bytes).into_owned();
                 let body = if uplink.is_some() { wrap_server_bytes(&body) } else { body };
-                if sink.send(Message::Text(body)).await.is_err() {
+                if !send_bounded(&mut sink, Message::Text(body), pong_timeout).await {
                     break;
                 }
             }
@@ -903,7 +917,7 @@ async fn run_paired(
                     continue;
                 };
                 let body = serde_json::to_string(&frame).unwrap_or_default();
-                if sink.send(Message::Text(body)).await.is_err() {
+                if !send_bounded(&mut sink, Message::Text(body), pong_timeout).await {
                     break;
                 }
             }
@@ -923,7 +937,7 @@ async fn run_paired(
                             (Some(_), Message::Text(body)) => Message::Text(wrap_server_bytes(&body)),
                             (_, other) => other,
                         };
-                        let _ = sink.send(revoked).await;
+                        let _ = send_bounded(&mut sink, revoked, pong_timeout).await;
                         closing = Some(close_msg(CLOSE_UNAUTHORIZED, "unauthorized"));
                         break;
                     }
@@ -944,7 +958,7 @@ async fn run_paired(
                     closing = Some(close_msg(1001, "no pong"));
                     break;
                 }
-                if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                if !send_bounded(&mut sink, Message::Ping(Vec::new()), pong_timeout).await {
                     break;
                 }
             }
@@ -956,10 +970,13 @@ async fn run_paired(
     }
 
     if let Some(close) = closing {
-        let _ = sink.send(close).await;
+        let _ = send_bounded(&mut sink, close, pong_timeout).await;
     }
-    let _ = sink.flush().await;
-    let _ = sink.close().await;
+    let _ = tokio::time::timeout(pong_timeout, async {
+        let _ = sink.flush().await;
+        let _ = sink.close().await;
+    })
+    .await;
     // End of the bridge: the handler reads EOF and cleans up.
     drop(bridge_wr);
     reader.abort();

@@ -506,7 +506,10 @@ mod tests {
         assert_eq!(ring.len(), 2);
         assert_eq!(ring.bytes(), 20);
         assert_eq!(ring_seqs(ring.replay(2, 4, false)), vec![3, 4]);
-        assert!(matches!(ring.replay(1, 4, false), RingReplay::Exceeded { .. }));
+        assert!(matches!(
+            ring.replay(1, 4, false),
+            RingReplay::Exceeded { .. }
+        ));
     }
 
     #[test]
@@ -516,7 +519,10 @@ mod tests {
         assert!(ring.is_empty());
         assert_eq!(ring.bytes(), 0);
         // Nothing to serve and the client is behind: it is told.
-        assert!(matches!(ring.replay(0, 1, false), RingReplay::Exceeded { .. }));
+        assert!(matches!(
+            ring.replay(0, 1, false),
+            RingReplay::Exceeded { .. }
+        ));
     }
 
     #[test]
@@ -546,14 +552,20 @@ mod tests {
         // Fully caught up: nothing, not a gap.
         assert_eq!(ring_seqs(ring.replay(6, 6, false)), Vec::<u64>::new());
         // From the future (a client of a daemon that restarted): a gap.
-        assert!(matches!(ring.replay(7, 6, false), RingReplay::Exceeded { .. }));
+        assert!(matches!(
+            ring.replay(7, 6, false),
+            RingReplay::Exceeded { .. }
+        ));
     }
 
     #[test]
     fn an_empty_ring_covers_a_client_that_is_caught_up() {
         let ring = ReplayRing::with_limits(3, 100);
         assert_eq!(ring_seqs(ring.replay(0, 0, false)), Vec::<u64>::new());
-        assert!(matches!(ring.replay(1, 0, false), RingReplay::Exceeded { .. }));
+        assert!(matches!(
+            ring.replay(1, 0, false),
+            RingReplay::Exceeded { .. }
+        ));
     }
 
     #[test]
