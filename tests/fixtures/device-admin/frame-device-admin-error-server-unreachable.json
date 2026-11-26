@@ -1,0 +1,5 @@
+{
+  "type": "device_admin_error",
+  "request_id": "r1",
+  "reason": "server_unreachable"
+}

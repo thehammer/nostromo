@@ -1,0 +1,5 @@
+{
+  "type": "device_admin_error",
+  "request_id": "r4",
+  "reason": "unknown_device"
+}

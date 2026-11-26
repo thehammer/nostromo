@@ -1,0 +1,6 @@
+{
+  "type": "device_revoked",
+  "request_id": "r4",
+  "device_id": "dev_1",
+  "was_connected": true
+}

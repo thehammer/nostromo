@@ -1,0 +1,5 @@
+{
+  "type": "device_pair_cancel",
+  "request_id": "r2",
+  "pairing_id": "p1"
+}

@@ -176,6 +176,10 @@
 		AA0000000000000000000013 /* NostromoWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000003 /* NostromoWindow.swift */; };
 		AA0000020000000000000101 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000001 /* Models.swift */; };
 		AA0000020000000000000102 /* NostromodClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000002 /* NostromodClient.swift */; };
+		BP0000000000000000000005 /* DeviceAdminModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000004 /* DeviceAdminModel.swift */; };
+		BP0000000000000000000006 /* DeviceAdminModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000004 /* DeviceAdminModel.swift */; };
+		BP0000000000000000000002 /* DeviceWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000001 /* DeviceWire.swift */; };
+		BP0000000000000000000003 /* DeviceWire.swift in TestSources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000001 /* DeviceWire.swift */; };
 		JJ0000000000000000000011 /* IPCLatencyStats.swift in Sources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000001 /* IPCLatencyStats.swift */; };
 		JJ0000000000000000000013 /* DaemonDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000002 /* DaemonDiagnostics.swift */; };
 		AA0000020000000000000103 /* FileWatchers.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000003 /* FileWatchers.swift */; };
@@ -218,6 +222,12 @@
 		AA0000020000000000000131 /* ChatSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000031 /* ChatSession.swift */; };
 		AA0000020000000000000132 /* FocusStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000032 /* FocusStore.swift */; };
 		AA0000020000000000000124 /* CreateFocusSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000024 /* CreateFocusSheet.swift */; };
+		BP0000000000000000000014 /* DevicesWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000013 /* DevicesWindow.swift */; };
+		BP0000000000000000000015 /* DevicesWindow.swift in TestSources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000013 /* DevicesWindow.swift */; };
+		BP0000000000000000000011 /* PairDeviceWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000010 /* PairDeviceWindow.swift */; };
+		BP0000000000000000000012 /* PairDeviceWindow.swift in TestSources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000010 /* PairDeviceWindow.swift */; };
+		BP0000000000000000000008 /* PairQR.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000007 /* PairQR.swift */; };
+		BP0000000000000000000009 /* PairQR.swift in TestSources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000007 /* PairQR.swift */; };
 		ZZ0000000000000000CH0401 /* ResumeTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0400 /* ResumeTabView.swift */; };
 		BB00000000000000000000A2 /* MotherBrokerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000A1 /* MotherBrokerClient.swift */; };
 		BB00000000000000000000B2 /* MotherBrokerClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000B1 /* MotherBrokerClientTests.swift */; };
@@ -462,6 +472,8 @@
 		MF000000000000000000A101 /* PlanDocumentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000A001 /* PlanDocumentView.swift */; };
 		MF000000000000000000A201 /* PlanDocumentView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000A001 /* PlanDocumentView.swift */; };
 		AQDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = APDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift */; };
+		BP0000000000000000000017 /* OperatorPresenceReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000016 /* OperatorPresenceReporter.swift */; };
+		BP0000000000000000000018 /* OperatorPresenceReporter.swift in TestSources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000016 /* OperatorPresenceReporter.swift */; };
 		ARDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift in TestSources */ = {isa = PBXBuildFile; fileRef = APDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift */; };
 		AQ7A3F0C51D2B84E6A90C1D2E /* AuthoredPrsFilterStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP7A3F0C51D2B84E6A90C1D2E /* AuthoredPrsFilterStrip.swift */; };
 		AQ702AE104105E91A173DDAA /* AuthoredPrMerge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP55F857F9FCF90C2E9A47A2 /* AuthoredPrMerge.swift */; };
@@ -574,6 +586,12 @@
 		AU0000000000000000000011 /* ActivationAudit.swift in Sources */ = {isa = PBXBuildFile; fileRef = AU0000000000000000000001 /* ActivationAudit.swift */; };
 		AU0000000000000000000012 /* ActivationAudit.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AU0000000000000000000001 /* ActivationAudit.swift */; };
 		AU0000000000000000000022 /* ActivationAuditTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AU0000000000000000000002 /* ActivationAuditTests.swift */; };
+		BP0000000000000000000026 /* OperatorPresenceReporterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000025 /* OperatorPresenceReporterTests.swift */; };
+		BP0000000000000000000024 /* PairQRTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000023 /* PairQRTests.swift */; };
+		BP0000000000000000000022 /* DeviceWireDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000021 /* DeviceWireDecodingTests.swift */; };
+		BP0000000000000000000020 /* DeviceAdminModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000019 /* DeviceAdminModelTests.swift */; };
+		BP0000000000000000000030 /* DeviceAdminClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000029 /* DeviceAdminClientTests.swift */; };
+		BP0000000000000000000028 /* DeviceWindowGestureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000027 /* DeviceWindowGestureTests.swift */; };
 		ZP0000000000000000000014 /* WindowPlacementController.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000004 /* WindowPlacementController.swift */; };
 		ZP0000000000000000000024 /* WindowPlacementController.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000004 /* WindowPlacementController.swift */; };
 		ZP0000000000000000000025 /* NostromoWindow.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000003 /* NostromoWindow.swift */; };
@@ -1023,6 +1041,8 @@
 		AA0000000000000000000006 /* Nostromo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Nostromo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA0000020000000000000001 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		AA0000020000000000000002 /* NostromodClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostromodClient.swift; sourceTree = "<group>"; };
+		BP0000000000000000000004 /* DeviceAdminModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceAdminModel.swift; sourceTree = "<group>"; };
+		BP0000000000000000000001 /* DeviceWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceWire.swift; sourceTree = "<group>"; };
 		AA0000020000000000000003 /* FileWatchers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileWatchers.swift; sourceTree = "<group>"; };
 		AA0000020000000000000004 /* AppStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStore.swift; sourceTree = "<group>"; };
 		AA0000020000000000000005 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
@@ -1057,6 +1077,9 @@
 		AA0000020000000000000031 /* ChatSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSession.swift; sourceTree = "<group>"; };
 		AA0000020000000000000032 /* FocusStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusStore.swift; sourceTree = "<group>"; };
 		AA0000020000000000000024 /* CreateFocusSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateFocusSheet.swift; sourceTree = "<group>"; };
+		BP0000000000000000000013 /* DevicesWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesWindow.swift; sourceTree = "<group>"; };
+		BP0000000000000000000010 /* PairDeviceWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairDeviceWindow.swift; sourceTree = "<group>"; };
+		BP0000000000000000000007 /* PairQR.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairQR.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0400 /* ResumeTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewFocus/ResumeTabView.swift; sourceTree = "<group>"; };
 		BB00000000000000000000A1 /* MotherBrokerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherBrokerClient.swift; sourceTree = "<group>"; };
 		SH00000000000000000000A1 /* MotherJobReconciler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherJobReconciler.swift; sourceTree = "<group>"; };
@@ -1230,6 +1253,7 @@
 		MM0000000000000000000001 /* MarkdownBlockDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlockDocument.swift; sourceTree = "<group>"; };
 		MF000000000000000000A001 /* PlanDocumentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanDocumentView.swift; sourceTree = "<group>"; };
 		APDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrsDemandReporter.swift; sourceTree = "<group>"; };
+		BP0000000000000000000016 /* OperatorPresenceReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorPresenceReporter.swift; sourceTree = "<group>"; };
 		AP7A3F0C51D2B84E6A90C1D2E /* AuthoredPrsFilterStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrsFilterStrip.swift; sourceTree = "<group>"; };
 		AP55F857F9FCF90C2E9A47A2 /* AuthoredPrMerge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrMerge.swift; sourceTree = "<group>"; };
 		APBEE69E684F660EB782B847 /* AuthoredPrMergeViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrMergeViews.swift; sourceTree = "<group>"; };
@@ -1308,6 +1332,12 @@
 		ZP0000000000000000000003 /* WindowPlacementLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowPlacementLog.swift; sourceTree = "<group>"; };
 		AU0000000000000000000001 /* ActivationAudit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivationAudit.swift; sourceTree = "<group>"; };
 		AU0000000000000000000002 /* ActivationAuditTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivationAuditTests.swift; sourceTree = "<group>"; };
+		BP0000000000000000000025 /* OperatorPresenceReporterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperatorPresenceReporterTests.swift; sourceTree = "<group>"; };
+		BP0000000000000000000023 /* PairQRTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairQRTests.swift; sourceTree = "<group>"; };
+		BP0000000000000000000021 /* DeviceWireDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceWireDecodingTests.swift; sourceTree = "<group>"; };
+		BP0000000000000000000019 /* DeviceAdminModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceAdminModelTests.swift; sourceTree = "<group>"; };
+		BP0000000000000000000029 /* DeviceAdminClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceAdminClientTests.swift; sourceTree = "<group>"; };
+		BP0000000000000000000027 /* DeviceWindowGestureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceWindowGestureTests.swift; sourceTree = "<group>"; };
 		QH0000000000000000000001 /* NostromoHome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostromoHome.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000004 /* WindowPlacementController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowPlacementController.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000031 /* DisplayIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayIdentityTests.swift; sourceTree = "<group>"; };
@@ -1636,6 +1666,8 @@
 				II000000000000000000040 /* LoadHarnessTargeting.swift */,
 				AA0000020000000000000001 /* Models.swift */,
 				AA0000020000000000000002 /* NostromodClient.swift */,
+				BP0000000000000000000004 /* DeviceAdminModel.swift */,
+				BP0000000000000000000001 /* DeviceWire.swift */,
 				AA0000020000000000000003 /* FileWatchers.swift */,
 				AA0000020000000000000004 /* AppStore.swift */,
 				RR0000000000000000000001 /* PRDetailCache.swift */,
@@ -1750,6 +1782,9 @@
 				AA0000020000000000000040 /* ToastBannerView.swift */,
 				AA0000020000000000000041 /* SessionHealthStatusView.swift */,
 				AA0000020000000000000024 /* CreateFocusSheet.swift */,
+				BP0000000000000000000013 /* DevicesWindow.swift */,
+				BP0000000000000000000010 /* PairDeviceWindow.swift */,
+				BP0000000000000000000007 /* PairQR.swift */,
 				ZZ0000000000000000CH0400 /* ResumeTabView.swift */,
 				ML0000000000000000000004 /* RenameFocusSheet.swift */,
 				OO000000000000000000010 /* DecisionStore.swift */,
@@ -2122,6 +2157,12 @@
 				ZP0000000000000000000033 /* WindowPlacementControllerTests.swift */,
 				ZP0000000000000000000034 /* WindowPlacementLogTests.swift */,
 				AU0000000000000000000002 /* ActivationAuditTests.swift */,
+				BP0000000000000000000025 /* OperatorPresenceReporterTests.swift */,
+				BP0000000000000000000023 /* PairQRTests.swift */,
+				BP0000000000000000000021 /* DeviceWireDecodingTests.swift */,
+				BP0000000000000000000019 /* DeviceAdminModelTests.swift */,
+				BP0000000000000000000029 /* DeviceAdminClientTests.swift */,
+				BP0000000000000000000027 /* DeviceWindowGestureTests.swift */,
 				QH0000000000000000000004 /* NostromoHomeTests.swift */,
 				ZP0000000000000000000035 /* NostromoWindowConstrainTests.swift */,
 				YY0000000000000000000001 /* PaneContentViewForEachIdentityTests.swift */,
@@ -2309,6 +2350,7 @@
 				E04515DFBB656ECF4B228066 /* AuthoredPrHandoffViews.swift */,
 				CB75D1387D375CEAC87818C3 /* AuthoredPrHandoff.swift */,
 				APDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift */,
+				BP0000000000000000000016 /* OperatorPresenceReporter.swift */,
 				MF000000000000000000A004 /* MotherListDivider.swift */,
 				MF000000000000000000A600 /* MotherDependencySection.swift */,
 				MF000000000000000000A500 /* MotherDependencyPresentation.swift */,
@@ -2545,6 +2587,8 @@
 				ZP0000000000000000000014 /* WindowPlacementController.swift in Sources */,
 				AA0000020000000000000101 /* Models.swift in Sources */,
 				AA0000020000000000000102 /* NostromodClient.swift in Sources */,
+				BP0000000000000000000005 /* DeviceAdminModel.swift in Sources */,
+				BP0000000000000000000002 /* DeviceWire.swift in Sources */,
 				AA0000020000000000000103 /* FileWatchers.swift in Sources */,
 				AA0000020000000000000104 /* AppStore.swift in Sources */,
 				AA0000020000000000000105 /* Theme.swift in Sources */,
@@ -2576,6 +2620,9 @@
 				AA0000020000000000000131 /* ChatSession.swift in Sources */,
 				AA0000020000000000000132 /* FocusStore.swift in Sources */,
 				AA0000020000000000000124 /* CreateFocusSheet.swift in Sources */,
+				BP0000000000000000000014 /* DevicesWindow.swift in Sources */,
+				BP0000000000000000000011 /* PairDeviceWindow.swift in Sources */,
+				BP0000000000000000000008 /* PairQR.swift in Sources */,
 				ZZ0000000000000000CH0401 /* ResumeTabView.swift in Sources */,
 				BB00000000000000000000A2 /* MotherBrokerClient.swift in Sources */,
 				SH00000000000000000000A2 /* MotherJobReconciler.swift in Sources */,
@@ -2600,6 +2647,7 @@
 				DD23B1CC8E10BDBC86C64D5D /* AuthoredPrHandoffViews.swift in Sources */,
 				0AD6E2826C3DB1488BD11284 /* AuthoredPrHandoff.swift in Sources */,
 				AQDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift in Sources */,
+				BP0000000000000000000017 /* OperatorPresenceReporter.swift in Sources */,
 				MF000000000000000000A104 /* MotherListDivider.swift in Sources */,
 				MF000000000000000000A601 /* MotherDependencySection.swift in Sources */,
 				MF000000000000000000A501 /* MotherDependencyPresentation.swift in Sources */,
@@ -2813,6 +2861,12 @@
 				ZP0000000000000000000043 /* WindowPlacementControllerTests.swift in Sources */,
 				ZP0000000000000000000044 /* WindowPlacementLogTests.swift in Sources */,
 				AU0000000000000000000022 /* ActivationAuditTests.swift in Sources */,
+				BP0000000000000000000026 /* OperatorPresenceReporterTests.swift in Sources */,
+				BP0000000000000000000024 /* PairQRTests.swift in Sources */,
+				BP0000000000000000000022 /* DeviceWireDecodingTests.swift in Sources */,
+				BP0000000000000000000020 /* DeviceAdminModelTests.swift in Sources */,
+				BP0000000000000000000030 /* DeviceAdminClientTests.swift in Sources */,
+				BP0000000000000000000028 /* DeviceWindowGestureTests.swift in Sources */,
 				QH0000000000000000000005 /* NostromoHomeTests.swift in Sources */,
 				ZP0000000000000000000045 /* NostromoWindowConstrainTests.swift in Sources */,
 				WK0000000000000000000006 /* WorkStore.swift in TestSources */,
@@ -2952,6 +3006,7 @@
 				A6A4E86D3C5E7702F9B2366A /* AuthoredPrHandoffViews.swift in TestSources */,
 				59D941FE7E102E5F1C2D282A /* AuthoredPrHandoff.swift in TestSources */,
 				ARDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift in TestSources */,
+				BP0000000000000000000018 /* OperatorPresenceReporter.swift in TestSources */,
 				MF000000000000000000A204 /* MotherListDivider.swift in TestSources */,
 				MF000000000000000000A602 /* MotherDependencySection.swift in TestSources */,
 				MF000000000000000000A502 /* MotherDependencyPresentation.swift in TestSources */,
@@ -2965,6 +3020,8 @@
 				LL0000000000000000000306 /* CodePaneRenderAuditTests.swift in Sources */,
 				DD00000000000000000000A1 /* SessionHealthTests.swift in Sources */,
 				DD00000000000000000000A2 /* NostromodClient.swift in TestSources */,
+				BP0000000000000000000006 /* DeviceAdminModel.swift in TestSources */,
+				BP0000000000000000000003 /* DeviceWire.swift in TestSources */,
 				LL0000000000000000000109 /* PaneContentDump.swift in TestSources */,
 				DD00000000000000000000A3 /* ChatModels.swift in TestSources */,
 				DD00000000000000000000A4 /* ChatSession.swift in TestSources */,
@@ -2973,6 +3030,9 @@
 				GG00000000000000000000A3 /* ProcessRunner.swift in TestSources */,
 				RO00000000000000000000A3 /* RepoOrg.swift in TestSources */,
 				RO00000000000000000000A6 /* CreateFocusSheet.swift in TestSources */,
+				BP0000000000000000000015 /* DevicesWindow.swift in TestSources */,
+				BP0000000000000000000012 /* PairDeviceWindow.swift in TestSources */,
+				BP0000000000000000000009 /* PairQR.swift in TestSources */,
 				ZZ0000000000000000CH0402 /* ResumeTabView.swift in TestSources */,
 				RO00000000000000000000A5 /* RepoOrgTests.swift in Sources */,
 				ML0000000000000000000003 /* BranchProvider.swift in TestSources */,
