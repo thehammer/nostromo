@@ -273,6 +273,7 @@ pub fn server_msg_tag(msg: &ServerMsg) -> MsgTag<'_> {
         | ServerMsg::DeviceAdminError { .. }
         | ServerMsg::Hosts { .. }
         | ServerMsg::HostUnavailable { .. }
+        | ServerMsg::Gap { .. }
         | ServerMsg::DeviceAdminLevel { .. } => MsgTag::Untagged,
     }
 }

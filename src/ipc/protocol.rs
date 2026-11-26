@@ -3,6 +3,7 @@
 //! Frames are length-prefixed: a big-endian u32 byte count followed by a JSON
 //! body.  Maximum frame size is 4 MiB.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -68,7 +69,7 @@ pub fn default_socket_path() -> PathBuf {
 }
 
 /// Topics a client can subscribe to.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Topic {
     Activity,
@@ -126,6 +127,18 @@ pub enum Topic {
     Unknown,
 }
 
+impl Topic {
+    /// Does this topic's traffic get a `seq` and a replay ring? Not the local-only
+    /// topics a client re-requests on reconnect, nor a topic this build does not
+    /// know (see [`ServerMsg::topic`]).
+    pub fn is_sequenced(&self) -> bool {
+        !matches!(
+            self,
+            Topic::Terminal | Topic::AuthoredPrs | Topic::Devices | Topic::Unknown
+        )
+    }
+}
+
 /// Decode a `Subscribe` topic list leniently: an element that is not a topic
 /// this build knows (an unknown name, or not a string at all) becomes
 /// [`Topic::Unknown`] instead of failing the whole frame.
@@ -138,6 +151,46 @@ where
         .into_iter()
         .map(|v| serde_json::from_value(v).unwrap_or(Topic::Unknown))
         .collect())
+}
+
+/// Decode `Subscribe.resume` leniently: a topic this build does not know (a
+/// newer client's) or a value that is not an unsigned integer is dropped
+/// instead of failing the whole frame.
+fn lenient_resume<'de, D>(deserializer: D) -> Result<BTreeMap<Topic, u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|(name, after)| {
+            let topic: Topic = serde_json::from_value(serde_json::Value::String(name)).ok()?;
+            (topic != Topic::Unknown).then_some(())?;
+            Some((topic, after.as_u64()?))
+        })
+        .collect())
+}
+
+/// What the daemon's replay rings hold (see [`crate::ipc::seq`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayUsage {
+    pub topics: usize,
+    pub frames: usize,
+    pub bytes: usize,
+}
+
+/// Why a `Gap` was sent: what the client may have missed on one topic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GapReason {
+    /// The client resumed from a point the replay ring no longer reaches (or a
+    /// point from before the daemon restarted).
+    ReplayWindowExceeded,
+    /// The client read too slowly: frames were dropped for it instead of
+    /// holding the others back.
+    ClientSlow,
+    /// A satellite's uplink dropped for longer than its ring window.
+    UplinkReconnect,
 }
 
 // ── persistent session metadata ──────────────────────────────────────────────
@@ -1725,6 +1778,17 @@ pub enum ClientMsg {
         /// before `exec`ing the genuine app cannot contain it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         operator_nonce: Option<String>,
+        /// Per topic, the last `seq` this client saw (see [`crate::ipc::seq`]).
+        /// A daemon that advertises `"seq"` replays what the topic published
+        /// after it, or tells the client it cannot (`ServerMsg::Gap`). Sent
+        /// only to a daemon that advertised `"seq"`; absent means "no resume".
+        /// A topic this build does not know is dropped.
+        #[serde(
+            default,
+            skip_serializing_if = "BTreeMap::is_empty",
+            deserialize_with = "lenient_resume"
+        )]
+        resume: BTreeMap<Topic, u64>,
     },
     Ping,
 
@@ -3641,6 +3705,10 @@ pub enum ServerMsg {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         last_event_at: Option<chrono::DateTime<chrono::Utc>>,
         hook_installed: bool,
+        /// What the replay rings hold now (frames and bytes, in total). Filled
+        /// on the health frame sent at attach; absent on the live broadcast.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        replay: Option<ReplayUsage>,
     },
 
     // ── Teri/Fred work views (all sensitive: never sent to TCP peers) ────────
@@ -4172,6 +4240,20 @@ pub enum ServerMsg {
         reason: String,
     },
 
+    /// Updates on `topic` between `from` and `to` (inclusive `seq` bounds) were
+    /// not delivered to this connection: refresh the topic's state. Never
+    /// carries a `seq` itself; after it the client's last `seq` for the topic
+    /// is `to`. `host` is `None` for the daemon's own frames. `Open`: topic
+    /// names and numbers only.
+    Gap {
+        topic: Topic,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+        from: u64,
+        to: u64,
+        reason: GapReason,
+    },
+
     // ── satellites (W10) ──────────────────────────────────────────────────────
     /// The satellites currently connected to this primary. `Open`: names,
     /// egress and timestamps only.
@@ -4190,6 +4272,47 @@ pub enum ServerMsg {
         level: crate::ipc::devices::SatelliteAdmin,
         pair_from: Vec<String>,
     },
+}
+
+impl ServerMsg {
+    /// The topic whose subscribers this frame goes to *and* whose updates are
+    /// numbered and kept for replay (see [`crate::ipc::seq`]), or `None`.
+    ///
+    /// `None` for what has no topic (session frames, everything targeted) and
+    /// for the topics that are local only and re-requested on reconnect
+    /// (`Terminal`, `AuthoredPrs`, `Devices`): they get no `seq` and no ring.
+    /// A satellite's frames are the primary's: the primary numbers them in the
+    /// topic they belong to, whatever `host` says.
+    pub fn topic(&self) -> Option<Topic> {
+        match self {
+            ServerMsg::Activity(_)
+            | ServerMsg::ActivitySnapshot { .. }
+            | ServerMsg::ActivityHealth { .. } => Some(Topic::Activity),
+            ServerMsg::MotherJobs { .. }
+            | ServerMsg::MotherAwaitDetected(_)
+            | ServerMsg::MotherNoticeState { .. } => Some(Topic::MotherJobs),
+            ServerMsg::MotherStatusline(_) => Some(Topic::MotherStatusline),
+            ServerMsg::MotherPeek { .. } => Some(Topic::MotherPeek),
+            ServerMsg::TeriState { .. } => Some(Topic::Teri),
+            ServerMsg::WorkSourceStatus { .. }
+            | ServerMsg::WorkSnapshot { .. }
+            | ServerMsg::TeriPicks { .. } => Some(Topic::Work),
+            ServerMsg::FocusRegistryUpdated { .. } => Some(Topic::Focuses),
+            ServerMsg::PerriState { .. } => Some(Topic::Perri),
+            ServerMsg::FredState { .. } => Some(Topic::Fred),
+            ServerMsg::FocusLayout { .. }
+            | ServerMsg::PaneContent { .. }
+            | ServerMsg::FocusCreated { .. }
+            | ServerMsg::Notification { .. } => Some(Topic::Layout),
+            ServerMsg::DecisionRequest { .. }
+            | ServerMsg::DecisionResolved { .. }
+            | ServerMsg::ApprovalPending { .. } => Some(Topic::Decision),
+            ServerMsg::ModelCatalog { .. }
+            | ServerMsg::ModelDefaults { .. }
+            | ServerMsg::SessionModelState(_) => Some(Topic::Model),
+            _ => None,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -4522,6 +4645,7 @@ mod tests {
             renders_approvals: false,
             capabilities: vec![],
             operator_nonce: None,
+            resume: Default::default(),
         });
 
         let v = serde_json::to_value(ClientMsg::Subscribe {
@@ -4530,6 +4654,7 @@ mod tests {
             renders_approvals: false,
             capabilities: vec![],
             operator_nonce: None,
+            resume: Default::default(),
         })
         .unwrap();
         assert_eq!(v["type"], "subscribe");
@@ -4548,6 +4673,7 @@ mod tests {
             renders_approvals: false,
             capabilities: vec![],
             operator_nonce: None,
+            resume: Default::default(),
         });
 
         let v = serde_json::to_value(ClientMsg::Subscribe {
@@ -4556,6 +4682,7 @@ mod tests {
             renders_approvals: false,
             capabilities: vec![],
             operator_nonce: None,
+            resume: Default::default(),
         })
         .unwrap();
         assert_eq!(v["renders_decisions"], true);
@@ -5696,6 +5823,7 @@ mod tests {
             reason: None,
             last_event_at: Some(chrono::Utc::now()),
             hook_installed: true,
+            replay: None,
         });
     }
 
@@ -5706,6 +5834,7 @@ mod tests {
             reason: Some("hook not installed".into()),
             last_event_at: None,
             hook_installed: false,
+            replay: None,
         });
     }
 
@@ -8913,6 +9042,7 @@ mod work_wire_tests {
                 renders_approvals: value,
                 capabilities: vec![],
                 operator_nonce: None,
+                resume: Default::default(),
             };
             round_trip_client(msg.clone());
             assert_client_golden(

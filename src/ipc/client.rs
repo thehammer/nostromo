@@ -236,6 +236,7 @@ async fn do_connect(path: &Path) -> Result<(SplitReader, SplitWriter, u32)> {
         renders_approvals: false,
         capabilities: vec![],
         operator_nonce: None,
+        resume: Default::default(),
     };
     write_frame(&mut writer, &serde_json::to_vec(&subscribe)?).await?;
     debug!(client_id, "sent Subscribe");

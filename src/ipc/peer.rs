@@ -944,6 +944,9 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         // Satellite bookkeeping: host names, egress and timestamps only.
         ServerMsg::Hosts { .. } | ServerMsg::HostUnavailable { .. } => ServerClass::Open,
 
+        // A topic name and two numbers: what a connection missed (W12).
+        ServerMsg::Gap { .. } => ServerClass::Open,
+
         // The CLI's model list and the per-agent defaults name agents and
         // models, never focus content. A request result goes only to the
         // connection that asked.
@@ -2188,6 +2191,7 @@ mod tests {
                 renders_approvals: false,
                 capabilities: vec![],
                 operator_nonce: None,
+                resume: Default::default(),
             },
             ClientMsg::Ping,
             ClientMsg::PtySpawn {

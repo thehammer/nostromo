@@ -204,6 +204,7 @@ impl Rig {
             renders_approvals: false,
             capabilities: vec![],
             operator_nonce: None,
+            resume: Default::default(),
         })
         .await;
         conn

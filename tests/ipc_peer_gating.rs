@@ -276,6 +276,7 @@ async fn handshake_with_nonce<S: AsyncRead + AsyncWrite + Unpin>(
             renders_approvals: false,
             capabilities: vec![],
             operator_nonce: None,
+            resume: Default::default(),
         },
     )
     .await;
@@ -2495,6 +2496,7 @@ fn health_probe() -> ServerMsg {
         reason: Some("health-probe".into()),
         last_event_at: None,
         hook_installed: true,
+        replay: None,
     }
 }
 
@@ -3544,6 +3546,7 @@ async fn a_unix_client_that_subscribed_to_everything_is_not_replayed_retained_fr
             renders_approvals: false,
             capabilities: vec![],
             operator_nonce: None,
+            resume: Default::default(),
         },
     )
     .await;
@@ -4066,6 +4069,7 @@ async fn a_unix_client_that_adds_the_work_topic_with_a_second_subscribe_is_repla
             renders_approvals: false,
             capabilities: vec![],
             operator_nonce: None,
+            resume: Default::default(),
         },
     )
     .await;
@@ -4133,6 +4137,7 @@ async fn a_tcp_client_that_adds_the_work_topic_with_a_second_subscribe_is_still_
             renders_approvals: false,
             capabilities: vec![],
             operator_nonce: None,
+            resume: Default::default(),
         },
     )
     .await;
@@ -7320,6 +7325,7 @@ async fn a_tcp_client_can_still_use_every_read_only_request() {
                 renders_approvals: false,
                 capabilities: vec![],
                 operator_nonce: None,
+                resume: Default::default(),
             },
         )
         .await,
@@ -8269,6 +8275,7 @@ mod background_tasks {
                 renders_approvals: false,
                 capabilities: vec![],
                 operator_nonce: None,
+                resume: Default::default(),
             })
             .await;
             tap.sync().await;
@@ -13507,6 +13514,7 @@ async fn a_paired_device_subscribing_after_the_fact_is_replayed_none_of_the_reta
             renders_approvals: false,
             capabilities: vec![],
             operator_nonce: None,
+            resume: Default::default(),
         },
     )
     .await;
@@ -14659,6 +14667,7 @@ async fn handshake_claiming_a_satellite_role<S: AsyncRead + AsyncWrite + Unpin>(
             renders_approvals: false,
             capabilities: vec![],
             operator_nonce: None,
+            resume: Default::default(),
         },
     )
     .await;

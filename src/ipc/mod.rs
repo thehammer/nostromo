@@ -39,6 +39,7 @@ pub mod perri_state;
 pub mod protocol;
 pub mod router;
 pub mod scrollback;
+pub mod seq;
 pub mod server;
 pub mod session_manager;
 pub mod stream_json;

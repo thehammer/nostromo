@@ -1019,6 +1019,7 @@ async fn an_answer_buffered_before_execing_the_pinned_app_is_refused_for_lacking
         renders_approvals: false,
         capabilities: vec![],
         operator_nonce: None,
+        resume: Default::default(),
     }));
     bytes.extend(frame(&ClientMsg::DecisionAnswer {
         request_id: request_id.clone(),

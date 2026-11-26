@@ -43,9 +43,9 @@ use super::{
         MAC_APP_CLIENT_KIND,
     },
     protocol::{
-        ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, HelloRole, HostUnavailableReason,
-        MotherActionKind, QueueResultCode, QueueReturnedEntry, ServerMsg, SessionAction, Topic,
-        TrackerEditError, FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_MERGE,
+        ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, GapReason, HelloRole,
+        HostUnavailableReason, MotherActionKind, QueueResultCode, QueueReturnedEntry, ServerMsg,
+        SessionAction, Topic, TrackerEditError, FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_MERGE,
         FEATURE_AUTHORED_PRS_MERGE_QUEUE, FEATURE_AUTHORED_PRS_NOTIFY, FEATURE_AUTHORED_PRS_PERRI,
         FEATURE_CONVERSATION_HISTORY, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_MERGED_TURNS,
         FEATURE_SESSION_MCP, FEATURE_SESSION_QUEUE, FEATURE_SLASH_COMMANDS,
@@ -53,6 +53,10 @@ use super::{
         FEATURE_TRACKER_EDIT, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
     router::{client_host, Routed},
+    seq::{
+        self, encode_with_seq, DropLog, Replay, SeqHub, Stamped, CLIENT_QUEUE_CAP,
+        CLIENT_QUEUE_RESUME_BELOW, FEATURE_SEQ,
+    },
     session_manager::{
         AppLabel, ModelRequestOutcome, QueueVerb, ResendTrigger, SessionManager, SwitchRequest,
     },
@@ -143,7 +147,10 @@ pub(super) use super::ws::{
 /// Handle to the running IPC server.  Drop to shut down.
 pub struct Server {
     socket_path: PathBuf,
+    /// Where producers send frames. Each is numbered by the sequencer task and
+    /// reaches clients through [`Server::seq`], not from here.
     pub tx: broadcast::Sender<ServerMsg>,
+    seq: Arc<SeqHub>,
     retained: RetainedCache,
     held_mother_jobs: HeldMotherJobs,
     /// Bumped when the retained cache lagged and must be repopulated; the
@@ -223,6 +230,11 @@ impl Server {
         // Agent follow delivers terminal output into the sessions' conversations.
         terminal::follow::FollowManager::install_with_sessions(&terminals, &session_mgr);
 
+        // Every frame a producer sends is numbered (and kept for replay) by one
+        // task before the connections see it.
+        let seq = SeqHub::new();
+        seq::spawn_sequencer(Arc::clone(&seq), tx.subscribe());
+
         // Subscribe before returning so no broadcast sent after `bind` can be missed.
         let retained: RetainedCache = Arc::new(Mutex::new(BTreeMap::new()));
         let (republish, _) = tokio::sync::watch::channel(0u64);
@@ -241,6 +253,7 @@ impl Server {
         let held_for_loop = Arc::clone(&held_mother_jobs);
         let unix_peers = UnixPeers { verifier, qa_mode };
         let terminals_for_loop = Arc::clone(&terminals);
+        let seq_for_loop = Arc::clone(&seq);
         let hub: HubSlot = Arc::new(HubCell::default());
         let hub_for_loop = Arc::clone(&hub);
         tokio::spawn(async move {
@@ -255,6 +268,7 @@ impl Server {
                 held_for_loop,
                 terminals_for_loop,
                 hub_for_loop,
+                seq_for_loop,
             )
             .await
             {
@@ -267,6 +281,7 @@ impl Server {
         Ok(Self {
             socket_path: path,
             tx,
+            seq,
             retained,
             held_mother_jobs,
             republish,
@@ -280,6 +295,11 @@ impl Server {
     /// state again. Pollers `select!` on `changed()` next to their own source.
     pub fn subscribe_republish(&self) -> tokio::sync::watch::Receiver<u64> {
         self.republish.subscribe()
+    }
+
+    /// The numbering and replay state behind this server's connections.
+    pub fn seq(&self) -> &Arc<SeqHub> {
+        &self.seq
     }
 
     /// Broadcast a message to all connected, subscribed clients.
@@ -307,6 +327,7 @@ impl Server {
         let held = Arc::clone(&self.held_mother_jobs);
         let terminals = Arc::clone(&self.terminals);
         let hub = Arc::clone(&self.hub);
+        let seq = Arc::clone(&self.seq);
         tokio::spawn(async move {
             if let Err(e) = accept_loop_tcp(
                 listener,
@@ -318,6 +339,7 @@ impl Server {
                 held,
                 terminals,
                 hub,
+                seq,
             )
             .await
             {
@@ -362,6 +384,7 @@ impl Server {
         let _ = self.hub.set(Arc::clone(&hub));
         let shared = super::ws::WsShared {
             tx: self.tx.clone(),
+            seq: Arc::clone(&self.seq),
             session_mgr,
             perri_state_dir,
             decisions,
@@ -700,13 +723,15 @@ async fn accept_loop(
     held_mother_jobs: HeldMotherJobs,
     terminals: Arc<Mutex<TerminalManager>>,
     hub: HubSlot,
+    seq: Arc<SeqHub>,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let terminals = Arc::clone(&terminals);
                 let hub = Arc::clone(&hub);
-                let rx = tx.subscribe();
+                let rx = seq.subscribe();
+                let seq = Arc::clone(&seq);
                 let session_mgr = Arc::clone(&session_mgr);
                 let broadcast_tx = tx.clone();
                 let psd = perri_state_dir.clone();
@@ -742,6 +767,7 @@ async fn accept_loop(
                         held,
                         terminals,
                         hub,
+                        seq,
                     )
                     .await
                     {
@@ -767,6 +793,7 @@ async fn accept_loop_tcp(
     held_mother_jobs: HeldMotherJobs,
     terminals: Arc<Mutex<TerminalManager>>,
     hub: HubSlot,
+    seq: Arc<SeqHub>,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
@@ -774,7 +801,8 @@ async fn accept_loop_tcp(
                 let terminals = Arc::clone(&terminals);
                 let hub = Arc::clone(&hub);
                 info!(%addr, "TCP IPC client connected");
-                let rx = tx.subscribe();
+                let rx = seq.subscribe();
+                let seq = Arc::clone(&seq);
                 let session_mgr = Arc::clone(&session_mgr);
                 let broadcast_tx = tx.clone();
                 let psd = perri_state_dir.clone();
@@ -794,6 +822,7 @@ async fn accept_loop_tcp(
                         held,
                         terminals,
                         hub,
+                        seq,
                     )
                     .await
                     {
@@ -833,6 +862,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
         FEATURE_WS.to_string(),
         FEATURE_PAIR.to_string(),
         FEATURE_DEVICES.to_string(),
+        FEATURE_SEQ.to_string(),
     ];
     if mgr.authored_prs().is_some() {
         features.push(FEATURE_AUTHORED_PRS.to_string());
@@ -868,7 +898,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
 pub(super) async fn handle_client<S>(
     stream: S,
     mut origin: PeerOrigin,
-    mut broadcast_rx: broadcast::Receiver<ServerMsg>,
+    broadcast_rx: broadcast::Receiver<Stamped>,
     broadcast_tx: broadcast::Sender<ServerMsg>,
     session_mgr: Arc<Mutex<SessionManager>>,
     perri_state_dir: PathBuf,
@@ -877,6 +907,7 @@ pub(super) async fn handle_client<S>(
     held_mother_jobs: HeldMotherJobs,
     terminals: Arc<Mutex<TerminalManager>>,
     hub: HubSlot,
+    seq: Arc<SeqHub>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
@@ -1003,12 +1034,13 @@ where
     let sub_bytes = read_frame(&mut reader).await?;
     let sub: ClientMsg = serde_json::from_slice(&sub_bytes)?;
 
-    let (topics, renders_decisions, renders_approvals, capabilities, sub_nonce): (
+    let (topics, renders_decisions, renders_approvals, capabilities, sub_nonce, resume): (
         Vec<Topic>,
         bool,
         bool,
         Vec<String>,
         Option<String>,
+        BTreeMap<Topic, u64>,
     ) = match sub {
         ClientMsg::Subscribe {
             topics,
@@ -1016,16 +1048,18 @@ where
             renders_approvals,
             capabilities,
             operator_nonce,
+            resume,
         } => (
             topics,
             renders_decisions,
             renders_approvals,
             capabilities,
             operator_nonce,
+            resume,
         ),
         ClientMsg::Ping => {
             write_frame(&mut writer, &serde_json::to_vec(&ServerMsg::Pong)?).await?;
-            (vec![], false, false, vec![], None)
+            (vec![], false, false, vec![], None, BTreeMap::new())
         }
         _ => {
             // The frame's type only: its content is never logged.
@@ -1209,6 +1243,35 @@ where
     // app dedupes by request id).
     replay_messages(&mut writer, std::mem::take(&mut approvals_replay)).await;
 
+    // ── Resume — what the topics this client names published since ───────────
+    // First of the replays, so the fresh snapshots that follow are the last word
+    // on a topic: a replayed frame is older than they are. Each frame passes the
+    // same gate as the live path, so a peer is replayed nothing it would not have
+    // been sent live (the rings hold frames before any peer's trust filter).
+    let ResumePlan {
+        frames: resume_frames,
+        covered: resume_covered,
+        high_water: resume_high_water,
+        gaps: resume_gaps,
+    } = plan_resume(&seq, &resume, &topics);
+    for stamped in resume_frames {
+        if let Some(bytes) = broadcast_bytes(
+            stamped,
+            &topics,
+            presents_approvals,
+            trust,
+            &sensitive,
+            origin.ws_device(),
+        ) {
+            if write_outbound(&mut writer, &bytes, &conn_key)
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+    }
+
     // ── Claude sign-in replay — who is waiting for one, as of now ─────────────
     // The whole picture (REPLACE semantics), so a client that connects while a
     // session waits shows it at once. `LocalOnly`: a network peer is sent none.
@@ -1306,7 +1369,7 @@ where
     // known focus and one health verdict are pushed immediately on attach,
     // mirroring the Layout replay above (D4).
     if topics.contains(&Topic::Activity) {
-        let (snapshots, health_msg): (Vec<ServerMsg>, ServerMsg) = {
+        let (snapshots, mut health_msg): (Vec<ServerMsg>, ServerMsg) = {
             let mgr = session_mgr.lock().unwrap();
             let snapshots = mgr
                 .known_focus_tags()
@@ -1323,6 +1386,10 @@ where
             let health_msg = activity_health_msg(&mgr, hook_installed);
             (snapshots, health_msg)
         };
+        // What the replay rings hold, for the operator's health read-out.
+        if let ServerMsg::ActivityHealth { replay, .. } = &mut health_msg {
+            *replay = Some(seq.usage());
+        }
         replay_messages(
             &mut writer,
             snapshots
@@ -1374,14 +1441,27 @@ where
         PeerTrust::Paired => {
             let frames = retained_matching(&retained, &topics, None)
                 .into_iter()
+                .filter(|m| !covered_by_resume(&resume_covered, m))
                 .filter_map(|m| outbound(trust, m, &sensitive))
                 .chain(std::iter::once(withheld_msg_for(trust)));
             replay_messages(&mut writer, frames).await;
         }
         PeerTrust::OperatorApp | PeerTrust::LocalOther => {
-            replay_messages(&mut writer, retained_matching(&retained, &topics, None)).await
+            let frames = retained_matching(&retained, &topics, None)
+                .into_iter()
+                .filter(|m| !covered_by_resume(&resume_covered, m));
+            replay_messages(&mut writer, frames).await
         }
     }
+    // A topic the ring could not catch up has just been replayed its snapshot:
+    // say that updates in between are lost.
+    replay_messages(
+        &mut writer,
+        resume_gaps
+            .into_iter()
+            .filter_map(|m| outbound(trust, m, &sensitive)),
+    )
+    .await;
 
     // ── Model replay — catalogue, defaults and every focus's model state ──────
     // Every peer: a network peer is withheld the state of a sensitive focus by
@@ -1396,6 +1476,26 @@ where
         )
         .await;
     }
+
+    // ── Broadcast queue ───────────────────────────────────────────────────────
+    // A task of its own takes the connection's frames off the broadcast channel
+    // into a bounded queue, so a client that reads slowly costs only itself:
+    // when the queue is full its frames are dropped (and remembered, to be
+    // reported as a `Gap`) instead of lagging the receiver unnoticed.
+    let filter = Arc::new(Mutex::new(BroadcastFilter {
+        topics: topics.clone(),
+        presents_approvals,
+    }));
+    let drops = Arc::new(Mutex::new(DropLog::default()));
+    let (queue_tx, mut queue_rx) = mpsc::channel::<Stamped>(CLIENT_QUEUE_CAP);
+    let forwarder = tokio::spawn(forward_broadcasts(
+        broadcast_rx,
+        queue_tx,
+        Arc::clone(&filter),
+        Arc::clone(&drops),
+        resume_high_water,
+        Arc::clone(&seq),
+    ));
 
     // ── Main loop (broadcast + targeted + client reads) ───────────────────────
 
@@ -1416,31 +1516,43 @@ where
 
     let result: Result<()> = loop {
         tokio::select! {
-            // Broadcast events (activity, Mother, etc.)
-            bcast = broadcast_rx.recv() => {
-                match bcast {
-                    Ok(msg) => {
-                        // Trust gate first: a network peer never gets a
-                        // sensitive frame, whatever its topic list says.
-                        if !deliver_broadcast(&msg, &topics, presents_approvals) {
-                            continue;
-                        }
-                        let Some(msg) = outbound(trust, msg, &sensitive) else {
+            // Broadcast events (activity, Mother, etc.), from the bounded queue.
+            queued = queue_rx.recv() => {
+                let Some(stamped) = queued else {
+                    // The broadcast channel closed: the daemon is going down.
+                    break Ok(());
+                };
+                // Trust gate first: a network peer never gets a sensitive
+                // frame, whatever its topic list says.
+                if let Some(bytes) = broadcast_bytes(
+                    stamped,
+                    &topics,
+                    presents_approvals,
+                    trust,
+                    &sensitive,
+                    origin.ws_device(),
+                ) {
+                    if write_outbound(&mut writer, &bytes, &conn_key).await.is_err() {
+                        break Ok(());
+                    }
+                }
+                // Once the queue has drained below half, say what it dropped.
+                if queue_rx.len() < CLIENT_QUEUE_RESUME_BELOW {
+                    let gaps = drops.lock().unwrap().take_gaps();
+                    let mut failed = false;
+                    for gap in gaps {
+                        let Some(gap) = outbound(trust, gap, &sensitive) else {
                             continue;
                         };
-                        let msg = for_satellite(msg, trust, origin.ws_device());
-                        let bytes = match serde_json::to_vec(&msg) {
-                            Ok(b) => b,
-                            Err(e) => { warn!("serialise error: {e}"); continue; }
+                        let Ok(bytes) = serde_json::to_vec(&gap) else {
+                            continue;
                         };
                         if write_outbound(&mut writer, &bytes, &conn_key).await.is_err() {
-                            break Ok(());
+                            failed = true;
+                            break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(conn_key, "client lagged {n} broadcast messages");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
+                    if failed {
                         break Ok(());
                     }
                 }
@@ -1543,7 +1655,7 @@ where
                         // A later `Subscribe` replaces the topic list: a client
                         // that learned from `Welcome.features` that the daemon
                         // serves `work` adds it this way.
-                        if let ClientMsg::Subscribe { topics: new_topics, renders_decisions, renders_approvals, capabilities, operator_nonce: sent } = msg {
+                        if let ClientMsg::Subscribe { topics: new_topics, renders_decisions, renders_approvals, capabilities, operator_nonce: sent, .. } = msg {
                             let new_topics = deliverable_topics(new_topics, trust);
                             if let Some(cap) = &cap {
                                 lock_terminals(&terminals).set_capabilities(cap, &conn_key, capabilities);
@@ -1619,6 +1731,10 @@ where
                                 }
                             }
                             topics = new_topics;
+                            *filter.lock().unwrap() = BroadcastFilter {
+                                topics: topics.clone(),
+                                presents_approvals,
+                            };
                             replay_messages(&mut writer, frames).await;
                             continue;
                         }
@@ -1749,6 +1865,7 @@ where
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
     reader_task.abort();
+    forwarder.abort();
     debug!(
         claimed_id,
         conn_key, "client handler exiting; detaching sessions"
@@ -1795,6 +1912,169 @@ where
     drop(terminal_stream_tx);
 
     result
+}
+
+// ── broadcast queue and resume ────────────────────────────────────────────────
+
+/// What a connection takes from the broadcast channel; changed by a later
+/// `Subscribe`.
+struct BroadcastFilter {
+    topics: Vec<Topic>,
+    presents_approvals: bool,
+}
+
+/// Is `topic`'s traffic something a connection subscribed to `topics` is sent?
+/// (`Model` is only for a client that names it, like its frames.)
+fn topic_wanted(topics: &[Topic], topic: &Topic) -> bool {
+    match topic {
+        Topic::Model => wants_model(topics),
+        other => subscribed(topics, other.clone()),
+    }
+}
+
+/// A frame as the connection is written it, or `None` if it is not sent:
+/// the topic filter, then the trust gate, exactly as the live path applies
+/// them, then its topic number as a `seq`.
+fn broadcast_bytes(
+    stamped: Stamped,
+    topics: &[Topic],
+    presents_approvals: bool,
+    trust: PeerTrust,
+    sensitive: &SensitiveTags,
+    device: Option<&str>,
+) -> Option<Vec<u8>> {
+    let Stamped { seq, msg } = stamped;
+    if !deliver_broadcast(&msg, topics, presents_approvals) {
+        return None;
+    }
+    let topic = msg.topic();
+    let msg = outbound(trust, msg, sensitive)?;
+    let msg = for_satellite(msg, trust, device);
+    // A frame the gate turned into something else is not the numbered one.
+    let seq = seq.filter(|_| msg.topic() == topic);
+    match encode_with_seq(&msg, seq) {
+        Ok(bytes) => Some(bytes),
+        Err(e) => {
+            warn!("serialise error: {e}");
+            None
+        }
+    }
+}
+
+/// What a `Subscribe.resume` came to.
+#[derive(Default)]
+struct ResumePlan {
+    /// The frames the rings hold after the numbers the client named, per topic
+    /// in order.
+    frames: Vec<Stamped>,
+    /// The topics whose ring reached back far enough: their frames are in
+    /// `frames`, so their retained snapshots are not sent.
+    covered: HashSet<Topic>,
+    /// Per covered topic, the last number replayed (or the client's own): a
+    /// live frame at or below it is the same one and is dropped.
+    high_water: BTreeMap<Topic, u64>,
+    /// A `Gap` per topic the ring could not reach back to.
+    gaps: Vec<ServerMsg>,
+}
+
+/// Was this retained frame's topic replayed from its ring?
+fn covered_by_resume(covered: &HashSet<Topic>, msg: &ServerMsg) -> bool {
+    msg.topic().is_some_and(|t| covered.contains(&t))
+}
+
+fn plan_resume(seq: &SeqHub, resume: &BTreeMap<Topic, u64>, topics: &[Topic]) -> ResumePlan {
+    let mut plan = ResumePlan::default();
+    for (topic, &after) in resume {
+        if !topic.is_sequenced() || !topic_wanted(topics, topic) {
+            continue;
+        }
+        match seq.replay(topic, after) {
+            Replay::Messages(frames) => {
+                let last = frames.last().and_then(|f| f.seq).unwrap_or(after);
+                plan.covered.insert(topic.clone());
+                plan.high_water.insert(topic.clone(), last.max(after));
+                plan.frames.extend(frames);
+            }
+            Replay::Exceeded { latest, .. } => plan.gaps.push(ServerMsg::Gap {
+                topic: topic.clone(),
+                host: None,
+                // What the client has not seen: after its number, or, if that is
+                // from before a restart, from the first.
+                from: if after > latest { 1 } else { after + 1 },
+                to: latest,
+                reason: GapReason::ReplayWindowExceeded,
+            }),
+        }
+    }
+    plan
+}
+
+/// Move a connection's broadcast frames into its bounded queue.
+async fn forward_broadcasts(
+    mut rx: broadcast::Receiver<Stamped>,
+    queue: mpsc::Sender<Stamped>,
+    filter: Arc<Mutex<BroadcastFilter>>,
+    drops: Arc<Mutex<DropLog>>,
+    mut high_water: BTreeMap<Topic, u64>,
+    seq: Arc<SeqHub>,
+) {
+    // The last number seen per topic (whether or not it is wanted), so what a
+    // lag skipped can be named.
+    let mut seen = seq.latest_all();
+    loop {
+        let stamped = tokio::select! {
+            _ = queue.closed() => return,
+            received = rx.recv() => match received {
+                Ok(stamped) => stamped,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    seq.note_lagged();
+                    // Frames were lost before this task saw them: whatever the
+                    // topics this connection follows have published since the
+                    // last number seen may be among them.
+                    let f = filter.lock().unwrap();
+                    let mut log = drops.lock().unwrap();
+                    for (topic, last) in seen.iter_mut() {
+                        let latest = seq.latest(topic);
+                        if latest > *last && topic_wanted(&f.topics, topic) {
+                            log.record_range(topic.clone(), *last + 1, latest);
+                        }
+                        *last = (*last).max(latest);
+                    }
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+        };
+        let topic = stamped.msg.topic();
+        if let (Some(n), Some(t)) = (stamped.seq, &topic) {
+            let last = seen.entry(t.clone()).or_insert(0);
+            *last = (*last).max(n);
+        }
+        {
+            let f = filter.lock().unwrap();
+            if !deliver_broadcast(&stamped.msg, &f.topics, f.presents_approvals) {
+                continue;
+            }
+        }
+        // The same frame the resume replay already carried.
+        if let (Some(n), Some(t)) = (stamped.seq, &topic) {
+            if high_water.get(t).is_some_and(|hw| n <= *hw) {
+                continue;
+            }
+            high_water.remove(t);
+        }
+        match queue.try_send(stamped) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(dropped)) => {
+                let mut log = drops.lock().unwrap();
+                match (dropped.seq, topic) {
+                    (Some(n), Some(t)) => log.record(t, n),
+                    _ => log.record_unsequenced(),
+                }
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => return,
+        }
+    }
 }
 
 /// Serialize and write each message in order, best-effort: a message that
@@ -5330,6 +5610,7 @@ pub fn activity_health_msg(mgr: &SessionManager, hook_installed: bool) -> Server
         reason,
         last_event_at: health.last_event_at,
         hook_installed,
+        replay: None,
     }
 }
 
@@ -5876,6 +6157,7 @@ mod tests {
             reason: None,
             last_event_at: None,
             hook_installed: true,
+            replay: None,
         };
 
         assert!(message_matches_topics(&snapshot, &[Topic::Activity]));

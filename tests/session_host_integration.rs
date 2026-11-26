@@ -92,6 +92,7 @@ async fn session_round_trip_drives_real_claude() {
             renders_approvals: false,
             capabilities: vec![],
             operator_nonce: None,
+            resume: Default::default(),
         },
     )
     .await;

@@ -408,6 +408,7 @@ fn subscribe() -> ClientMsg {
         renders_approvals: false,
         capabilities: vec![],
         operator_nonce: None,
+        resume: Default::default(),
     }
 }
 

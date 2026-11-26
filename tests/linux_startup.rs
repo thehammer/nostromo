@@ -284,6 +284,7 @@ fn activity_tailer_creates_missing_file_and_delivers_appended_events() {
             renders_approvals: false,
             capabilities: vec![],
             operator_nonce: None,
+            resume: Default::default(),
         };
         write_frame(&mut s, &serde_json::to_vec(&sub).unwrap())
             .await

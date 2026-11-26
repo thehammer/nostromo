@@ -98,6 +98,7 @@ async fn ask(stream: UnixStream) -> Result<Vec<RemoteShellSummary>> {
         renders_approvals: false,
         capabilities: Vec::new(),
         operator_nonce: None,
+        resume: Default::default(),
     };
     write_frame(&mut writer, &serde_json::to_vec(&subscribe)?).await?;
     write_frame(

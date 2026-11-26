@@ -296,6 +296,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Client<S> {
             // Echo the Welcome's nonce, as the app does: only then are a
             // verified app's terminal verbs honoured.
             operator_nonce: c.nonce.clone(),
+            resume: Default::default(),
         })
         .await;
         c.sync().await;
@@ -2721,6 +2722,7 @@ async fn frames_written_before_the_nonce_was_seen_are_refused_until_a_subscribe_
         renders_approvals: false,
         capabilities: vec!["terminal_ui".into()],
         operator_nonce: None,
+        resume: Default::default(),
     })
     .await;
     c.send(&open_msg(TAG, Some(&cwd), "buffered")).await;
@@ -2754,6 +2756,7 @@ async fn frames_written_before_the_nonce_was_seen_are_refused_until_a_subscribe_
         renders_approvals: false,
         capabilities: vec!["terminal_ui".into()],
         operator_nonce: nonce,
+        resume: Default::default(),
     };
     c.send(&resubscribe(Some("0".repeat(64)))).await;
     let from = c.mark();

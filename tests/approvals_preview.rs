@@ -380,6 +380,7 @@ impl Rig {
                 renders_approvals: renders,
                 capabilities: vec![],
                 operator_nonce: None,
+                resume: Default::default(),
             })
             .unwrap(),
         )
@@ -403,6 +404,7 @@ impl Rig {
                 renders_approvals: true,
                 capabilities: vec![],
                 operator_nonce: None,
+                resume: Default::default(),
             })
             .unwrap(),
         )
@@ -424,6 +426,7 @@ impl Rig {
                     renders_approvals: true,
                     capabilities: vec![],
                     operator_nonce: None,
+                    resume: Default::default(),
                 })
                 .unwrap(),
             )

@@ -184,6 +184,7 @@ fn ip_key(ip: IpAddr) -> IpAddr {
 /// Everything `handle_client` needs, bundled for the accept loop.
 pub(super) struct WsShared {
     pub tx: broadcast::Sender<ServerMsg>,
+    pub seq: Arc<super::seq::SeqHub>,
     pub session_mgr: Arc<Mutex<SessionManager>>,
     pub perri_state_dir: std::path::PathBuf,
     pub decisions: Arc<Mutex<DecisionRegistry>>,
@@ -758,7 +759,7 @@ async fn run_paired(
             role_refused: Arc::clone(&role_refused),
             admitted: Arc::clone(&admitted),
         },
-        shared.tx.subscribe(),
+        shared.seq.subscribe(),
         shared.tx.clone(),
         Arc::clone(&shared.session_mgr),
         shared.perri_state_dir.clone(),
@@ -767,6 +768,7 @@ async fn run_paired(
         Arc::clone(&shared.held_mother_jobs),
         Arc::clone(&shared.terminals),
         Arc::clone(&shared.hub_slot),
+        Arc::clone(&shared.seq),
     ));
 
     // `read_frame` is not cancel-safe: read whole frames in a task of their own.

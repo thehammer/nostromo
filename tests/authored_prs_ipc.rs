@@ -140,6 +140,7 @@ fn subscribe(topics: Vec<Topic>) -> ClientMsg {
         renders_approvals: false,
         capabilities: vec![],
         operator_nonce: None,
+        resume: Default::default(),
     }
 }
 
