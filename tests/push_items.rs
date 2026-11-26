@@ -543,7 +543,9 @@ fn paused_at_is_off_the_wire_when_none_and_on_it_when_set() {
 }
 
 #[test]
-fn the_existing_mother_contract_frames_still_decode_and_reencode_without_paused_at() {
+fn the_existing_mother_contract_frames_still_decode_and_reencode_without_inventing_paused_at() {
+    // `paused_at` is read leniently and written only when Mother sent it: a frame that
+    // had it keeps it (the vendored hold fixture does), and no frame gains it.
     for name in [
         "ipc_mother_jobs.golden.json",
         "ipc_mother_jobs_plain.golden.json",
@@ -553,17 +555,29 @@ fn the_existing_mother_contract_frames_still_decode_and_reencode_without_paused_
             .join(name);
         let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
         let msg: ServerMsg = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let original: Value = serde_json::from_str(&text).unwrap();
+        let had: Vec<bool> = original["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|j| j.get("paused_at").is_some_and(|v| !v.is_null()))
+            .collect();
         match &msg {
             ServerMsg::MotherJobs { jobs, .. } => {
                 assert!(!jobs.is_empty(), "{name}");
-                assert!(jobs.iter().all(|j| j.paused_at.is_none()), "{name}");
+                let has: Vec<bool> = jobs.iter().map(|j| j.paused_at.is_some()).collect();
+                assert_eq!(
+                    has, had,
+                    "{name}: paused_at must decode exactly where it was sent"
+                );
             }
             other => panic!("{name}: {other:?}"),
         }
         let again = serde_json::to_string_pretty(&msg).unwrap();
-        assert!(
-            !again.contains("paused_at"),
-            "{name}: a new key appeared in an old frame"
+        assert_eq!(
+            again.matches("paused_at").count(),
+            text.matches("paused_at").count(),
+            "{name}: a key appeared in, or vanished from, an old frame"
         );
     }
 }
