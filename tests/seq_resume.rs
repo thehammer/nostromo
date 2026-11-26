@@ -305,7 +305,20 @@ async fn attach(conn: &mut Conn, topics: &[Topic], resume: &[(Topic, u64)]) {
 }
 
 /// Subscribe (with `resume`) on a connection that has said Hello, then a sync.
+/// No `seq_epoch`: the numbers are compared as they are, as a client that
+/// predates the field does.
 async fn subscribe(conn: &mut Conn, topics: &[Topic], resume: &[(Topic, u64)]) {
+    subscribe_under(conn, topics, resume, None).await;
+}
+
+/// [`subscribe`] naming the daemon run (`Subscribe.seq_epoch`) the numbers in
+/// `resume` were given under.
+async fn subscribe_under(
+    conn: &mut Conn,
+    topics: &[Topic],
+    resume: &[(Topic, u64)],
+    seq_epoch: Option<u64>,
+) {
     conn.send(&ClientMsg::Subscribe {
         topics: topics.to_vec(),
         renders_decisions: false,
@@ -313,10 +326,67 @@ async fn subscribe(conn: &mut Conn, topics: &[Topic], resume: &[(Topic, u64)]) {
         capabilities: vec![],
         operator_nonce: None,
         resume: resume.iter().cloned().collect(),
-        seq_epoch: None,
+        seq_epoch,
     })
     .await;
     conn.sync().await;
+}
+
+/// What a resuming client says about the daemon run its numbers come from.
+#[derive(Clone, Copy, Debug)]
+enum Epoch {
+    /// Nothing: a client that predates the field.
+    Absent,
+    /// The epoch of the Welcome this very connection was just given: a client
+    /// that kept the numbers it saw together with that Welcome's value and
+    /// reconnects to the same daemon run.
+    Echo,
+    /// This value, which the test took from another daemon run's Welcome.
+    Is(u64),
+}
+
+/// The `seq_epoch` of the connection's Welcome.
+fn welcome_epoch(conn: &Conn) -> Option<u64> {
+    match &conn.welcome {
+        Some(ServerMsg::Welcome { seq_epoch, .. }) => *seq_epoch,
+        other => panic!("no Welcome yet: {other:?}"),
+    }
+}
+
+/// A Welcome's epoch, which every daemon that numbers its topics must give.
+fn epoch_of(conn: &Conn) -> u64 {
+    welcome_epoch(conn).expect("the Welcome carries a seq_epoch")
+}
+
+/// Hello, Welcome, Subscribe naming `epoch`, then a sync.
+async fn attach_under(conn: &mut Conn, topics: &[Topic], resume: &[(Topic, u64)], epoch: Epoch) {
+    hello(conn).await;
+    let seq_epoch = match epoch {
+        Epoch::Absent => None,
+        Epoch::Echo => Some(epoch_of(conn)),
+        Epoch::Is(n) => Some(n),
+    };
+    subscribe_under(conn, topics, resume, seq_epoch).await;
+}
+
+/// [`local`] naming the daemon run the numbers come from.
+async fn local_under(rig: &Rig, topics: &[Topic], resume: &[(Topic, u64)], epoch: Epoch) -> Conn {
+    let mut conn = rig.unix_raw().await;
+    attach_under(&mut conn, topics, resume, epoch).await;
+    conn
+}
+
+/// [`paired`] naming the daemon run the numbers come from.
+async fn paired_under(
+    rig: &Rig,
+    token: &str,
+    topics: &[Topic],
+    resume: &[(Topic, u64)],
+    epoch: Epoch,
+) -> Conn {
+    let mut conn = rig.device_raw(token).await;
+    attach_under(&mut conn, topics, resume, epoch).await;
+    conn
 }
 
 /// An ordinary local process on the Unix socket (not the Mac app).
@@ -1019,10 +1089,15 @@ async fn a_client_of_a_restarted_daemon_is_told_even_when_the_topic_has_publishe
     assert_eq!(gaps.len(), 1, "one Gap so the client refreshes the topic");
     assert_eq!(gaps[0].topic, Topic::Perri);
     assert_eq!(gaps[0].reason, GapReason::ReplayWindowExceeded);
+    assert!(
+        gaps[0].from <= gaps[0].to,
+        "a Gap never runs backwards: {:?}",
+        gaps[0]
+    );
     assert_eq!(
         (gaps[0].from, gaps[0].to),
-        (1, 0),
-        "from 1 (the client's number is from before a restart), to the topic's latest, which is 0"
+        (0, 0),
+        "to the topic's latest, which is 0, and from no later than that (the topic has no number 1 yet)"
     );
 }
 
@@ -1900,20 +1975,51 @@ struct Stalled {
     focuses_published: u64,
 }
 
+/// What the stalled client is: an ordinary local process, or a paired device
+/// (a network peer).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Transport {
+    Local,
+    Paired,
+}
+
+impl Transport {
+    /// Blockers it takes to leave the writer waiting on the client: a Unix
+    /// socket holds about 200 KiB; a WebSocket has the kernel's TCP buffers
+    /// (several MiB each way) and a bridge (256 KiB, 16 frames) behind it.
+    fn blockers(self) -> u64 {
+        match self {
+            Transport::Local => BLOCKERS,
+            Transport::Paired => 120,
+        }
+    }
+}
+
 async fn stalled_client(small_jobs: u64, focus_frames: u64) -> Stalled {
+    stalled_client_on(Transport::Local, small_jobs, focus_frames).await
+}
+
+async fn stalled_client_on(transport: Transport, small_jobs: u64, focus_frames: u64) -> Stalled {
     let rig = Rig::new().await;
     let topics = [Topic::MotherJobs, Topic::Focuses];
-    let slow = local(&rig, &topics, &[]).await;
+    let slow = match transport {
+        Transport::Local => local(&rig, &topics, &[]).await,
+        Transport::Paired => {
+            let phone = rig.mint_device("slow-phone");
+            paired(&rig, &phone.token, &topics, &[]).await
+        }
+    };
     let mut fast = local(&rig, &topics, &[]).await;
+    let blockers = transport.blockers();
 
     publish(
         &rig.server,
-        (0..BLOCKERS)
+        (0..blockers)
             .map(|i| big_jobs_frame(&format!("blocker-{i}"), BLOCKER_BYTES, None))
             .collect(),
     )
     .await;
-    read_n(&mut fast, BLOCKERS, is_jobs).await;
+    read_n(&mut fast, blockers, is_jobs).await;
 
     let mut sent = 0;
     while sent < small_jobs {
@@ -1951,7 +2057,7 @@ async fn stalled_client(small_jobs: u64, focus_frames: u64) -> Stalled {
         rig,
         slow,
         fast,
-        jobs_published: BLOCKERS + small_jobs + 1,
+        jobs_published: blockers + small_jobs + 1,
         focuses_published: focus_frames,
     }
 }
@@ -1998,8 +2104,10 @@ async fn a_client_that_stops_reading_for_10s_costs_only_itself_and_is_told_once_
 ) {
     let mut s = stalled_client(600, 50).await;
 
-    // The other client: every frame, in order, no Gap.
-    barrier(&s.rig.server, &mut s.fast, "fast-done").await;
+    // The other client: every frame, in order, no Gap. (Synced with a Ping, not
+    // a `barrier`: a frame with no topic would reach the stalled client too,
+    // and a local client that cannot be sent one is closed, by design.)
+    s.fast.sync().await;
     assert_eq!(
         seqs_of(&s.fast, "mother_jobs"),
         range(1, s.jobs_published),
@@ -2109,7 +2217,7 @@ async fn a_flood_to_a_client_that_never_reads_stays_bounded_and_the_daemon_stays
     let mut newcomer = local(&s.rig, &[Topic::Perri], &[]).await;
     newcomer.sync().await;
     assert_eq!(s.rig.server.seq().lag_count(), 0);
-    barrier(&s.rig.server, &mut s.fast, "fast-done").await;
+    s.fast.sync().await; // not a `barrier`: see the first test of this scenario
     assert_eq!(
         seqs_of(&s.fast, "mother_jobs"),
         range(1, s.jobs_published),
@@ -2139,6 +2247,11 @@ async fn a_flood_to_a_client_that_never_reads_stays_bounded_and_the_daemon_stays
         delivered.len() as u64 + (to - from + 1),
         s.jobs_published,
         "delivered plus the Gap's range is every frame published"
+    );
+    assert_eq!(
+        s.rig.server.seq().ordering_timeouts(),
+        0,
+        "no reply stopped waiting for the frames ahead of it, flood or no flood"
     );
 }
 
@@ -2231,4 +2344,1044 @@ async fn a_broadcast_frame_is_on_the_wire_before_the_reply_asked_for_right_after
         "the Pong came before the frame published ahead of it in {} of 200 rounds: {overtaken:?}",
         overtaken.len()
     );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// More frames and helpers for what follows
+// ════════════════════════════════════════════════════════════════════════════
+
+/// A frame of the `perri` topic; `site` tells frames apart on the wire, and a
+/// `host` makes the daemon retain the latest one as a snapshot.
+fn perri_frame(site: &str, host: Option<&str>) -> ServerMsg {
+    ServerMsg::PerriState {
+        tag: "t".into(),
+        queue: vec![],
+        current: None,
+        jira_site: Some(site.into()),
+        host: host.map(str::to_string),
+    }
+}
+
+fn is_perri(m: &ServerMsg) -> bool {
+    matches!(m, ServerMsg::PerriState { .. })
+}
+
+/// Every topic that has numbers, written down here (not read from the daemon).
+fn numbered_topics() -> Vec<Topic> {
+    vec![
+        Topic::Activity,
+        Topic::MotherJobs,
+        Topic::MotherStatusline,
+        Topic::Focuses,
+        Topic::MotherPeek,
+        Topic::Perri,
+        Topic::Fred,
+        Topic::Teri,
+        Topic::Work,
+        Topic::Layout,
+        Topic::Decision,
+        Topic::Model,
+    ]
+}
+
+fn serialized_len(msg: &ServerMsg) -> usize {
+    serde_json::to_vec(msg).unwrap().len()
+}
+
+/// `n` (at most 9) `mother_jobs` frames, each exactly `each` bytes serialized.
+fn jobs_frames_each(n: u64, each: usize, host: Option<&str>) -> Vec<ServerMsg> {
+    let base = serialized_len(&big_jobs_frame("m1", 0, host));
+    (1..=n)
+        .map(|i| {
+            let frame = big_jobs_frame(&format!("m{i}"), each - base, host);
+            assert_eq!(serialized_len(&frame), each);
+            frame
+        })
+        .collect()
+}
+
+/// An activity event with a summary of `bytes` bytes.
+fn big_activity(own_seq: u64, bytes: usize) -> ServerMsg {
+    serde_json::from_value(json!({
+        "type": "activity",
+        "ts": "2026-11-25T12:00:00Z",
+        "agent": "cody",
+        "kind": "tool_use",
+        "summary": "x".repeat(bytes),
+        "focus_tag": "proj",
+        "seq": own_seq,
+    }))
+    .expect("a big activity frame")
+}
+
+/// Broadcast `count` frames that have no topic, a hundred at a time.
+async fn flood_without_topic(server: &Server, count: u64, label: &str) {
+    for batch in 0..count.div_ceil(100) {
+        for i in 0..100.min(count - batch * 100) {
+            server.broadcast(ServerMsg::Error {
+                message: format!("{label}-{}", batch * 100 + i),
+            });
+        }
+        settle().await;
+    }
+}
+
+fn errors_labelled(conn: &Conn, label: &str) -> usize {
+    wire(conn)
+        .iter()
+        .filter(|f| {
+            ty(f) == "error"
+                && f["message"]
+                    .as_str()
+                    .is_some_and(|m| m.starts_with(&format!("{label}-")))
+        })
+        .count()
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// The daemon's epoch: numbers from another run of the daemon mean nothing
+// ════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn the_welcome_of_every_transport_carries_the_daemons_epoch_nonzero_below_2_pow_53_and_another_daemon_has_another(
+) {
+    let rig = Rig::new().await;
+    let minted = rig.mint_device("phone");
+    let on_unix = local(&rig, &[], &[]).await;
+    let on_tcp = tcp(&rig, &[], &[]).await;
+    let on_ws = paired(&rig, &minted.token, &[], &[]).await;
+    let epochs = [
+        ("unix", epoch_of(&on_unix)),
+        ("tcp", epoch_of(&on_tcp)),
+        ("websocket", epoch_of(&on_ws)),
+    ];
+    for (name, epoch) in epochs {
+        assert!(
+            epoch != 0 && epoch < (1u64 << 53),
+            "the {name} epoch {epoch} must be nonzero and below 2^53 (a JSON reader holds it exactly)"
+        );
+        assert_eq!(
+            epoch, epochs[0].1,
+            "one daemon run, one epoch, on {name} too"
+        );
+    }
+    // It is a JSON number on the wire.
+    assert!(
+        wire(&on_unix)
+            .iter()
+            .any(|f| ty(f) == "welcome" && f["seq_epoch"].as_u64() == Some(epochs[0].1)),
+        "seq_epoch is a plain number in the Welcome: {:?}",
+        on_unix.raw
+    );
+    // Fixed for the life of the daemon.
+    let later = local(&rig, &[], &[]).await;
+    assert_eq!(epoch_of(&later), epochs[0].1);
+
+    // Another run (another daemon) has another.
+    let other = Rig::new().await;
+    let on_other = local(&other, &[], &[]).await;
+    assert_ne!(
+        epoch_of(&on_other),
+        epochs[0].1,
+        "two daemons must not share an epoch, or a restart could not be told from a reconnect"
+    );
+}
+
+#[tokio::test]
+async fn a_resume_naming_this_daemons_epoch_replays_the_missed_frames_as_before() {
+    let rig = Rig::new().await;
+    publish(
+        &rig.server,
+        (1..=5)
+            .map(|i| jobs_frame(&format!("a{i}"), Some("kobe")))
+            .collect(),
+    )
+    .await;
+    let back = local_under(
+        &rig,
+        &[Topic::MotherJobs],
+        &[(Topic::MotherJobs, 2)],
+        Epoch::Echo,
+    )
+    .await;
+    let frames = of(&back, "mother_jobs");
+    assert_eq!(
+        frames.iter().filter_map(number).collect::<Vec<_>>(),
+        range(3, 5)
+    );
+    assert_eq!(frames.len(), 3, "and no retained snapshot on top");
+    assert!(gaps(&back).is_empty(), "the ring covered it: no Gap");
+}
+
+#[tokio::test]
+async fn a_resume_with_no_epoch_is_compared_by_its_numbers_as_it_always_was() {
+    let rig = Rig::new().await;
+    publish(
+        &rig.server,
+        (1..=5)
+            .map(|i| jobs_frame(&format!("a{i}"), Some("kobe")))
+            .collect(),
+    )
+    .await;
+    let back = local_under(
+        &rig,
+        &[Topic::MotherJobs],
+        &[(Topic::MotherJobs, 2)],
+        Epoch::Absent,
+    )
+    .await;
+    assert_eq!(seqs_of(&back, "mother_jobs"), range(3, 5));
+    assert!(gaps(&back).is_empty());
+
+    // And a number the ring does not reach is a Gap for the ring's usual reason.
+    let ahead = local_under(
+        &rig,
+        &[Topic::MotherJobs],
+        &[(Topic::MotherJobs, 9999)],
+        Epoch::Absent,
+    )
+    .await;
+    let g = gaps(&ahead);
+    assert_eq!(g.len(), 1);
+    assert_eq!(g[0].reason, GapReason::ReplayWindowExceeded);
+}
+
+/// Whatever numbers a client holds, if they were given by another run of the
+/// daemon nothing is replayed: each resumed topic gets its retained snapshot
+/// and exactly one `Gap { daemon_restarted }`.
+#[tokio::test]
+async fn a_resume_naming_another_daemon_run_gets_each_topics_snapshot_one_daemon_restarted_gap_and_no_replay(
+) {
+    let rig = Rig::new().await;
+    publish(
+        &rig.server,
+        (1..=5)
+            .map(|i| jobs_frame(&format!("a{i}"), Some("kobe")))
+            .collect(),
+    )
+    .await;
+    publish(
+        &rig.server,
+        (1..=3).map(|_| focuses_frame(Some("kobe"))).collect(),
+    )
+    .await;
+    let phone = rig.mint_device("phone");
+    let probe = local(&rig, &[], &[]).await;
+    let foreign = epoch_of(&probe) ^ 1;
+    assert_ne!(foreign, epoch_of(&probe));
+
+    // Numbers below, at, and above this daemon's latest (5 and 3), and 0.
+    for (jobs_after, focuses_after) in [(2, 1), (5, 3), (9999, 9999), (0, 0)] {
+        let resume = [
+            (Topic::MotherJobs, jobs_after),
+            (Topic::Focuses, focuses_after),
+        ];
+        let topics = [Topic::MotherJobs, Topic::Focuses];
+        let client = local_under(&rig, &topics, &resume, Epoch::Is(foreign)).await;
+        let what = format!("resuming from {resume:?} under another run's epoch");
+        assert!(
+            numbered(&client).is_empty(),
+            "{what}: nothing may be replayed from this run's rings: {:?}",
+            client.raw
+        );
+        let snapshots = of(&client, "mother_jobs");
+        assert_eq!(snapshots.len(), 1, "{what}: the retained snapshot, once");
+        assert_eq!(marker(&snapshots[0]), "a5", "{what}: the latest state");
+        assert_eq!(
+            of(&client, "focus_registry_updated").len(),
+            1,
+            "{what}: the focuses snapshot, once"
+        );
+        let found = gaps(&client);
+        assert_eq!(
+            found.len(),
+            2,
+            "{what}: one Gap per resumed topic: {found:?}"
+        );
+        for (topic, latest) in [(Topic::MotherJobs, 5), (Topic::Focuses, 3)] {
+            let named: Vec<&Gap> = found.iter().filter(|g| g.topic == topic).collect();
+            assert_eq!(named.len(), 1, "{what}: exactly one Gap names {topic:?}");
+            assert_eq!(named[0].reason, GapReason::DaemonRestarted, "{what}");
+            assert!(named[0].from <= named[0].to, "{what}: {:?}", named[0]);
+            assert_eq!(
+                (named[0].from, named[0].to),
+                (1, latest),
+                "{what}: all of this run's numbers are news to the client"
+            );
+        }
+        assert!(
+            !found
+                .iter()
+                .any(|g| g.reason == GapReason::ReplayWindowExceeded),
+            "{what}: the ring was not the reason"
+        );
+        let last_snapshot = ["mother_jobs", "focus_registry_updated"]
+            .iter()
+            .map(|t| first_index(&client, t).unwrap())
+            .max()
+            .unwrap();
+        assert!(
+            last_snapshot < first_index(&client, "gap").unwrap(),
+            "{what}: the snapshots come before the Gaps"
+        );
+    }
+
+    // A paired device is held to it as well (it has no `Withheld` surprise: the
+    // resumed topics get their Gap, and no numbered frame).
+    let device = paired_under(
+        &rig,
+        &phone.token,
+        &[Topic::MotherJobs],
+        &[(Topic::MotherJobs, 2)],
+        Epoch::Is(foreign),
+    )
+    .await;
+    assert!(numbered(&device).is_empty(), "{:?}", device.raw);
+    let found = gaps(&device);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].reason, GapReason::DaemonRestarted);
+    assert_eq!((found[0].from, found[0].to), (1, 5));
+}
+
+/// The case the epoch exists for: a daemon restarted, and (by chance) has
+/// numbered the topic to just where the client was, below it, or above it.
+/// By numbers alone the client would be "covered" (and its snapshot withheld),
+/// or told it was ahead, or replayed frames that are not the ones it missed.
+async fn a_client_of_one_daemon_run_resumes_on_another_that_numbered_perri_to(published_on_b: u64) {
+    let a = Rig::new().await;
+    let b = Rig::new().await;
+
+    // Under daemon A the client was numbered `perri` 1..=3.
+    let mut first = local(&a, &[Topic::Perri], &[]).await;
+    publish(
+        &a.server,
+        (1..=3)
+            .map(|i| perri_frame(&format!("a{i}"), Some("kobe")))
+            .collect(),
+    )
+    .await;
+    read_n(&mut first, 3, is_perri).await;
+    assert_eq!(seqs_of(&first, "perri_state"), range(1, 3));
+    let epoch_a = epoch_of(&first);
+    drop(first);
+
+    // Daemon B, started afresh, has published its own frames, and retains the
+    // latest as its snapshot.
+    publish(
+        &b.server,
+        (1..=published_on_b)
+            .map(|i| perri_frame(&format!("b{i}"), Some("kobe")))
+            .collect(),
+    )
+    .await;
+
+    let back = local_under(
+        &b,
+        &[Topic::Perri],
+        &[(Topic::Perri, 3)],
+        Epoch::Is(epoch_a),
+    )
+    .await;
+    assert_ne!(epoch_of(&back), epoch_a, "two daemons, two epochs");
+    let what = format!("B numbered perri to {published_on_b}, the client to 3");
+    assert!(
+        numbered(&back).is_empty(),
+        "{what}: no frame of B's may be replayed as if the client had missed it: {:?}",
+        back.raw
+    );
+    let snapshots = of(&back, "perri_state");
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "{what}: the snapshot is sent, never withheld: {:?}",
+        back.raw
+    );
+    assert_eq!(
+        snapshots[0]["jira_site"].as_str(),
+        Some(format!("b{published_on_b}").as_str()),
+        "{what}: B's latest state"
+    );
+    let found = gaps(&back);
+    assert_eq!(found.len(), 1, "{what}: exactly one Gap: {found:?}");
+    assert_eq!(found[0].topic, Topic::Perri);
+    assert_eq!(found[0].reason, GapReason::DaemonRestarted, "{what}");
+    assert!(found[0].from <= found[0].to);
+    assert_eq!((found[0].from, found[0].to), (1, published_on_b), "{what}");
+
+    if published_on_b == 3 {
+        // What the epoch is for: without it these numbers look like "caught up",
+        // so nothing would be sent and the client would show A's state.
+        let blind = local_under(&b, &[Topic::Perri], &[(Topic::Perri, 3)], Epoch::Absent).await;
+        assert!(
+            of(&blind, "perri_state").is_empty() && gaps(&blind).is_empty(),
+            "a client that names no epoch is compared by numbers alone, as it always was: {:?}",
+            blind.raw
+        );
+    }
+}
+
+#[tokio::test]
+async fn after_a_daemon_restart_a_client_whose_perri_number_equals_the_new_daemons_latest_still_gets_the_snapshot_and_a_gap(
+) {
+    a_client_of_one_daemon_run_resumes_on_another_that_numbered_perri_to(3).await;
+}
+
+#[tokio::test]
+async fn after_a_daemon_restart_a_client_whose_perri_number_is_above_the_new_daemons_latest_gets_the_snapshot_and_a_gap(
+) {
+    a_client_of_one_daemon_run_resumes_on_another_that_numbered_perri_to(2).await;
+}
+
+#[tokio::test]
+async fn after_a_daemon_restart_a_client_whose_perri_number_is_below_the_new_daemons_latest_is_not_replayed_the_wrong_frames(
+) {
+    a_client_of_one_daemon_run_resumes_on_another_that_numbered_perri_to(7).await;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// A Gap never runs backwards
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Each case: frames the topic has published, the number the client names, and
+/// whether it names another daemon run's epoch. Whatever the case, the one Gap
+/// has `from <= to` and ends at the topic's latest number.
+#[tokio::test]
+async fn a_gap_never_runs_backwards_and_always_ends_at_the_topics_latest_number() {
+    // (published, after, foreign epoch, expected (from, to), expected reason)
+    type Case = (u64, u64, bool, (u64, u64), GapReason);
+    let cases: [Case; 11] = [
+        // a client from before a restart, and the topic has said nothing yet
+        (0, 5, false, (0, 0), GapReason::ReplayWindowExceeded),
+        (0, 0, true, (0, 0), GapReason::DaemonRestarted),
+        (0, 5, true, (0, 0), GapReason::DaemonRestarted),
+        // from the future of a topic that has published
+        (5, 6, false, (1, 5), GapReason::ReplayWindowExceeded),
+        (5, 9, false, (1, 5), GapReason::ReplayWindowExceeded),
+        // another run's numbers: below, at, above, and zero
+        (5, 2, true, (1, 5), GapReason::DaemonRestarted),
+        (5, 5, true, (1, 5), GapReason::DaemonRestarted),
+        (5, 9, true, (1, 5), GapReason::DaemonRestarted),
+        (5, 0, true, (1, 5), GapReason::DaemonRestarted),
+        // evicted from the window (the ring keeps 1000)
+        (1002, 1, false, (2, 1002), GapReason::ReplayWindowExceeded),
+        (
+            1002,
+            5000,
+            false,
+            (1, 1002),
+            GapReason::ReplayWindowExceeded,
+        ),
+    ];
+    for (published, after, foreign, expected, reason) in cases {
+        let rig = Rig::new().await;
+        publish(
+            &rig.server,
+            (0..published).map(|_| tiny_jobs_frame(None)).collect(),
+        )
+        .await;
+        let probe = local(&rig, &[], &[]).await;
+        let epoch = if foreign {
+            Epoch::Is(epoch_of(&probe) ^ 1)
+        } else {
+            Epoch::Absent
+        };
+        let client = local_under(
+            &rig,
+            &[Topic::MotherJobs],
+            &[(Topic::MotherJobs, after)],
+            epoch,
+        )
+        .await;
+        let what = format!(
+            "{published} published, the client at {after}, {}",
+            if foreign {
+                "another run's epoch"
+            } else {
+                "no epoch"
+            }
+        );
+        let found = gaps(&client);
+        assert_eq!(found.len(), 1, "{what}: exactly one Gap: {found:?}");
+        let g = &found[0];
+        assert!(g.from <= g.to, "{what}: a Gap runs backwards: {g:?}");
+        assert_eq!(
+            g.to, published,
+            "{what}: it ends at the topic's latest: {g:?}"
+        );
+        assert_eq!((g.from, g.to), expected, "{what}");
+        assert_eq!(g.reason, reason, "{what}");
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// A resume replays at most so many bytes
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Bytes of serialized frames one resume may have replayed to a network peer,
+/// and to a local client.
+const SPEC_RESUME_BUDGET_NETWORK: usize = 4 * 1024 * 1024;
+const SPEC_RESUME_BUDGET_LOCAL: usize = 16 * 1024 * 1024;
+
+#[test]
+fn the_documented_resume_budgets_are_the_contract() {
+    assert_eq!(seq::RESUME_BUDGET_NETWORK, SPEC_RESUME_BUDGET_NETWORK);
+    assert_eq!(seq::RESUME_BUDGET_LOCAL, SPEC_RESUME_BUDGET_LOCAL);
+}
+
+const MIB: usize = 1024 * 1024;
+
+#[tokio::test]
+async fn a_paired_device_resuming_past_4_mib_of_replay_gets_the_snapshot_and_one_gap_and_no_frames()
+{
+    let rig = Rig::new().await;
+    let phone = rig.mint_device("phone");
+    // Five frames of 1 MiB: all five stay in the 8 MiB ring, and they are
+    // more than a network peer is replayed in one resume.
+    publish(&rig.server, jobs_frames_each(5, MIB, Some("kobe"))).await;
+    assert_eq!(
+        rig.server.seq().usage().frames,
+        5,
+        "the ring holds them all"
+    );
+
+    let device = paired(
+        &rig,
+        &phone.token,
+        &[Topic::MotherJobs],
+        &[(Topic::MotherJobs, 0)],
+    )
+    .await;
+    assert!(
+        numbered(&device).is_empty(),
+        "no replayed frame: {} frames came",
+        numbered(&device).len()
+    );
+    let snapshots = of(&device, "mother_jobs");
+    assert_eq!(snapshots.len(), 1, "the retained snapshot, once");
+    assert_eq!(marker(&snapshots[0]), "m5", "the latest state");
+    let found = gaps(&device);
+    assert_eq!(found.len(), 1, "exactly one Gap: {found:?}");
+    assert_eq!(found[0].reason, GapReason::ReplayWindowExceeded);
+    assert_eq!((found[0].from, found[0].to), (1, 5));
+    assert!(
+        first_index(&device, "mother_jobs") < first_index(&device, "gap"),
+        "the snapshot comes first"
+    );
+}
+
+#[tokio::test]
+async fn a_local_client_is_replayed_the_same_5_mib_in_full() {
+    let rig = Rig::new().await;
+    publish(&rig.server, jobs_frames_each(5, MIB, Some("kobe"))).await;
+    let mac = local(&rig, &[Topic::MotherJobs], &[(Topic::MotherJobs, 0)]).await;
+    assert_eq!(seqs_of(&mac, "mother_jobs"), range(1, 5));
+    assert_eq!(of(&mac, "mother_jobs").len(), 5, "and no snapshot on top");
+    assert!(gaps(&mac).is_empty());
+}
+
+/// The budget is `RESUME_BUDGET_NETWORK` bytes of serialized frames: exactly
+/// that is replayed, one byte more is a snapshot and a Gap.
+#[tokio::test]
+async fn a_resume_of_exactly_4_mib_is_replayed_and_one_byte_more_is_not() {
+    let phone_of = |rig: &Rig| rig.mint_device("phone");
+
+    // Four frames of exactly 1 MiB: 4 MiB in all.
+    let rig = Rig::new().await;
+    let phone = phone_of(&rig);
+    publish(&rig.server, jobs_frames_each(4, MIB, Some("kobe"))).await;
+    let at = paired(
+        &rig,
+        &phone.token,
+        &[Topic::MotherJobs],
+        &[(Topic::MotherJobs, 0)],
+    )
+    .await;
+    assert_eq!(
+        seqs_of(&at, "mother_jobs"),
+        range(1, 4),
+        "exactly at the budget: replayed"
+    );
+    assert!(gaps(&at).is_empty());
+
+    // The same with the last frame one byte longer.
+    let rig = Rig::new().await;
+    let phone = phone_of(&rig);
+    let mut frames = jobs_frames_each(3, MIB, Some("kobe"));
+    let base = serialized_len(&big_jobs_frame("m4", 0, Some("kobe")));
+    let last = big_jobs_frame("m4", MIB - base + 1, Some("kobe"));
+    assert_eq!(serialized_len(&last), MIB + 1);
+    frames.push(last);
+    publish(&rig.server, frames).await;
+    let over = paired(
+        &rig,
+        &phone.token,
+        &[Topic::MotherJobs],
+        &[(Topic::MotherJobs, 0)],
+    )
+    .await;
+    assert!(
+        numbered(&over).is_empty(),
+        "one byte over the budget: no frame is replayed: {:?}",
+        numbered(&over)
+    );
+    let found = gaps(&over);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].reason, GapReason::ReplayWindowExceeded);
+}
+
+/// The budget is for the whole resume, not for each topic.
+#[tokio::test]
+async fn the_network_budget_is_shared_across_the_topics_of_one_resume() {
+    let rig = Rig::new().await;
+    let phone = rig.mint_device("phone");
+    // Each topic holds about 3 MiB (under the 4 MiB budget); together, 6.
+    publish(&rig.server, jobs_frames_each(3, MIB, None)).await;
+    publish(
+        &rig.server,
+        (1..=3)
+            .map(|i| notification("proj", &format!("{i}{}", "y".repeat(MIB))))
+            .collect(),
+    )
+    .await;
+
+    let device = paired(
+        &rig,
+        &phone.token,
+        &[Topic::MotherJobs, Topic::Layout],
+        &[(Topic::MotherJobs, 0), (Topic::Layout, 0)],
+    )
+    .await;
+    let found = gaps(&device);
+    assert_eq!(
+        found.len(),
+        1,
+        "exactly one of the two topics fell back to a Gap: {found:?}"
+    );
+    assert_eq!(found[0].reason, GapReason::ReplayWindowExceeded);
+    let (replayed, fell_back) = if found[0].topic == Topic::MotherJobs {
+        ("notification", "mother_jobs")
+    } else {
+        ("mother_jobs", "notification")
+    };
+    assert_eq!(
+        seqs_of(&device, replayed),
+        range(1, 3),
+        "the other topic was replayed in full"
+    );
+    assert!(
+        seqs_of(&device, fell_back).is_empty(),
+        "the topic that went over has no replayed frame"
+    );
+}
+
+#[tokio::test]
+async fn the_local_budget_is_16_mib_for_the_whole_resume() {
+    let rig = Rig::new().await;
+    // Three topics of about 6 MiB each (each under the ring's 8 MiB): 18 MiB.
+    let each = 2 * MIB;
+    publish(&rig.server, jobs_frames_each(3, each, None)).await;
+    publish(
+        &rig.server,
+        (1..=3)
+            .map(|i| notification("proj", &format!("{i}{}", "y".repeat(each))))
+            .collect(),
+    )
+    .await;
+    publish(
+        &rig.server,
+        (1..=3).map(|i| big_activity(i, each)).collect(),
+    )
+    .await;
+
+    let topics = [Topic::MotherJobs, Topic::Layout, Topic::Activity];
+    let mac = local(
+        &rig,
+        &topics,
+        &[
+            (Topic::MotherJobs, 0),
+            (Topic::Layout, 0),
+            (Topic::Activity, 0),
+        ],
+    )
+    .await;
+    let found = gaps(&mac);
+    assert_eq!(
+        found.len(),
+        1,
+        "18 MiB is over the 16 MiB budget: exactly one topic falls back: {found:?}"
+    );
+    assert_eq!(found[0].reason, GapReason::ReplayWindowExceeded);
+    let counts = [
+        (Topic::MotherJobs, seqs_of(&mac, "mother_jobs").len()),
+        (Topic::Layout, seqs_of(&mac, "notification").len()),
+        (Topic::Activity, seqs_of(&mac, "activity").len()),
+    ];
+    for (topic, count) in counts {
+        let expected = if topic == found[0].topic { 0 } else { 3 };
+        assert_eq!(
+            count, expected,
+            "{topic:?}: the topic that went over has no replayed frame, the others all three"
+        );
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// A local client that cannot be sent a frame with no topic is closed
+// ════════════════════════════════════════════════════════════════════════════
+
+fn is_error_named(label: &'static str) -> impl Fn(&ServerMsg) -> bool {
+    move |m| matches!(m, ServerMsg::Error { message } if message == label)
+}
+
+/// A frame with no topic (an approval, a reply) is in no Gap, so a local client
+/// that could not be sent one is closed rather than left wrong; it reconnects
+/// and is replayed what it needs. Nobody else is affected.
+#[tokio::test]
+async fn a_stalled_local_client_that_cannot_be_sent_a_frame_with_no_topic_is_closed_and_nobody_else_is_affected(
+) {
+    let mut s = stalled_client(600, 0).await;
+    s.rig.server.broadcast(ServerMsg::Error {
+        message: "for-everyone".into(),
+    });
+    settle().await;
+
+    // The others are served as ever.
+    s.fast
+        .next_matching("the frame with no topic", is_error_named("for-everyone"))
+        .await;
+    let mut newcomer = local(&s.rig, &[Topic::Perri], &[]).await;
+    newcomer.sync().await;
+    assert!(s.fast.closed.is_none());
+
+    // The stalled one is closed (it reads what was already on its way, then EOF).
+    s.slow.expect_close_within(Duration::from_secs(20)).await;
+    let last_seen = *seqs_of(&s.slow, "mother_jobs")
+        .last()
+        .expect("it was sent some frames before it was closed");
+
+    // A fresh connection is fine, and is replayed what the closed one missed.
+    let again = local(
+        &s.rig,
+        &[Topic::MotherJobs, Topic::Focuses],
+        &[(Topic::MotherJobs, last_seen)],
+    )
+    .await;
+    assert_eq!(
+        seqs_of(&again, "mother_jobs"),
+        range(last_seen + 1, s.jobs_published),
+        "the reconnect gets everything after the last number the old connection saw"
+    );
+    assert!(gaps(&again).is_empty());
+}
+
+/// The same when it is frames with no topic that fill the queue.
+#[tokio::test]
+async fn a_local_client_whose_queue_fills_with_frames_that_have_no_topic_is_closed() {
+    let rig = Rig::new().await;
+    let mut slow = local(&rig, &[Topic::MotherJobs], &[]).await;
+    publish(
+        &rig.server,
+        (0..BLOCKERS)
+            .map(|i| big_jobs_frame(&format!("blocker-{i}"), BLOCKER_BYTES, None))
+            .collect(),
+    )
+    .await;
+    flood_without_topic(&rig.server, 300, "nt").await;
+
+    slow.expect_close_within(Duration::from_secs(20)).await;
+    assert!(
+        errors_labelled(&slow, "nt") < 300,
+        "it was closed, not sent all of them"
+    );
+
+    let mut newcomer = local(&rig, &[Topic::Perri], &[]).await;
+    newcomer.sync().await;
+}
+
+/// A network peer keeps the Gap policy: a frame with no topic that does not fit
+/// is dropped (it is nothing a network peer needs to be told about) and the
+/// connection stays.
+#[tokio::test]
+async fn a_stalled_paired_device_is_not_closed_when_a_frame_with_no_topic_cannot_be_queued() {
+    let mut s = stalled_client_on(Transport::Paired, 600, 0).await;
+    s.rig.server.broadcast(ServerMsg::Error {
+        message: "for-everyone".into(),
+    });
+    settle().await;
+
+    drain_slow(&mut s, 1).await;
+    settle().await;
+    s.slow.sync().await;
+    assert!(
+        s.slow.closed.is_none(),
+        "a network peer is told with a Gap, not closed"
+    );
+    assert!(s.slow.closed.is_none());
+    let found = gaps(&s.slow);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].topic, Topic::MotherJobs);
+    assert_eq!(found[0].reason, GapReason::ClientSlow);
+}
+
+#[tokio::test]
+async fn a_paired_device_whose_queue_fills_with_frames_that_have_no_topic_stays_connected() {
+    let rig = Rig::new().await;
+    let phone = rig.mint_device("phone");
+    let mut slow = paired(&rig, &phone.token, &[Topic::MotherJobs], &[]).await;
+    publish(
+        &rig.server,
+        (0..Transport::Paired.blockers())
+            .map(|i| big_jobs_frame(&format!("blocker-{i}"), BLOCKER_BYTES, None))
+            .collect(),
+    )
+    .await;
+    flood_without_topic(&rig.server, 300, "nt").await;
+
+    slow.sync().await;
+    // A connection that is going to be closed is closed once its main loop is
+    // back from answering that Ping: give it that, then ask again.
+    settle().await;
+    slow.sync().await;
+    assert!(slow.closed.is_none(), "not closed");
+    let got = errors_labelled(&slow, "nt");
+    assert!(
+        got > 0 && got < 300,
+        "{got} of 300 frames with no topic were queued: some were dropped (or the \
+         client was never stalled, which proves nothing)"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Frames the daemon lost before numbering them
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Each connection is told, once per topic *it follows*, that a number was
+/// skipped; the Gap names exactly that number; and the topic's numbers go on
+/// from it.
+#[tokio::test]
+async fn frames_lost_before_they_were_numbered_are_told_to_each_connection_once_per_followed_topic()
+{
+    let rig = Rig::new().await;
+    let phone = rig.mint_device("phone");
+    let mut a = local(&rig, &[Topic::MotherJobs, Topic::Focuses], &[]).await;
+    let mut b = paired(&rig, &phone.token, &[Topic::Perri], &[]).await;
+    let mut c = local(&rig, &[], &[]).await; // everything (but `model`, which is named)
+    let mut d = local(&rig, &[Topic::Model, Topic::Fred], &[]).await;
+
+    publish(
+        &rig.server,
+        vec![
+            jobs_frame("j1", None),
+            jobs_frame("j2", None),
+            jobs_frame("j3", None),
+            focuses_frame(None),
+            focuses_frame(None),
+            perri_frame("p1", None),
+        ],
+    )
+    .await;
+    for conn in [&mut a, &mut b, &mut c, &mut d] {
+        conn.sync().await;
+    }
+    let before: BTreeMap<Topic, u64> = numbered_topics()
+        .into_iter()
+        .map(|t| {
+            let n = rig.server.seq().latest(&t);
+            (t, n)
+        })
+        .collect();
+    assert_eq!(before[&Topic::MotherJobs], 3);
+    assert_eq!(before[&Topic::Fred], 0, "a topic that published nothing");
+
+    rig.server.seq().lost_frames();
+    for conn in [&mut a, &mut b, &mut c, &mut d] {
+        conn.sync().await;
+    }
+
+    let everything_but_model: Vec<Topic> = numbered_topics()
+        .into_iter()
+        .filter(|t| *t != Topic::Model)
+        .collect();
+    let followed_by = [
+        (
+            "a: mother_jobs, focuses",
+            vec![Topic::MotherJobs, Topic::Focuses],
+        ),
+        ("b: perri (paired)", vec![Topic::Perri]),
+        ("c: everything", everything_but_model),
+        ("d: model, fred", vec![Topic::Model, Topic::Fred]),
+    ];
+    for ((who, followed), conn) in followed_by.iter().zip([&a, &b, &c, &d]) {
+        let found = gaps(conn);
+        let mut told: Vec<Topic> = found.iter().map(|g| g.topic.clone()).collect();
+        told.sort();
+        let mut want = followed.clone();
+        want.sort();
+        assert_eq!(
+            told, want,
+            "{who}: exactly one Gap for each topic it follows, and none for the others: {found:?}"
+        );
+        for g in &found {
+            assert_eq!(g.reason, GapReason::Lagged, "{who}: {g:?}");
+            assert_eq!(g.host, None);
+            let skipped = before[&g.topic] + 1;
+            assert_eq!(
+                (g.from, g.to),
+                (skipped, skipped),
+                "{who}: the Gap names the one number {:?} skipped",
+                g.topic
+            );
+        }
+    }
+
+    // The topics go on from the skipped number, and nothing at or below a Gap's
+    // end follows it.
+    publish(
+        &rig.server,
+        vec![
+            jobs_frame("j4", None),
+            focuses_frame(None),
+            perri_frame("p2", None),
+        ],
+    )
+    .await;
+    for conn in [&mut a, &mut b, &mut c, &mut d] {
+        conn.sync().await;
+    }
+    assert_eq!(seqs_of(&a, "mother_jobs"), vec![1, 2, 3, 5]);
+    assert_eq!(seqs_of(&a, "focus_registry_updated"), vec![1, 2, 4]);
+    assert_eq!(seqs_of(&b, "perri_state"), vec![1, 3]);
+    assert_eq!(seqs_of(&c, "mother_jobs"), vec![1, 2, 3, 5]);
+    assert_eq!(seqs_of(&c, "perri_state"), vec![1, 3]);
+    for ((who, _), conn) in followed_by.iter().zip([&a, &b, &c, &d]) {
+        for g in gaps(conn) {
+            let frame_type = match g.topic {
+                Topic::MotherJobs => "mother_jobs",
+                Topic::Focuses => "focus_registry_updated",
+                Topic::Perri => "perri_state",
+                _ => continue, // nothing of these was published after the Gap
+            };
+            let at = wire(conn)
+                .iter()
+                .position(|f| ty(f) == "gap" && f["topic"] == json!(g.topic))
+                .unwrap();
+            let after: Vec<u64> = wire(conn)
+                .iter()
+                .skip(at + 1)
+                .filter(|f| ty(f) == frame_type)
+                .filter_map(number)
+                .collect();
+            assert_eq!(
+                after,
+                vec![g.to + 1],
+                "{who}: after the Gap for {:?} the next number is the one after its end",
+                g.topic
+            );
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// The `client_slow` Gap is queued in order
+// ════════════════════════════════════════════════════════════════════════════
+
+/// A client stalls (it reads nothing while the daemon publishes enough to fill
+/// its queue), then reads again while the daemon keeps publishing (several
+/// frames for every one it reads, so frames are arriving at the very moment its
+/// queue drains). On its wire the frames and the `Gap`s must partition the
+/// numbers in order: each delivered frame is the next number, a Gap starts at
+/// the next number and names exactly the ones that were dropped, and no
+/// later-numbered frame comes before it.
+///
+/// Whether a frame arrives before or after the queue's "drained" signal is a
+/// race, so the stall and the recovery are repeated: a Gap queued after a frame
+/// that is numbered above it would show in one of the rounds.
+#[tokio::test]
+async fn the_client_slow_gap_is_queued_in_order_between_the_frames_before_it_and_the_frames_after_it(
+) {
+    const ROUNDS: u64 = 10;
+    const PUBLISHED_PER_READ: u64 = 3;
+    const EXTRA_PER_ROUND: u64 = 450;
+
+    let rig = Rig::new().await;
+    let mut slow = local(&rig, &[Topic::MotherJobs], &[]).await;
+    let mut published = 0u64;
+    for round in 0..ROUNDS {
+        // The stall: the writer waits on the socket, then the queue fills.
+        publish(
+            &rig.server,
+            (0..BLOCKERS)
+                .map(|i| big_jobs_frame(&format!("blocker-{round}-{i}"), BLOCKER_BYTES, None))
+                .collect(),
+        )
+        .await;
+        published += BLOCKERS;
+        publish(
+            &rig.server,
+            (0..600)
+                .map(|i| jobs_frame(&format!("s{round}-{i}"), None))
+                .collect(),
+        )
+        .await;
+        published += 600;
+
+        // It reads again; the daemon goes on publishing.
+        let target = published + EXTRA_PER_ROUND;
+        let mut extra = 0u64;
+        let mut covered = 0u64;
+        while covered < target {
+            for _ in 0..PUBLISHED_PER_READ {
+                if extra < EXTRA_PER_ROUND {
+                    extra += 1;
+                    rig.server
+                        .broadcast(jobs_frame(&format!("x{round}-{extra}"), None));
+                }
+            }
+            slow.next_matching("a frame or a Gap", |_| true).await;
+            let last: Value = serde_json::from_str(slow.raw.last().unwrap()).unwrap();
+            match ty(&last) {
+                "mother_jobs" => covered = covered.max(number(&last).unwrap()),
+                "gap" => covered = covered.max(last["to"].as_u64().unwrap()),
+                _ => {}
+            }
+        }
+        published = target;
+    }
+
+    let mut next = 1u64;
+    let mut gap_count = 0;
+    for frame in wire(&slow) {
+        match ty(&frame) {
+            "mother_jobs" => {
+                let n = number(&frame).unwrap();
+                assert_eq!(
+                    n, next,
+                    "frame {n} arrived where {next} was due (a frame must not overtake \
+                     the Gap that names the numbers before it)"
+                );
+                next = n + 1;
+            }
+            "gap" => {
+                gap_count += 1;
+                let (from, to) = (
+                    frame["from"].as_u64().unwrap(),
+                    frame["to"].as_u64().unwrap(),
+                );
+                assert_eq!(from, next, "a Gap starts at the first number not delivered");
+                assert!(from <= to);
+                next = to + 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        next,
+        published + 1,
+        "every number was delivered or named by a Gap"
+    );
+    assert!(
+        gap_count >= ROUNDS as usize,
+        "the client stalled in every round, so each has a Gap ({gap_count})"
+    );
+    assert_eq!(rig.server.seq().lag_count(), 0);
 }

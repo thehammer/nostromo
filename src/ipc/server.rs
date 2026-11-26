@@ -2216,6 +2216,25 @@ async fn forward_broadcasts(
             }
         }
     };
+    // Remember a frame dropped for want of room. `false`: the connection is to
+    // be closed (see `unsequenced_dropped`). A numbered frame is its number; a
+    // `Gap` (the sequencer lost frames, see `SeqHub::lost_frames`) is the range
+    // it names, under its own topic, to be reported in the `client_slow` `Gap`
+    // that follows; anything else has no number to name.
+    let note_dropped = |dropped: &Stamped, log: &mut DropLog| -> bool {
+        match (dropped.seq, dropped.msg.topic(), &dropped.msg) {
+            (Some(n), Some(t), _) => log.record(t, n),
+            (
+                _,
+                _,
+                ServerMsg::Gap {
+                    topic, from, to, ..
+                },
+            ) => log.record_range(topic.clone(), *from, *to),
+            _ => return unsequenced_dropped(log),
+        }
+        true
+    };
     // Queue the `Gap`s and stop dropping. `false`: the connection is gone.
     let flush = |log: &mut DropLog, dropping: &mut bool| -> bool {
         let unsequenced = log.unsequenced();
@@ -2299,13 +2318,8 @@ async fn forward_broadcasts(
                 return;
             }
             if dropping {
-                match (stamped.seq, topic) {
-                    (Some(n), Some(t)) => log.record(t, n),
-                    _ => {
-                        if !unsequenced_dropped(&mut log) {
-                            return;
-                        }
-                    }
+                if !note_dropped(&stamped, &mut log) {
+                    return;
                 }
                 break 'frame;
             }
@@ -2314,13 +2328,8 @@ async fn forward_broadcasts(
                 Err(mpsc::error::TrySendError::Full(Queued::Frame(dropped))) => {
                     dropping = true;
                     dropping_flag.store(true, Ordering::Relaxed);
-                    match (dropped.seq, dropped.msg.topic()) {
-                        (Some(n), Some(t)) => log.record(t, n),
-                        _ => {
-                            if !unsequenced_dropped(&mut log) {
-                                return;
-                            }
-                        }
+                    if !note_dropped(&dropped, &mut log) {
+                        return;
                     }
                 }
                 Err(mpsc::error::TrySendError::Full(Queued::Gap(_))) => {}
@@ -7059,5 +7068,151 @@ mod satellite_retention_tests {
         assert_eq!(keys_of(&cache, "sendai"), 2);
         assert_eq!(keys_of(&cache, "kobe2"), 1);
         assert_eq!(keys_of(&cache, "kobe"), 512);
+    }
+}
+
+#[cfg(test)]
+mod forwarder_tests {
+    //! `forward_broadcasts` on its own: what a connection whose queue is full is
+    //! told afterwards about frames the sequencer lost (`SeqHub::lost_frames`).
+    use super::*;
+    use std::time::Duration;
+
+    fn jobs() -> ServerMsg {
+        ServerMsg::MotherJobs {
+            jobs: vec![],
+            host: None,
+        }
+    }
+
+    /// A forwarder for a connection following `mother_jobs` and `perri`, its
+    /// queue full of numbered frames that nobody reads, then the sequencer
+    /// loses frames; then the queue is read down below half. What the queue
+    /// holds afterwards, and whether a local connection was told to close.
+    async fn a_full_queue_then_lost_frames(local: bool) -> (Vec<ServerMsg>, bool) {
+        let hub = SeqHub::new(crate::ipc::peer::SensitiveTags::in_memory());
+        let sub = hub.subscribe_counted();
+        let (queue_tx, mut queue_rx) = mpsc::channel::<Queued>(CLIENT_QUEUE_CAP);
+        let dropping = Arc::new(AtomicBool::new(false));
+        let drained = Arc::new(Notify::new());
+        let close = Arc::new(Notify::new());
+        let (processed_tx, mut processed_rx) = watch::channel(0u64);
+        let task = tokio::spawn(forward_broadcasts(
+            sub.rx,
+            queue_tx,
+            ForwardCtl {
+                filter: Arc::new(Mutex::new(BroadcastFilter {
+                    topics: vec![Topic::MotherJobs, Topic::Perri],
+                    presents_approvals: false,
+                })),
+                dropping: Arc::clone(&dropping),
+                drained: Arc::clone(&drained),
+                processed: processed_tx,
+                close_local: local.then(|| Arc::clone(&close)),
+            },
+            BTreeMap::new(),
+            sub.seen,
+            Arc::clone(&hub),
+        ));
+
+        // The queue fills (256 frames) and one more is dropped; nothing reads.
+        let numbered = CLIENT_QUEUE_CAP as u64 + 1;
+        for _ in 0..numbered {
+            hub.publish(jobs());
+        }
+        // The sequencer loses frames: a `Gap` for each numbered topic follows
+        // the frames above on the stamped channel.
+        hub.lost_frames();
+        let sent = numbered + seq::SEQUENCED_TOPICS.len() as u64;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            processed_rx.wait_for(|got| *got >= sent),
+        )
+        .await
+        .expect("the forwarder got through every frame")
+        .unwrap();
+        assert!(
+            dropping.load(Ordering::Relaxed),
+            "the queue is full: dropping"
+        );
+
+        // The client reads again; the main loop says so once the queue is below half.
+        while queue_rx.len() >= CLIENT_QUEUE_RESUME_BELOW {
+            queue_rx.recv().await.expect("a queued frame");
+        }
+        drained.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while dropping.load(Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the forwarder stopped dropping");
+
+        let mut told = Vec::new();
+        while let Ok(queued) = queue_rx.try_recv() {
+            if let Queued::Gap(gap) = queued {
+                told.push(gap);
+            }
+        }
+        let closed = tokio::time::timeout(Duration::from_millis(100), close.notified())
+            .await
+            .is_ok();
+        task.abort();
+        (told, closed)
+    }
+
+    fn gap_of(told: &[ServerMsg], topic: Topic) -> (u64, u64, GapReason) {
+        let named: Vec<_> = told
+            .iter()
+            .filter_map(|m| match m {
+                ServerMsg::Gap {
+                    topic: t,
+                    from,
+                    to,
+                    reason,
+                    ..
+                } if *t == topic => Some((*from, *to, *reason)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(named.len(), 1, "exactly one Gap for {topic:?}: {told:?}");
+        named[0]
+    }
+
+    async fn the_gap_for_lost_frames_reaches_the_slow_client(local: bool) {
+        let (told, closed) = a_full_queue_then_lost_frames(local).await;
+        assert!(
+            !closed,
+            "a lost-frames Gap is not a reason to close a local client"
+        );
+        assert_eq!(
+            told.len(),
+            2,
+            "one Gap per followed topic, none for the others: {told:?}"
+        );
+        // mother_jobs: the 257th frame was dropped, and number 258 is the one the
+        // sequencer's loss skipped.
+        assert_eq!(
+            gap_of(&told, Topic::MotherJobs),
+            (
+                CLIENT_QUEUE_CAP as u64 + 1,
+                CLIENT_QUEUE_CAP as u64 + 2,
+                GapReason::ClientSlow
+            )
+        );
+        // perri had no frame at all, and still is told the number that was skipped.
+        assert_eq!(gap_of(&told, Topic::Perri), (1, 1, GapReason::ClientSlow));
+    }
+
+    #[tokio::test]
+    async fn a_network_client_with_a_full_queue_is_told_in_a_client_slow_gap_of_the_numbers_the_sequencer_lost(
+    ) {
+        the_gap_for_lost_frames_reaches_the_slow_client(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_local_client_with_a_full_queue_is_told_the_same_and_not_closed() {
+        the_gap_for_lost_frames_reaches_the_slow_client(true).await;
     }
 }

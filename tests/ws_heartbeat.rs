@@ -34,9 +34,11 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use nostromo::ipc::protocol::{ClientMsg, ServerMsg, Topic};
+use nostromo::ipc::devices::{DeviceKind, Egress, SatelliteAdmin};
+use nostromo::ipc::protocol::{ClientMsg, ServerMsg, Topic, PROTOCOL_VERSION};
 use nostromo::ipc::ws::WsLimits;
 use nostromo::mother::MotherJob;
+use serde_json::json;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
@@ -638,4 +640,105 @@ async fn a_device_that_stopped_reading_while_the_daemon_keeps_publishing_is_stil
         !rig.hub.is_connected(&phone.device_id),
         "10 s after the device went quiet (timeout 3 s) the daemon still holds its socket"
     );
+}
+
+// ── a satellite's uplink is a paired socket too ───────────────────────────────
+
+/// Read text frames (an uplink's are envelopes, so they are not decoded) until
+/// one satisfies `is`.
+async fn read_text_until(ws: &mut Ws, what: &str, is: impl Fn(&str) -> bool) {
+    loop {
+        match tokio::time::timeout(READ_TIMEOUT, ws.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) if is(&text) => return,
+            Ok(Some(Ok(_))) => continue,
+            other => panic!("waiting for {what}: {other:?}"),
+        }
+    }
+}
+
+/// A satellite named `kobe`, admitted over its uplink (a `Hello` that names the
+/// satellite role, in the uplink's envelopes), then left idle.
+async fn admitted_uplink(rig: &Rig, reading: Reading) -> (Minted, Device) {
+    let record = rig
+        .registry
+        .redeem_with_egress(
+            "kobe",
+            DeviceKind::Satellite,
+            Some(SatelliteAdmin::RevokeOnly),
+            Some(Egress::Work),
+            None,
+        )
+        .expect("a satellite record");
+    let minted = Minted {
+        device_id: record.device_id,
+        token: record.token,
+        name: record.name,
+    };
+    let mut ws = open_ws(rig, Some(&minted.token)).await;
+    let envelope =
+        |msg: serde_json::Value| Message::Text(json!({"uplink": "client", "msg": msg}).to_string());
+    ws.send(envelope(json!({
+        "type": "hello",
+        "client_id": "heartbeat-satellite",
+        "protocol_version": PROTOCOL_VERSION,
+        "role": {"kind": "satellite", "host": "kobe", "egress": Egress::Work.as_str()},
+    })))
+    .await
+    .expect("send the Hello");
+    read_text_until(&mut ws, "the Welcome", |t| t.contains("\"welcome\"")).await;
+    ws.send(envelope(json!({"type": "subscribe", "topics": []})))
+        .await
+        .expect("send the Subscribe");
+    read_text_until(&mut ws, "the admission", |t| {
+        t.contains("device_admin_level")
+    })
+    .await;
+    (minted, Device::take_over(ws, reading))
+}
+
+/// The heartbeat is a property of the paired socket, so a satellite's uplink has
+/// it too: one that answers its pings is not taken for dead, however long it is
+/// otherwise idle, and stays admitted (a connected host).
+#[tokio::test]
+async fn a_satellite_uplink_that_answers_its_pings_stays_open_and_admitted_far_past_the_pong_timeout(
+) {
+    let rig = Rig::with_limits(limits(secs(2), secs(7))).await;
+    let (sat, device) = admitted_uplink(&rig, Reading::AnsweringPings).await;
+    assert!(rig.hub.router().is_connected("kobe"), "admitted");
+
+    // Six times the pong timeout.
+    device.elapse(secs(42)).await;
+    assert!(
+        device.close().is_none(),
+        "never closed: {:?}",
+        device.close()
+    );
+    assert!(
+        rig.hub.is_connected(&sat.device_id),
+        "the daemon still holds the uplink's slot"
+    );
+    assert!(
+        rig.hub.router().is_connected("kobe"),
+        "and the host is still admitted"
+    );
+    assert!(
+        device.pings().len() >= 15,
+        "it was pinged every 2 s all along: {} pings",
+        device.pings().len()
+    );
+}
+
+/// And the other side of it, so the test above proves something: an uplink that
+/// swallows its pings is closed like any paired socket, and its host is gone.
+#[tokio::test]
+async fn a_satellite_uplink_that_swallows_its_pings_is_closed_with_1001_and_its_host_is_gone() {
+    let rig = Rig::with_limits(limits(secs(2), secs(7))).await;
+    let (sat, device) = admitted_uplink(&rig, Reading::Silently).await;
+    assert!(rig.hub.router().is_connected("kobe"), "admitted");
+
+    device.elapse(secs(14)).await;
+    let (_, code) = device.close().expect("the daemon closed the uplink");
+    assert_eq!(code, Some(1001));
+    assert!(!rig.hub.is_connected(&sat.device_id));
+    assert!(!rig.hub.router().is_connected("kobe"));
 }

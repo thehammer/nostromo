@@ -895,4 +895,356 @@ mod tests {
             }
         )));
     }
+
+    // ── the hub, seen from outside: epoch, counted subscriptions, lost frames ──
+
+    fn layout_frame() -> ServerMsg {
+        ServerMsg::Notification {
+            tag: "proj".into(),
+            level: crate::ipc::protocol::NotificationLevel::Info,
+            message: "n".into(),
+        }
+    }
+
+    #[test]
+    fn the_epoch_is_nonzero_below_2_pow_53_and_differs_between_hubs() {
+        let epochs: Vec<u64> = (0..20)
+            .map(|_| SeqHub::new(SensitiveTags::in_memory()).epoch())
+            .collect();
+        for epoch in &epochs {
+            assert!(*epoch != 0 && *epoch < (1u64 << 53), "{epoch}");
+        }
+        let distinct: std::collections::BTreeSet<_> = epochs.iter().collect();
+        assert!(distinct.len() > 1, "twenty hubs, one epoch: {epochs:?}");
+        let hub = SeqHub::new(SensitiveTags::in_memory());
+        hub.publish(jobs());
+        assert_eq!(hub.epoch(), hub.epoch(), "fixed for the life of the hub");
+    }
+
+    #[test]
+    fn a_counted_subscription_says_exactly_what_was_published_before_it_and_receives_what_follows()
+    {
+        let hub = SeqHub::new(SensitiveTags::in_memory());
+        hub.publish(jobs());
+        hub.publish(jobs());
+        hub.publish(statusline_free_frame()); // counted though it has no number
+        hub.publish(layout_frame());
+        assert_eq!(hub.published(), 4);
+
+        let mut sub = hub.subscribe_counted();
+        assert_eq!(sub.published, 4, "every frame handed to the channel so far");
+        assert_eq!(sub.seen.get(&Topic::MotherJobs), Some(&2));
+        assert_eq!(sub.seen.get(&Topic::Layout), Some(&1));
+        assert_eq!(sub.seen.get(&Topic::Perri).copied().unwrap_or(0), 0);
+        assert!(
+            matches!(
+                sub.rx.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "nothing published before it is in its receiver"
+        );
+
+        hub.publish(jobs());
+        assert_eq!(sub.rx.try_recv().unwrap().seq, Some(3));
+        assert_eq!(hub.published(), 5, "and the count moves on");
+    }
+
+    /// A frame is either in the receiver of a counted subscription or counted in
+    /// what it says came before, never both and never neither: the receiver is
+    /// made under the lock `publish` sends under. Here a frame is sent (as
+    /// `publish` sends it) while a subscription is waiting for that lock.
+    #[test]
+    fn a_counted_subscription_that_waits_for_a_frame_being_published_neither_loses_nor_repeats_it()
+    {
+        let hub = SeqHub::new(SensitiveTags::in_memory());
+        hub.publish(jobs());
+        let mut state = hub.state.lock().unwrap();
+        let subscriber = {
+            let hub = Arc::clone(&hub);
+            std::thread::spawn(move || hub.subscribe_counted())
+        };
+        // Long enough for the subscriber to have reached the lock (or past it,
+        // were it not to wait for it).
+        std::thread::sleep(Duration::from_millis(100));
+        let seq = state.stamper.next(&Topic::MotherJobs);
+        hub.send_locked(
+            &mut state,
+            Stamped {
+                seq: Some(seq),
+                msg: jobs(),
+            },
+        );
+        drop(state);
+
+        let mut sub = subscriber.join().unwrap();
+        let mut got = 0u64;
+        while sub.rx.try_recv().is_ok() {
+            got += 1;
+        }
+        assert_eq!(
+            sub.published + got,
+            2,
+            "the frame published during the subscription is counted once: {} counted before, {got} received",
+            sub.published
+        );
+        assert_eq!(
+            sub.seen.get(&Topic::MotherJobs).copied().unwrap_or(0) + got,
+            2,
+            "the numbers it had seen and the frames it got make both"
+        );
+    }
+
+    // What a network peer is replayed is what it was sent when the frame was
+    // published, trimmed then: a tag that stops being sensitive afterwards must
+    // not give back what the live frame hid. The same through the two network
+    // gates, `Routed` (a satellite's requester) and `Paired` (a device).
+
+    const SECRET_TITLE: &str = "SECRET-HELD-TITLE";
+    const SECRET_TAG: &str = "secret-held-tag";
+
+    fn secret_meta() -> crate::ipc::protocol::FocusMeta {
+        crate::ipc::protocol::FocusMeta {
+            no_codebase: None,
+            tag: SECRET_TAG.into(),
+            display_name: SECRET_TITLE.into(),
+            agent_name: "cody".into(),
+            project_name: None,
+            org: None,
+            is_built_in: false,
+            session_summary: None,
+            label: None,
+            project_path: None,
+            select_for_client: None,
+            initial_model: None,
+            initial_effort: None,
+        }
+    }
+
+    fn secret_job() -> crate::mother::MotherJob {
+        use crate::mother::origin::{OriginKind, OriginView};
+        crate::mother::MotherJob {
+            id: "trim-job-1".to_string(),
+            state: "running".to_string(),
+            nostromo: Some(crate::mother::JobAnnotation {
+                origin: OriginView {
+                    kind: OriginKind::Focus,
+                    focus_tag: Some(SECRET_TAG.into()),
+                    name_snapshot: Some(SECRET_TITLE.into()),
+                    focus_name: Some(SECRET_TITLE.into()),
+                    closed: None,
+                    session_prefix: None,
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_network_replay_never_carries_what_the_live_frame_hid() {
+        let variants: [(&str, ServerMsg, bool); 4] = [
+            (
+                "FocusRegistryUpdated",
+                ServerMsg::FocusRegistryUpdated {
+                    focuses: vec![secret_meta()],
+                    host: None,
+                },
+                true,
+            ),
+            (
+                "FocusCreated",
+                ServerMsg::FocusCreated {
+                    meta: secret_meta(),
+                    host: None,
+                },
+                true,
+            ),
+            (
+                "MotherJobs",
+                ServerMsg::MotherJobs {
+                    jobs: vec![secret_job()],
+                    host: None,
+                },
+                false,
+            ),
+            (
+                "MotherAwaitDetected",
+                ServerMsg::MotherAwaitDetected(Box::new(secret_job())),
+                false,
+            ),
+        ];
+        for (name, frame, hides_tag) in variants {
+            let tags = SensitiveTags::in_memory();
+            let hub = SeqHub::new(tags.clone());
+            let topic = frame.topic().expect("a numbered topic");
+            let mentions_secret = |msg: &ServerMsg| {
+                let json = serde_json::to_string(msg).unwrap();
+                json.contains(SECRET_TITLE) || (hides_tag && json.contains(SECRET_TAG))
+            };
+            assert!(
+                mentions_secret(&frame),
+                "{name}: the frame carries the secret"
+            );
+
+            // Published while the tag is held sensitive: the live path trims it.
+            let hold = tags.hold_sensitive(SECRET_TAG);
+            let live = outbound(PeerTrust::Paired, frame.clone(), &tags)
+                .unwrap_or_else(|| panic!("{name}: a paired device is sent the trimmed frame"));
+            assert!(!mentions_secret(&live), "{name}: the live frame hides it");
+            hub.publish(frame);
+            drop(hold);
+
+            let Replay::Messages(replayed) = hub.replay(&topic, 0, true) else {
+                panic!("{name}: the ring covers it");
+            };
+            assert_eq!(replayed.len(), 1, "{name}");
+            for trust in [PeerTrust::Routed, PeerTrust::Paired] {
+                if let Some(sent) = outbound(trust, replayed[0].msg.clone(), &tags) {
+                    assert!(
+                        !mentions_secret(&sent),
+                        "{name} over {trust:?}: the replay shows what the live frame hid: {sent:?}"
+                    );
+                }
+            }
+            assert!(
+                outbound(PeerTrust::Paired, replayed[0].msg.clone(), &tags).is_some(),
+                "{name}: a paired device is replayed the (trimmed) frame, not nothing"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sequencer_that_falls_behind_empties_the_rings_skips_a_number_on_every_topic_and_says_so(
+    ) {
+        let (tx, raw) = broadcast::channel::<ServerMsg>(4);
+        let hub = SeqHub::new(SensitiveTags::in_memory());
+        hub.publish(jobs());
+        hub.publish(jobs()); // mother_jobs is at 2, every other topic at 0
+        let mut stamped = hub.subscribe();
+        spawn_sequencer(Arc::clone(&hub), raw);
+        // More than the channel holds, with no yield: the sequencer's first
+        // receive reports that it lost frames.
+        for _ in 0..10 {
+            tx.send(ServerMsg::Pong).unwrap();
+        }
+        // The frames the sequencer put on the stamped channel: a Gap for every
+        // topic, then the four frames that were not lost.
+        let expected = SEQUENCED_TOPICS.len() + 4;
+        let mut frames = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while frames.len() < expected {
+                match stamped.try_recv() {
+                    Ok(frame) => frames.push(frame),
+                    Err(_) => tokio::task::yield_now().await,
+                }
+            }
+        })
+        .await
+        .expect("the sequencer handled the lost frames and the four that were left");
+
+        assert_eq!(hub.usage().frames, 0, "the rings were emptied");
+        assert!(
+            matches!(
+                hub.replay(&Topic::MotherJobs, 2, false),
+                Replay::Exceeded { .. }
+            ),
+            "a resume from before the loss is a Gap"
+        );
+        for topic in &SEQUENCED_TOPICS {
+            let skipped = if *topic == Topic::MotherJobs { 3 } else { 1 };
+            assert_eq!(
+                hub.latest(topic),
+                skipped,
+                "{topic:?} skipped a number (a topic that had published nothing included)"
+            );
+        }
+
+        let mut told: BTreeMap<Topic, (u64, u64)> = BTreeMap::new();
+        let mut pongs = 0;
+        for frame in frames {
+            assert_eq!(frame.seq, None, "neither a Gap nor a Pong is numbered");
+            match frame.msg {
+                ServerMsg::Gap {
+                    topic,
+                    host,
+                    from,
+                    to,
+                    reason,
+                } => {
+                    assert_eq!((host, reason), (None, GapReason::Lagged));
+                    assert!(
+                        told.insert(topic, (from, to)).is_none(),
+                        "one Gap per topic"
+                    );
+                }
+                ServerMsg::Pong => pongs += 1,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(pongs, 4, "the frames that were not lost went on");
+        assert_eq!(told.len(), SEQUENCED_TOPICS.len());
+        for topic in &SEQUENCED_TOPICS {
+            let n = hub.latest(topic);
+            assert_eq!(
+                told[topic],
+                (n, n),
+                "{topic:?}: the Gap names the skipped number"
+            );
+        }
+    }
+
+    /// Which topics are numbered, written down here against `Topic` itself: a
+    /// new variant does not compile until it is classified.
+    #[test]
+    fn the_numbered_topics_are_exactly_the_topics_that_are_sequenced() {
+        fn numbered(topic: &Topic) -> bool {
+            match topic {
+                Topic::Activity
+                | Topic::MotherJobs
+                | Topic::MotherStatusline
+                | Topic::Focuses
+                | Topic::MotherPeek
+                | Topic::Perri
+                | Topic::Fred
+                | Topic::Teri
+                | Topic::Work
+                | Topic::Layout
+                | Topic::Decision
+                | Topic::Model => true,
+                Topic::Terminal | Topic::AuthoredPrs | Topic::Devices | Topic::Unknown => false,
+            }
+        }
+        let every_variant = [
+            Topic::Activity,
+            Topic::MotherJobs,
+            Topic::MotherStatusline,
+            Topic::Focuses,
+            Topic::MotherPeek,
+            Topic::Perri,
+            Topic::Fred,
+            Topic::Teri,
+            Topic::Work,
+            Topic::Layout,
+            Topic::Decision,
+            Topic::Model,
+            Topic::Terminal,
+            Topic::AuthoredPrs,
+            Topic::Devices,
+            Topic::Unknown,
+        ];
+        for topic in &every_variant {
+            assert_eq!(topic.is_sequenced(), numbered(topic), "{topic:?}");
+        }
+        let spec: std::collections::BTreeSet<Topic> = every_variant
+            .iter()
+            .filter(|t| numbered(t))
+            .cloned()
+            .collect();
+        let listed: std::collections::BTreeSet<Topic> = SEQUENCED_TOPICS.iter().cloned().collect();
+        assert_eq!(
+            listed, spec,
+            "SEQUENCED_TOPICS lists every numbered topic and no other"
+        );
+        assert_eq!(SEQUENCED_TOPICS.len(), listed.len(), "and none twice");
+    }
 }
