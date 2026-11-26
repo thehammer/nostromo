@@ -1184,6 +1184,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
             capabilities: vec![],
             operator_nonce: None,
             resume: Default::default(),
+            seq_epoch: None,
         },
     )
     .await;

@@ -19,6 +19,7 @@ fn subscribe(resume: BTreeMap<Topic, u64>) -> ClientMsg {
         capabilities: vec![],
         operator_nonce: None,
         resume,
+        seq_epoch: None,
     }
 }
 

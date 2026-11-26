@@ -48,11 +48,11 @@ use nostromo::ipc::peer::SensitiveTags;
 use nostromo::ipc::protocol::{
     ClientMsg, FocusMeta, GapReason, NotificationLevel, ReplayUsage, ServerMsg, Topic,
 };
-use nostromo::mother::origin::{OriginKind, OriginView};
-use nostromo::mother::JobAnnotation;
 use nostromo::ipc::seq::{self, Replay, SeqHub};
 use nostromo::ipc::server::Server;
 use nostromo::mother::decode::parse_jobs;
+use nostromo::mother::origin::{OriginKind, OriginView};
+use nostromo::mother::JobAnnotation;
 use nostromo::mother::MotherJob;
 use serde_json::{json, Value};
 
@@ -313,6 +313,7 @@ async fn subscribe(conn: &mut Conn, topics: &[Topic], resume: &[(Topic, u64)]) {
         capabilities: vec![],
         operator_nonce: None,
         resume: resume.iter().cloned().collect(),
+        seq_epoch: None,
     })
     .await;
     conn.sync().await;
@@ -1458,7 +1459,10 @@ async fn a_trimmed_frame_stays_trimmed_in_the_replay(variant: Trimmed, net: Net)
         "{variant:?} over {net:?}: the replay must not show what the live stream hid: {:?}",
         resumed.raw
     );
-    if matches!(variant, Trimmed::FocusRegistryUpdated | Trimmed::FocusCreated) {
+    if matches!(
+        variant,
+        Trimmed::FocusRegistryUpdated | Trimmed::FocusCreated
+    ) {
         assert!(
             !resumed.raw.iter().any(|r| r.contains(SECRET_TAG)),
             "{variant:?} over {net:?}: nor the tag, which is a slug of the title: {:?}",
@@ -2210,9 +2214,10 @@ async fn a_broadcast_frame_is_on_the_wire_before_the_reply_asked_for_right_after
         conn.send(&ClientMsg::Ping).await;
         conn.next_matching("the Pong", |m| matches!(m, ServerMsg::Pong))
             .await;
-        conn.next_matching("the broadcast frame", |m| {
-            matches!(m, ServerMsg::Notification { message, .. } if *message == label)
-        })
+        conn.next_matching(
+            "the broadcast frame",
+            |m| matches!(m, ServerMsg::Notification { message, .. } if *message == label),
+        )
         .await;
         let new = &conn.raw[start..];
         let frame_at = new.iter().position(|r| r.contains(&label)).unwrap();

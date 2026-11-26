@@ -1020,6 +1020,7 @@ async fn an_answer_buffered_before_execing_the_pinned_app_is_refused_for_lacking
         capabilities: vec![],
         operator_nonce: None,
         resume: Default::default(),
+        seq_epoch: None,
     }));
     bytes.extend(frame(&ClientMsg::DecisionAnswer {
         request_id: request_id.clone(),

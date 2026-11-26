@@ -333,6 +333,7 @@ impl Ipc {
             capabilities: vec!["terminal_ui".to_string()],
             operator_nonce: nonce,
             resume: Default::default(),
+            seq_epoch: None,
         })
         .await;
         ipc.sync().await;

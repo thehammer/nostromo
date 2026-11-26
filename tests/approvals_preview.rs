@@ -381,6 +381,7 @@ impl Rig {
                 capabilities: vec![],
                 operator_nonce: None,
                 resume: Default::default(),
+                seq_epoch: None,
             })
             .unwrap(),
         )
@@ -405,6 +406,7 @@ impl Rig {
                 capabilities: vec![],
                 operator_nonce: None,
                 resume: Default::default(),
+                seq_epoch: None,
             })
             .unwrap(),
         )
@@ -427,6 +429,7 @@ impl Rig {
                     capabilities: vec![],
                     operator_nonce: None,
                     resume: Default::default(),
+                    seq_epoch: None,
                 })
                 .unwrap(),
             )

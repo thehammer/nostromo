@@ -470,6 +470,7 @@ fn pairing_welcome() -> ServerMsg {
         operator_nonce: None,
         enabled_agents: None,
         disabled_agents: None,
+        seq_epoch: None,
     }
 }
 
@@ -783,7 +784,7 @@ async fn run_paired(
             role_refused: Arc::clone(&role_refused),
             admitted: Arc::clone(&admitted),
         },
-        shared.seq.subscribe(),
+        shared.seq.subscribe_counted(),
         shared.tx.clone(),
         Arc::clone(&shared.session_mgr),
         shared.perri_state_dir.clone(),

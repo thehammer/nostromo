@@ -348,6 +348,7 @@ fn subscribe(topics: Vec<Topic>) -> Value {
         capabilities: vec![],
         operator_nonce: None,
         resume: Default::default(),
+        seq_epoch: None,
     })
     .unwrap()
 }

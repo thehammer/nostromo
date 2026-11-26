@@ -151,6 +151,7 @@ async fn raw_handshake(stream: &mut UnixStream, client_id: &str) {
             capabilities: vec![],
             operator_nonce: None,
             resume: Default::default(),
+            seq_epoch: None,
         },
     )
     .await;

@@ -2192,6 +2192,7 @@ mod tests {
                 capabilities: vec![],
                 operator_nonce: None,
                 resume: Default::default(),
+                seq_epoch: None,
             },
             ClientMsg::Ping,
             ClientMsg::PtySpawn {

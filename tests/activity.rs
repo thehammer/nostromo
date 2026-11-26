@@ -57,6 +57,7 @@ async fn handshake(stream: &mut UnixStream, topics: Vec<Topic>) {
             capabilities: vec![],
             operator_nonce: None,
             resume: Default::default(),
+            seq_epoch: None,
         },
     )
     .await;

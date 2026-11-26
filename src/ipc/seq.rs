@@ -19,20 +19,29 @@
 //! the number it names ([`SeqHub::replay`]), or, when the ring no longer
 //! reaches back that far, the retained snapshot and a `Gap`.
 //!
-//! The rings hold frames *before* any peer's trust filter. A replay goes
-//! through the same `peer::outbound` gate as the live path, so a ring can
-//! never hand a peer what it would not have been sent live. The rings are in
-//! memory only: a daemon restart starts every topic again at 1, and a client
-//! that resumes from a higher number is told so with a `Gap`.
+//! The rings hold frames *before* any peer's trust filter, plus, for each,
+//! the copy a network peer was (or would have been) sent when it was published
+//! (`RingEntry::network`: already trimmed, or absent when withheld). A replay to
+//! a network peer is that copy, run through `peer::outbound` again with today's
+//! sensitive tags, so a ring can never hand a peer what it would not have been
+//! sent live: not what was withheld, not what was trimmed (a tag that stops
+//! being sensitive later does not give its title back), and not what became
+//! sensitive since.
+//!
+//! The rings are in memory only. A daemon restart starts every topic again at
+//! 1, so every run of the daemon has an *epoch* (a random number, `Welcome.seq_epoch`):
+//! a client that resumes under another epoch is not covered, whatever its
+//! numbers are, and is told so with a `Gap { daemon_restarted }`.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::warn;
 
-use super::peer::{may_receive, PeerTrust, SensitiveTags};
+use super::peer::{outbound, PeerTrust, SensitiveTags};
 use super::protocol::{GapReason, ReplayUsage, ServerMsg, Topic};
 
 /// The `Welcome.features` entry of a daemon that numbers its topics and
@@ -49,8 +58,51 @@ pub const CLIENT_QUEUE_CAP: usize = 256;
 /// A dropped range is reported as a `Gap` once the queue is below this.
 pub const CLIENT_QUEUE_RESUME_BELOW: usize = CLIENT_QUEUE_CAP / 2;
 
+/// Bytes (of serialized frames) one resume may have replayed to a network peer;
+/// a topic whose replay would go past it is answered with its snapshot and a
+/// `Gap` instead. A resume names about a dozen topics, each up to
+/// [`MAX_RING_BYTES`], and a device may hold several sockets.
+pub const RESUME_BUDGET_NETWORK: usize = 4 * 1024 * 1024;
+/// The same for a local client (the operator's own app).
+pub const RESUME_BUDGET_LOCAL: usize = 16 * 1024 * 1024;
+
+/// How long a connection waits, before it writes a targeted reply, for the
+/// frames published ahead of it to get through the sequencer and its own
+/// forwarder. Bounded so a flood of broadcasts never holds a reply up for
+/// good; a wait that runs out is counted ([`SeqHub::ordering_timeouts`]).
+pub const ORDER_WAIT: Duration = Duration::from_millis(100);
+
 /// Capacity of the stamped broadcast channel.
 const STAMPED_CHANNEL_CAP: usize = 512;
+
+/// Every topic that is numbered ([`Topic::is_sequenced`]).
+pub const SEQUENCED_TOPICS: [Topic; 12] = [
+    Topic::Activity,
+    Topic::MotherJobs,
+    Topic::MotherStatusline,
+    Topic::Focuses,
+    Topic::MotherPeek,
+    Topic::Perri,
+    Topic::Fred,
+    Topic::Teri,
+    Topic::Work,
+    Topic::Layout,
+    Topic::Decision,
+    Topic::Model,
+];
+
+/// Epochs are kept below 2^53 so a JSON reader that parses numbers as doubles
+/// holds one exactly.
+const EPOCH_MASK: u64 = (1 << 53) - 1;
+
+fn new_epoch() -> u64 {
+    loop {
+        let epoch = uuid::Uuid::new_v4().as_u128() as u64 & EPOCH_MASK;
+        if epoch != 0 {
+            return epoch;
+        }
+    }
+}
 
 /// A broadcast frame with the number its topic gave it (`None`: the frame has
 /// no topic, or was not numbered, and goes out as it is).
@@ -109,12 +161,19 @@ impl SeqStamper {
         self.last.get(topic).copied().unwrap_or(0)
     }
 
-    /// Skip one number on every topic, so a frame lost before it was numbered
-    /// shows as a jump rather than being invisible.
-    fn skip_all(&mut self) {
-        for n in self.last.values_mut() {
-            *n += 1;
-        }
+    /// Skip one number on every numbered topic (a topic that has none yet gets
+    /// its first), so a frame lost before it was numbered shows as a jump rather
+    /// than being invisible, and return what each topic skipped. A topic that
+    /// has published nothing yet is included: the lost frames may have been its.
+    fn skip_all(&mut self) -> Vec<(Topic, u64)> {
+        SEQUENCED_TOPICS
+            .iter()
+            .map(|topic| {
+                let n = self.last.entry(topic.clone()).or_insert(0);
+                *n += 1;
+                (topic.clone(), *n)
+            })
+            .collect()
     }
 }
 
@@ -126,10 +185,13 @@ struct RingEntry {
     size: usize,
     /// Shared, so a replay takes its copies after the hub's lock is released.
     msg: Arc<ServerMsg>,
-    /// Could a network peer have been sent this frame when it was published?
-    /// What was sensitive then is judged then: a tag that stops being
-    /// sensitive later does not open the frames it withheld.
-    network_ok: bool,
+    /// What a network peer was sent for this frame when it was published,
+    /// trimmed as it was then (`peer::outbound`), or `None` when the frame was
+    /// withheld from network peers. What was sensitive then is judged then: a
+    /// tag that stops being sensitive later neither opens the frames it
+    /// withheld nor gives back the title it had trimmed away. Shares the
+    /// original when the trim changed nothing.
+    network: Option<Arc<ServerMsg>>,
 }
 
 /// The newest frames of one topic, bounded by count and by serialized size.
@@ -153,13 +215,27 @@ impl ReplayRing {
 
     /// Keep `msg` (numbered `seq`, `size` bytes serialized), dropping the
     /// oldest frames until both limits hold again. A frame larger than the
-    /// byte limit is not kept at all.
+    /// byte limit is not kept at all. `network_ok`: a network peer is sent the
+    /// frame as it is (see [`ReplayRing::push_trimmed`] for one that is trimmed).
     pub fn push(&mut self, seq: u64, size: usize, msg: Arc<ServerMsg>, network_ok: bool) {
+        let network = network_ok.then(|| Arc::clone(&msg));
+        self.push_trimmed(seq, size, msg, network);
+    }
+
+    /// [`ReplayRing::push`] with the copy a network peer was sent (`None`:
+    /// withheld from network peers).
+    pub fn push_trimmed(
+        &mut self,
+        seq: u64,
+        size: usize,
+        msg: Arc<ServerMsg>,
+        network: Option<Arc<ServerMsg>>,
+    ) {
         self.frames.push_back(RingEntry {
             seq,
             size,
             msg,
-            network_ok,
+            network,
         });
         self.bytes += size;
         while self.frames.len() > self.max_msgs || self.bytes > self.max_bytes {
@@ -192,25 +268,45 @@ impl ReplayRing {
     ///
     /// For a network peer (`network`) only the frames that could have been sent
     /// to one when they were published.
+    #[cfg(test)]
     fn replay(&self, after: u64, latest: u64, network: bool) -> RingReplay {
+        self.replay_within(after, latest, network, usize::MAX)
+    }
+
+    /// [`ReplayRing::replay`] that gives up (as if the ring did not reach back)
+    /// when the frames to send come to more than `budget` serialized bytes.
+    fn replay_within(&self, after: u64, latest: u64, network: bool, budget: usize) -> RingReplay {
         // The first number the ring would have to hold.
         let oldest = self.frames.front().map_or(latest + 1, |e| e.seq);
         if after > latest || after + 1 < oldest {
             return RingReplay::Exceeded { oldest, latest };
         }
-        RingReplay::Entries(
-            self.frames
-                .iter()
-                .filter(|e| e.seq > after && (!network || e.network_ok))
-                .map(|e| (e.seq, Arc::clone(&e.msg)))
-                .collect(),
-        )
+        let mut entries = Vec::new();
+        let mut bytes = 0usize;
+        for e in self.frames.iter().filter(|e| e.seq > after) {
+            let copy = if network {
+                &e.network
+            } else {
+                &Some(Arc::clone(&e.msg))
+            };
+            let Some(copy) = copy else { continue };
+            bytes = bytes.saturating_add(e.size);
+            if bytes > budget {
+                return RingReplay::Exceeded { oldest, latest };
+            }
+            entries.push((e.seq, Arc::clone(copy)));
+        }
+        RingReplay::Entries(entries, bytes)
     }
 }
 
 enum RingReplay {
-    Entries(Vec<(u64, Arc<ServerMsg>)>),
-    Exceeded { oldest: u64, latest: u64 },
+    /// The frames, and their serialized size.
+    Entries(Vec<(u64, Arc<ServerMsg>)>, usize),
+    Exceeded {
+        oldest: u64,
+        latest: u64,
+    },
 }
 
 /// The answer to a resume.
@@ -230,6 +326,20 @@ pub enum Replay {
 struct HubState {
     stamper: SeqStamper,
     rings: BTreeMap<Topic, ReplayRing>,
+    /// Frames handed to the stamped channel so far (numbered or not): where a
+    /// connection's receiver starts, and what it must have got through for
+    /// everything published before some moment to have reached its queue.
+    published: u64,
+}
+
+/// A receiver of the numbered frames, with where the hub stood the moment it
+/// was made: nothing published before is in it, everything after is.
+pub struct HubSubscription {
+    pub rx: broadcast::Receiver<Stamped>,
+    /// [`SeqHub::published`] at that moment.
+    pub published: u64,
+    /// The last number of every topic at that moment.
+    pub seen: BTreeMap<Topic, u64>,
 }
 
 /// Numbers and keeps every topic-bearing frame, and fans the numbered frames
@@ -240,8 +350,16 @@ pub struct SeqHub {
     tags: SensitiveTags,
     max_msgs: usize,
     max_bytes: usize,
+    /// Which run of the daemon the numbers belong to (`Welcome.seq_epoch`).
+    epoch: u64,
     /// How often a connection's receiver fell behind the stamped channel.
     lagged: AtomicU64,
+    /// How often a reply stopped waiting for the frames ahead of it
+    /// ([`ORDER_WAIT`]).
+    ordering_timeouts: AtomicU64,
+    /// Asks the sequencer task to catch up with the raw channel (see
+    /// [`SeqHub::sync_point`]); set when the sequencer starts.
+    sync: OnceLock<mpsc::UnboundedSender<oneshot::Sender<u64>>>,
 }
 
 impl SeqHub {
@@ -257,13 +375,23 @@ impl SeqHub {
             state: Mutex::new(HubState {
                 stamper: SeqStamper::default(),
                 rings: BTreeMap::new(),
+                published: 0,
             }),
             out,
             tags,
             max_msgs,
             max_bytes,
+            epoch: new_epoch(),
             lagged: AtomicU64::new(0),
+            ordering_timeouts: AtomicU64::new(0),
+            sync: OnceLock::new(),
         })
+    }
+
+    /// Which run of the daemon the numbers belong to: random, fixed for the
+    /// life of the hub, nonzero and below 2^53.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// A receiver of the numbered frames. Subscribe *before* asking for a
@@ -273,37 +401,117 @@ impl SeqHub {
         self.out.subscribe()
     }
 
+    /// [`SeqHub::subscribe`] together with where the hub stood at that very
+    /// moment (taken under the lock `publish` sends under, so a frame is either
+    /// in the receiver or counted in what was already there).
+    pub fn subscribe_counted(&self) -> HubSubscription {
+        let state = self.state.lock().unwrap();
+        HubSubscription {
+            rx: self.out.subscribe(),
+            published: state.published,
+            seen: state.stamper.last.clone(),
+        }
+    }
+
+    /// How many frames have been handed to the stamped channel.
+    pub fn published(&self) -> u64 {
+        self.state.lock().unwrap().published
+    }
+
+    /// Wait (up to [`ORDER_WAIT`]) for the sequencer to number everything the
+    /// producers had put on the raw channel by now, and return how many frames
+    /// the stamped channel then holds ([`SeqHub::published`]): a connection that
+    /// has got through that many of its own receiver's frames has seen every
+    /// frame sent before this call. Falls back to the count as it stands when
+    /// there is no sequencer or it does not answer in time.
+    pub async fn sync_point(&self) -> u64 {
+        let Some(sync) = self.sync.get() else {
+            return self.published();
+        };
+        let (reply, answer) = oneshot::channel();
+        if sync.send(reply).is_err() {
+            return self.published();
+        }
+        match tokio::time::timeout(ORDER_WAIT, answer).await {
+            Ok(Ok(published)) => published,
+            _ => {
+                self.note_ordering_timeout();
+                self.published()
+            }
+        }
+    }
+
+    /// A reply stopped waiting for the frames published ahead of it.
+    pub fn note_ordering_timeout(&self) {
+        self.ordering_timeouts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How often a reply was written without every frame ahead of it having
+    /// got through (the wait ran out). Stays 0 unless the daemon is flooded.
+    pub fn ordering_timeouts(&self) -> u64 {
+        self.ordering_timeouts.load(Ordering::Relaxed)
+    }
+
     /// Number `msg` if it has a topic, keep it, and send it on. Frames are
     /// published one at a time (the sequencer task), in the order numbered.
     pub fn publish(&self, msg: ServerMsg) {
         let mut state = self.state.lock().unwrap();
         let seq = msg.topic().map(|topic| {
             let seq = state.stamper.next(&topic);
-            let size = serde_json::to_vec(&msg).map_or(0, |b| b.len());
-            let network_ok = may_receive(PeerTrust::Paired, &msg, &self.tags);
+            let bytes = serde_json::to_vec(&msg).unwrap_or_default();
+            let original = Arc::new(msg.clone());
+            // What a network peer is sent for it, as it is sent now: withheld,
+            // trimmed, or untouched (then the same copy as the original).
+            let network = outbound(PeerTrust::Paired, msg.clone(), &self.tags).map(|sent| {
+                if serde_json::to_vec(&sent).is_ok_and(|b| b == bytes) {
+                    Arc::clone(&original)
+                } else {
+                    Arc::new(sent)
+                }
+            });
             let (max_msgs, max_bytes) = (self.max_msgs, self.max_bytes);
             state
                 .rings
                 .entry(topic)
                 .or_insert_with(|| ReplayRing::with_limits(max_msgs, max_bytes))
-                .push(seq, size, Arc::new(msg.clone()), network_ok);
+                .push_trimmed(seq, bytes.len(), original, network);
             seq
         });
-        // Sent under the lock: a replay taken after this returns sees every
-        // frame the channel has been given, and the channel stays in order.
-        let _ = self.out.send(Stamped { seq, msg });
+        self.send_locked(&mut state, Stamped { seq, msg });
+    }
+
+    /// Put a frame on the stamped channel. Under the state lock: a replay taken
+    /// after this returns sees every frame the channel has been given, and the
+    /// channel stays in order.
+    fn send_locked(&self, state: &mut HubState, stamped: Stamped) {
+        state.published += 1;
+        let _ = self.out.send(stamped);
     }
 
     /// What `topic` published after `after`, or that the ring cannot say. For a
     /// `network` peer only frames a network peer could have been sent when they
     /// were published; the caller still runs each through the peer's own gate.
     pub fn replay(&self, topic: &Topic, after: u64, network: bool) -> Replay {
+        self.replay_within(topic, after, network, usize::MAX).0
+    }
+
+    /// [`SeqHub::replay`] that answers `Exceeded` instead when the frames would
+    /// come to more than `budget` serialized bytes, and says how many bytes the
+    /// frames it did return come to. A network peer's frames are the copies
+    /// trimmed when they were published.
+    pub fn replay_within(
+        &self,
+        topic: &Topic,
+        after: u64,
+        network: bool,
+        budget: usize,
+    ) -> (Replay, usize) {
         let found = {
             let state = self.state.lock().unwrap();
             let latest = state.stamper.last(topic);
             match state.rings.get(topic) {
-                Some(ring) => ring.replay(after, latest, network),
-                None if after == latest => RingReplay::Entries(Vec::new()),
+                Some(ring) => ring.replay_within(after, latest, network, budget),
+                None if after == latest => RingReplay::Entries(Vec::new(), 0),
                 None => RingReplay::Exceeded {
                     oldest: latest + 1,
                     latest,
@@ -312,16 +520,19 @@ impl SeqHub {
         };
         // Copied after the lock is released: publishing is never held up by it.
         match found {
-            RingReplay::Entries(entries) => Replay::Messages(
-                entries
-                    .into_iter()
-                    .map(|(seq, msg)| Stamped {
-                        seq: Some(seq),
-                        msg: (*msg).clone(),
-                    })
-                    .collect(),
+            RingReplay::Entries(entries, bytes) => (
+                Replay::Messages(
+                    entries
+                        .into_iter()
+                        .map(|(seq, msg)| Stamped {
+                            seq: Some(seq),
+                            msg: (*msg).clone(),
+                        })
+                        .collect(),
+                ),
+                bytes,
             ),
-            RingReplay::Exceeded { oldest, latest } => Replay::Exceeded { oldest, latest },
+            RingReplay::Exceeded { oldest, latest } => (Replay::Exceeded { oldest, latest }, 0),
         }
     }
 
@@ -348,11 +559,24 @@ impl SeqHub {
     /// Frames were lost before they were numbered (the sequencer fell behind
     /// the raw channel): the rings can no longer vouch for what they hold, so
     /// they are emptied and every topic skips a number. A resume from before
-    /// now is answered with a `Gap`.
-    fn lost_frames(&self) {
+    /// now is answered with a `Gap`, and so is every connection that is
+    /// connected now: a `Gap { lagged }` naming the skipped number goes through
+    /// the stamped channel, in its place, to each topic's followers (a
+    /// connection queues it only for the topics it follows).
+    pub fn lost_frames(&self) {
         let mut state = self.state.lock().unwrap();
-        state.stamper.skip_all();
+        let skipped = state.stamper.skip_all();
         state.rings.values_mut().for_each(ReplayRing::clear);
+        for (topic, n) in skipped {
+            let gap = ServerMsg::Gap {
+                topic,
+                host: None,
+                from: n,
+                to: n,
+                reason: GapReason::Lagged,
+            };
+            self.send_locked(&mut state, Stamped::unsequenced(gap));
+        }
     }
 
     /// A connection's receiver fell behind the stamped channel.
@@ -367,17 +591,36 @@ impl SeqHub {
     }
 }
 
-/// Number every frame producers put on `raw`, until the channel closes.
+/// Number every frame producers put on `raw`, until the channel closes. Also
+/// answers [`SeqHub::sync_point`]: it takes whatever is on `raw` at that moment
+/// (no more) before it answers.
 pub fn spawn_sequencer(hub: Arc<SeqHub>, mut raw: broadcast::Receiver<ServerMsg>) {
+    let (sync_tx, mut sync_rx) = mpsc::unbounded_channel::<oneshot::Sender<u64>>();
+    let _ = hub.sync.set(sync_tx);
     tokio::spawn(async move {
         loop {
-            match raw.recv().await {
-                Ok(msg) => hub.publish(msg),
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!("sequencer lagged {n} broadcast messages; emptying the replay rings");
-                    hub.lost_frames();
+            tokio::select! {
+                Some(reply) = sync_rx.recv() => {
+                    for _ in 0..raw.len() {
+                        match raw.try_recv() {
+                            Ok(msg) => hub.publish(msg),
+                            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                                warn!("sequencer lagged {n} broadcast messages; emptying the replay rings");
+                                hub.lost_frames();
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    let _ = reply.send(hub.published());
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
+                received = raw.recv() => match received {
+                    Ok(msg) => hub.publish(msg),
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("sequencer lagged {n} broadcast messages; emptying the replay rings");
+                        hub.lost_frames();
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
             }
         }
     });
@@ -463,7 +706,7 @@ mod tests {
 
     fn ring_seqs(replay: RingReplay) -> Vec<u64> {
         match replay {
-            RingReplay::Entries(v) => v.into_iter().map(|(seq, _)| seq).collect(),
+            RingReplay::Entries(v, _) => v.into_iter().map(|(seq, _)| seq).collect(),
             RingReplay::Exceeded { .. } => panic!("expected entries, got exceeded"),
         }
     }

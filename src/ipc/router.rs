@@ -1435,6 +1435,7 @@ mod tests {
                 operator_nonce: None,
                 enabled_agents: None,
                 disabled_agents: None,
+                seq_epoch: None,
             },
             ServerMsg::Pong,
             ServerMsg::DeviceUnpaired,

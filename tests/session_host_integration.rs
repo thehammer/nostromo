@@ -93,6 +93,7 @@ async fn session_round_trip_drives_real_claude() {
             capabilities: vec![],
             operator_nonce: None,
             resume: Default::default(),
+            seq_epoch: None,
         },
     )
     .await;

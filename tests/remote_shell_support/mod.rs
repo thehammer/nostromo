@@ -422,6 +422,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Client<S> {
             // Echo the Welcome's nonce, as the app does.
             operator_nonce: c.nonce.clone(),
             resume: Default::default(),
+            seq_epoch: None,
         })
         .await;
         c.sync().await;
@@ -596,6 +597,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> Client<S> {
             capabilities: caps.iter().map(|s| s.to_string()).collect(),
             operator_nonce: nonce,
             resume: Default::default(),
+            seq_epoch: None,
         })
         .await;
     }

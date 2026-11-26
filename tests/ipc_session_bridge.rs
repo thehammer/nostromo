@@ -617,6 +617,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) {
             capabilities: vec![],
             operator_nonce: None,
             resume: Default::default(),
+            seq_epoch: None,
         },
     )
     .await;

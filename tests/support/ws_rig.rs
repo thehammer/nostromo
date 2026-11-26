@@ -689,6 +689,7 @@ impl Conn {
             capabilities: vec![],
             operator_nonce: None,
             resume: Default::default(),
+            seq_epoch: None,
         }
     }
 

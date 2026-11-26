@@ -191,6 +191,15 @@ pub enum GapReason {
     ClientSlow,
     /// A satellite's uplink dropped for longer than its ring window.
     UplinkReconnect,
+    /// The client resumed under another daemon run's numbers (its
+    /// `Subscribe.seq_epoch` is not this run's `Welcome.seq_epoch`): the
+    /// retained snapshots were just sent in place of a replay, so there is
+    /// nothing to warn of beyond what they show. A client must not raise a
+    /// "may have missed updates" notice for it.
+    DaemonRestarted,
+    /// The daemon's own sequencer fell behind its producers and lost frames
+    /// before numbering them: `from == to` is the number that stands for them.
+    Lagged,
 }
 
 // ── persistent session metadata ──────────────────────────────────────────────
@@ -1789,6 +1798,13 @@ pub enum ClientMsg {
             deserialize_with = "lenient_resume"
         )]
         resume: BTreeMap<Topic, u64>,
+        /// The daemon run (`Welcome.seq_epoch`) the numbers in `resume` were
+        /// given under. A different value from the daemon's own means the
+        /// numbers are from before a restart: no topic is replayed, each gets
+        /// its snapshot and a `Gap { daemon_restarted }`. Absent: the numbers
+        /// are compared as they are (a client that predates the field).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq_epoch: Option<u64>,
     },
     Ping,
 
@@ -3263,6 +3279,14 @@ pub enum ServerMsg {
         /// `PROTOCOL_VERSION` does not change.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         disabled_agents: Option<Vec<String>>,
+        /// Which run of the daemon numbers the topics a client sees (random,
+        /// fixed for the life of the process, below 2^53 so every JSON reader
+        /// holds it exactly). A client keeps the numbers it saw together with
+        /// this value and echoes it in `Subscribe.seq_epoch`; another value
+        /// means the daemon restarted and the numbers mean nothing. Additive:
+        /// absent from a daemon without `"seq"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq_epoch: Option<u64>,
     },
     Activity(ActivityEvent),
     MotherJobs {
@@ -4646,6 +4670,7 @@ mod tests {
             capabilities: vec![],
             operator_nonce: None,
             resume: Default::default(),
+            seq_epoch: None,
         });
 
         let v = serde_json::to_value(ClientMsg::Subscribe {
@@ -4655,6 +4680,7 @@ mod tests {
             capabilities: vec![],
             operator_nonce: None,
             resume: Default::default(),
+            seq_epoch: None,
         })
         .unwrap();
         assert_eq!(v["type"], "subscribe");
@@ -4674,6 +4700,7 @@ mod tests {
             capabilities: vec![],
             operator_nonce: None,
             resume: Default::default(),
+            seq_epoch: None,
         });
 
         let v = serde_json::to_value(ClientMsg::Subscribe {
@@ -4683,6 +4710,7 @@ mod tests {
             capabilities: vec![],
             operator_nonce: None,
             resume: Default::default(),
+            seq_epoch: None,
         })
         .unwrap();
         assert_eq!(v["renders_decisions"], true);
@@ -6033,6 +6061,7 @@ mod tests {
             operator_nonce: None,
             enabled_agents: None,
             disabled_agents: None,
+            seq_epoch: None,
         };
         let v = serde_json::to_value(&plain).unwrap();
         assert!(
@@ -6047,6 +6076,7 @@ mod tests {
             operator_nonce: Some("cd34".into()),
             enabled_agents: None,
             disabled_agents: None,
+            seq_epoch: None,
         };
         round_trip_server(operator.clone());
         assert_eq!(
@@ -8884,6 +8914,7 @@ mod work_wire_tests {
                 operator_nonce: Some("cd34".into()),
                 enabled_agents: None,
                 disabled_agents: None,
+                seq_epoch: None,
             },
             r#"{"type":"welcome","protocol_version":4,"daemon_pid":9,"features":["work","approvals_v1"],"operator_nonce":"cd34"}"#,
         );
@@ -8899,6 +8930,7 @@ mod work_wire_tests {
                 operator_nonce: None,
                 enabled_agents: Some(vec!["mother".into(), "teri".into()]),
                 disabled_agents: Some(vec!["fred".into(), "perri".into()]),
+                seq_epoch: None,
             },
             r#"{"type":"welcome","protocol_version":4,"daemon_pid":9,"enabled_agents":["mother","teri"],"disabled_agents":["fred","perri"]}"#,
         );
@@ -8914,6 +8946,7 @@ mod work_wire_tests {
                 operator_nonce: None,
                 enabled_agents: None,
                 disabled_agents: Some(vec![]),
+                seq_epoch: None,
             },
             r#"{"type":"welcome","protocol_version":4,"daemon_pid":9,"disabled_agents":[]}"#,
         );
@@ -9043,6 +9076,7 @@ mod work_wire_tests {
                 capabilities: vec![],
                 operator_nonce: None,
                 resume: Default::default(),
+                seq_epoch: None,
             };
             round_trip_client(msg.clone());
             assert_client_golden(

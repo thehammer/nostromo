@@ -148,6 +148,7 @@ async fn connect(d: &Daemon) -> UnixStream {
             capabilities: vec![],
             operator_nonce: None,
             resume: Default::default(),
+            seq_epoch: None,
         },
     )
     .await;
@@ -495,6 +496,7 @@ async fn replayed_layout(d: &Daemon, tag: &str) -> Option<PaneTree> {
             capabilities: vec![],
             operator_nonce: None,
             resume: Default::default(),
+            seq_epoch: None,
         },
     )
     .await;
@@ -683,6 +685,7 @@ async fn a_fresh_spawn_of_teri_or_fred_does_not_announce_its_layout_to_a_network
             capabilities: vec![],
             operator_nonce: None,
             resume: Default::default(),
+            seq_epoch: None,
         })
         .unwrap(),
     )

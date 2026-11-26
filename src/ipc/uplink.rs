@@ -1131,6 +1131,7 @@ async fn run_session(env: &Env, shared: &Arc<Mutex<Shared>>) -> SessionEnd {
             capabilities: vec![],
             operator_nonce: None,
             resume: Default::default(),
+            seq_epoch: None,
         },
     };
     if let Err(e) = send_frame(&mut ws, &subscribe).await {

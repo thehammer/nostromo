@@ -121,6 +121,7 @@ async fn connect(d: &Daemon, topics: Vec<Topic>) -> (UnixStream, Vec<ServerMsg>)
             capabilities: vec![],
             operator_nonce: None,
             resume: Default::default(),
+            seq_epoch: None,
         },
     )
     .await;
