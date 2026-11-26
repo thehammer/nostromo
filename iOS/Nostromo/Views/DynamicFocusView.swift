@@ -67,7 +67,7 @@ struct DynamicFocusView: View {
     let displayName: String
     let agentName:   String
     let viewName:    String
-    let client:      NetworkClient
+    let client:      any DaemonTransport
 
     @EnvironmentObject var store: DaemonStore
     /// Presents `ActivityStreamsSheet` (D5) — owned here, at the focus-view

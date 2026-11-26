@@ -12,8 +12,10 @@ struct MotherQueueView: View {
 
     var body: some View {
         Group {
-            if !store.connected {
+            if !store.connected && !store.hasLastKnownContent {
                 disconnectedView
+            } else if !store.canMutate {
+                MergedQueueList()
             } else if store.motherJobs.isEmpty {
                 emptyView
             } else {

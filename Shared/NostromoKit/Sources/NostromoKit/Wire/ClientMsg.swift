@@ -5,6 +5,9 @@
 // All types are pure value types (Encodable); no import dependencies.
 
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - Hello
 
@@ -83,7 +86,9 @@ struct ClientPing: Encodable {
 /// Request a snapshot of all daemon-hosted sessions.
 struct ClientSessionList: Encodable {
     let type_ = "session_list"
-    enum CodingKeys: String, CodingKey { case type_ = "type" }
+    /// W10: ask one satellite host's queue instead of the primary's own. `nil` omits the field.
+    var host: String? = nil
+    enum CodingKeys: String, CodingKey { case type_ = "type", host }
 }
 
 // MARK: - FocusList
@@ -91,7 +96,9 @@ struct ClientSessionList: Encodable {
 /// Request the daemon's focus registry snapshot.
 struct ClientFocusList: Encodable {
     let type_ = "focus_list"
-    enum CodingKeys: String, CodingKey { case type_ = "type" }
+    /// W10: see `ClientSessionList.host`.
+    var host: String? = nil
+    enum CodingKeys: String, CodingKey { case type_ = "type", host }
 }
 
 // MARK: - SessionSpawn
@@ -121,13 +128,16 @@ struct ClientSessionSpawn: Encodable {
 struct ClientSessionAttach: Encodable {
     let type_ = "session_attach"
     let tag:   String
-    enum CodingKeys: String, CodingKey { case type_ = "type", tag }
+    /// W10: the satellite host that owns `tag`. `nil` omits the field.
+    var host:  String? = nil
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag, host }
 }
 
 struct ClientSessionDetach: Encodable {
     let type_ = "session_detach"
     let tag:   String
-    enum CodingKeys: String, CodingKey { case type_ = "type", tag }
+    var host:  String? = nil
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag, host }
 }
 
 /// Close one tab (the tab's × button). The daemon refuses the review queue and
@@ -301,12 +311,15 @@ public struct ClientDecisionAnswer: Encodable {
 public struct ClientActivitySnapshotRequest: Encodable {
     let type_: String = "activity_snapshot_request"
     public let tag: String
+    /// W10: the satellite host that owns `tag`. `nil` omits the field.
+    public let host: String?
 
-    public init(tag: String) {
+    public init(tag: String, host: String? = nil) {
         self.tag = tag
+        self.host = host
     }
 
-    enum CodingKeys: String, CodingKey { case type_ = "type", tag }
+    enum CodingKeys: String, CodingKey { case type_ = "type", tag, host }
 }
 
 // MARK: - Background tasks
@@ -388,5 +401,54 @@ public struct ClientSessionTaskOutput: Encodable, Equatable {
         // Absent means "the tail"; the daemon reads a missing `offset` as `None`.
         try c.encodeIfPresent(offset, forKey: .offset)
         try c.encode(maxBytes, forKey: .maxBytes)
+    }
+}
+
+// MARK: - Device pairing (W9, W11)
+
+/// Asks a token-less pairing socket whether `code` is live. With `proof` it also asks whether this
+/// server already knows the device (D6). Never uses the code up. Mirrors `ClientMsg::PairCheck`.
+public struct ClientPairCheck: Encodable, Equatable {
+    let type_ = "pair_check"
+    public let code: String
+    public let proof: String?
+    public init(code: String, proof: String? = nil) { self.code = code; self.proof = proof }
+    enum CodingKeys: String, CodingKey { case type_ = "type", code, proof }
+}
+
+/// Redeems a code for a token. `replace` asks the server to replace the record the earlier proof
+/// matched on this same socket. Mirrors `ClientMsg::Pair`.
+public struct ClientPair: Encodable, Equatable {
+    let type_ = "pair"
+    public let code: String
+    public let name: String
+    public let kind: DeviceKindWire
+    public let replace: Bool
+    public init(code: String, name: String, kind: DeviceKindWire, replace: Bool = false) {
+        self.code = code; self.name = name; self.kind = kind; self.replace = replace
+    }
+    enum CodingKeys: String, CodingKey { case type_ = "type", code, name, kind, replace }
+}
+
+/// An authenticated device removes its own pairing. Mirrors `ClientMsg::DeviceUnpairSelf`.
+public struct ClientDeviceUnpairSelf: Encodable, Equatable {
+    let type_ = "device_unpair_self"
+    public init() {}
+    enum CodingKeys: String, CodingKey { case type_ = "type" }
+}
+
+/// What kind of device is pairing (`DeviceKind` in `src/ipc/devices.rs`; a phone never sends
+/// `satellite`).
+public enum DeviceKindWire: String, Codable, Equatable {
+    case iphone, ipad
+
+    /// This device's kind. Kept in Kit so no app view reads the device idiom (the iOS policy: the
+    /// presentation is chosen by width class alone).
+    public static var current: DeviceKindWire {
+        #if canImport(UIKit)
+        return UIDevice.current.userInterfaceIdiom == .pad ? .ipad : .iphone
+        #else
+        return .iphone
+        #endif
     }
 }

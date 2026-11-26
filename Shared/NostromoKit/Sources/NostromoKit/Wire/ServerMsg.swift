@@ -157,6 +157,26 @@ public enum ServerMsg {
     /// The answer to this connection's `tracker_edit`. Local clients only.
     case trackerEditResult(TrackerEditResultWire)
 
+    // ── device pairing and satellite hosts (W9, W10) ─────────────────────────
+
+    /// The answer to a `pair_check`. `knowsDevice` is present only in the answer to the first proof.
+    case pairOffer(nameHint: String?, serverId: String, challenge: String, knowsDevice: Bool?)
+    /// The answer to `pair`: the device's token, shown once.
+    case paired(deviceId: String, token: SecretToken, name: String, serverId: String, replaced: Bool)
+    /// A pairing code was refused.
+    case pairRefused(PairRefusal)
+    /// This connection is not (or no longer) allowed; followed by close code 4001.
+    case unauthorized(reason: String)
+    /// The answer to `device_unpair_self`.
+    case deviceUnpaired
+    /// How many permission requests a focus has held: the count only, the one approval frame a
+    /// network peer receives. `host` is the satellite it came from (see `HostedServerMsg`).
+    case approvalPending(tag: String, count: Int)
+    /// The satellites currently connected to the primary.
+    case hosts([HostInfoWire])
+    /// A request naming `host` could not be routed.
+    case hostUnavailable(host: String, reason: HostUnavailableReason)
+
     case unknown
 }
 
@@ -987,6 +1007,8 @@ extension ServerMsg {
         else { return .unknown }
 
         let dec = JSONDecoder.nostromo
+
+        if let pairing = decodePairingFrame(type_: type_, data: data) { return pairing }
 
         switch type_ {
         case "welcome":

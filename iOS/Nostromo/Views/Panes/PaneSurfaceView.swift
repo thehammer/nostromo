@@ -222,17 +222,20 @@ struct PaneSurfaceView: View {
                                 NostromoKit.PerriPRRow(
                                     model:  item.toRowModel(marked: address?.marks(repo: item.repo, number: item.number) ?? false),
                                     onLoad: { store.perriLoadPr(number: item.number, repo: item.repo) },
-                                    onClear: {}
+                                    onClear: {},
+                                    actionsEnabled: store.canMutate
                                 )
                                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                    Button {
-                                        // First tap only stages the approval — confirmation
-                                        // dialog fires before anything is sent to GitHub.
-                                        pendingApproval = (repo: item.repo, number: item.number)
-                                    } label: {
-                                        Label("Approve", systemImage: "checkmark.seal.fill")
+                                    if store.canMutate {
+                                        Button {
+                                            // First tap only stages the approval — confirmation
+                                            // dialog fires before anything is sent to GitHub.
+                                            pendingApproval = (repo: item.repo, number: item.number)
+                                        } label: {
+                                            Label("Approve", systemImage: "checkmark.seal.fill")
+                                        }
+                                        .tint(.green)
                                     }
-                                    .tint(.green)
                                 }
                                 .onAppear    { noteRowVisible(item, in: ordered, visible: true) }
                                 .onDisappear { noteRowVisible(item, in: ordered, visible: false) }
@@ -249,15 +252,18 @@ struct PaneSurfaceView: View {
                             NostromoKit.PerriPRRow(
                                 model:  item.toRowModel(marked: address?.marks(repo: item.repo, number: item.number) ?? false),
                                 onLoad: { store.perriLoadPr(number: item.number, repo: item.repo) },
-                                onClear: {}
+                                onClear: {},
+                                actionsEnabled: store.canMutate
                             )
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                Button {
-                                    pendingApproval = (repo: item.repo, number: item.number)
-                                } label: {
-                                    Label("Approve", systemImage: "checkmark.seal.fill")
+                                if store.canMutate {
+                                    Button {
+                                        pendingApproval = (repo: item.repo, number: item.number)
+                                    } label: {
+                                        Label("Approve", systemImage: "checkmark.seal.fill")
+                                    }
+                                    .tint(.green)
                                 }
-                                .tint(.green)
                             }
                             .onAppear    { noteRowVisible(item, in: ordered, visible: true) }
                             .onDisappear { noteRowVisible(item, in: ordered, visible: false) }

@@ -1,0 +1,21 @@
+{
+  "_comment": "The fixed phrases the phone's work-host rows (W11, Q8) and the lock-screen push (W13) share. Shared/NostromoKit ReasonPhrases.swift and src/push/vocab.rs both assert their tables equal this file, so the app and the lock screen cannot drift. Never put free text (a title, a question, a branch) in here.",
+  "mother_reason_default": "needs you",
+  "mother_paused_reason": {
+    "user": "asked a question",
+    "adherence_blocked": "blocked after review",
+    "operator_hold": "held after a failure",
+    "cost_cap": "paused at its spend cap"
+  },
+  "mother_activity": {
+    "pipeline_blocked": "pipeline blocked"
+  },
+  "agent_class": {
+    "mother": "Mother",
+    "perri": "Perri",
+    "fred": "Fred",
+    "teri": "Teri",
+    "claudia": "Claudia"
+  },
+  "agent_fallback": "A session"
+}

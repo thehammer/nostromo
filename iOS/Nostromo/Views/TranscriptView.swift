@@ -18,7 +18,7 @@ struct TranscriptView<Accessory: View>: View {
     let displayName: String
     let agentName:   String
     let viewName:    String
-    let client:      NetworkClient
+    let client:      any DaemonTransport
     /// The ambient-activity ticker (ios-curated-view-parity W4), composed
     /// above the input bar inside this view's own bottom safe-area inset —
     /// NOT a second `safeAreaInset` (that would land below the input bar
@@ -56,7 +56,7 @@ struct TranscriptView<Accessory: View>: View {
     @State private var showNewSessionConfirm  = false
 
     init(
-        tag: String, displayName: String, agentName: String, viewName: String, client: NetworkClient,
+        tag: String, displayName: String, agentName: String, viewName: String, client: any DaemonTransport,
         store: TranscriptStore,
         saveScrollKey: @escaping (Int) -> Void,
         restoreScroll: @escaping (ClosedRange<Int>?) -> ScrollRestore,
@@ -78,7 +78,7 @@ struct TranscriptView<Accessory: View>: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(Array(store.turns.enumerated()), id: \.element.id) { index, turn in
-                        TurnCard(turn: turn, onAnswer: { store.send($0) })
+                        TurnCard(turn: turn, canAnswer: store.canMutate, onAnswer: { store.send($0) })
                             // Turn rendering itself is untouched (W6 is not
                             // allowed to assume a turn is one fixed-height
                             // row, and doesn't): these only record which
@@ -110,16 +110,21 @@ struct TranscriptView<Accessory: View>: View {
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
                 bottomAccessory()
-                InputBar(draft: $draft) {
-                    store.send(draft)
-                    draft = ""
+                // The composer is hidden when the transport cannot send a message (WebSocket).
+                if store.canMutate {
+                    InputBar(draft: $draft) {
+                        store.send(draft)
+                        draft = ""
+                    }
                 }
             }
         }
         .navigationTitle(displayName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            // Restart, Stop and New Session all change the session: hidden when the transport cannot.
+            if store.canMutate {
+                ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button { showRestartConfirm = true } label: {
                         Label("Restart", systemImage: "arrow.clockwise")
@@ -135,6 +140,7 @@ struct TranscriptView<Accessory: View>: View {
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
+                }
                 }
             }
         }
@@ -211,8 +217,9 @@ private struct InputBar: View {
 // MARK: - TurnCard
 
 private struct TurnCard: View {
-    let turn:     DaemonTurn
-    let onAnswer: (String) -> Void
+    let turn:      DaemonTurn
+    let canAnswer: Bool
+    let onAnswer:  (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -255,7 +262,7 @@ private struct TurnCard: View {
 
             // Assistant blocks
             ForEach(Array(turn.blocks.enumerated()), id: \.offset) { _, block in
-                BlockView(block: block, onAnswer: onAnswer)
+                BlockView(block: block, canAnswer: canAnswer, onAnswer: onAnswer)
             }
         }
     }
@@ -288,8 +295,9 @@ private struct InjectedMarkerRow: View {
 // MARK: - BlockView
 
 private struct BlockView: View {
-    let block:    DaemonTurnBlock
-    let onAnswer: (String) -> Void
+    let block:     DaemonTurnBlock
+    let canAnswer: Bool
+    let onAnswer:  (String) -> Void
 
     var body: some View {
         switch block {
@@ -345,7 +353,8 @@ private struct BlockView: View {
                 question: question,
                 header:   header,
                 options:  options,
-                onAnswer: onAnswer
+                onAnswer: onAnswer,
+                canAnswer: canAnswer
             )
 
         case .note(_, let text, _):

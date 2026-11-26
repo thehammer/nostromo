@@ -14,28 +14,35 @@ public struct PerriPRRow: View {
     public let model:    PerriPRRowModel
     public let onLoad:   () -> Void
     public let onClear:  () -> Void
+    /// False when the transport cannot change state on the Mac (iOS over the WebSocket): the row
+    /// is a plain display and its Load PR / Clear menu is not offered.
+    public let actionsEnabled: Bool
 
     public init(
         model:   PerriPRRowModel,
         onLoad:  @escaping () -> Void = {},
-        onClear: @escaping () -> Void = {}
+        onClear: @escaping () -> Void = {},
+        actionsEnabled: Bool = true
     ) {
         self.model   = model
         self.onLoad  = onLoad
         self.onClear = onClear
+        self.actionsEnabled = actionsEnabled
     }
 
     public var body: some View {
         // Button captures mouse-down reliably inside NSHostingView on macOS
         // (onTapGesture can be swallowed by the split view hierarchy).
-        Button(action: onLoad) {
+        Button(action: actionsEnabled ? onLoad : {}) {
             rowContent
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button("Load PR", action: onLoad)
-            Button("Clear",   action: onClear)
+            if actionsEnabled {
+                Button("Load PR", action: onLoad)
+                Button("Clear",   action: onClear)
+            }
         }
     }
 

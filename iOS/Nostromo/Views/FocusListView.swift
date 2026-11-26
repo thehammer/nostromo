@@ -11,7 +11,7 @@ struct FocusListView: View {
 
     var body: some View {
         Group {
-            if !store.connected {
+            if !store.connected && !store.hasLastKnownContent {
                 disconnectedView
             } else if store.focusRows.isEmpty {
                 emptyView

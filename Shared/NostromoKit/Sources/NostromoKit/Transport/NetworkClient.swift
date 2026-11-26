@@ -21,6 +21,8 @@ private let log = Logger(subsystem: "com.hammer.nostromo.ios", category: "Networ
 /// Maximum frame body size (4 MiB) — must match the Rust daemon.
 private let maxFrameLen: Int = 4 * 1024 * 1024
 
+/// The legacy TCP transport (Bonjour discovery, no authentication). The app's transport is
+/// `WebSocketClient`; this stays only behind Settings → Advanced → Local network (legacy).
 @MainActor
 public final class NetworkClient: ObservableObject {
 
@@ -244,7 +246,7 @@ public final class NetworkClient: ObservableObject {
     // MARK: - Send
 
     /// Send an encodable message to the daemon. Called by `DaemonStore` and internally.
-    func send(_ msg: some Encodable) {
+    public func send(_ msg: some Encodable) {
         guard let conn = connection,
               let body = try? encoder.encode(msg)
         else {

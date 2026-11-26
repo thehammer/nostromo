@@ -155,7 +155,7 @@ struct DaemonDiscoveryView: View {
         // Persist the .local host name so future launches reconnect by name,
         // not by raw IP.
         ConnectionSettings.save(host: daemon.hostName, port: ConnectionSettings.defaultPort)
-        store.client.connect(to: daemon.endpoint)
+        store.legacyClient?.connect(to: daemon.endpoint)
         store.start()
         dismiss()
     }
