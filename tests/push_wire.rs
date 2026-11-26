@@ -866,3 +866,86 @@ fn a_work_satellites_review_frame_keeps_the_changed_lines_number() {
     assert!(!repo.contains("admin-portal") && !repo.contains("Carefeed"));
     assert!(is_uplink_metadata_shape(&out));
 }
+
+// ── W13-19: the engine never answers anything ────────────────────────────────
+
+/// The only `ClientMsg` variants `src/push/` may name: the paired phone's four
+/// verbs, which it matches (never builds) in `PushEngine::dispatch`.
+const PUSH_ENGINE_CLIENT_VERBS: [&str; 4] =
+    ["RegisterPush", "SetPushPrefs", "PushSentLog", "PushWaiting"];
+
+/// What in `src` (a `src/push/` file) would let the engine answer something:
+/// an answer type, or a `ClientMsg::` variant outside the four push verbs.
+fn engine_answer_violations(file: &str, src: &str) -> Vec<String> {
+    let code: String = src
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut out = Vec::new();
+    for word in ["DecisionAnswer", "ApprovalAnswer"] {
+        if code.contains(word) {
+            out.push(format!("{file} mentions {word}"));
+        }
+    }
+    for part in code.split("ClientMsg::").skip(1) {
+        let variant: String = part
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if !PUSH_ENGINE_CLIENT_VERBS.contains(&variant.as_str()) {
+            out.push(format!("{file} names ClientMsg::{variant}"));
+        }
+    }
+    out
+}
+
+const PUSH_SOURCES: [(&str, &str); 10] = [
+    ("cli.rs", include_str!("../src/push/cli.rs")),
+    ("devices.rs", include_str!("../src/push/devices.rs")),
+    ("items.rs", include_str!("../src/push/items.rs")),
+    ("mod.rs", include_str!("../src/push/mod.rs")),
+    ("owner.rs", include_str!("../src/push/owner.rs")),
+    ("publisher.rs", include_str!("../src/push/publisher.rs")),
+    ("schedule.rs", include_str!("../src/push/schedule.rs")),
+    ("sent_log.rs", include_str!("../src/push/sent_log.rs")),
+    ("vocab.rs", include_str!("../src/push/vocab.rs")),
+    ("wire.rs", include_str!("../src/push/wire.rs")),
+];
+
+#[test]
+fn the_push_engine_source_builds_no_answer_and_sends_only_relay_requests() {
+    // A file added to src/push/ must be added to the list above, or it escapes the scan.
+    let mut on_disk: Vec<String> = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src/push"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    on_disk.sort();
+    let listed: Vec<String> = PUSH_SOURCES.iter().map(|(n, _)| n.to_string()).collect();
+    assert_eq!(on_disk, listed, "src/push/ changed: list the new file in PUSH_SOURCES");
+
+    for (name, src) in PUSH_SOURCES {
+        assert_eq!(engine_answer_violations(name, src), Vec::<String>::new());
+    }
+    // Not vacuous: the engine does send relay requests.
+    assert!(PUSH_SOURCES.iter().any(|(_, s)| s.contains("RelayRequest")));
+}
+
+#[test]
+fn the_answer_scan_bites_on_an_answer_a_foreign_verb_and_ignores_comments() {
+    assert_eq!(
+        engine_answer_violations("x.rs", "let m = ClientMsg::DecisionAnswer { request_id };").len(),
+        2,
+        "the type name and the foreign variant"
+    );
+    assert_eq!(
+        engine_answer_violations("x.rs", "tx.send(ClientMsg::MotherAction { id });").len(),
+        1
+    );
+    assert_eq!(
+        engine_answer_violations("x.rs", "ClientMsg::ApprovalAnswer { .. }").len(),
+        2
+    );
+    assert!(engine_answer_violations("x.rs", "ClientMsg::PushWaiting => {}").is_empty());
+    assert!(engine_answer_violations("x.rs", "// never ClientMsg::DecisionAnswer").is_empty());
+}
