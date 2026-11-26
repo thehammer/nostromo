@@ -13,7 +13,10 @@ So no string literal under `iOS/Nostromo/**` may mention mail, calendar or todos
 sentence lives in Kit's `PairingCopy.notShared` exactly as written.
 
 W11 fix round 1 adds five more source checks (each with a "bites" test):
-  - the client's outbound ALLOW-list equals the daemon's `NETWORK_ALLOWED` (`src/ipc/peer.rs`);
+  - the client's `allowedTypes` equals the daemon's `NETWORK_ALLOWED` (`src/ipc/peer.rs`), and its
+    separate `pairedDeviceTypes` is exactly the four W13 push verbs (`register_push`,
+    `set_push_prefs`, `push_sent_log`, `push_waiting`), none of them in `NETWORK_ALLOWED`, and
+    `operator_presence` in neither list;
   - `Info.plist` allows local networking for App Transport Security and never arbitrary loads;
   - the pairing start screen reaches the legacy local-network transport;
   - the controls that change state on the Mac sit behind `canMutate`;
@@ -117,6 +120,37 @@ def allow_list_violations(rust_source, swift_source):
     return out
 
 
+PUSH_VERBS = {"register_push", "set_push_prefs", "push_sent_log", "push_waiting"}
+SWIFT_PAIRED_RE = re.compile(r"static let pairedDeviceTypes: Set<String> = \[(.*?)\]", re.S)
+
+
+def swift_paired_device_types(source):
+    """The strings in `OutboundPolicy.pairedDeviceTypes` (comments ignored)."""
+    m = SWIFT_PAIRED_RE.search(_strip_line_comments(source))
+    if not m:
+        return set()
+    return set(re.findall(r'"([a-z0-9_]+)"', m.group(1)))
+
+
+def paired_device_violations(rust_source, swift_source):
+    """`pairedDeviceTypes` is exactly the four push verbs, outside NETWORK_ALLOWED and `allowedTypes`;
+    `operator_presence` (the Mac app's verb) is on neither list."""
+    paired = swift_paired_device_types(swift_source)
+    allowed = swift_allowed_types(swift_source)
+    network = rust_network_allowed(rust_source)
+    if not paired:
+        return ["OutboundPolicy.pairedDeviceTypes was not found in WebSocketClient.swift"]
+    out = ["pairedDeviceTypes lists %r, which is not a W13 push verb" % t for t in sorted(paired - PUSH_VERBS)]
+    out += ["pairedDeviceTypes does not list the push verb %r" % t for t in sorted(PUSH_VERBS - paired)]
+    out += ["%r is in the daemon's NETWORK_ALLOWED; the push verbs are not network verbs" % t
+            for t in sorted(PUSH_VERBS & network)]
+    out += ["%r is in allowedTypes as well as pairedDeviceTypes" % t for t in sorted(PUSH_VERBS & allowed)]
+    for t in ("operator_presence",):
+        if t in paired or t in allowed or t in network:
+            out.append("%r must be on no list: only the Mac app sends it" % t)
+    return out
+
+
 def ats_violations(plist_bytes):
     """App Transport Security: local networking on, arbitrary loads never on."""
     info = plistlib.loads(plist_bytes)
@@ -209,6 +243,26 @@ class QueueVerbPolicyTests(unittest.TestCase):
 class OutboundAllowListTests(unittest.TestCase):
     def test_the_phone_allow_list_equals_the_daemons_network_allowed(self):
         self.assertEqual(allow_list_violations(_read(PEER_RS), _read(WS_CLIENT)), [])
+
+    def test_the_paired_device_set_is_exactly_the_four_push_verbs(self):
+        self.assertEqual(paired_device_violations(_read(PEER_RS), _read(WS_CLIENT)), [])
+        self.assertEqual(swift_paired_device_types(_read(WS_CLIENT)), PUSH_VERBS)
+
+    def test_paired_device_bites_on_a_fifth_verb_a_missing_verb_and_presence(self):
+        rust = 'const NETWORK_ALLOWED: &[&str] = &["Hello"];'
+
+        def swift(paired, allowed='"hello"'):
+            return ('static let allowedTypes: Set<String> = [%s]\n'
+                    'static let pairedDeviceTypes: Set<String> = [%s]' % (allowed, paired))
+        four = '"register_push", "set_push_prefs", "push_sent_log", "push_waiting"'
+        self.assertEqual(paired_device_violations(rust, swift(four)), [])
+        self.assertEqual(len(paired_device_violations(rust, swift(four + ', "mother_action"'))), 1)
+        self.assertEqual(len(paired_device_violations(rust, swift('"register_push", "set_push_prefs", "push_waiting"'))), 1)
+        self.assertEqual(len(paired_device_violations(rust, swift(four + ', "operator_presence"'))), 2)
+        self.assertEqual(len(paired_device_violations(rust, swift(four, '"hello", "push_waiting"'))), 1)
+        self.assertEqual(len(paired_device_violations(
+            'const NETWORK_ALLOWED: &[&str] = &["Hello", "PushWaiting"];', swift(four))), 1)
+        self.assertEqual(len(paired_device_violations(rust, "// gone")), 1)
 
     def test_the_rust_list_is_found_and_converted_to_wire_names(self):
         rust = rust_network_allowed(_read(PEER_RS))

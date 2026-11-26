@@ -3,8 +3,7 @@
 // Push notifications on the phone (W13). iOS needs an app delegate to hand over the Apple push token,
 // and a notification-center delegate to route a tap, so this is the one place the app touches them:
 //
-//   - the operator enables notifications on the settings screen (`requestAuthorization`, with
-//     time-sensitive for decisions), which registers for remote notifications;
+//   - the operator enables notifications on the settings screen (`requestAuthorization`), which registers for remote notifications;
 //   - the token (hex) goes to `PushModel`, which sends `register_push` whenever the link is up;
 //   - on every foreground connect the model reconciles: delivered notifications whose item no longer
 //     waits are removed (the replace-in-place withdrawal of S1 covers the rest while the app is closed)
@@ -31,12 +30,17 @@ final class PushCoordinator {
     private(set) var token: String?
     private var bag = Set<AnyCancellable>()
 
+    /// Read from the signing (the embedded profile's `aps-environment`), not from the build
+    /// configuration, so a Release build signed with a development profile still reaches the sandbox.
     var environment: PushEnvironmentWire {
-        #if DEBUG
-        return .sandbox
+        let profile = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision")
+            .flatMap { try? Data(contentsOf: $0) }
+        #if targetEnvironment(simulator)
+        let simulator = true
         #else
-        return .production
+        let simulator = false
         #endif
+        return .signed(provisioning: profile, simulator: simulator)
     }
 
     func didRegister(deviceToken: Data) {
@@ -44,11 +48,11 @@ final class PushCoordinator {
         model?.apnsToken = token
     }
 
-    /// Ask for permission (alert, badge, sound, time-sensitive), then register for remote
-    /// notifications. Called from the settings screen when the operator turns notifications on.
+    /// Ask for permission (alert, badge, sound), then register for remote notifications. Time-sensitive
+    /// delivery needs no request option: the entitlement is what allows it. Called from the settings screen when the operator turns notifications on.
     func enable() async -> Bool {
         let granted = (try? await UNUserNotificationCenter.current()
-            .requestAuthorization(options: [.alert, .badge, .sound, .timeSensitive])) ?? false
+            .requestAuthorization(options: [.alert, .badge, .sound])) ?? false
         if granted { UIApplication.shared.registerForRemoteNotifications() }
         return granted
     }

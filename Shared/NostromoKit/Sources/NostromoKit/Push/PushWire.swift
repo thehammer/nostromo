@@ -109,6 +109,28 @@ public enum PushEnvironmentWire: String, Codable, Equatable, Sendable {
     case sandbox, production
 }
 
+extension PushEnvironmentWire {
+    /// The APNs environment the installed build was signed for: the `aps-environment` entitlement in
+    /// its embedded provisioning profile (`development` -> sandbox, `production` -> production), not
+    /// the build configuration (a Release build signed with a development profile talks to the
+    /// sandbox). A simulator build has no profile and no APNs token, so it reads as sandbox; a build
+    /// with no profile (the App Store removes it) or one that names no environment is production.
+    public static func signed(provisioning: Data?, simulator: Bool) -> PushEnvironmentWire {
+        if simulator { return .sandbox }
+        guard let provisioning, let text = String(data: provisioning, encoding: .isoLatin1),
+              let start = text.range(of: "<?xml"), let end = text.range(of: "</plist>") else {
+            return .production
+        }
+        let plist = Data(text[start.lowerBound..<end.upperBound].utf8)
+        guard let root = (try? PropertyListSerialization.propertyList(from: plist, format: nil)) as? [String: Any],
+              let entitlements = root["Entitlements"] as? [String: Any],
+              let aps = entitlements["aps-environment"] as? String else {
+            return .production
+        }
+        return aps == "development" ? .sandbox : .production
+    }
+}
+
 /// What this build of the app can do. W13's app sends `nseWithdraw: false`.
 public struct PushCapabilitiesWire: Codable, Equatable, Sendable {
     public var nseWithdraw: Bool

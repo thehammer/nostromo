@@ -53,6 +53,7 @@
 		B20000000000000000000214 /* AppTransportSecurityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000213 /* AppTransportSecurityTests.swift */; };
 		B20000000000000000000216 /* AppSessionLaunchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000215 /* AppSessionLaunchTests.swift */; };
 		B20000000000000000000204 /* PairLinkRoutingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000203 /* PairLinkRoutingTests.swift */; };
+		B20000000000000000000302 /* PushSheetEnvironmentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000301 /* PushSheetEnvironmentTests.swift */; };
 		B20000000000000000000206 /* ContentCacheProtectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000205 /* ContentCacheProtectionTests.swift */; };
 		B10000000000000000000B02 /* PushAppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000B01 /* PushAppDelegate.swift */; };
 		B10000000000000000000B04 /* PushItemView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000B03 /* PushItemView.swift */; };
@@ -119,6 +120,7 @@
 		B20000000000000000000213 /* AppTransportSecurityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppTransportSecurityTests.swift; sourceTree = "<group>"; };
 		B20000000000000000000215 /* AppSessionLaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSessionLaunchTests.swift; sourceTree = "<group>"; };
 		B20000000000000000000203 /* PairLinkRoutingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairLinkRoutingTests.swift; sourceTree = "<group>"; };
+		B20000000000000000000301 /* PushSheetEnvironmentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushSheetEnvironmentTests.swift; sourceTree = "<group>"; };
 		B20000000000000000000205 /* ContentCacheProtectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentCacheProtectionTests.swift; sourceTree = "<group>"; };
 		B10000000000000000000B01 /* PushAppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushAppDelegate.swift; sourceTree = "<group>"; };
 		B10000000000000000000B03 /* PushItemView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushItemView.swift; sourceTree = "<group>"; };
@@ -239,6 +241,7 @@
 				B20000000000000000000215 /* AppSessionLaunchTests.swift */,
 				B20000000000000000000205 /* ContentCacheProtectionTests.swift */,
 				B20000000000000000000203 /* PairLinkRoutingTests.swift */,
+				B20000000000000000000301 /* PushSheetEnvironmentTests.swift */,
 				B20000000000000000000201 /* KeychainCredentialStoreTests.swift */,
 				AC0000010000000000000003 /* NostromoSmokeTests.swift */,
 				AC0000010000000000000004 /* HostedHarnessTests.swift */,
@@ -411,6 +414,7 @@
 				B20000000000000000000216 /* AppSessionLaunchTests.swift in Sources */,
 				B20000000000000000000206 /* ContentCacheProtectionTests.swift in Sources */,
 				B20000000000000000000204 /* PairLinkRoutingTests.swift in Sources */,
+				B20000000000000000000302 /* PushSheetEnvironmentTests.swift in Sources */,
 				B20000000000000000000202 /* KeychainCredentialStoreTests.swift in Sources */,
 				AC0000010000000000000002 /* HostedHarnessTests.swift in Sources */,
 			);

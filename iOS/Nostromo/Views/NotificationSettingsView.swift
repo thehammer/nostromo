@@ -17,6 +17,7 @@ struct NotificationSettingsView: View {
     var body: some View {
         Form {
             authorizationSection
+            prefsSaveSection
             Section("Notify me about") {
                 ForEach(PushKindWire.allCases, id: \.self) { kind in
                     Toggle(title(kind), isOn: Binding(
@@ -72,6 +73,24 @@ struct NotificationSettingsView: View {
             }
         default:
             EmptyView()
+        }
+    }
+
+    /// An edit the primary has not kept stays as typed, with the reason it is not saved yet.
+    @ViewBuilder private var prefsSaveSection: some View {
+        switch push.prefsSave {
+        case .saved:
+            EmptyView()
+        case .pending:
+            Section {
+                Label("Not saved yet. It will save when your Mac is reachable.", systemImage: "clock")
+                    .font(.footnote)
+            }
+        case .failed:
+            Section {
+                Label("Your Mac did not keep these settings. They will be sent again.", systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+            }
         }
     }
 

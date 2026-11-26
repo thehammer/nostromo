@@ -50,7 +50,7 @@ struct RootView: View {
                     PairingSuccessView(name: name)
                 } else if let store = session.store {
                     if let push = session.push {
-                        PushGate(push: push) {
+                        PushGate(push: push, store: store) {
                             ContentView()
                                 .environmentObject(store)
                                 .onAppear { store.start() }
@@ -86,6 +86,9 @@ struct RootView: View {
 /// remove. Also opens the screen for a tapped notification.
 struct PushGate<Content: View>: View {
     @ObservedObject var push: PushModel
+    /// The sheet is its own presentation: it does not inherit what `content` is given below, so the
+    /// store is passed here and injected on the sheet explicitly.
+    let store: DaemonStore
     @ViewBuilder let content: () -> Content
 
     var body: some View {
@@ -97,7 +100,7 @@ struct PushGate<Content: View>: View {
                 set: { if !$0 { push.tapped = nil } }
             )) {
                 if let payload = push.tapped {
-                    PushItemView(payload: payload).environmentObject(push)
+                    PushItemView(payload: payload).environmentObject(push).environmentObject(store)
                 }
             }
     }

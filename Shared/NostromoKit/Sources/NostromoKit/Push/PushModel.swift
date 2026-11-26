@@ -31,6 +31,19 @@ public final class PushModel: ObservableObject {
     @Published public private(set) var reconciled = false
     /// The notification the operator tapped, until the screen for it is dismissed.
     @Published public var tapped: PushPayload?
+    /// Whether the last settings edit reached the primary. An edit made while the link is down (or
+    /// one the primary did not keep) stays on screen as typed, marked `pending` or `failed`, and is
+    /// sent again on the next connect; it never silently reverts.
+    @Published public private(set) var prefsSave = PrefsSave.saved
+
+    public enum PrefsSave: Equatable, Sendable {
+        /// The primary has what the screen shows.
+        case saved
+        /// Not sent yet (the link is down) or sent and not answered.
+        case pending
+        /// The primary answered with something else (it refused or has no record of this device).
+        case failed
+    }
 
     /// The hex APNs token iOS issued, once it has. Setting it registers it if the link is up.
     public var apnsToken: String? {
@@ -48,6 +61,11 @@ public final class PushModel: ObservableObject {
     private let transport: DaemonTransport
     private var bag = Set<AnyCancellable>()
     private var reconcileDeadline: Task<Void, Never>?
+    /// The settings the primary has not acknowledged yet.
+    private var pendingPrefs: PushPrefsWire?
+    /// True once the first screen's reconcile has finished (answered, timed out, or the link was
+    /// down). Later reconnects reconcile again but never hold the screen back.
+    private var firstScreenReleased = false
 
     public init(transport: DaemonTransport, environment: PushEnvironmentWire = .production,
                 reconcileTimeout: TimeInterval = 2) {
@@ -86,33 +104,49 @@ public final class PushModel: ObservableObject {
         transport.send(ClientPushSentLog())
     }
 
-    /// Change this device's settings. The screen shows the new value at once; the primary's
-    /// `push_status` answer replaces it with what it kept.
+    /// Change this device's settings. The screen shows the new value at once and keeps it until the
+    /// primary's `push_status` answer says it has the same (`prefsSave`). Offline, the edit waits
+    /// and goes out on the next connect.
     public func update(_ change: (inout PushPrefsWire) -> Void) {
         var next = prefs
         change(&next)
         prefs = next
-        transport.send(ClientSetPushPrefs(prefs: next))
+        pendingPrefs = next
+        prefsSave = .pending
+        sendPendingPrefs()
+    }
+
+    private func sendPendingPrefs() {
+        guard transport.connected, let pending = pendingPrefs else { return }
+        transport.send(ClientSetPushPrefs(prefs: pending))
     }
 
     // MARK: - Link
 
     private func connected() {
-        reconciled = false
         registerIfPossible()
+        sendPendingPrefs()
         requestWaiting()
+        // Only the first screen is held back; a reconnect reconciles in the background.
+        guard !firstScreenReleased else { return }
+        reconciled = false
         reconcileDeadline?.cancel()
         let timeout = reconcileTimeout
         reconcileDeadline = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            self?.reconciled = true
+            self?.releaseFirstScreen()
         }
     }
 
     private func disconnected() {
         // Nothing to wait for while the primary is out of reach: do not hold the first screen.
         reconcileDeadline?.cancel()
+        releaseFirstScreen()
+    }
+
+    private func releaseFirstScreen() {
+        firstScreenReleased = true
         reconciled = true
     }
 
@@ -123,16 +157,32 @@ public final class PushModel: ObservableObject {
         switch hosted.msg {
         case .pushStatus(let status):
             self.status = status
-            prefs = status.prefs
+            acknowledge(status.prefs)
         case .pushWaiting(let items, let badge):
             waiting = items
             self.badge = badge
-            reconciled = true
             reconcileDeadline?.cancel()
+            releaseFirstScreen()
         case .pushSentLog(let entries):
             sentLog = entries
         default:
             break
+        }
+    }
+
+    /// The primary's current settings arrived. They replace the screen's only when nothing of ours is
+    /// waiting; an edit the primary did not keep stays as typed and is marked failed.
+    private func acknowledge(_ kept: PushPrefsWire) {
+        guard let pending = pendingPrefs else {
+            prefs = kept
+            return
+        }
+        if kept == pending {
+            pendingPrefs = nil
+            prefsSave = .saved
+            prefs = kept
+        } else if transport.connected {
+            prefsSave = .failed
         }
     }
 
