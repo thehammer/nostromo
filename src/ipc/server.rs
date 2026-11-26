@@ -1528,25 +1528,17 @@ where
                     // The broadcast channel closed: the daemon is going down.
                     break Ok(());
                 };
-                let bytes = match queued {
-                    // Trust gate first: a network peer never gets a sensitive
-                    // frame, whatever its topic list says.
-                    Queued::Frame(stamped) => broadcast_bytes(
-                        stamped,
-                        &topics,
-                        presents_approvals,
-                        trust,
-                        &sensitive,
-                        origin.ws_device(),
-                    ),
-                    // What the queue dropped, in the place of what it dropped.
-                    Queued::Gap(gap) => outbound(trust, gap, &sensitive)
-                        .and_then(|gap| serde_json::to_vec(&gap).ok()),
-                };
-                if let Some(bytes) = bytes {
-                    if write_outbound(&mut writer, &bytes, &conn_key).await.is_err() {
-                        break Ok(());
-                    }
+                if write_queued(
+                    &mut writer,
+                    queued,
+                    (&topics, presents_approvals),
+                    (trust, &sensitive, origin.ws_device()),
+                    &conn_key,
+                )
+                .await
+                .is_err()
+                {
+                    break Ok(());
                 }
                 // A queue that is dropping frames is told when it has drained.
                 if dropping.load(Ordering::Relaxed) && queue_rx.len() < CLIENT_QUEUE_RESUME_BELOW {
@@ -1580,6 +1572,32 @@ where
 
             // Targeted messages (session replies, refusals, errors).
             Some(msg) = targeted_rx.recv() => {
+                // A broadcast frame the queue already holds was sent before this
+                // reply (a spawn broadcasts `FocusCreated`, then answers): it is
+                // written first, as it was when frames went straight from the
+                // channel to this loop.
+                let mut failed = false;
+                while let Ok(queued) = queue_rx.try_recv() {
+                    if write_queued(
+                        &mut writer,
+                        queued,
+                        (&topics, presents_approvals),
+                        (trust, &sensitive, origin.ws_device()),
+                        &conn_key,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        failed = true;
+                        break;
+                    }
+                }
+                if failed {
+                    break Ok(());
+                }
+                if dropping.load(Ordering::Relaxed) && queue_rx.len() < CLIENT_QUEUE_RESUME_BELOW {
+                    drained.notify_one();
+                }
                 // Targeted frames (session transcripts, replies, summaries)
                 // go through the same gate as broadcasts; the only
                 // sensitive frames a network peer gets are refusals.
@@ -1954,6 +1972,39 @@ fn broadcast_bytes(
             warn!("serialise error: {e}");
             None
         }
+    }
+}
+
+/// Write one queued item: a frame as the connection is sent it (see
+/// [`broadcast_bytes`]) or a `Gap`, in the place of what the queue dropped.
+async fn write_queued<W>(
+    writer: &mut W,
+    queued: Queued,
+    (topics, presents_approvals): (&[Topic], bool),
+    (trust, sensitive, device): (PeerTrust, &SensitiveTags, Option<&str>),
+    conn: &str,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let bytes = match queued {
+        // Trust gate first: a network peer never gets a sensitive frame,
+        // whatever its topic list says.
+        Queued::Frame(stamped) => broadcast_bytes(
+            stamped,
+            topics,
+            presents_approvals,
+            trust,
+            sensitive,
+            device,
+        ),
+        Queued::Gap(gap) => {
+            outbound(trust, gap, sensitive).and_then(|gap| serde_json::to_vec(&gap).ok())
+        }
+    };
+    match bytes {
+        Some(bytes) => write_outbound(writer, &bytes, conn).await,
+        None => Ok(()),
     }
 }
 
