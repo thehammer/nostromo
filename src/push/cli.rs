@@ -77,6 +77,14 @@ pub fn status(config: &Config, out: &mut impl Write) -> Result<()> {
     )?;
     let devices = DeviceStore::load(dir.join("devices.json"));
     let log = SentLog::load(dir.join("sent.jsonl"), Utc::now());
+    // A corrupt file reads as no devices, and the phone only sees "failed": say why.
+    if let Some(file) = devices.unreadable_file() {
+        writeln!(
+            out,
+            "registrations refused until the file is moved aside: {}",
+            file.display()
+        )?;
+    }
     let mut any = false;
     for device in devices.iter() {
         any = true;
@@ -103,7 +111,7 @@ pub fn status(config: &Config, out: &mut impl Write) -> Result<()> {
                 .map_or(String::new(), |t| format!(", failing since {}", t.to_rfc3339())),
         )?;
     }
-    if !any {
+    if !any && devices.unreadable_file().is_none() {
         writeln!(out, "no devices registered")?;
     }
     Ok(())
@@ -181,6 +189,43 @@ mod tests {
             ["Carefeed", "Acme"]
         );
         assert!(add_work_owner(&path, "bad owner").is_err());
+    }
+
+    fn status_text(state_dir: &Path) -> String {
+        let config = Config {
+            push: Some(PushConfig {
+                state_dir: Some(state_dir.to_path_buf()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        status(&config, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_corrupt_devices_file_is_named_in_the_status_instead_of_reading_as_no_devices() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("devices.json");
+        std::fs::write(&file, b"{ not json").unwrap();
+        let text = status_text(dir.path());
+        assert!(
+            text.contains(&format!(
+                "registrations refused until the file is moved aside: {}",
+                file.display()
+            )),
+            "{text}"
+        );
+        assert!(!text.contains("no devices registered"), "{text}");
+    }
+
+    #[test]
+    fn a_missing_devices_file_is_no_devices_and_not_a_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = status_text(dir.path());
+        assert!(text.contains("no devices registered"), "{text}");
+        assert!(!text.contains("refused"), "{text}");
     }
 
     #[test]

@@ -130,6 +130,12 @@ impl DeviceStore {
         }
     }
 
+    /// The file that could not be read, while registrations are refused until the
+    /// operator moves it aside; `None` when the store is healthy.
+    pub fn unreadable_file(&self) -> Option<&Path> {
+        self.unreadable.as_ref().map(|_| self.path.as_path())
+    }
+
     pub fn get(&self, device_id: &str) -> Option<&PushDevice> {
         self.devices.get(device_id)
     }
