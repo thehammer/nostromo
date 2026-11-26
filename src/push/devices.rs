@@ -212,6 +212,30 @@ impl DeviceStore {
         Ok(true)
     }
 
+    /// Apple said this token is dead (`410 Unregistered`, `400 BadDeviceToken`):
+    /// forget the token but keep the device's settings and reference. The phone's
+    /// next `register_push` with a fresh token makes it deliverable again. `token`
+    /// is the one that was refused: a device that has re-registered since keeps
+    /// its new one. Returns the device id when a token was cleared.
+    pub fn forget_dead_token(&mut self, push_id: &str, token: &str) -> Result<Option<String>> {
+        let Some(record) = self
+            .devices
+            .values_mut()
+            .find(|d| d.push_id == push_id && d.apns_token == token)
+        else {
+            return Ok(None);
+        };
+        record.apns_token.clear();
+        let id = record.device_id.clone();
+        if let Err(e) = self.save() {
+            if let Some(record) = self.devices.get_mut(&id) {
+                record.apns_token = token.to_string();
+            }
+            return Err(e);
+        }
+        Ok(Some(id))
+    }
+
     /// Delete a device's record (it was revoked or unpaired).
     pub fn remove(&mut self, device_id: &str) -> Result<Option<PushDevice>> {
         let removed = self.devices.remove(device_id);

@@ -632,6 +632,12 @@ impl PushEngine {
             let Some(device) = st.devices.get(&id).cloned() else {
                 continue;
             };
+            // A device whose token Apple refused as dead waits for a fresh one. Its
+            // schedule goes, so registering again baselines what is waiting then.
+            if device.apns_token.is_empty() {
+                st.schedules.remove(&id);
+                continue;
+            }
             let fresh = !st.schedules.contains_key(&id);
             let effects = st.schedules.entry(id.clone()).or_default().step(
                 now,
@@ -691,6 +697,21 @@ impl PushEngine {
         for send in sends {
             let delivery = self.publisher.send(&send.request).await;
             let mut st = self.state.lock().unwrap();
+            if let Delivery::Rejected { status, reason } = &delivery {
+                if token_is_dead(*status, reason.as_deref()) {
+                    match st
+                        .devices
+                        .forget_dead_token(&send.push_id, &send.request.apns_token)
+                    {
+                        Ok(Some(id)) => {
+                            warn!(device = %id, "apns refused a token as dead; waiting for a new one");
+                            st.schedules.remove(&id);
+                        }
+                        Ok(None) => {}
+                        Err(e) => warn!("dead token not cleared: {e:#}"),
+                    }
+                }
+            }
             let outcome = |ok: PushOutcome| match &delivery {
                 Delivery::Delivered => ok,
                 Delivery::Rejected { .. } => PushOutcome::RejectedByApple,
@@ -716,6 +737,13 @@ impl PushEngine {
             }
         }
     }
+}
+
+/// Whether Apple's answer means the token will never work again: `410` (the app
+/// was uninstalled, `Unregistered`) or `400 BadDeviceToken`. Anything else
+/// (payload, topic, throttling) is not the token's fault.
+fn token_is_dead(status: u16, reason: Option<&str>) -> bool {
+    status == 410 || (status == 400 && reason == Some("BadDeviceToken"))
 }
 
 // ── building a request ───────────────────────────────────────────────────────

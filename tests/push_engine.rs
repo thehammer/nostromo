@@ -3344,3 +3344,84 @@ async fn turning_enabled_off_in_the_config_stops_pushes_without_a_restart_and_ba
     assert_eq!(posts.len(), 1, "{posts:#?}");
     assert!(posts[0]["body"].as_str().unwrap().contains("aaaa0002"));
 }
+
+// ── a token Apple says is dead ───────────────────────────────────────────────
+
+async fn rig_answering(status: u16, reason: &str) -> Rig {
+    let rig = Rig::build(None, None, |_| {}).await;
+    rig.mount(
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"apns_status": status, "apns_reason": reason})),
+        None,
+    )
+    .await;
+    rig
+}
+
+/// Two jobs three minutes apart: how many pushes reach the relay, and the rig.
+async fn two_jobs_pushed(mut rig: Rig) -> (usize, Rig) {
+    let t0 = base();
+    rig.register("dev-1", &token_a());
+    rig.start(&["kobe"], t0).await;
+    rig.engine.ingest(
+        jobs_frame(
+            Some("kobe"),
+            vec![
+                awaiting("aaaa0001", t0),
+                awaiting("aaaa0002", t0 + secs(300)),
+            ],
+        ),
+        t0,
+    );
+    for t in [0, 120, 300, 420, 600] {
+        rig.engine.step_at(t0 + secs(t)).await;
+    }
+    (rig.posts().await.len(), rig)
+}
+
+#[tokio::test]
+async fn a_410_unregistered_token_is_dropped_so_nothing_more_is_sent_until_the_phone_registers_again(
+) {
+    let (posts, mut rig) = two_jobs_pushed(rig_answering(410, "Unregistered").await).await;
+    assert_eq!(posts, 1, "the second job is not sent to a dead token");
+    // The phone registers a fresh token: pushes resume.
+    let t1 = base() + secs(700);
+    rig.register("dev-1", &token_b());
+    rig.engine.step_at(t1).await;
+    rig.engine.ingest(
+        jobs_frame(
+            Some("kobe"),
+            vec![
+                awaiting("aaaa0001", base()),
+                awaiting("aaaa0002", base() + secs(300)),
+                awaiting("aaaa0003", t1),
+            ],
+        ),
+        t1,
+    );
+    rig.engine.step_at(t1 + secs(1)).await;
+    rig.engine.step_at(t1 + secs(130)).await;
+    assert_eq!(
+        rig.posts_to(&token_b()).await.len(),
+        1,
+        "only the new job, to the new token"
+    );
+}
+
+#[tokio::test]
+async fn a_400_bad_device_token_is_dropped_too_but_other_refusals_keep_the_registration() {
+    let (posts, _rig) = two_jobs_pushed(rig_answering(400, "BadDeviceToken").await).await;
+    assert_eq!(posts, 1, "BadDeviceToken drops the token");
+
+    for (status, reason) in [
+        (400, "PayloadTooLarge"),
+        (403, "InvalidProviderToken"),
+        (429, "TooManyRequests"),
+    ] {
+        let (posts, _rig) = two_jobs_pushed(rig_answering(status, reason).await).await;
+        assert_eq!(
+            posts, 2,
+            "{status} {reason} is not the token's fault: both jobs are sent"
+        );
+    }
+}
