@@ -64,13 +64,17 @@ not used; withdrawal is "replace in place".)
 ```bash
 cd infra/push-relay
 sam build            # uses cargo-lambda (Metadata: BuildMethod rust-cargolambda)
-sam deploy --guided  # stack name e.g. nostromo-push-relay; accept the defaults;
-                     # "FunctionUrlConfig may be public" is expected: the bearer
-                     # token is checked in code
+sam deploy --guided  # stack name e.g. nostromo-push-relay; it asks for BudgetAlertEmail
+                     # (where the monthly cost alarm writes) and MonthlyBudgetUsd (default 5);
+                     # accept the other defaults. "FunctionUrlConfig may be public" is
+                     # expected: the bearer token is checked in code
 ```
 
-The stack creates the function and its URL, the DynamoDB table (TTL on `expires_at`),
-the two Secrets Manager secrets and a log group with 7-day retention. Note the
+The stack creates the function and its URL (reserved concurrency 5), the DynamoDB table
+(TTL on `expires_at`), the two Secrets Manager secrets, a log group with 7-day retention
+and a monthly cost budget that emails `BudgetAlertEmail` at 80% actual and 100% forecast
+spend. The function URL is public (`AuthType: NONE`), so every request anyone sends it is
+billed: the concurrency cap and the budget are the tripwires. Note the
 `FunctionUrl`, `DaemonTokenSecretArn` and `ApnsSecretArn` outputs.
 
 ## 3. Fill in the secrets
@@ -90,9 +94,11 @@ aws secretsmanager put-secret-value --profile <your-relay-profile> \
     --secret-id <ApnsSecretArn> --secret-string file:///tmp/apns-secret.json
 rm -P /tmp/apns-secret.json     # or: shred -u /tmp/apns-secret.json on Linux
 
-# The daemon token was generated for you; read it once.
-aws secretsmanager get-secret-value --profile <your-relay-profile> \
-    --secret-id <DaemonTokenSecretArn> --query SecretString --output text
+# The daemon token was generated for you; write it straight to the primary's token
+# file, never to the terminal or a command line.
+(umask 077; aws secretsmanager get-secret-value --profile <your-relay-profile> \
+    --secret-id <DaemonTokenSecretArn> --query SecretString --output text \
+    > ~/.nostromo/push-relay-token)
 ```
 
 Keep the `.p8` somewhere safe and out of this repository.
@@ -130,10 +136,15 @@ does not match `^[a-z][a-z0-9-]{0,15}$` shows as the literal `host` in a notific
 
 ## Rotating the daemon token (no redeploy)
 
+The new token never appears on a command line, so it stays out of shell history and the
+process list:
+
 ```bash
+umask 077
+openssl rand -base64 48 | tr -d '=/+\n' | head -c 48 > /tmp/new-relay-token
 aws secretsmanager put-secret-value --profile <your-relay-profile> \
-    --secret-id <DaemonTokenSecretArn> --secret-string '<new token>'
-printf '%s' '<new token>' > ~/.nostromo/push-relay-token   # on the primary
+    --secret-id <DaemonTokenSecretArn> --secret-string file:///tmp/new-relay-token
+mv /tmp/new-relay-token ~/.nostromo/push-relay-token      # on the primary (mode 600 from the umask)
 ```
 
 The handler re-reads the secret at most every 5 minutes, so there is a short window
@@ -148,8 +159,35 @@ derived from it are cached for at most 50 minutes.
 | `POST /push` | Bearer required. A closed JSON body (unknown fields → 400; `title` ≤ 64 and `body` ≤ 96 characters; `data` keys exactly `item`, `kind`, `host`, `ref`, `resolved`). Sends to APNs over HTTP/2 with an ES256 provider token and answers `{"apns_status": 200, "apns_reason": null}`. `aps.mutable-content: 1` is set only when the body's `mutable_content` is `true`. |
 | `GET /records?push_id=<32 hex>` | Bearer required. That reference's delivery records, never older than 7 days (the read enforces it; TTL deletion is lazy). |
 
-A safety ceiling of 60 pushes per device reference per 10 minutes returns 429.
-Product-level rate shaping is the primary's job.
+Two safety ceilings return 429: 60 pushes per APNs token per 10 minutes (counted on a
+hash of the token, never on the `push_id`, which the caller chooses), and 600 per
+10 minutes across the whole bearer. Product-level rate shaping is the primary's job.
+
+When Apple answers `410 Unregistered` or `400 BadDeviceToken`, the primary forgets that
+token (the device's settings stay) and sends nothing more to it until the phone registers
+a fresh one.
+
+## Teardown
+
+Everything the stack made goes with it, but two things live outside the stack:
+
+```bash
+# 1. Delete the stack (function, URL, table, log group, budget, both secrets).
+sam delete --stack-name <your-stack> --profile <your-relay-profile>
+
+# 2. Secrets Manager keeps a deleted secret for a recovery window (7-30 days) unless it is
+#    force-deleted; the APNs key is in one of them. Force-delete both now:
+aws secretsmanager delete-secret --profile <your-relay-profile> --secret-id <ApnsSecretArn> \
+    --force-delete-without-recovery
+aws secretsmanager delete-secret --profile <your-relay-profile> --secret-id <DaemonTokenSecretArn> \
+    --force-delete-without-recovery
+```
+
+Then, at developer.apple.com, revoke the APNs key (Certificates, Identifiers & Profiles,
+Keys): a key that has left your machine should not stay valid. Finally, on the primary,
+remove the `[push]` table's `relay_url` (or set `enabled = false`; no restart is needed)
+and delete `~/.nostromo/push-relay-token`. `~/.nostromo/push/` holds the registered
+devices and the sent log; remove it to forget them.
 
 ## Tests and the build
 
@@ -158,7 +196,9 @@ The relay's tests are hermetic: an in-memory store and secrets, an APNs stub on
 repository root, run the crate's tests with Cargo's `test` subcommand and
 `--manifest-path infra/push-relay/Cargo.toml` (add `--no-default-features` for the
 handler alone, without the AWS SDK). Locally on the maintainer's Mac this runs in
-the RWX sandbox: `rwx sandbox exec -- <that command>`.
+the RWX sandbox: `rwx sandbox exec -- <that command>`. CI runs fmt, clippy with
+`-D warnings` and both test builds on every change under `infra/push-relay/`
+(`.github/workflows/push-relay.yml`).
 
 ## Things only a device can show (operator-verified after deploy)
 
