@@ -1,0 +1,59 @@
+{
+  "type": "devices",
+  "devices": [
+    {
+      "id": "dev_1",
+      "name": "Ada's iPad",
+      "kind": "ipad",
+      "paired_at": "2026-11-20T10:00:00Z",
+      "last_seen_at": "2026-11-25T09:30:00Z",
+      "connected": true,
+      "revoked_at": null,
+      "revoked_by": null
+    },
+    {
+      "id": "dev_2",
+      "name": "Ada's iPhone",
+      "kind": "iphone",
+      "paired_at": "2026-11-20T10:00:00Z",
+      "last_seen_at": null,
+      "connected": false,
+      "revoked_at": null,
+      "revoked_by": null
+    },
+    {
+      "id": "dev_3",
+      "name": "Old iPhone",
+      "kind": "iphone",
+      "paired_at": "2026-11-20T10:00:00Z",
+      "last_seen_at": "2026-11-21T08:00:00Z",
+      "connected": false,
+      "revoked_at": "2026-11-22T08:00:00Z",
+      "revoked_by": "operator"
+    },
+    {
+      "id": "dev_4",
+      "name": "Ada's iPhone",
+      "kind": "iphone",
+      "paired_at": "2026-11-20T10:00:00Z",
+      "last_seen_at": null,
+      "connected": false,
+      "revoked_at": "2026-11-23T08:00:00Z",
+      "revoked_by": "replaced"
+    }
+  ],
+  "hosts": [
+    {
+      "id": "host_1",
+      "name": "sendai",
+      "kind": "satellite",
+      "paired_at": "2026-11-20T10:00:00Z",
+      "last_seen_at": null,
+      "connected": true,
+      "revoked_at": null,
+      "revoked_by": null,
+      "admin": "revoke_only",
+      "egress": "work"
+    }
+  ]
+}

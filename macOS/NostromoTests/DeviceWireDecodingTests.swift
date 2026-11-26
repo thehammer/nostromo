@@ -139,3 +139,144 @@ final class DeviceWireDecodingTests: XCTestCase {
         XCTAssertEqual(w.pairFrom, [])
     }
 }
+
+// MARK: - The golden frames
+
+// `tests/fixtures/device-admin/frame-*.json` is what the Rust daemon's serde types write (the Rust test
+// `device_admin_wire_golden` generates and checks them), decoded here by the real client. Every frame file
+// has an entry in `expectations` below, and a file with no entry fails: a new frame cannot go unchecked.
+final class DeviceWireFixtureTests: XCTestCase {
+
+    private static let directory: URL = URL(fileURLWithPath: #filePath)   // .../macOS/NostromoTests/<this file>
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("tests/fixtures/device-admin")
+
+    private let client = NostromodClient(socketPath: "/dev/null")
+
+    private static func iso(_ text: String) -> Date { ISO8601DateFormatter().date(from: text)! }
+
+    private func decodeFixture(_ name: String) throws -> ServerMsg {
+        let raw = try Data(contentsOf: Self.directory.appendingPathComponent(name))
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: raw) as? [String: Any], name)
+        return client.decode(type_: try XCTUnwrap(json["type"] as? String, name), json: json, raw: raw)
+    }
+
+    private func frameFixturesOnDisk() throws -> Set<String> {
+        let names = try FileManager.default.contentsOfDirectory(atPath: Self.directory.path)
+        return Set(names.filter { $0.hasPrefix("frame-") && $0.hasSuffix(".json") })
+    }
+
+    // MARK: Expected fields, by file
+
+    private func outcome(_ expected: DevicePairOutcomeKind) -> (ServerMsg) -> Void {
+        return { msg in
+            guard case .devicePairOutcome(let w) = msg else { return XCTFail("device_pair_outcome must decode") }
+            XCTAssertEqual(w.pairingId, "p1")
+            XCTAssertEqual(w.outcome, expected)
+            XCTAssertNil(w.name)
+            XCTAssertNil(w.kind)
+            XCTAssertFalse(w.replaced)
+        }
+    }
+
+    private func adminError(_ request: String, _ reason: String) -> (ServerMsg) -> Void {
+        return { msg in
+            guard case .deviceAdminError(let w) = msg else { return XCTFail("device_admin_error must decode") }
+            XCTAssertEqual(w.requestId, request)
+            XCTAssertEqual(w.reason, reason)
+        }
+    }
+
+    private func level(_ expected: String, pairFrom: [String]) -> (ServerMsg) -> Void {
+        return { msg in
+            guard case .deviceAdminLevel(let w) = msg else { return XCTFail("device_admin_level must decode") }
+            XCTAssertEqual(w.level, expected)
+            XCTAssertEqual(w.pairFrom, pairFrom)
+        }
+    }
+
+    private var expectations: [String: (ServerMsg) -> Void] {
+        let iso = Self.iso
+        return [
+            "frame-device-pairing.json": { msg in
+                guard case .devicePairing(let w) = msg else { return XCTFail("device_pairing must decode") }
+                XCTAssertEqual(w.requestId, "r1")
+                XCTAssertEqual(w.pairingId, "p1")
+                XCTAssertEqual(w.code, "123456")
+                XCTAssertEqual(w.serverUrl, "nostromo://pair?v=1&host=kobe&port=7777&code=123456")
+                XCTAssertEqual(w.expiresAt, iso("2026-11-25T12:05:00Z"))
+            },
+            "frame-device-pair-outcome-cancelled.json": outcome(.cancelled),
+            "frame-device-pair-outcome-connection-lost.json": outcome(.connectionLost),
+            "frame-device-pair-outcome-expired.json": outcome(.expired),
+            "frame-device-pair-outcome-failed.json": outcome(.failed),
+            "frame-device-pair-outcome-locked-out.json": outcome(.lockedOut),
+            "frame-device-pair-outcome-paired.json": { msg in
+                guard case .devicePairOutcome(let w) = msg else { return XCTFail("device_pair_outcome must decode") }
+                XCTAssertEqual(w.pairingId, "p1")
+                XCTAssertEqual(w.outcome, .paired)
+                XCTAssertEqual(w.name, "Ada's iPhone")
+                XCTAssertEqual(w.kind, "iphone")
+                XCTAssertTrue(w.replaced)
+            },
+            "frame-devices.json": { msg in
+                guard case .devices(let w) = msg else { return XCTFail("devices must decode") }
+                XCTAssertEqual(w.devices.map(\.id), ["dev_1", "dev_2", "dev_3", "dev_4"], "four rows, in the daemon's order")
+                XCTAssertEqual(w.devices.map(\.name), ["Ada's iPad", "Ada's iPhone", "Old iPhone", "Ada's iPhone"])
+                XCTAssertEqual(w.devices.map(\.kind), ["ipad", "iphone", "iphone", "iphone"])
+                XCTAssertEqual(w.devices.map(\.pairedAt), Array(repeating: iso("2026-11-20T10:00:00Z"), count: 4))
+                XCTAssertEqual(w.devices.map(\.connected), [true, false, false, false])
+                XCTAssertEqual(w.devices.map(\.lastSeenAt),
+                               [iso("2026-11-25T09:30:00Z"), nil, iso("2026-11-21T08:00:00Z"), nil])
+                XCTAssertEqual(w.devices.map(\.revokedAt), [nil, nil, iso("2026-11-22T08:00:00Z"), iso("2026-11-23T08:00:00Z")])
+                XCTAssertEqual(w.devices.map(\.revokedBy), [nil, nil, "operator", "replaced"])
+                XCTAssertEqual(w.devices.map(\.isRevoked), [false, false, true, true])
+                XCTAssertFalse(w.devices.contains { $0.id == "host_1" || $0.name == "sendai" }, "satellite Macs (`hosts`) are not shown")
+            },
+            "frame-device-revoked.json": { msg in
+                guard case .deviceRevoked(let w) = msg else { return XCTFail("device_revoked must decode") }
+                XCTAssertEqual(w.requestId, "r4")
+                XCTAssertEqual(w.deviceId, "dev_1")
+                XCTAssertTrue(w.wasConnected)
+            },
+            "frame-device-admin-error-devices-unavailable.json": adminError("r1", "devices_unavailable"),
+            "frame-device-admin-error-not-permitted.json": adminError("r1", "not_permitted_on_this_mac"),
+            "frame-device-admin-error-server-unreachable.json": adminError("r1", "server_unreachable"),
+            "frame-device-admin-error-too-many-pairings.json": adminError("r1", "too_many_pairings"),
+            "frame-device-admin-error-unknown-device.json": adminError("r4", "unknown_device"),
+            "frame-device-admin-level-full.json": level("full", pairFrom: []),
+            "frame-device-admin-level-off.json": level("off", pairFrom: []),
+            "frame-device-admin-level-read-only.json": level("read_only", pairFrom: []),
+            "frame-device-admin-level-revoke-only.json": level("revoke_only", pairFrom: ["sendai"]),
+        ]
+    }
+
+    // MARK: Tests
+
+    func testEveryFrameTheDaemonWritesDecodesToItsFields() throws {
+        for (name, check) in expectations.sorted(by: { $0.key < $1.key }) {
+            check(try decodeFixture(name))
+        }
+    }
+
+    func testEveryFrameFixtureOnDiskHasExpectedFieldsAndNoneIsMissing() throws {
+        XCTAssertEqual(Set(expectations.keys), try frameFixturesOnDisk(),
+                       "a frame fixture with no expectations here (or an expectation with no file) is unvalidated")
+    }
+
+    func testAnUnknownOutcomeStringDecodesAsUnknownAndDoesNotFailTheFrame() throws {
+        let json: [String: Any] = ["type": "device_pair_outcome", "pairing_id": "p1", "outcome": "frozen"]
+        let msg = client.decode(type_: "device_pair_outcome", json: json, raw: try JSONSerialization.data(withJSONObject: json))
+        guard case .devicePairOutcome(let w) = msg else { return XCTFail("an unknown outcome must still decode the frame, got \(msg)") }
+        XCTAssertEqual(w.outcome, .unknown("frozen"))
+        XCTAssertEqual(w.pairingId, "p1")
+    }
+
+    func testAnUnknownLevelStringDecodes() throws {
+        let json: [String: Any] = ["type": "device_admin_level", "level": "frozen_solid", "pair_from": ["sendai"]]
+        let msg = client.decode(type_: "device_admin_level", json: json, raw: try JSONSerialization.data(withJSONObject: json))
+        guard case .deviceAdminLevel(let w) = msg else { return XCTFail("an unknown level must still decode the frame, got \(msg)") }
+        XCTAssertEqual(w.level, "frozen_solid")
+        XCTAssertEqual(w.pairFrom, ["sendai"])
+    }
+}

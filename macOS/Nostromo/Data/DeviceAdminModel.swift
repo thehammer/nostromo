@@ -29,6 +29,7 @@ enum DeviceAdminCopy {
     static let wasConnected = "Disconnected just now"
     static let wasNotConnected = "Wasn't connected. It will be refused the next time it tries."
     static let replaced = "Replaced by re-pairing"
+    static let notAUserAction = "That didn't come from a click or key press in this window, so nothing was sent. Try again."
 
     static func pairingOff(pairFrom: [String]) -> String {
         let command = "run `nostromo device pair` on your server."
@@ -109,7 +110,11 @@ final class DeviceAdminModel: ObservableObject {
         case expired
         case lockedOut
         case connectionLost
+        /// The code was redeemed but the device could not be saved.
         case failed
+        /// The primary or the daemon refused to make a code (or the pairing ended in a way this build does
+        /// not know): the generic "couldn't make a pairing code" sentence.
+        case issueFailed
         /// No code can be made; the window says why, from `adminAvailability`.
         case blocked
     }
@@ -120,6 +125,8 @@ final class DeviceAdminModel: ObservableObject {
     @Published private(set) var connected = false
     @Published private(set) var devicesSupported = false
     @Published private(set) var lastError: String?
+    /// Why the last Pair or Revoke press sent nothing (it was not a person's own input); nil otherwise.
+    @Published private(set) var gestureNotice: String?
     @Published private(set) var pair: PairState = .idle
     /// Per-device text after a revoke, keyed by device id.
     @Published private(set) var revokeStatus: [String: String] = [:]
@@ -141,11 +148,12 @@ final class DeviceAdminModel: ObservableObject {
         if !connected { return .daemonNotRunning }
         if !devicesSupported || lastError == "server_unreachable" { return .serverUnreachable }
         switch level?.level {
-        case "off": return .off
-        case "read_only": return .readOnly
+        case nil: return lastError == "not_permitted_on_this_mac" ? .revokeOnly : .available
+        case "full": return .available
         case "revoke_only": return .revokeOnly
-        case nil where lastError == "not_permitted_on_this_mac": return .revokeOnly
-        default: return .available
+        case "off": return .off
+        // `read_only`, and any level this build does not know: never open a control for it.
+        default: return .readOnly
         }
     }
 
@@ -186,9 +194,14 @@ final class DeviceAdminModel: ObservableObject {
         let availability = adminAvailability
         guard availability == .available else {
             pair = .blocked
+            probeIfStale(availability)
             return
         }
-        guard case .human = gesture else { return }
+        guard case .human = gesture else {
+            refuseGesture()
+            return
+        }
+        gestureNotice = nil
         cancelOpenPairing()
         let id = makeId()
         pendingPairRequest = id
@@ -212,6 +225,19 @@ final class DeviceAdminModel: ObservableObject {
         }
     }
 
+    /// The Pair window came to the front. After a refusal or an unreachable answer, ask again: the answer
+    /// tells whether the server is back (or still gone).
+    func windowBecameKey() {
+        probeIfStale(adminAvailability)
+    }
+
+    /// While the Pair window waits for the server, ask again (it calls this every few seconds). Nothing is
+    /// asked once the window is closed (`idle`).
+    func probeWhileWaiting() {
+        guard lastError == "server_unreachable", pair != .idle else { return }
+        requestList()
+    }
+
     // MARK: Devices
 
     func requestList() {
@@ -220,7 +246,12 @@ final class DeviceAdminModel: ObservableObject {
     }
 
     func revoke(deviceId: String, gesture: HumanGestureVerdict) {
-        guard case .human = gesture, canRevoke else { return }
+        guard case .human = gesture else {
+            refuseGesture()
+            return
+        }
+        guard canRevoke else { return }
+        gestureNotice = nil
         let id = makeId()
         pendingRevokes[id] = deviceId
         revokeStatus[deviceId] = "Revoking\u{2026}"
@@ -237,13 +268,15 @@ final class DeviceAdminModel: ObservableObject {
             devices = w.devices
             hasList = true
             if lastError == "server_unreachable" { lastError = nil }
+            settleBlockedPair()
         case .deviceRevoked(let w):
             guard pendingRevokes.removeValue(forKey: w.requestId) != nil else { return }
             revokeStatus[w.deviceId] = w.wasConnected ? DeviceAdminCopy.wasConnected : DeviceAdminCopy.wasNotConnected
         case .deviceAdminError(let w): handleError(w)
         case .deviceAdminLevel(let w):
             level = w
-            if lastError == "not_permitted_on_this_mac" { lastError = nil }
+            if lastError == "not_permitted_on_this_mac" || lastError == "server_unreachable" { lastError = nil }
+            settleBlockedPair()
         default: break
         }
     }
@@ -267,16 +300,28 @@ final class DeviceAdminModel: ObservableObject {
         case .expired: pair = .expired
         case .cancelled: pair = .idle
         case .lockedOut: pair = .lockedOut
-        case .connectionLost: pair = .connectionLost
+        case .connectionLost:
+            // On a satellite the local socket stays up while the uplink to the primary is gone: nothing can be
+            // asked of the server until an answer comes back (D3).
+            pair = .connectionLost
+            lastError = "server_unreachable"
+            requestList()
         case .failed: pair = .failed
+        case .unknown: pair = .issueFailed
         }
     }
 
     private func handleError(_ w: DeviceAdminErrorWire) {
         if w.requestId == pendingPairRequest {
             pendingPairRequest = nil
-            if w.reason == "server_unreachable" || w.reason == "not_permitted_on_this_mac" { lastError = w.reason }
-            pair = (w.reason == "server_unreachable" || w.reason == "not_permitted_on_this_mac") ? .blocked : .failed
+            switch w.reason {
+            case "server_unreachable", "not_permitted_on_this_mac":
+                lastError = w.reason
+                pair = .blocked
+            default:
+                // `too_many_pairings`, `devices_unavailable`, or a reason this build does not know.
+                pair = .issueFailed
+            }
             return
         }
         cancelledPairRequests.remove(w.requestId)
@@ -294,6 +339,29 @@ final class DeviceAdminModel: ObservableObject {
             }
             return
         }
-        if w.reason == "server_unreachable" { lastError = w.reason }
+        if w.reason == "server_unreachable" || w.reason == "connection_lost" { lastError = "server_unreachable" }
+    }
+
+    // MARK: Private
+
+    /// Say so when a press was not a person's own input, instead of doing nothing silently.
+    private func refuseGesture() {
+        gestureNotice = DeviceAdminCopy.notAUserAction
+        ActivationAudit.note("devices:gesture-refused")
+    }
+
+    /// Below `full` (or after an error) the app cannot tell a Mac that may not pair from a satellite whose
+    /// uplink dropped (the satellite forgets its level and tells no local client). A `DeviceList` is allowed
+    /// at revoke-only and read-only, and the answer says which it is: `server_unreachable` or the list.
+    private func probeIfStale(_ availability: Availability) {
+        switch availability {
+        case .revokeOnly, .readOnly, .serverUnreachable: requestList()
+        case .available, .off, .daemonNotRunning: break
+        }
+    }
+
+    /// A blocked window whose block lifted (the server answered) goes back to asking for a code.
+    private func settleBlockedPair() {
+        if pair == .blocked, adminAvailability == .available { pair = .idle }
     }
 }

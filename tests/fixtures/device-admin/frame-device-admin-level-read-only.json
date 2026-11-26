@@ -1,0 +1,5 @@
+{
+  "type": "device_admin_level",
+  "level": "read_only",
+  "pair_from": []
+}

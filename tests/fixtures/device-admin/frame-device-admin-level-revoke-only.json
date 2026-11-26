@@ -1,0 +1,7 @@
+{
+  "type": "device_admin_level",
+  "level": "revoke_only",
+  "pair_from": [
+    "sendai"
+  ]
+}

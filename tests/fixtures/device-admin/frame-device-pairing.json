@@ -1,0 +1,8 @@
+{
+  "type": "device_pairing",
+  "request_id": "r1",
+  "pairing_id": "p1",
+  "code": "123456",
+  "server_url": "nostromo://pair?v=1&host=kobe&port=7777&code=123456",
+  "expires_at": "2026-11-25T12:05:00Z"
+}

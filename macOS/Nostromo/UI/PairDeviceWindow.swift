@@ -5,9 +5,12 @@ import SwiftUI
 /// `DeviceAdminModel`. Closing the window sends `DevicePairCancel`, so the code dies with it.
 final class PairDeviceWindowController: NSWindowController, NSWindowDelegate {
     private let model: DeviceAdminModel
+    private let currentEvent: () -> NSEvent?
 
-    init(model: DeviceAdminModel) {
+    /// `currentEvent` is the input behind a control's action; a test supplies its own.
+    init(model: DeviceAdminModel, currentEvent: @escaping () -> NSEvent? = { NSApp.currentEvent }) {
         self.model = model
+        self.currentEvent = currentEvent
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 520),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Pair a Device"
@@ -16,23 +19,30 @@ final class PairDeviceWindowController: NSWindowController, NSWindowDelegate {
         window.delegate = self
         window.contentView = NSHostingView(rootView: PairDeviceView(
             model: model,
-            gesture: { [weak window] in
-                guard let view = window?.contentView else { return .refused(reason: .notAUserEvent) }
-                return HumanGesture.permit(NSApp.currentEvent, control: view)
-            },
+            gesture: { [weak self] in self?.gesture() ?? .refused(reason: .notAUserEvent) },
             close: { [weak window] in window?.close() }))
         window.center()
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
+    /// Whether the input behind the control being pressed was a person's own, in this window.
+    func gesture() -> HumanGestureVerdict {
+        DeviceWindowGesture.verdict(in: window, event: currentEvent())
+    }
+
+    /// The menu pick that opened the window asks for the code: a menu item's event belongs to the menu, not to
+    /// this window, so this check is the menu one. Every other check of `HumanGesture.permit` still applies.
+    func beginFromMenuPick() {
+        guard let window else { return }
+        model.beginPairing(gesture: HumanGesture.permit(currentEvent(), control: window.contentView ?? NSView(),
+                                                        menuSelection: true))
+    }
+
     /// Open (or bring forward). The menu pick is the gesture that asks for the code.
     func present() {
         guard let window else { return }
-        if !window.isVisible {
-            model.beginPairing(gesture: HumanGesture.permit(NSApp.currentEvent, control: window.contentView ?? NSView(),
-                                                            menuSelection: true))
-        }
+        if !window.isVisible { beginFromMenuPick() }
         ActivationAudit.note("pair-device:menu-open")
         NSApp.activate(ignoringOtherApps: true)
         ActivationAudit.note("pair-device:menu-open-front")
@@ -40,6 +50,8 @@ final class PairDeviceWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) { model.cancelPairing() }
+
+    func windowDidBecomeKey(_ notification: Notification) { model.windowBecameKey() }
 }
 
 struct PairDeviceView: View {
@@ -50,10 +62,15 @@ struct PairDeviceView: View {
     var body: some View {
         VStack(spacing: 14) {
             content
+            notice
             Spacer(minLength: 0)
         }
         .padding(20)
         .frame(width: 360, height: 520)
+        // While the server can't be reached, ask again every few seconds until it answers (a no-op otherwise).
+        .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { _ in
+            model.probeWhileWaiting()
+        }
     }
 
     @ViewBuilder private var content: some View {
@@ -83,6 +100,9 @@ struct PairDeviceView: View {
         case .failed:
             message(DeviceAdminCopy.saveFailed)
             newCode
+        case .issueFailed:
+            message(DeviceAdminCopy.issueFailed)
+            newCode
         case .blocked:
             message(DeviceAdminCopy.blocked(model.adminAvailability, pairFrom: model.pairFrom))
             Button("Close", action: close)
@@ -103,6 +123,12 @@ struct PairDeviceView: View {
             Text(DeviceAdminCopy.sharingLine).font(.footnote).foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
             cancelButton
+        }
+    }
+
+    private var notice: some View {
+        Group {
+            if let text = model.gestureNotice { Text(text).font(.footnote).foregroundColor(.red) }
         }
     }
 

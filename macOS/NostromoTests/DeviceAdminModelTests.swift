@@ -10,7 +10,47 @@ import XCTest
 //   M3 a code for an unknown request shown or cancelled       -> testACodeForAnUnknownRequestIsIgnoredWithoutCancelling
 //   M4 the human-gesture check dropped from pairing/revoke    -> testARefusedGestureSendsNothing...
 //   M5 the revoke-only level still sends pair start           -> testRevokeOnlyTurnsPairingOffButRevokeStillWorks
-//   M6 New Code enabled while disconnected                    -> testLosingTheConnectionWhileAMomentShowsDisablesNewCodeUntilReconnect
+//   M6 New Code enabled while disconnected                    -> testLosingTheConnectionWhileShowingDisablesNewCodeUntilReconnect
+//   M7 a refusal other than server_unreachable / not_permitted (too_many_pairings, devices_unavailable, an
+//      unknown reason) shown as blocked or as a save failure  -> testTooManyPairingsIsIssueFailedNotBlocked,
+//                                                                testDevicesUnavailableIsIssueFailedNotBlocked,
+//                                                                testAnUnknownPairStartRefusalIsIssueFailed,
+//                                                                testAnotherFailureToIssueIsIssueFailedNotBlocked
+//   M8 no probe when the Pair window opens at revoke_only /
+//      read_only, or a probe at off                           -> testOpeningAtRevokeOnlyProbesTheServerAndSendsNoPairStart,
+//                                                                testOpeningAtReadOnlyProbesTheServer, testOpeningAtOffSendsNothing
+//   M9 a probe answered server_unreachable / connection_lost
+//      not marking the server unreachable (or any other
+//      answer doing so)                                       -> testAProbeAnsweredServerUnreachableMarksTheServerUnreachable,
+//                                                                testAProbeAnsweredConnectionLostMarksTheServerUnreachable,
+//                                                                testAProbeAnsweredWithAnotherErrorChangesNothing
+//   M10 windowBecameKey not re-probing, or probing when idle at
+//      full / off                                             -> testBecomingKeyAfterAnUnreachableAnswerProbesAgain,
+//                                                                testBecomingKeyAtRevokeOnlyProbesAgain,
+//                                                                testBecomingKeyWhenIdleAtFullSendsNothing, testBecomingKeyAtOffSendsNothing
+//   M11 a devices / level frame not lifting unreachable, or a
+//      blocked pair not going back to idle (or doing so while
+//      the level still forbids pairing)                       -> testADevicesFrameLiftsTheUnreachableState,
+//                                                                testALevelFrameLiftsTheUnreachableStateAndReopensAPairWindow,
+//                                                                testABlockedPairReturnsToIdleWhenTheBlockLifts,
+//                                                                testABlockedPairStaysBlockedWhileTheLevelStillForbidsPairing
+//   M12 D3: a connection_lost outcome leaving New Code enabled,
+//      not probing, or an answer not re-enabling it; the
+//      waiting probe sending when reachable or when idle      -> testAConnectionLostOutcomeDisablesNewCodeWhileTheSocketStaysUp,
+//                                                                testAConnectionLostOutcomeAsksTheServerAgain,
+//                                                                testADevicesFrameReEnablesNewCodeAfterAConnectionLostOutcome,
+//                                                                testALevelFrameReEnablesNewCodeAfterAConnectionLostOutcome,
+//                                                                testProbeWhileWaitingAsksWhileTheServerIsUnreachable,
+//                                                                testProbeWhileWaitingSendsNothingWhileTheServerIsReachable,
+//                                                                testProbeWhileWaitingSendsNothingOnceTheWindowIsIdle
+//   M13 an unknown outcome string not ending in issueFailed   -> testAnUnknownOutcomeIsIssueFailed
+//   M14 an unknown level opening a control                    -> testAnUnknownLevelIsReadOnlyAndOpensNoControl,
+//                                                                testAnUnknownLevelSendsNoPairStart, testAnUnknownLevelSendsNoRevoke
+//   M15 a refused press silent, or a human press leaving the
+//      notice up                                              -> testARefusedPairPressSaysSoAndSendsNothing,
+//                                                                testARefusedRevokePressSaysSoAndSendsNothing,
+//                                                                testTheNextHumanPairPressClearsTheNotice,
+//                                                                testTheNextHumanRevokePressClearsTheNotice
 final class DeviceAdminModelTests: XCTestCase {
 
     // MARK: Rig
@@ -139,13 +179,40 @@ final class DeviceAdminModelTests: XCTestCase {
         XCTAssertEqual(DeviceAdminCopy.blocked(model.adminAvailability, pairFrom: model.pairFrom), DeviceAdminCopy.unreachable)
     }
 
-    func testAnotherFailureToIssueIsFailedNotBlocked() {
+    // Updated from `...IsFailedNotBlocked`: a refusal to issue is now `.issueFailed` ("couldn't make a pairing
+    // code"), kept apart from `.failed`, which means a paired device that could not be saved.
+    func testAnotherFailureToIssueIsIssueFailedNotBlocked() {
         connect()
         model.beginPairing(gesture: human)
         model.handle(adminError("r1", "not_saved"))
-        XCTAssertEqual(model.pair, .failed)
+        XCTAssertEqual(model.pair, .issueFailed)
+        XCTAssertNotEqual(model.pair, .blocked)
+        XCTAssertNotEqual(model.pair, .failed)
+        XCTAssertEqual(model.adminAvailability, .available)
         XCTAssertTrue(model.canPair)
     }
+
+    /// The daemon refused to issue a code for `reason`; the window must say so in its own words and offer
+    /// New Code, which must work.
+    private func assertPairStartRefusalIsIssueFailed(_ reason: String, file: StaticString = #filePath, line: UInt = #line) {
+        connect()
+        model.beginPairing(gesture: human)
+        model.handle(adminError("r1", reason))
+        XCTAssertEqual(model.pair, .issueFailed, reason, file: file, line: line)
+        XCTAssertNil(showingCode(), file: file, line: line)
+        XCTAssertEqual(model.adminAvailability, .available, "\(reason) is not a reason to treat the server as gone", file: file, line: line)
+        XCTAssertTrue(model.canPair, file: file, line: line)
+        XCTAssertTrue(model.canRequestNewCode, file: file, line: line)
+        XCTAssertEqual(DeviceAdminCopy.issueFailed, "Couldn't make a pairing code. Try again.", file: file, line: line)
+        transport.calls.removeAll()
+        model.beginPairing(gesture: human)
+        XCTAssertEqual(model.pair, .issuing, "New Code asks again", file: file, line: line)
+        XCTAssertEqual(transport.calls, [.pairStart("r2")], file: file, line: line)
+    }
+
+    func testTooManyPairingsIsIssueFailedNotBlocked() { assertPairStartRefusalIsIssueFailed("too_many_pairings") }
+    func testDevicesUnavailableIsIssueFailedNotBlocked() { assertPairStartRefusalIsIssueFailed("devices_unavailable") }
+    func testAnUnknownPairStartRefusalIsIssueFailed() { assertPairStartRefusalIsIssueFailed("a_reason_from_a_newer_daemon") }
 
     func testALateCodeForACancelledRequestIsCancelledAndNeverShown() {
         connect()
@@ -230,15 +297,18 @@ final class DeviceAdminModelTests: XCTestCase {
         XCTAssertTrue(model.canRevoke)
         model.beginPairing(gesture: human)
         XCTAssertEqual(model.pair, .blocked)
-        XCTAssertEqual(transport.calls, [], "no DevicePairStart at revoke_only")
+        // Updated: opening below `full` now sends one DeviceList probe (see M8), and never a PairStart.
+        XCTAssertEqual(transport.calls, [.list("r1")], "one probe and no DevicePairStart at revoke_only")
         XCTAssertEqual(DeviceAdminCopy.blocked(model.adminAvailability, pairFrom: model.pairFrom),
                        "Pairing new devices is turned off on this Mac. Pair from sendai or run `nostromo device pair` on your server.")
         model.revoke(deviceId: "d1", gesture: human)
-        XCTAssertEqual(transport.calls, [.revoke(request: "r1", device: "d1")])
+        XCTAssertEqual(transport.calls, [.list("r1"), .revoke(request: "r2", device: "d1")])
     }
 
     func testReadOnlyAndOffDisablePairAndRevoke() {
-        for level in ["read_only", "off"] {
+        // Updated: read_only probes on open (one DeviceList, see M8); off sends nothing at all. Neither may
+        // ever send a PairStart or a Revoke.
+        for (level, probes) in [("read_only", [FakeTransport.Call.list("r1")]), ("off", [])] {
             let t = FakeTransport()
             let m = makeModel(t)
             connect(m, level: level)
@@ -247,7 +317,9 @@ final class DeviceAdminModelTests: XCTestCase {
             m.beginPairing(gesture: human)
             m.revoke(deviceId: "d1", gesture: human)
             XCTAssertEqual(m.pair, .blocked, level)
-            XCTAssertEqual(t.calls, [], level)
+            XCTAssertEqual(t.calls, probes, level)
+            XCTAssertFalse(t.calls.contains { if case .pairStart = $0 { return true } else { return false } }, level)
+            XCTAssertFalse(t.calls.contains { if case .revoke = $0 { return true } else { return false } }, level)
         }
     }
 
@@ -338,6 +410,294 @@ final class DeviceAdminModelTests: XCTestCase {
         }
         XCTAssertEqual(a.pair, .lockedOut)
         XCTAssertEqual(b.pair, .lockedOut)
+    }
+
+    // MARK: Opening below full: the probe
+
+    func testOpeningAtRevokeOnlyProbesTheServerAndSendsNoPairStart() {
+        connect(level: "revoke_only", pairFrom: ["sendai"])
+        model.beginPairing(gesture: human)
+        XCTAssertEqual(model.pair, .blocked)
+        XCTAssertEqual(transport.calls, [.list("r1")])
+    }
+
+    func testOpeningAtReadOnlyProbesTheServer() {
+        connect(level: "read_only")
+        model.beginPairing(gesture: human)
+        XCTAssertEqual(model.pair, .blocked)
+        XCTAssertEqual(transport.calls, [.list("r1")])
+    }
+
+    func testOpeningAtOffSendsNothing() {
+        connect(level: "off")
+        model.beginPairing(gesture: human)
+        XCTAssertEqual(model.pair, .blocked)
+        XCTAssertEqual(transport.calls, [])
+    }
+
+    func testOpeningWithoutAConnectionOrWithoutDevicesSupportSendsNothing() {
+        let notRunning = FakeTransport()
+        let m1 = makeModel(notRunning)
+        m1.beginPairing(gesture: human)
+        XCTAssertEqual(m1.pair, .blocked)
+        XCTAssertEqual(notRunning.calls, [], "a daemon that is not running is asked nothing")
+
+        let old = FakeTransport()
+        let m2 = makeModel(old)
+        m2.connectionChanged(connected: true, devicesSupported: false)
+        m2.beginPairing(gesture: human)
+        XCTAssertEqual(m2.pair, .blocked)
+        XCTAssertEqual(old.calls, [], "a daemon without device support is asked nothing")
+    }
+
+    // The satellite whose uplink to the primary dropped (Kobe with WireGuard off) forgets its level and tells
+    // no local client; the probe's answer is how the Pair window learns it is the server that is gone.
+
+    func testAProbeAnsweredServerUnreachableMarksTheServerUnreachable() {
+        connect(level: "read_only")
+        model.beginPairing(gesture: human)
+        XCTAssertNotEqual(DeviceAdminCopy.blocked(model.adminAvailability, pairFrom: model.pairFrom), DeviceAdminCopy.unreachable,
+                          "before the answer the window cannot tell why")
+        model.handle(adminError("r1", "server_unreachable"))
+        XCTAssertEqual(model.adminAvailability, .serverUnreachable)
+        XCTAssertFalse(model.canPair)
+        XCTAssertEqual(model.pair, .blocked)
+        XCTAssertEqual(DeviceAdminCopy.blocked(model.adminAvailability, pairFrom: model.pairFrom), DeviceAdminCopy.unreachable)
+    }
+
+    func testAProbeAnsweredConnectionLostMarksTheServerUnreachable() {
+        connect(level: "revoke_only", pairFrom: ["sendai"])
+        model.beginPairing(gesture: human)
+        model.handle(adminError("r1", "connection_lost"))
+        XCTAssertEqual(model.adminAvailability, .serverUnreachable)
+        XCTAssertFalse(model.canPair)
+        XCTAssertEqual(DeviceAdminCopy.blocked(model.adminAvailability, pairFrom: model.pairFrom), DeviceAdminCopy.unreachable)
+    }
+
+    func testAProbeAnsweredWithAnotherErrorChangesNothing() {
+        connect(level: "read_only")
+        model.beginPairing(gesture: human)
+        model.handle(adminError("r1", "unknown_device"))
+        XCTAssertEqual(model.adminAvailability, .readOnly)
+        XCTAssertEqual(DeviceAdminCopy.blocked(model.adminAvailability, pairFrom: model.pairFrom), DeviceAdminCopy.readOnly)
+    }
+
+    // MARK: Window focus
+
+    func testBecomingKeyAfterAnUnreachableAnswerProbesAgain() {
+        connect()
+        model.beginPairing(gesture: human)
+        model.handle(adminError("r1", "server_unreachable"))
+        XCTAssertEqual(transport.calls, [.pairStart("r1")])
+        model.windowBecameKey()
+        XCTAssertEqual(transport.calls, [.pairStart("r1"), .list("r2")])
+    }
+
+    func testBecomingKeyBelowFullProbesAgain() {
+        for level in ["revoke_only", "read_only"] {
+            let t = FakeTransport()
+            let m = makeModel(t)
+            connect(m, level: level)
+            m.beginPairing(gesture: human)
+            m.windowBecameKey()
+            XCTAssertEqual(t.calls, [.list("r1"), .list("r2")], level)
+        }
+    }
+
+    func testBecomingKeyWhenIdleAtFullSendsNothing() {
+        connect(level: "full")
+        model.windowBecameKey()
+        XCTAssertEqual(transport.calls, [])
+    }
+
+    func testBecomingKeyAtOffOrWithoutADaemonSendsNothing() {
+        connect(level: "off")
+        model.windowBecameKey()
+        XCTAssertEqual(transport.calls, [])
+        let t = FakeTransport()
+        makeModel(t).windowBecameKey()
+        XCTAssertEqual(t.calls, [])
+    }
+
+    // MARK: Lifting the unreachable state
+
+    /// The state of a Pair window that asked for a code and was told the server is unreachable.
+    private func blockedByAnUnreachableServer() {
+        connect(level: "full")
+        model.beginPairing(gesture: human)
+        model.handle(adminError("r1", "server_unreachable"))
+        XCTAssertEqual(model.pair, .blocked, "precondition")
+        XCTAssertEqual(model.adminAvailability, .serverUnreachable, "precondition")
+    }
+
+    func testADevicesFrameLiftsTheUnreachableState() {
+        blockedByAnUnreachableServer()
+        model.handle(.devices(DevicesWire(devices: [])))
+        XCTAssertEqual(model.adminAvailability, .available)
+        XCTAssertTrue(model.canPair)
+        XCTAssertTrue(model.canRequestNewCode)
+    }
+
+    func testALevelFrameLiftsTheUnreachableStateAndReopensAPairWindow() {
+        blockedByAnUnreachableServer()
+        model.handle(.deviceAdminLevel(DeviceAdminLevelWire(level: "full")))
+        XCTAssertEqual(model.adminAvailability, .available)
+        XCTAssertEqual(model.pair, .idle, "the blocked window asks for a code again")
+    }
+
+    func testABlockedPairReturnsToIdleWhenTheBlockLifts() {
+        blockedByAnUnreachableServer()
+        model.handle(.devices(DevicesWire(devices: [])))
+        XCTAssertEqual(model.pair, .idle)
+    }
+
+    func testABlockedPairStaysBlockedWhileTheLevelStillForbidsPairing() {
+        connect(level: "revoke_only", pairFrom: ["sendai"])
+        model.beginPairing(gesture: human)
+        model.handle(.devices(DevicesWire(devices: [device("d1")])))
+        XCTAssertEqual(model.pair, .blocked)
+        XCTAssertEqual(model.adminAvailability, .revokeOnly)
+    }
+
+    // MARK: D3: the uplink drops while the local socket stays up
+
+    /// A code is showing; the daemon says the pairing was lost, and the socket to the daemon is still up.
+    private func loseTheUplinkWhileShowing() {
+        connect(level: "full")
+        model.beginPairing(gesture: human)
+        model.handle(pairing("r1", "p1"))
+        transport.calls.removeAll()
+        model.handle(outcome("p1", .connectionLost))
+    }
+
+    func testAConnectionLostOutcomeDisablesNewCodeWhileTheSocketStaysUp() {
+        loseTheUplinkWhileShowing()
+        XCTAssertEqual(model.pair, .connectionLost)
+        XCTAssertTrue(model.connected, "the local socket never went down")
+        XCTAssertFalse(model.canRequestNewCode)
+        XCTAssertEqual(model.adminAvailability, .serverUnreachable)
+        XCTAssertEqual(DeviceAdminCopy.waitingForServer, "Waiting for the server\u{2026}")
+    }
+
+    func testAConnectionLostOutcomeAsksTheServerAgain() {
+        loseTheUplinkWhileShowing()
+        XCTAssertEqual(transport.calls, [.list("r2")])
+    }
+
+    func testADevicesFrameReEnablesNewCodeAfterAConnectionLostOutcome() {
+        loseTheUplinkWhileShowing()
+        model.handle(.devices(DevicesWire(devices: [])))
+        XCTAssertTrue(model.canRequestNewCode)
+        XCTAssertEqual(model.pair, .connectionLost, "the lost code is not resurrected")
+        transport.calls.removeAll()
+        model.beginPairing(gesture: human)
+        XCTAssertEqual(transport.calls, [.pairStart("r3")], "New Code works again")
+    }
+
+    func testALevelFrameReEnablesNewCodeAfterAConnectionLostOutcome() {
+        loseTheUplinkWhileShowing()
+        model.handle(.deviceAdminLevel(DeviceAdminLevelWire(level: "full")))
+        XCTAssertTrue(model.canRequestNewCode)
+        XCTAssertEqual(model.pair, .connectionLost)
+    }
+
+    func testProbeWhileWaitingAsksWhileTheServerIsUnreachable() {
+        loseTheUplinkWhileShowing()
+        transport.calls.removeAll()
+        model.probeWhileWaiting()
+        XCTAssertEqual(transport.calls, [.list("r3")])
+        model.probeWhileWaiting()
+        XCTAssertEqual(transport.calls, [.list("r3"), .list("r4")], "and again every time the timer fires")
+    }
+
+    func testProbeWhileWaitingSendsNothingWhileTheServerIsReachable() {
+        loseTheUplinkWhileShowing()
+        model.handle(.devices(DevicesWire(devices: [])))
+        transport.calls.removeAll()
+        model.probeWhileWaiting()
+        XCTAssertEqual(transport.calls, [])
+    }
+
+    func testProbeWhileWaitingSendsNothingOnceTheWindowIsIdle() {
+        loseTheUplinkWhileShowing()
+        model.cancelPairing()
+        XCTAssertEqual(model.adminAvailability, .serverUnreachable, "precondition: still waiting for the server")
+        transport.calls.removeAll()
+        model.probeWhileWaiting()
+        XCTAssertEqual(transport.calls, [])
+    }
+
+    // MARK: Values this build does not know
+
+    func testAnUnknownOutcomeIsIssueFailed() {
+        connect()
+        model.beginPairing(gesture: human)
+        model.handle(pairing("r1", "p1"))
+        model.handle(outcome("p1", .unknown("frozen")))
+        XCTAssertEqual(model.pair, .issueFailed)
+        XCTAssertTrue(model.canRequestNewCode)
+    }
+
+    func testAnUnknownLevelIsReadOnlyAndOpensNoControl() {
+        connect(level: "frozen_solid", pairFrom: ["sendai"])
+        XCTAssertEqual(model.adminAvailability, .readOnly)
+        XCTAssertFalse(model.canPair)
+        XCTAssertFalse(model.canRevoke)
+        XCTAssertFalse(model.canRequestNewCode)
+        XCTAssertEqual(DeviceAdminCopy.blocked(model.adminAvailability, pairFrom: model.pairFrom), DeviceAdminCopy.readOnly)
+    }
+
+    func testAnUnknownLevelSendsNoPairStart() {
+        connect(level: "frozen_solid")
+        model.beginPairing(gesture: human)
+        XCTAssertEqual(model.pair, .blocked)
+        XCTAssertFalse(transport.calls.contains { if case .pairStart = $0 { return true } else { return false } })
+    }
+
+    func testAnUnknownLevelSendsNoRevoke() {
+        connect(level: "frozen_solid")
+        model.revoke(deviceId: "d1", gesture: human)
+        XCTAssertFalse(transport.calls.contains { if case .revoke = $0 { return true } else { return false } })
+        XCTAssertNil(model.revokeStatus["d1"])
+    }
+
+    func testBeforeAnyLevelArrivesPairingAndRevokingAreAvailable() {
+        connect()
+        XCTAssertTrue(model.canPair)
+        XCTAssertTrue(model.canRevoke)
+    }
+
+    // MARK: A press that was not a person's
+
+    func testARefusedPairPressSaysSoAndSendsNothing() {
+        connect()
+        XCTAssertNil(model.gestureNotice)
+        model.beginPairing(gesture: refused)
+        XCTAssertEqual(model.gestureNotice, DeviceAdminCopy.notAUserAction)
+        XCTAssertEqual(transport.calls, [])
+    }
+
+    func testARefusedRevokePressSaysSoAndSendsNothing() {
+        connect()
+        model.revoke(deviceId: "d1", gesture: refused)
+        XCTAssertEqual(model.gestureNotice, DeviceAdminCopy.notAUserAction)
+        XCTAssertEqual(transport.calls, [])
+    }
+
+    func testTheNextHumanPairPressClearsTheNotice() {
+        connect()
+        model.beginPairing(gesture: refused)
+        model.beginPairing(gesture: human)
+        XCTAssertNil(model.gestureNotice)
+        XCTAssertEqual(transport.calls, [.pairStart("r1")])
+    }
+
+    func testTheNextHumanRevokePressClearsTheNotice() {
+        connect()
+        model.revoke(deviceId: "d1", gesture: refused)
+        model.revoke(deviceId: "d1", gesture: human)
+        XCTAssertNil(model.gestureNotice)
+        XCTAssertEqual(transport.calls, [.revoke(request: "r1", device: "d1")])
     }
 
     // MARK: Devices

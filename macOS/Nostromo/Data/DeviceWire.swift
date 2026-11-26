@@ -69,11 +69,24 @@ struct DevicePairingWire: Decodable, Equatable {
     }
 }
 
-enum DevicePairOutcomeKind: String, Decodable, Equatable {
-    case paired, expired, cancelled
-    case lockedOut = "locked_out"
-    case connectionLost = "connection_lost"
-    case failed
+/// How a pairing ended. A value this build does not know decodes as `.unknown` (never an error), so a
+/// newer daemon cannot make the whole frame fail and leave the window counting down a dead code.
+enum DevicePairOutcomeKind: Decodable, Equatable {
+    case paired, expired, cancelled, lockedOut, connectionLost, failed
+    case unknown(String)
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        switch raw {
+        case "paired": self = .paired
+        case "expired": self = .expired
+        case "cancelled": self = .cancelled
+        case "locked_out": self = .lockedOut
+        case "connection_lost": self = .connectionLost
+        case "failed": self = .failed
+        default: self = .unknown(raw)
+        }
+    }
 }
 
 struct DevicePairOutcomeWire: Decodable, Equatable {
@@ -114,7 +127,8 @@ struct DeviceAdminErrorWire: Decodable, Equatable {
     enum CodingKeys: String, CodingKey { case requestId = "request_id", reason }
 }
 
-/// What this Mac may do on the primary. `level` is one of `full`, `revoke_only`, `read_only`, `off`.
+/// What this Mac may do on the primary. `level` is one of `full`, `revoke_only`, `read_only`, `off`; any other
+/// value is read as read-only by `DeviceAdminModel` (an unknown level never opens a control).
 struct DeviceAdminLevelWire: Decodable, Equatable {
     let level: String
     let pairFrom: [String]

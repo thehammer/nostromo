@@ -1,25 +1,42 @@
 import AppKit
 import SwiftUI
 
+/// The gesture check of the device windows' own controls. The event a control acts on must belong to the
+/// control's window: a SwiftUI `.alert`, `.sheet` or popover is a window of its own, and a click there is
+/// refused as "not a user event", so a confirmation shown that way never acts. Confirm inside the window.
+enum DeviceWindowGesture {
+    static func verdict(in window: NSWindow?, event: NSEvent?) -> HumanGestureVerdict {
+        guard let view = window?.contentView else { return .refused(reason: .notAUserEvent) }
+        return HumanGesture.permit(event, control: view)
+    }
+}
+
 /// Devices…: the paired phones and iPads, with Revoke… and the revoked ones below.
 final class DevicesWindowController: NSWindowController {
     private let model: DeviceAdminModel
+    private let currentEvent: () -> NSEvent?
 
-    init(model: DeviceAdminModel) {
+    /// `currentEvent` is the input behind a control's action; a test supplies its own.
+    init(model: DeviceAdminModel, currentEvent: @escaping () -> NSEvent? = { NSApp.currentEvent }) {
         self.model = model
+        self.currentEvent = currentEvent
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "Devices"
         window.isReleasedWhenClosed = false
         super.init(window: window)
-        window.contentView = NSHostingView(rootView: DevicesView(model: model, gesture: { [weak window] in
-            guard let view = window?.contentView else { return .refused(reason: .notAUserEvent) }
-            return HumanGesture.permit(NSApp.currentEvent, control: view)
+        window.contentView = NSHostingView(rootView: DevicesView(model: model, gesture: { [weak self] in
+            self?.gesture() ?? .refused(reason: .notAUserEvent)
         }))
         window.center()
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+
+    /// Whether the input behind the control being pressed was a person's own, in this window.
+    func gesture() -> HumanGestureVerdict {
+        DeviceWindowGesture.verdict(in: window, event: currentEvent())
+    }
 
     func present() {
         model.requestList()
@@ -33,7 +50,8 @@ final class DevicesWindowController: NSWindowController {
 struct DevicesView: View {
     @ObservedObject var model: DeviceAdminModel
     let gesture: () -> HumanGestureVerdict
-    @State private var pendingRevoke: DeviceSummary?
+    /// The device whose Revoke… was pressed: its row shows the confirmation (inside this window).
+    @State private var pendingRevoke: String?
 
     private var banner: String? {
         switch model.adminAvailability {
@@ -51,6 +69,7 @@ struct DevicesView: View {
                model.hasList {
                 Text("Showing the last list received. It may be out of date.").font(.footnote).foregroundColor(.secondary)
             }
+            if let notice = model.gestureNotice { Text(notice).font(.footnote).foregroundColor(.red) }
             if model.adminAvailability == .off {
                 Spacer()
             } else {
@@ -59,10 +78,21 @@ struct DevicesView: View {
         }
         .padding(16)
         .frame(minWidth: 480, minHeight: 320)
-        .alert(item: $pendingRevoke) { device in
-            Alert(title: Text(DeviceAdminCopy.revokeConfirmation(name: device.name)),
-                  primaryButton: .destructive(Text("Revoke")) { model.revoke(deviceId: device.id, gesture: gesture()) },
-                  secondaryButton: .cancel())
+    }
+
+    /// The Revoke confirmation, a row of this window (not an alert: see `DeviceWindowGesture`). Its Revoke
+    /// button is the control the gesture check runs on.
+    private func confirmation(for device: DeviceSummary) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(DeviceAdminCopy.revokeConfirmation(name: device.name)).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Revoke") {
+                    let verdict = gesture()
+                    pendingRevoke = nil
+                    model.revoke(deviceId: device.id, gesture: verdict)
+                }
+                Button("Cancel") { pendingRevoke = nil }.keyboardShortcut(.cancelAction)
+            }
         }
     }
 
@@ -82,8 +112,10 @@ struct DevicesView: View {
                             }
                         }
                         Spacer()
-                        Button("Revoke\u{2026}") { pendingRevoke = device }.disabled(!model.canRevoke)
+                        Button("Revoke\u{2026}") { pendingRevoke = device.id }
+                            .disabled(!model.canRevoke || pendingRevoke == device.id)
                     }
+                    if pendingRevoke == device.id { confirmation(for: device) }
                 }
             }
             if !model.revokedDevices.isEmpty {

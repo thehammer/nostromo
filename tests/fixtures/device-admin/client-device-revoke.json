@@ -1,0 +1,5 @@
+{
+  "type": "device_revoke",
+  "request_id": "r4",
+  "device": "dev_1"
+}

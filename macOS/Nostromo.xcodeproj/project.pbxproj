@@ -590,6 +590,8 @@
 		BP0000000000000000000024 /* PairQRTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000023 /* PairQRTests.swift */; };
 		BP0000000000000000000022 /* DeviceWireDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000021 /* DeviceWireDecodingTests.swift */; };
 		BP0000000000000000000020 /* DeviceAdminModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000019 /* DeviceAdminModelTests.swift */; };
+		BP0000000000000000000030 /* DeviceAdminClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000029 /* DeviceAdminClientTests.swift */; };
+		BP0000000000000000000028 /* DeviceWindowGestureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BP0000000000000000000027 /* DeviceWindowGestureTests.swift */; };
 		ZP0000000000000000000014 /* WindowPlacementController.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000004 /* WindowPlacementController.swift */; };
 		ZP0000000000000000000024 /* WindowPlacementController.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000004 /* WindowPlacementController.swift */; };
 		ZP0000000000000000000025 /* NostromoWindow.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000003 /* NostromoWindow.swift */; };
@@ -1334,6 +1336,8 @@
 		BP0000000000000000000023 /* PairQRTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairQRTests.swift; sourceTree = "<group>"; };
 		BP0000000000000000000021 /* DeviceWireDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceWireDecodingTests.swift; sourceTree = "<group>"; };
 		BP0000000000000000000019 /* DeviceAdminModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceAdminModelTests.swift; sourceTree = "<group>"; };
+		BP0000000000000000000029 /* DeviceAdminClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceAdminClientTests.swift; sourceTree = "<group>"; };
+		BP0000000000000000000027 /* DeviceWindowGestureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceWindowGestureTests.swift; sourceTree = "<group>"; };
 		QH0000000000000000000001 /* NostromoHome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostromoHome.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000004 /* WindowPlacementController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowPlacementController.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000031 /* DisplayIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayIdentityTests.swift; sourceTree = "<group>"; };
@@ -2157,6 +2161,8 @@
 				BP0000000000000000000023 /* PairQRTests.swift */,
 				BP0000000000000000000021 /* DeviceWireDecodingTests.swift */,
 				BP0000000000000000000019 /* DeviceAdminModelTests.swift */,
+				BP0000000000000000000029 /* DeviceAdminClientTests.swift */,
+				BP0000000000000000000027 /* DeviceWindowGestureTests.swift */,
 				QH0000000000000000000004 /* NostromoHomeTests.swift */,
 				ZP0000000000000000000035 /* NostromoWindowConstrainTests.swift */,
 				YY0000000000000000000001 /* PaneContentViewForEachIdentityTests.swift */,
@@ -2859,6 +2865,8 @@
 				BP0000000000000000000024 /* PairQRTests.swift in Sources */,
 				BP0000000000000000000022 /* DeviceWireDecodingTests.swift in Sources */,
 				BP0000000000000000000020 /* DeviceAdminModelTests.swift in Sources */,
+				BP0000000000000000000030 /* DeviceAdminClientTests.swift in Sources */,
+				BP0000000000000000000028 /* DeviceWindowGestureTests.swift in Sources */,
 				QH0000000000000000000005 /* NostromoHomeTests.swift in Sources */,
 				ZP0000000000000000000045 /* NostromoWindowConstrainTests.swift in Sources */,
 				WK0000000000000000000006 /* WorkStore.swift in TestSources */,
