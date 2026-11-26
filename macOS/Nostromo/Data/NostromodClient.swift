@@ -329,6 +329,14 @@ enum ServerMsg {
     /// The answer to a hand-off verb of this connection (`authored_prs_notify_v1`). Local only.
     case authoredPrAnswer(AuthoredPrAnswerFrame)
 
+    // ── device administration (`devices`; local clients only) ────────────────
+    case devicePairing(DevicePairingWire)
+    case devicePairOutcome(DevicePairOutcomeWire)
+    case devices(DevicesWire)
+    case deviceRevoked(DeviceRevokedWire)
+    case deviceAdminError(DeviceAdminErrorWire)
+    case deviceAdminLevel(DeviceAdminLevelWire)
+
     // ── conversation history (`conversation_history_v1`; operator app only) ──
     case conversationHistory(ConversationHistoryWire)
     case conversationResumeResult(ConversationResumeResultWire)
@@ -1087,7 +1095,8 @@ class NostromodClient {
     /// daemon delivers them only to a client that names the topic, so a reconnect to
     /// a daemon that advertises the feature subscribes again (this runs per `welcome`).
     static let featureTopics: [String: String] = ["work": "work", "model": "model",
-                                                  "authored_prs_v1": "authored_prs"]
+                                                  "authored_prs_v1": "authored_prs",
+                                                  "devices": "devices"]
 
     /// Re-subscribe with the base topics plus the topic of every feature this
     /// connection's daemon advertised. Evaluated per connection (a daemon that is
@@ -1307,6 +1316,49 @@ class NostromodClient {
     func sessionCommandsGet(tag: String, requestId: String) {
         guard daemonAdvertisesSlashCommands else { return }
         send(ClientSessionCommandsGet(requestId: requestId, tag: tag), type: "session_commands_get", tag: tag)
+    }
+
+    /// Whether the connection's last `welcome` advertised `devices` (device administration).
+    var daemonAdvertisesDevices: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return advertisedFeatures.contains(NostromodClient.devicesFeature)
+    }
+
+    /// Whether the connection's last `welcome` advertised `presence` (operator presence, W13).
+    var daemonAdvertisesPresence: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return advertisedFeatures.contains(NostromodClient.presenceFeature)
+    }
+
+    static let devicesFeature = "devices"
+    static let presenceFeature = "presence"
+
+    // The device-administration verbs. Each is written only to a daemon that advertised `devices`
+    // (an older daemon cannot decode them). All traffic goes over the existing Unix socket.
+    func devicePairStart(requestId: String) {
+        guard daemonAdvertisesDevices else { return }
+        send(ClientDevicePairStart(requestId: requestId), type: "device_pair_start")
+    }
+
+    func devicePairCancel(requestId: String, pairingId: String) {
+        guard daemonAdvertisesDevices else { return }
+        send(ClientDevicePairCancel(requestId: requestId, pairingId: pairingId), type: "device_pair_cancel")
+    }
+
+    func deviceList(requestId: String) {
+        guard daemonAdvertisesDevices else { return }
+        send(ClientDeviceList(requestId: requestId), type: "device_list")
+    }
+
+    func deviceRevoke(requestId: String, device: String) {
+        guard daemonAdvertisesDevices else { return }
+        send(ClientDeviceRevoke(requestId: requestId, device: device), type: "device_revoke")
+    }
+
+    /// Whether the operator is at this Mac. Written only to a daemon that advertised `presence`.
+    func sendOperatorPresence(state: String) {
+        guard daemonAdvertisesPresence else { return }
+        send(ClientOperatorPresence(state: state), type: "operator_presence")
     }
 
     /// Whether the connection's last `welcome` advertised `authored_prs_v1`.
@@ -2461,6 +2513,30 @@ class NostromodClient {
             } else {
                 log.error("failed to decode session_commands")
             }
+
+        case "device_pairing":
+            if let m = try? decoder.decode(DevicePairingWire.self, from: raw) { return .devicePairing(m) }
+            log.error("failed to decode device_pairing")   // never log the frame: it carries a code
+
+        case "device_pair_outcome":
+            if let m = try? decoder.decode(DevicePairOutcomeWire.self, from: raw) { return .devicePairOutcome(m) }
+            log.error("failed to decode device_pair_outcome")
+
+        case "devices":
+            if let m = try? decoder.decode(DevicesWire.self, from: raw) { return .devices(m) }
+            log.error("failed to decode devices")
+
+        case "device_revoked":
+            if let m = try? decoder.decode(DeviceRevokedWire.self, from: raw) { return .deviceRevoked(m) }
+            log.error("failed to decode device_revoked")
+
+        case "device_admin_error":
+            if let m = try? decoder.decode(DeviceAdminErrorWire.self, from: raw) { return .deviceAdminError(m) }
+            log.error("failed to decode device_admin_error")
+
+        case "device_admin_level":
+            if let m = try? decoder.decode(DeviceAdminLevelWire.self, from: raw) { return .deviceAdminLevel(m) }
+            log.error("failed to decode device_admin_level")
 
         case "authored_prs":
             if let m = try? decoder.decode(AuthoredPrsFrame.self, from: raw) {

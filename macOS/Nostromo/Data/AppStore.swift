@@ -99,6 +99,13 @@ class AppStore: ObservableObject {
     lazy var authoredPrsDemand = AuthoredPrsDemandReporter(
         supported: { [weak self] in self?.authoredPrsSupported == true },
         send: { [weak self] level in self?.client.sendAuthoredPrsDemand(level: level) })
+    /// Device administration (Pair a Device…, Devices…): state for the two windows.
+    lazy var deviceAdmin = DeviceAdminModel(transport: client)
+    /// Tells the daemon whether the operator is at this Mac (locked, asleep or idle for 2 minutes is away).
+    /// Sends only to a daemon that advertised `presence`.
+    lazy var operatorPresence = OperatorPresenceReporter(
+        supported: { [weak self] in self?.client.daemonAdvertisesPresence == true },
+        send: { [weak self] state in self?.client.sendOperatorPresence(state: state) })
     /// Where the Overview's refresh goes. Tests replace it.
     var authoredPrsRefreshSender: () -> Void = {}
     /// The daemon's last refusal of a notice switch, as one line; cleared by the next state frame or a disconnect.
@@ -760,6 +767,7 @@ class AppStore: ObservableObject {
         RemoteShellStore.shared.transport = { [client] in client.sendRemoteShell($0) }
         authoredPrsRefreshSender = { [client] in client.sendAuthoredPrsRefresh() }
         authoredPrsDemand.start()
+        operatorPresence.start()
 
         // The work store holds what one connection pushed. When it drops, requests
         // still waiting for an answer can never get one; when a connection comes
@@ -773,6 +781,11 @@ class AppStore: ObservableObject {
                 self?.perriHealth.connectionChanged(connected)
                 self?.sessionListRefresher.connectionChanged(connected)
                 if !connected { self?.daemonDisconnected() }
+                if let self {
+                    self.deviceAdmin.connectionChanged(connected: connected,
+                                                       devicesSupported: connected && self.client.daemonAdvertisesDevices)
+                    if connected { self.operatorPresence.connectionStarted() } else { self.operatorPresence.connectionLost() }
+                }
                 if connected, let self {
                     self.authoredPrsConnectionStarted(supported: self.client.daemonAdvertisesAuthoredPrs,
                                                       notify: self.client.daemonAdvertisesAuthoredPrsNotify,
@@ -2012,6 +2025,9 @@ class AppStore: ObservableObject {
             SlashCommandStore.shared.ingest(msg)
 
         // The author's open PRs: the Mother pane's Overview reads them from here.
+        case .devicePairing, .devicePairOutcome, .devices, .deviceRevoked, .deviceAdminError, .deviceAdminLevel:
+            deviceAdmin.handle(msg)
+
         case .authoredPrs(let snapshot):
             if snapshot != authoredPrs { authoredPrs = snapshot }
             if authoredPrsConnection != .connected { authoredPrsConnection = .connected }

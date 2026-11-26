@@ -500,6 +500,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         if !ApprovalOverlayHost.focusCard(in: NSApp.keyWindow) { NSSound.beep() }
     }
 
+    private lazy var pairDeviceWindow = PairDeviceWindowController(model: AppStore.shared.deviceAdmin)
+    private lazy var devicesWindow = DevicesWindowController(model: AppStore.shared.deviceAdmin)
+
+    /// App menu ▸ Pair a Device…: no shortcut. The menu pick is the human gesture behind the code.
+    @objc func showPairDevice(_ sender: Any?) { pairDeviceWindow.present() }
+
+    /// App menu ▸ Devices…: no shortcut.
+    @objc func showDevices(_ sender: Any?) { devicesWindow.present() }
+
     /// Window ▸ Approvals: open the read-only Approvals log (AP5). No shortcut.
     @objc func showApprovalsLog(_ sender: Any?) {
         ApprovalsWindowManager.shared.show()
@@ -533,6 +542,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(showPairDevice(_:)) || menuItem.action == #selector(showDevices(_:)) {
+            // At `off` the primary hides device management from this Mac: say so instead of opening a window.
+            let isPair = menuItem.action == #selector(showPairDevice(_:))
+            if AppStore.shared.deviceAdmin.adminAvailability == .off {
+                menuItem.title = DeviceAdminCopy.off
+                return false
+            }
+            menuItem.title = isPair ? "Pair a Device\u{2026}" : "Devices\u{2026}"
+            return true
+        }
         if menuItem.action == TranscriptViewMenu.focusAction || menuItem.action == TranscriptViewMenu.allActivityAction {
             return TranscriptViewMenu.validate(menuItem, target: TranscriptViewMenu.target(in: NSApp.keyWindow))
         }

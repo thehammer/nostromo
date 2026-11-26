@@ -28,6 +28,8 @@ import AppKit
     func showApprovalsLog(_ sender: Any?)
     func showApprovalRules(_ sender: Any?)
     func newFocus(_ sender: Any?)
+    func showPairDevice(_ sender: Any?)
+    func showDevices(_ sender: Any?)
     func resumeConversation(_ sender: Any?)
 }
 
@@ -43,6 +45,14 @@ enum MainMenu {
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
         appMenuItem.submenu = appMenu
+        // Device administration. No key equivalents: pairing and revoking are deliberate acts.
+        for (title, action) in [("Pair a Device\u{2026}", #selector(MainMenuActions.showPairDevice(_:))),
+                                ("Devices\u{2026}", #selector(MainMenuActions.showDevices(_:)))] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = target
+            appMenu.addItem(item)
+        }
+        appMenu.addItem(.separator())
         appMenu.addItem(NSMenuItem(
             title: "Quit Nostromo",
             action: #selector(NSApplication.terminate(_:)),
