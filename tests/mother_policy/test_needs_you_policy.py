@@ -24,6 +24,9 @@ MOTHER_VIEW = os.path.join(MAC, "UI", "Views", "MotherView.swift")
 TERI_BINDINGS = os.path.join(MAC, "UI", "Views", "TeriBindings.swift")
 KIT_NEEDS_YOU_DIR = os.path.join("Shared", "NostromoKit", "Sources", "NostromoKit", "NeedsYou")
 KIT_NOTIFIER = os.path.join(KIT_NEEDS_YOU_DIR, "NeedsYouNotifier.swift")
+# W16: the only other site, and it enriches a *remote* push (it never builds a local Needs-You
+# notification): the iOS Notification Service Extension hands iOS the push's own content, edited.
+NOTIFICATION_SERVICE_EXTENSION = os.path.join("iOS", "NostromoNotificationService", "NotificationService.swift")
 
 
 # --------------------------------------------------------------------------
@@ -243,7 +246,7 @@ class NeedsYouPolicyTests(unittest.TestCase):
         self.assertEqual(delegate_activation_problems(read(APP_DELEGATE)), [])
 
     def test_the_notification_content_is_built_only_in_the_kit_notifier(self):
-        self.assertEqual(mutable_content_files(), [KIT_NOTIFIER])
+        self.assertEqual(mutable_content_files(), sorted([KIT_NOTIFIER, NOTIFICATION_SERVICE_EXTENSION]))
 
     def test_only_the_notifier_the_delegate_and_the_app_store_import_user_notifications(self):
         allowed = {APP_DELEGATE, APP_STORE}
