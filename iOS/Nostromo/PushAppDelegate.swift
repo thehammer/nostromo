@@ -66,11 +66,27 @@ final class PushCoordinator {
         }
     }
 
+    /// This phone is no longer paired (revoked, un-paired, or the transport changed): drop what the
+    /// pairing put on the phone. Delivered notifications and the badge go, iOS is told to stop pushing
+    /// to this install, and the token is forgotten. (The primary deletes the device's push record when
+    /// it is revoked or unpaired, so it sends nothing more.)
+    func reset() {
+        let center = UNUserNotificationCenter.current()
+        center.removeAllDeliveredNotifications()
+        center.removeAllPendingNotificationRequests()
+        Task { try? await center.setBadgeCount(0) }
+        UIApplication.shared.unregisterForRemoteNotifications()
+        token = nil
+        model = nil
+    }
+
     private func attach() {
         bag.removeAll()
         guard let model else { return }
         model.environment = environment
         model.apnsToken = token
+        // A fresh pairing after a reset has no token yet: ask iOS for one again.
+        if token == nil { Task { await registerIfAuthorized() } }
         // Every answer to `push_waiting`: remove what no longer waits, and set the badge.
         model.$waiting
             .combineLatest(model.$badge)
@@ -84,8 +100,9 @@ final class PushCoordinator {
     private func reconcile(waiting: [PushWaitingItemWire], badge: Int) async {
         let center = UNUserNotificationCenter.current()
         let delivered = await center.deliveredNotifications()
-        let payloads: [(identifier: String, payload: PushPayload)] = delivered.compactMap {
-            PushPayload.parse(userInfo: $0.request.content.userInfo).map { p in ($0.request.identifier, p) }
+        let payloads: [(identifier: String, payload: PushPayload)] = delivered.compactMap { note in
+            guard let payload = PushPayload.parse(userInfo: note.request.content.userInfo) else { return nil }
+            return (note.request.identifier, payload)
         }
         let staleItems = Set(PushModel.staleItems(delivered: payloads.map(\.payload), waiting: waiting))
         let identifiers = payloads.filter { staleItems.contains($0.payload.item) }.map(\.identifier)

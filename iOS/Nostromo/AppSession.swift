@@ -93,6 +93,7 @@ final class AppSession: ObservableObject, PairingSideEffects {
         store?.wipeAll()                   // 2. memory, then the cache file
         store = nil
         push = nil
+        PushCoordinator.shared.reset()
         client = nil
         stateWatch = nil
         phase = .noLongerPaired            // 3. the screen
@@ -142,6 +143,7 @@ final class AppSession: ObservableObject, PairingSideEffects {
         store?.wipeAll()
         store = nil
         push = nil
+        PushCoordinator.shared.reset()
         client = nil
         stateWatch = nil
         forgottenNotice = reached ? nil : PairingCopy.forgotten(kind: kindName)
@@ -154,6 +156,7 @@ final class AppSession: ObservableObject, PairingSideEffects {
         store?.stop()
         store = nil
         push = nil
+        PushCoordinator.shared.reset()
         client = nil
         stateWatch = nil
         ConnectionSettings.transport = transport
