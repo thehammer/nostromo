@@ -23,7 +23,9 @@ final class DevicesWindowController: NSWindowController {
 
     func present() {
         model.requestList()
+        ActivationAudit.note("devices:menu-open")
         NSApp.activate(ignoringOtherApps: true)
+        ActivationAudit.note("devices:menu-open-front")
         window?.makeKeyAndOrderFront(nil)
     }
 }

@@ -33,7 +33,9 @@ final class PairDeviceWindowController: NSWindowController, NSWindowDelegate {
             model.beginPairing(gesture: HumanGesture.permit(NSApp.currentEvent, control: window.contentView ?? NSView(),
                                                             menuSelection: true))
         }
+        ActivationAudit.note("pair-device:menu-open")
         NSApp.activate(ignoringOtherApps: true)
+        ActivationAudit.note("pair-device:menu-open-front")
         window.makeKeyAndOrderFront(nil)
     }
 
