@@ -1483,12 +1483,22 @@ fn a_monthly_cost_budget_emails_when_the_bill_runs_away() {
     let notifications = list_of(&budget["Properties"]["NotificationsWithSubscribers"]);
     assert!(!notifications.is_empty());
     let mut kinds = BTreeSet::new();
+    // NotificationType -> (Threshold, ThresholdType, ComparisonOperator).
+    let mut thresholds = BTreeMap::new();
     for n in &notifications {
-        kinds.insert(
-            n["Notification"]["NotificationType"]
-                .as_str()
-                .unwrap()
-                .to_string(),
+        let notification = &n["Notification"];
+        let kind = notification["NotificationType"].as_str().unwrap();
+        kinds.insert(kind.to_string());
+        thresholds.insert(
+            kind.to_string(),
+            (
+                notification["Threshold"].as_f64().expect("a Threshold"),
+                notification["ThresholdType"].as_str().unwrap().to_string(),
+                notification["ComparisonOperator"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            ),
         );
         let subs = list_of(&n["Subscribers"]);
         assert!(
@@ -1498,6 +1508,15 @@ fn a_monthly_cost_budget_emails_when_the_bill_runs_away() {
         );
     }
     assert_eq!(kinds, set(&["ACTUAL", "FORECASTED"]));
+    // Email at 80% of the budget actually spent, and at 100% forecast to be spent.
+    assert_eq!(
+        thresholds["ACTUAL"],
+        (80.0, "PERCENTAGE".to_string(), "GREATER_THAN".to_string())
+    );
+    assert_eq!(
+        thresholds["FORECASTED"],
+        (100.0, "PERCENTAGE".to_string(), "GREATER_THAN".to_string())
+    );
     // The address is a required parameter (no default that points anywhere).
     let params = t["Parameters"].as_mapping().unwrap();
     let email = &params[&serde_yaml::Value::from("BudgetAlertEmail")];

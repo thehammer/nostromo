@@ -3537,6 +3537,8 @@ async fn a_400_bad_device_token_is_dropped_too_but_other_refusals_keep_the_regis
 
     for (status, reason) in [
         (400, "PayloadTooLarge"),
+        // The token is fine for another app; only this topic is wrong.
+        (400, "DeviceTokenNotForTopic"),
         (403, "InvalidProviderToken"),
         (429, "TooManyRequests"),
     ] {
@@ -3545,5 +3547,46 @@ async fn a_400_bad_device_token_is_dropped_too_but_other_refusals_keep_the_regis
             posts, 2,
             "{status} {reason} is not the token's fault: both jobs are sent"
         );
+    }
+}
+
+#[tokio::test]
+async fn a_dropped_token_keeps_the_devices_settings_for_the_fresh_registration() {
+    for (status, reason) in [(410, "Unregistered"), (400, "BadDeviceToken")] {
+        let mut rig = rig_answering(status, reason).await;
+        let t0 = base();
+        rig.register("dev-1", &token_a());
+        let mut prefs = rig.status("dev-1").prefs;
+        prefs.kinds.review = false;
+        prefs.quiet.end = "06:30".into();
+        rig.set_prefs("dev-1", prefs.clone());
+        let read = |rig: &Rig| -> Value {
+            serde_json::from_str(
+                &std::fs::read_to_string(rig.state_dir().join("devices.json")).unwrap(),
+            )
+            .unwrap()
+        };
+        let push_id = read(&rig)["devices"]["dev-1"]["push_id"].clone();
+
+        rig.start(&["kobe"], t0).await;
+        rig.engine
+            .ingest(jobs_frame(Some("kobe"), vec![awaiting("aaaa0001", t0)]), t0);
+        rig.engine.step_at(t0).await;
+        rig.engine.step_at(t0 + secs(120)).await;
+        assert_eq!(rig.posts().await.len(), 1, "{status} {reason}: one attempt");
+
+        // The token is gone, the device is not: its settings and reference wait for
+        // the phone's next register_push.
+        let device = read(&rig)["devices"]["dev-1"].clone();
+        assert_eq!(device["apns_token"], "", "{status} {reason}: token cleared");
+        assert_eq!(device["push_id"], push_id, "{status} {reason}");
+        assert_eq!(
+            device["prefs"],
+            serde_json::to_value(&prefs).unwrap(),
+            "{status} {reason}: settings kept"
+        );
+
+        let status_after = rig.register("dev-1", &token_b());
+        assert_eq!(status_after.prefs, prefs, "{status} {reason}");
     }
 }
