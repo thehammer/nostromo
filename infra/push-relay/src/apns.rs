@@ -69,10 +69,11 @@ pub fn payload(req: &PushRequest) -> serde_json::Value {
         if req.interruption_level.as_str() != "passive" {
             aps.insert("sound".into(), "default".into());
         }
-        // The notification service extension (W16) runs only for pushes that say so.
-        if req.mutable_content {
-            aps.insert("mutable-content".into(), 1.into());
-        }
+    }
+    // The notification service extension (W16) runs only for pushes that say so:
+    // the flag maps to `aps.mutable-content` exactly, set when true and absent when false.
+    if req.mutable_content {
+        aps.insert("mutable-content".into(), 1.into());
     }
     aps.insert("badge".into(), req.badge.into());
     let mut out = serde_json::Map::new();

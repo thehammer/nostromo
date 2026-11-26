@@ -36,8 +36,9 @@ lambda_http = { version = "0.14", optional = true }
 tracing-subscriber = { version = "0.3", features = ["json", "fmt"], optional = true }
 
 [dev-dependencies]
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+serde_yaml = "0.9"
 wiremock = "0.6"
 
 [[bin]]
