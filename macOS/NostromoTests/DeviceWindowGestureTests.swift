@@ -32,9 +32,14 @@ import SwiftUI
 //        -> testAnEventOfAnotherWindowIsNotAUserEvent, testAConfirmationPressWhoseEventBelongsToAnotherWindowSendsNothingAndSaysSo,
 //           testShowCodePressWhoseEventBelongsToAnotherWindowSendsNothingAndSaysSo
 //   W3 `windowWillClose` empty
-//        -> testClosingThePairWindowCancelsTheOpenPairing, testCancelInThePairWindowCancelsTheOpenPairingOnce
+//        -> testClosingThePairWindowCancelsTheOpenPairing (the Cancel button cancels by itself, so
+//           testCancelInThePairWindowCancelsTheOpenPairingOnce still passes: it is the button path)
 //   W4 `beginFromMenuPick` without `menuSelection: true`
 //        -> testAMenuPickAsksForTheCode
+//   W5 the Pair view maps `.issueFailed` to another sentence, or drops the 'Waiting for the server' line
+//        -> DeviceWindowPresentationSourceTests.testThePairViewShowsTheCouldntMakeACodeSentenceForIssueFailed,
+//           testThePairViewSaysItIsWaitingForTheServerAndDisablesNewCodeWhileNewCodeCannotBeRequested
+// (W1-W5 were each run by hand and failed the tests named; the real SwiftUI view is driven with real events.)
 final class DeviceWindowGestureTests: MouseQueueTestCase {
 
     // MARK: Rig
