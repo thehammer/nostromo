@@ -2434,6 +2434,11 @@ fn focus_scoped_frames(tag: &str) -> Vec<ServerMsg> {
             choices: vec![],
             context_pane_id: None,
             host: None,
+            deadline: None,
+            agent_class: None,
+            operator_presence: None,
+            repo: None,
+            repo_owner: None,
         },
         ServerMsg::DecisionResolved {
             tag: tag.into(),

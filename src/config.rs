@@ -118,6 +118,63 @@ fn nostromo_dir() -> PathBuf {
     home_dir().join(".nostromo")
 }
 
+/// The `[push]` table (W13). The key is `push.relay_url`, not the top-level
+/// `relay_url`, which is the GitHub relay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PushConfig {
+    /// The push relay's function URL. Absent: the engine does not start.
+    pub relay_url: Option<String>,
+    /// Where the relay's bearer token lives (default `~/.nostromo/push-relay-token`).
+    pub relay_token_path: Option<PathBuf>,
+    /// Kill switch (default `true`).
+    pub enabled: bool,
+    /// How the operator classified each host. An absent host is `work`.
+    pub hosts: std::collections::BTreeMap<String, crate::push::wire::HostClass>,
+    /// Owners whose repositories never show a name. `Carefeed` is always in
+    /// it: the list can only grow.
+    pub work_owners: Vec<String>,
+    /// Seconds a decision waits before it is pushed when the Mac is in use (default 30).
+    pub decision_grace_secs: Option<u64>,
+    /// Seconds a Mother job or review waits before it is pushed (default 120; tests only).
+    pub grace_secs: Option<u64>,
+    /// Where the device records and the sent log live (default `~/.nostromo/push`).
+    pub state_dir: Option<PathBuf>,
+}
+
+impl Default for PushConfig {
+    fn default() -> Self {
+        Self {
+            relay_url: None,
+            relay_token_path: None,
+            enabled: true,
+            hosts: Default::default(),
+            work_owners: Vec::new(),
+            decision_grace_secs: None,
+            grace_secs: None,
+            state_dir: None,
+        }
+    }
+}
+
+/// The work owner that is always in `push.work_owners`.
+pub const DEFAULT_WORK_OWNER: &str = "Carefeed";
+
+impl PushConfig {
+    /// `Carefeed` plus the configured owners, de-duplicated ignoring case. The
+    /// default cannot be removed by configuration.
+    pub fn resolved_work_owners(&self) -> Vec<String> {
+        let mut owners = vec![DEFAULT_WORK_OWNER.to_string()];
+        for owner in &self.work_owners {
+            let owner = owner.trim();
+            if !owner.is_empty() && !owners.iter().any(|o| o.eq_ignore_ascii_case(owner)) {
+                owners.push(owner.to_string());
+            }
+        }
+        owners
+    }
+}
+
 /// What a satellite daemon runs with, once validated.
 #[derive(Debug, Clone)]
 pub struct SatelliteSetup {
@@ -178,6 +235,10 @@ pub struct Config {
 
     /// The `[uplink]` table: where a satellite dials and what it may publish.
     pub uplink: Option<UplinkConfig>,
+
+    /// The `[push]` table (W13), read on the primary only: the push relay, and
+    /// how each host is classified. Absent: no push engine.
+    pub push: Option<PushConfig>,
 
     /// Folder whose children are your code repos (default: `~/Code`).
     ///
@@ -330,6 +391,7 @@ impl Default for Config {
             mode: DaemonMode::Primary,
             host_name: None,
             uplink: None,
+            push: None,
             code_root: None,
             agents: None,
             fred_accounts: None,
@@ -809,7 +871,8 @@ fn expand_tilde(path: &str, home: &Path) -> PathBuf {
     }
 }
 
-fn default_config_path() -> Result<PathBuf> {
+/// Where `config.toml` lives by default.
+pub fn default_config_path() -> Result<PathBuf> {
     if let Some(proj) = directories::ProjectDirs::from("", "", "nostromo") {
         Ok(proj.config_dir().join("config.toml"))
     } else {

@@ -32,6 +32,8 @@ pub type HubSlot = Arc<HubCell>;
 pub struct HubCell {
     hub: OnceLock<Arc<DeviceHub>>,
     relay: OnceLock<Arc<UplinkRelay>>,
+    /// The push engine, on a primary that has `[push]` configured (W13).
+    push: OnceLock<Arc<crate::push::PushEngine>>,
 }
 
 impl HubCell {
@@ -50,6 +52,18 @@ impl HubCell {
 
     pub fn set_relay(&self, relay: Arc<UplinkRelay>) -> Result<(), Arc<UplinkRelay>> {
         self.relay.set(relay)
+    }
+
+    /// The push engine, once the daemon starts it.
+    pub fn push(&self) -> Option<&Arc<crate::push::PushEngine>> {
+        self.push.get()
+    }
+
+    pub fn set_push(
+        &self,
+        push: Arc<crate::push::PushEngine>,
+    ) -> Result<(), Arc<crate::push::PushEngine>> {
+        self.push.set(push)
     }
 }
 

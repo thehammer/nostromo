@@ -2791,6 +2791,33 @@ pub enum ClientMsg {
         host: String,
         admin: crate::ipc::devices::SatelliteAdmin,
     },
+
+    // ── push notifications (W13) ──────────────────────────────────────────────
+    // The first four are a paired phone's, scoped to its own device record and
+    // handled before `handle_client_msg` (see `push::PushEngine::dispatch`);
+    // `network_policy` refuses them for every network peer, like the admin verbs.
+    /// A phone's Apple push token. `capabilities` is what this build can do;
+    /// absent means every flag is `false`.
+    RegisterPush {
+        apns_token: String,
+        environment: crate::push::wire::PushEnvironment,
+        tz: String,
+        #[serde(default)]
+        capabilities: crate::push::wire::PushCapabilities,
+    },
+    /// Replace this device's notification settings.
+    SetPushPrefs {
+        prefs: crate::push::wire::PushPrefs,
+    },
+    /// This device's notifications of the last 7 days (reply: `PushSentLog`).
+    PushSentLog,
+    /// What waits on the operator now (reply: `PushWaiting`).
+    PushWaiting,
+    /// Whether the operator is at this Mac, from the verified app only
+    /// (W15's reporter sends it when the daemon advertises `presence`). No reply.
+    OperatorPresence {
+        state: crate::push::wire::Presence,
+    },
 }
 
 // ── background tasks ──────────────────────────────────────────────────────────
@@ -3535,6 +3562,24 @@ pub enum ServerMsg {
         /// The satellite this frame came from; `None` is the daemon's own.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host: Option<String>,
+        /// When the asking agent stops waiting (W13). Absent: no timeout.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deadline: Option<chrono::DateTime<chrono::Utc>>,
+        /// The asking agent mapped to a fixed set on the originating daemon (W13).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_class: Option<crate::push::wire::AgentClass>,
+        /// Whether the Mac(s) presenting decisions are being used (W13, S7a).
+        /// Stripped from the frame before any `Paired` or `Tcp` peer gets it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_presence: Option<crate::push::wire::Presence>,
+        /// The focus's project repository name, and its `github.com` owner
+        /// (resolved locally from the `origin` remote): only so the primary can
+        /// apply the personal-host rule (W13, S5). Never in a relay request for
+        /// a work host; a `work` satellite's uplink drops both.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo_owner: Option<String>,
     },
 
     /// A `DecisionRequest` has been resolved — answered, dismissed, timed
@@ -4226,6 +4271,21 @@ pub enum ServerMsg {
         reason: String,
     },
     DeviceUnpaired,
+
+    // ── push notifications (W13): targeted replies to one paired device ──────
+    /// The device's own notifications of the last 7 days, newest last.
+    PushSentLog {
+        entries: Vec<crate::push::wire::PushSentEntry>,
+    },
+    /// Everything waiting on the operator for this device, and the badge it
+    /// should show (the waiting count, minus the kinds this device turned off).
+    PushWaiting {
+        items: Vec<crate::push::wire::PushWaitingItem>,
+        badge: u32,
+    },
+    /// This device's settings, the read-only host classes and work owners, and
+    /// whether notifications are getting through.
+    PushStatus(crate::push::wire::PushStatusBody),
 
     // ── device administration (daemon → local admin client) ───────────────────
     DevicePairing {
@@ -5563,6 +5623,7 @@ mod tests {
             head_sha: "abc123".into(),
             is_bot: false,
             tickets: vec![],
+            changed_lines: None,
         };
         let snap = PrSnapshot {
             pr_number: Some(42),
@@ -6095,6 +6156,11 @@ mod tests {
             choices: sample_decision_choices(),
             context_pane_id: Some("diff".into()),
             host: None,
+            deadline: None,
+            agent_class: None,
+            operator_presence: None,
+            repo: None,
+            repo_owner: None,
         });
     }
 
@@ -6108,6 +6174,11 @@ mod tests {
             choices: sample_decision_choices(),
             context_pane_id: None,
             host: None,
+            deadline: None,
+            agent_class: None,
+            operator_presence: None,
+            repo: None,
+            repo_owner: None,
         })
         .unwrap();
         let obj = v.as_object().unwrap();
@@ -6129,6 +6200,11 @@ mod tests {
             choices: sample_decision_choices(),
             context_pane_id: None,
             host: None,
+            deadline: None,
+            agent_class: None,
+            operator_presence: None,
+            repo: None,
+            repo_owner: None,
         });
     }
 
@@ -6142,6 +6218,11 @@ mod tests {
             choices: sample_decision_choices(),
             context_pane_id: None,
             host: None,
+            deadline: None,
+            agent_class: None,
+            operator_presence: None,
+            repo: None,
+            repo_owner: None,
         })
         .unwrap();
         assert_eq!(v["type"], "decision_request");

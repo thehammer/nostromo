@@ -185,6 +185,7 @@ mod tests {
                 head_sha: "abc123".into(),
                 is_bot: false,
                 tickets: vec![],
+                changed_lines: None,
             }],
             stale: false,
             error: None,

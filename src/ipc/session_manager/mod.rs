@@ -2965,6 +2965,25 @@ impl SessionManager {
         })
     }
 
+    /// What a decision on `tag` may say about its asker, as closed-vocabulary
+    /// facts for the push engine (W13): the agent mapped to the fixed set (never
+    /// the session's own name), and the focus's project path (read locally to
+    /// find the repository's owner; it never goes on the wire).
+    pub fn decision_focus_facts(
+        &self,
+        tag: &str,
+    ) -> (crate::push::wire::AgentClass, Option<String>) {
+        use crate::push::wire::AgentClass;
+        match self.focus_registry.iter().find(|f| f.tag == tag) {
+            Some(f) => (AgentClass::from_agent_name(&f.agent_name), f.project_path.clone()),
+            // A built-in focus's tag is its agent's name; a dynamic one is `<agent>-<id>`.
+            None => (
+                AgentClass::from_agent_name(tag.split('-').next().unwrap_or("")),
+                None,
+            ),
+        }
+    }
+
     /// Tell the origin book the registry changed; `pushed` when the Mac pushed
     /// it (the only evidence a missing tag is closed).
     fn note_origin_registry(&self, pushed: bool) {

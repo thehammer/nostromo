@@ -132,6 +132,10 @@ pub struct PrQueueItem {
     /// Absent on the wire when empty; old clients ignore it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tickets: Vec<String>,
+    /// Lines added plus lines deleted, when GitHub's PR detail said (W13: the
+    /// size phrase of a review notification). Absent when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_lines: Option<u64>,
 }
 
 fn default_bucket() -> String {
@@ -238,6 +242,7 @@ mod tests {
             head_sha: "abc123def456".to_owned(),
             is_bot: false,
             tickets: vec![],
+            changed_lines: None,
         };
 
         let json = serde_json::to_string(&item).expect("serialize");
@@ -295,6 +300,7 @@ mod tests {
             head_sha: "deadbeef".to_owned(),
             is_bot: true,
             tickets: vec![],
+            changed_lines: None,
         };
         let json = serde_json::to_string(&item).expect("serialize");
         let decoded: PrQueueItem = serde_json::from_str(&json).expect("deserialize");

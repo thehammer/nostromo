@@ -443,6 +443,20 @@ async fn main() -> Result<()> {
         }
     }
 
+    // ── Push notifications (W13) ──────────────────────────────────────────────
+    // Primary only, and only with a `[push]` table naming a relay. Satellites
+    // send nothing to the relay: they stamp facts on frames they already publish.
+    if satellite.is_none() {
+        if let Some(push) = config.push.clone() {
+            let local_host = nostromo::push::local_host_label(config.host_name.as_deref());
+            if server.start_push(nostromo::push::config_from_file(push), local_host) {
+                info!("push engine started");
+            } else {
+                info!("push engine not started (no relay configured, disabled, or no device registry)");
+            }
+        }
+    }
+
     // ── mDNS / Bonjour advertising ────────────────────────────────────────────
     // Advertise nostromd on the LAN so iOS clients can discover it without a
     // hardcoded IP.  Failure is non-fatal: some sandboxed or enterprise

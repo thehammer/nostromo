@@ -238,6 +238,7 @@ fn candidate(number: u64, head_sha: &str) -> Candidate {
         my_review: None,
         targeted_seen_at: None,
         head_ref: String::new(),
+        changed_lines: None,
         body_keys: Vec::new(),
     }
 }
@@ -684,6 +685,7 @@ fn item(number: u64, bucket: &str, ci: CiState, sha: &str, new_activity: bool) -
         head_sha: sha.to_owned(),
         is_bot: false,
         tickets: vec![],
+        changed_lines: None,
     }
 }
 

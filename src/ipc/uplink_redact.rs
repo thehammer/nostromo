@@ -509,6 +509,9 @@ pub fn redact_for_uplink_metadata(
             request_id,
             choices,
             host,
+            deadline,
+            agent_class,
+            operator_presence,
             ..
         } => {
             if !tag_ok_request_id(&request_id) {
@@ -529,6 +532,14 @@ pub fn redact_for_uplink_metadata(
                     .collect(),
                 context_pane_id: None,
                 host,
+                // Closed-vocabulary facts the primary's push engine needs (W13):
+                // a timestamp, an enum mapped before egress, an enum. The
+                // repository name and owner are dropped: a work host's is work data.
+                deadline,
+                agent_class,
+                operator_presence,
+                repo: None,
+                repo_owner: None,
             })
         }
         ServerMsg::DecisionResolved {
@@ -653,6 +664,9 @@ pub fn redact_for_uplink_metadata(
         | ServerMsg::PairRefused { .. }
         | ServerMsg::Unauthorized { .. }
         | ServerMsg::DeviceUnpaired
+        | ServerMsg::PushSentLog { .. }
+        | ServerMsg::PushWaiting { .. }
+        | ServerMsg::PushStatus(_)
         | ServerMsg::DevicePairing { .. }
         | ServerMsg::DevicePairOutcome { .. }
         | ServerMsg::Devices { .. }
@@ -724,10 +738,14 @@ pub fn is_uplink_metadata_shape(msg: &ServerMsg) -> bool {
             detail,
             choices,
             context_pane_id,
+            repo,
+            repo_owner,
             ..
         } => {
             is_focus_tag(tag)
                 && tag_ok_request_id(request_id)
+                && repo.is_none()
+                && repo_owner.is_none()
                 && prompt.is_empty()
                 && detail.is_none()
                 && context_pane_id.is_none()

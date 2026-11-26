@@ -402,6 +402,24 @@ impl Server {
 }
 
 impl Server {
+    /// Start the push engine (W13), on a primary that serves device pairing:
+    /// it needs the device registry to tell a revoked phone from a live one.
+    /// `false` when there is no registry or `[push]` does not configure a relay.
+    /// Call after [`Server::bind_ws`].
+    pub fn start_push(&self, config: crate::push::ConfigSource, local_host: String) -> bool {
+        let Some(registry) = self.hub.get().map(|h| Arc::clone(h.registry())) else {
+            return false;
+        };
+        let Some(engine) = crate::push::PushEngine::new(config, local_host, Some(registry)) else {
+            return false;
+        };
+        let retained = Arc::clone(&self.retained);
+        let source: crate::push::RetainedSource =
+            Arc::new(move || retained.lock().unwrap().values().cloned().collect());
+        engine.spawn(self.tx.subscribe(), Some(source));
+        self.hub.set_push(engine).is_ok()
+    }
+
     /// Start a satellite's uplink: dial `setup.uplink.url` with the token in
     /// `token_path`, publish this server's filtered broadcasts upstream and
     /// answer the reads the primary routes back. Local admin verbs are relayed
@@ -863,6 +881,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
         FEATURE_PAIR.to_string(),
         FEATURE_DEVICES.to_string(),
         FEATURE_SEQ.to_string(),
+        crate::push::FEATURE_PRESENCE.to_string(),
     ];
     if mgr.authored_prs().is_some() {
         features.push(FEATURE_AUTHORED_PRS.to_string());
@@ -1011,6 +1030,10 @@ where
         features.push(FEATURE_HOSTS.to_string());
         features.push(FEATURE_UPLINK.to_string());
     }
+    // A primary that runs the push engine (W13).
+    if let (ServerMsg::Welcome { features, .. }, Some(_)) = (&mut welcome, hub.push()) {
+        features.push(crate::push::FEATURE_PUSH.to_string());
+    }
     // Which run of the daemon numbers the topics (the `"seq"` feature's epoch).
     if let ServerMsg::Welcome { seq_epoch, .. } = &mut welcome {
         *seq_epoch = Some(seq.epoch());
@@ -1114,7 +1137,14 @@ where
     let can_answer = trust == PeerTrust::OperatorApp;
     let mut is_operator = can_answer && (topics.contains(&Topic::Decision) || renders_decisions);
     if is_operator {
-        decisions.lock().unwrap().add_operator(&conn_key);
+        let frames = {
+            let mut registry = decisions.lock().unwrap();
+            registry.add_operator(&conn_key);
+            registry.presence_frames()
+        };
+        for frame in frames {
+            let _ = broadcast_tx.send(frame);
+        }
     }
 
     // ── Approval presenters (AP0b) ────────────────────────────────────────────
@@ -1655,6 +1685,7 @@ where
                     continue;
                 };
                 let msg = for_satellite(msg, trust, origin.ws_device());
+                let msg = without_operator_presence(msg, trust);
                 let bytes = match serde_json::to_vec(&msg) {
                     Ok(b) => b,
                     Err(e) => { warn!("serialise targeted msg: {e}"); continue; }
@@ -1860,6 +1891,15 @@ where
                                 }
                             }
                         }
+                        // A paired phone's push verbs (W13), scoped to its own device
+                        // record. Every other peer falls through to the refusal.
+                        if let Some(push) = hub.push() {
+                            if push.dispatch(&msg, trust, origin.ws_device(), &targeted_tx)
+                                == crate::push::Dispatched::Handled
+                            {
+                                continue;
+                            }
+                        }
                         // Pairing and device administration (see `DeviceHub::dispatch`).
                         match hub.get() {
                             Some(h) => match h.dispatch(&msg, trust, origin.ws_device(), &conn_key, &targeted_tx) {
@@ -1960,6 +2000,12 @@ where
     if is_operator {
         decisions.lock().unwrap().remove_operator(&conn_key);
     }
+    // What the app last said about the operator goes with its connection; if that
+    // leaves every remaining app `away`, open decisions are re-broadcast (S7a).
+    let presence_frames = decisions.lock().unwrap().drop_presence(&conn_key);
+    for frame in presence_frames {
+        let _ = broadcast_tx.send(frame);
+    }
     // A closed connection's demand for the author's PR list goes with it.
     if let Some(board) = session_mgr.lock().unwrap().authored_prs() {
         board.remove(&conn_key);
@@ -2011,6 +2057,7 @@ fn broadcast_bytes(
     let topic = msg.topic();
     let msg = outbound(trust, msg, sensitive)?;
     let msg = for_satellite(msg, trust, device);
+    let msg = without_operator_presence(msg, trust);
     // A frame the gate turned into something else is not the numbered one.
     let seq = seq.filter(|_| msg.topic() == topic);
     match encode_with_seq(&msg, seq) {
@@ -4329,6 +4376,29 @@ fn handle_client_msg(
             debug!(?trust, "device verb ignored on this connection");
         }
 
+        // Whether the operator is at the Mac (W13, S7a): from the verified app
+        // only; from any other local peer it is ignored. (A network peer was
+        // refused above: it is not a network verb.) No reply.
+        ClientMsg::OperatorPresence { state } => {
+            if trust == PeerTrust::OperatorApp {
+                let changed = decisions.lock().unwrap().set_presence(conn_key, state);
+                for frame in changed {
+                    let _ = broadcast_tx.send(frame);
+                }
+            } else {
+                debug!(?trust, "operator presence ignored: not the verified Nostromo app");
+            }
+        }
+
+        // The push verbs are a paired phone's, handled by the push engine before
+        // this function runs; what reaches here is from a peer it does not serve.
+        ClientMsg::RegisterPush { .. }
+        | ClientMsg::SetPushPrefs { .. }
+        | ClientMsg::PushSentLog
+        | ClientMsg::PushWaiting => {
+            debug!(?trust, "push verb ignored on this connection");
+        }
+
         // The commands a session's CLI reports: a local answer to the asking
         // client, from what the daemon already read. Network refused earlier.
         ClientMsg::SessionCommandsGet { request_id, tag } => {
@@ -4898,6 +4968,29 @@ fn for_satellite(msg: ServerMsg, trust: PeerTrust, device_id: Option<&str>) -> S
         }
         other => other,
     }
+}
+
+/// What a `Paired` or `Tcp` peer's connection is written of a `DecisionRequest`:
+/// without `operator_presence` (whether the operator is at the Mac) and without
+/// the repository name and owner (W13). Done here, in the per-connection write
+/// step, and not in `redact_for_network`: a `personal` satellite's uplink sends
+/// through that function and the primary needs the presence it carries.
+fn without_operator_presence(mut msg: ServerMsg, trust: PeerTrust) -> ServerMsg {
+    if !matches!(trust, PeerTrust::Paired | PeerTrust::Tcp) {
+        return msg;
+    }
+    if let ServerMsg::DecisionRequest {
+        operator_presence,
+        repo,
+        repo_owner,
+        ..
+    } = &mut msg
+    {
+        *operator_presence = None;
+        *repo = None;
+        *repo_owner = None;
+    }
+    msg
 }
 
 fn wants_authored_prs(topics: &[Topic]) -> bool {
@@ -5798,6 +5891,9 @@ pub(super) fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool 
         | ServerMsg::Paired { .. }
         | ServerMsg::PairRefused { .. }
         | ServerMsg::Unauthorized { .. }
+        | ServerMsg::PushSentLog { .. }
+        | ServerMsg::PushWaiting { .. }
+        | ServerMsg::PushStatus(_)
         | ServerMsg::DeviceUnpaired => false,
         ServerMsg::MotherPeek { .. } => subscribed(topics, Topic::MotherPeek),
         ServerMsg::TeriState { .. } => subscribed(topics, Topic::Teri),
@@ -6288,6 +6384,11 @@ mod tests {
             ],
             context_pane_id: None,
             host: None,
+            deadline: None,
+            agent_class: None,
+            operator_presence: None,
+            repo: None,
+            repo_owner: None,
         }
     }
 

@@ -23,6 +23,39 @@ enum Command {
     /// Enrol this Mac as a satellite of a primary.
     #[command(subcommand)]
     Uplink(Uplink),
+    /// Push notifications: classify hosts, set work owners, show status.
+    #[command(subcommand)]
+    Push(Push),
+}
+
+#[derive(Subcommand)]
+enum Push {
+    /// Mark a host as `work` (default for any host) or `personal`. Only a shell
+    /// on the primary can; the phone shows the class read-only.
+    Host {
+        name: String,
+        #[arg(value_parser = parse_host_class)]
+        class: nostromo::push::wire::HostClass,
+    },
+    /// Manage the owners whose repository names never appear in a notification.
+    #[command(subcommand)]
+    WorkOwner(WorkOwner),
+    /// Devices, their settings and last delivery, and the relay URL (no tokens).
+    Status,
+}
+
+#[derive(Subcommand)]
+enum WorkOwner {
+    /// Add an owner (`Carefeed` is always in the list and cannot be removed).
+    Add { owner: String },
+}
+
+fn parse_host_class(s: &str) -> Result<nostromo::push::wire::HostClass, String> {
+    match s {
+        "work" => Ok(nostromo::push::wire::HostClass::Work),
+        "personal" => Ok(nostromo::push::wire::HostClass::Personal),
+        _ => Err(format!("'{s}': expected work or personal")),
+    }
 }
 
 #[derive(Subcommand)]
@@ -88,6 +121,7 @@ async fn main() {
     let result = match cli.command {
         Some(Command::Device(device)) => run(device).await,
         Some(Command::Uplink(uplink)) => run_uplink(uplink).await,
+        Some(Command::Push(push)) => run_push(push),
         None => {
             use clap::CommandFactory;
             let _ = Cli::command().print_help();
@@ -154,4 +188,29 @@ async fn run_uplink(uplink: Uplink) -> anyhow::Result<i32> {
         .unwrap_or_else(nostromo::config::default_uplink_token_path);
     let mut out = std::io::stdout();
     nostromo::uplink_cli::pair(&url, &code, &host, &token_path, &mut out).await
+}
+
+fn run_push(push: Push) -> anyhow::Result<i32> {
+    let mut out = std::io::stdout();
+    match push {
+        Push::Status => {
+            let config = nostromo::config::Config::load(None)?;
+            nostromo::push::cli::status(&config, &mut out)?;
+        }
+        Push::Host { name, class } => {
+            let path = nostromo::config::default_config_path()?;
+            nostromo::push::cli::set_host_class(&path, &name, class)?;
+            writeln!(out, "{name}: {class:?}")?;
+        }
+        Push::WorkOwner(WorkOwner::Add { owner }) => {
+            let path = nostromo::config::default_config_path()?;
+            let added = nostromo::push::cli::add_work_owner(&path, &owner)?;
+            writeln!(
+                out,
+                "{owner}: {}",
+                if added { "added" } else { "already a work owner" }
+            )?;
+        }
+    }
+    Ok(0)
 }

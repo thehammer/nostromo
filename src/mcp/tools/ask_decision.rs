@@ -20,7 +20,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::ipc::decisions::DecisionOutcome;
+use crate::ipc::decisions::{DecisionMeta, DecisionOutcome};
 use crate::ipc::protocol::DecisionChoice;
 use crate::mcp::state::McpSharedState;
 use crate::mcp::tools::apply_layout::target_tag;
@@ -106,12 +106,29 @@ pub async fn handle(state: &McpSharedState, args: &Value, pty_id: Option<&str>) 
         })
         .collect();
 
-    let (request_id, rx, broadcast_now) = daemon.decisions.lock().unwrap().submit(
+    // Closed-vocabulary facts for the push engine (W13): when the asker stops
+    // waiting, the asking agent mapped to the fixed set, and the project's
+    // `github.com` owner from its local `origin` remote. The agent's own name
+    // and the project path never go on the wire.
+    let (agent_class, project_path) = daemon.session_mgr.lock().unwrap().decision_focus_facts(&tag);
+    let remote = match project_path {
+        Some(path) => crate::push::owner::origin_remote(std::path::Path::new(&path)).await,
+        None => None,
+    };
+    let meta = DecisionMeta {
+        deadline: Some(chrono::Utc::now() + chrono::Duration::seconds(timeout_secs as i64)),
+        agent_class: Some(agent_class),
+        repo: remote.as_ref().map(|r| r.repo.clone()),
+        repo_owner: remote.map(|r| r.owner),
+    };
+
+    let (request_id, rx, broadcast_now) = daemon.decisions.lock().unwrap().submit_with(
         tag,
         input.prompt,
         input.detail,
         choices,
         input.context_pane_id,
+        meta,
     );
 
     if let Some(msg) = broadcast_now {

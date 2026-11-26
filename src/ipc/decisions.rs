@@ -28,7 +28,22 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
+use chrono::{DateTime, Utc};
+
 use crate::ipc::protocol::{DecisionChoice, DecisionResolution, ServerMsg};
+use crate::push::wire::{AgentClass, Presence};
+
+/// What the originating daemon knows about a decision besides its prompt (W13):
+/// closed-vocabulary facts for the push engine. Never the agent's own name.
+#[derive(Debug, Clone, Default)]
+pub struct DecisionMeta {
+    /// When the asker stops waiting; `None` means no timeout.
+    pub deadline: Option<DateTime<Utc>>,
+    pub agent_class: Option<AgentClass>,
+    /// The focus's project repository name and its `github.com` owner.
+    pub repo: Option<String>,
+    pub repo_owner: Option<String>,
+}
 
 // ── outcomes ──────────────────────────────────────────────────────────────────
 
@@ -78,6 +93,8 @@ enum ResolveResult {
 /// One outstanding (on-the-wire) decision request for a tag.
 struct ActiveEntry {
     tag: String,
+    /// The request as broadcast, kept so a change of presence can re-send it.
+    msg: ServerMsg,
     /// The ids of the choices the request offered; the only ids an answer may name.
     choice_ids: Vec<String>,
     reply: oneshot::Sender<DecisionOutcome>,
@@ -124,6 +141,11 @@ pub struct DecisionRegistry {
     /// Ids of active requests whose answer-time refusal was already logged
     /// (see [`Self::first_refusal`]). Same growth argument as `resolved`.
     refusals_logged: HashSet<String>,
+    /// What each connected operator app last said about the operator (W13,
+    /// S7a), by connection key. Dropped with the connection.
+    presence: HashMap<String, Presence>,
+    /// The combined presence the last time it was computed, to tell a change.
+    last_presence: Option<Presence>,
     /// Wired by [`DecisionRegistry::configure_broadcast`] so every resolution
     /// path can announce a [`ServerMsg::DecisionResolved`] notice — the fix
     /// for the multi-window decision-sheet bug: every presenting window (not
@@ -176,6 +198,30 @@ impl DecisionRegistry {
         oneshot::Receiver<DecisionOutcome>,
         Option<ServerMsg>,
     ) {
+        self.submit_with(
+            tag,
+            prompt,
+            detail,
+            choices,
+            context_pane_id,
+            DecisionMeta::default(),
+        )
+    }
+
+    /// [`Self::submit`] with the closed-vocabulary facts the push engine needs.
+    pub fn submit_with(
+        &mut self,
+        tag: String,
+        prompt: String,
+        detail: Option<String>,
+        choices: Vec<DecisionChoice>,
+        context_pane_id: Option<String>,
+        meta: DecisionMeta,
+    ) -> (
+        String,
+        oneshot::Receiver<DecisionOutcome>,
+        Option<ServerMsg>,
+    ) {
         let request_id = Uuid::new_v4().to_string();
         let (reply, rx) = oneshot::channel();
         let choice_ids = choices.iter().map(|c| c.id.clone()).collect();
@@ -187,6 +233,11 @@ impl DecisionRegistry {
             choices,
             context_pane_id,
             host: None,
+            deadline: meta.deadline,
+            agent_class: meta.agent_class,
+            operator_presence: None,
+            repo: meta.repo,
+            repo_owner: meta.repo_owner,
         };
 
         if self.active_by_tag.contains_key(&tag) {
@@ -197,10 +248,12 @@ impl DecisionRegistry {
             (request_id, rx, None)
         } else {
             self.active_by_tag.insert(tag.clone(), request_id.clone());
+            let msg = self.stamped(msg);
             self.active.insert(
                 request_id.clone(),
                 ActiveEntry {
                     tag,
+                    msg: msg.clone(),
                     choice_ids,
                     reply,
                 },
@@ -366,15 +419,17 @@ impl DecisionRegistry {
         };
         self.active_by_tag
             .insert(tag.to_string(), request_id.clone());
+        let msg = self.stamped(next.msg);
         self.active.insert(
             request_id,
             ActiveEntry {
                 tag: tag.to_string(),
+                msg: msg.clone(),
                 choice_ids,
                 reply: next.reply,
             },
         );
-        Some(next.msg)
+        Some(msg)
     }
 
     // ── operator subscription ──────────────────────────────────────────────
@@ -405,6 +460,63 @@ impl DecisionRegistry {
         self.operators.remove(conn_key);
     }
 
+    // ── operator presence (W13, S7a) ─────────────────────────────────────────
+
+    /// Record what the verified Mac app on `conn_key` says about the operator.
+    /// Returns the open decisions to re-broadcast if the combined state just
+    /// became `away` (the push engine sends such a decision at once).
+    pub fn set_presence(&mut self, conn_key: &str, state: Presence) -> Vec<ServerMsg> {
+        self.presence.insert(conn_key.to_string(), state);
+        self.presence_frames()
+    }
+
+    /// Forget a closed connection's presence; see [`Self::set_presence`].
+    pub fn drop_presence(&mut self, conn_key: &str) -> Vec<ServerMsg> {
+        self.presence.remove(conn_key);
+        self.presence_frames()
+    }
+
+    /// The combined presence: `away` only if every connected app that renders
+    /// decisions has reported `away`, `active` if any reports `active`, and
+    /// `None` when no app has reported or one has not yet (an app older than
+    /// the reporter, or one that just connected).
+    pub fn combined_presence(&self) -> Option<Presence> {
+        let reports: Vec<Presence> = self
+            .operators
+            .iter()
+            .filter_map(|conn| self.presence.get(conn).copied())
+            .collect();
+        if reports.contains(&Presence::Active) {
+            Some(Presence::Active)
+        } else if !reports.is_empty() && reports.len() == self.operators.len() {
+            Some(Presence::Away)
+        } else {
+            None
+        }
+    }
+
+    /// Recompute the combined presence; the frames to re-broadcast when it
+    /// changed to `away` (each active request, with the new value).
+    pub fn presence_frames(&mut self) -> Vec<ServerMsg> {
+        let now = self.combined_presence();
+        let was = std::mem::replace(&mut self.last_presence, now);
+        if now != Some(Presence::Away) || was == now {
+            return Vec::new();
+        }
+        self.active
+            .values_mut()
+            .map(|entry| {
+                entry.msg = stamp_presence(entry.msg.clone(), now);
+                entry.msg.clone()
+            })
+            .collect()
+    }
+
+    /// A request about to be broadcast, with the presence as it stands.
+    fn stamped(&self, msg: ServerMsg) -> ServerMsg {
+        stamp_presence(msg, self.combined_presence())
+    }
+
     // ── test/diagnostic visibility ────────────────────────────────────────────
 
     /// The focus tag an active request belongs to, if `request_id` is active.
@@ -421,6 +533,16 @@ impl DecisionRegistry {
     pub fn queued_count(&self, tag: &str) -> usize {
         self.queues.get(tag).map(VecDeque::len).unwrap_or(0)
     }
+}
+
+fn stamp_presence(mut msg: ServerMsg, now: Option<Presence>) -> ServerMsg {
+    if let ServerMsg::DecisionRequest {
+        operator_presence, ..
+    } = &mut msg
+    {
+        *operator_presence = now;
+    }
+    msg
 }
 
 #[cfg(test)]

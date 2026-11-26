@@ -411,6 +411,8 @@ pub struct Candidate {
     pub targeted_seen_at: Option<u64>,
     /// Head branch name; empty until a `/pulls/{n}` read or a probe supplies it.
     pub head_ref: String,
+    /// Lines added plus deleted, from the same `/pulls/{n}` read or probe.
+    pub changed_lines: Option<u64>,
     /// Keys pre-scanned from the PR body. The body itself is never kept.
     pub body_keys: Vec<BodyKey>,
 }
@@ -454,6 +456,7 @@ impl Candidate {
                 my_review: None,
                 targeted_seen_at: None,
                 head_ref: String::new(),
+                changed_lines: None,
                 body_keys: item.body_keys.clone(),
             }
         })
@@ -526,6 +529,7 @@ pub fn classify(
         head_sha: c.head_sha.clone(),
         is_bot: c.is_bot,
         tickets: scope.resolve(&c.title, &c.head_ref, &c.body_keys),
+        changed_lines: c.changed_lines,
     })
 }
 
@@ -1158,6 +1162,7 @@ impl PerriQueueNativeSource {
                 c.actions_failed = failed;
                 c.head_sha = head_sha;
                 c.head_ref = cached_head_ref(&endpoint_body_cache, &key.0, key.1);
+                c.changed_lines = cached_changed_lines(&endpoint_body_cache, &key.0, key.1);
                 if !failed {
                     known_urls.insert(c.url.clone());
                     b12_survivors += 1;
@@ -1309,6 +1314,8 @@ impl PerriQueueNativeSource {
                 c.actions_failed = failed;
                 c.head_sha = head_sha;
                 c.head_ref = cached_head_ref(&endpoint_body_cache, &outcome.key.0, outcome.key.1);
+                c.changed_lines =
+                    cached_changed_lines(&endpoint_body_cache, &outcome.key.0, outcome.key.1);
             }
         }
 
@@ -1984,6 +1991,26 @@ fn cached_head_ref(
     body.and_then(|b| serde_json::from_str::<Pr>(&b).ok())
         .map(|p| p.head.head_ref)
         .unwrap_or_default()
+}
+
+/// Lines added plus deleted, from the `/pulls/{n}` body `get_pr_head_sha`
+/// already cached. Issues no request (the queue's request counts do not
+/// change); `None` when that read never succeeded or GitHub omitted the counts.
+fn cached_changed_lines(
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+    repo: &str,
+    number: u64,
+) -> Option<u64> {
+    #[derive(Deserialize)]
+    struct Lines {
+        additions: Option<u64>,
+        deletions: Option<u64>,
+    }
+    let url = format!("{}/repos/{repo}/pulls/{number}", api_base());
+    let key = format!("{GITHUB_JSON_ACCEPT}|{url}");
+    let body = body_cache.lock().unwrap().get(&key).cloned()?;
+    let lines: Lines = serde_json::from_str(&body).ok()?;
+    Some(lines.additions? + lines.deletions?)
 }
 
 async fn get_pr_head_sha(
