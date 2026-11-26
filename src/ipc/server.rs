@@ -4976,7 +4976,10 @@ fn for_satellite(msg: ServerMsg, trust: PeerTrust, device_id: Option<&str>) -> S
 /// step, and not in `redact_for_network`: a `personal` satellite's uplink sends
 /// through that function and the primary needs the presence it carries.
 fn without_operator_presence(mut msg: ServerMsg, trust: PeerTrust) -> ServerMsg {
-    if !matches!(trust, PeerTrust::Paired | PeerTrust::Tcp) {
+    if !matches!(
+        trust,
+        PeerTrust::Paired | PeerTrust::Tcp | PeerTrust::Routed
+    ) {
         return msg;
     }
     if let ServerMsg::DecisionRequest {
@@ -6102,6 +6105,51 @@ mod tests {
             out.push(m);
         }
         out
+    }
+
+    fn decision_with_push_facts() -> ServerMsg {
+        ServerMsg::DecisionRequest {
+            tag: "t".into(),
+            request_id: "r".into(),
+            prompt: "p".into(),
+            detail: None,
+            choices: vec![],
+            context_pane_id: None,
+            host: None,
+            deadline: None,
+            agent_class: None,
+            operator_presence: Some(crate::push::wire::Presence::Away),
+            repo: Some("admin-portal".into()),
+            repo_owner: Some("Carefeed".into()),
+        }
+    }
+
+    #[test]
+    fn presence_repo_and_owner_are_stripped_for_every_network_style_peer_and_kept_for_the_rest() {
+        let facts = |msg: ServerMsg| match msg {
+            ServerMsg::DecisionRequest {
+                operator_presence,
+                repo,
+                repo_owner,
+                ..
+            } => (operator_presence.is_some(), repo.is_some(), repo_owner.is_some()),
+            other => panic!("{other:?}"),
+        };
+        for trust in [PeerTrust::Paired, PeerTrust::Tcp, PeerTrust::Routed] {
+            assert_eq!(
+                facts(without_operator_presence(decision_with_push_facts(), trust)),
+                (false, false, false),
+                "{trust:?}"
+            );
+        }
+        // A local peer and a satellite's uplink (the primary needs these) keep them.
+        for trust in [PeerTrust::OperatorApp, PeerTrust::LocalOther] {
+            assert_eq!(
+                facts(without_operator_presence(decision_with_push_facts(), trust)),
+                (true, true, true),
+                "{trust:?}"
+            );
+        }
     }
 
     /// The combined presence after `trust` sends `OperatorPresence { away }` on a

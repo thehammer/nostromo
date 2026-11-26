@@ -127,10 +127,15 @@ fn hex8(bytes: &[u8]) -> String {
     bytes.iter().take(4).map(|b| format!("{b:02x}")).collect()
 }
 
-/// `f-` plus 8 hex of HMAC-SHA256(host_key, tag): stable per host, opaque
-/// to everyone without the key.
+/// `f-` plus 8 hex of HMAC-SHA256(host_key, `tag:` + tag): stable per host,
+/// opaque to everyone without the key. The `tag:` prefix keeps this domain apart
+/// from the repository pseudonyms, so one string used as both never maps to
+/// matching digests.
 pub fn pseudonymous_tag(host_key: &[u8; 32], tag: &str) -> String {
-    format!("f-{}", hex8(&hmac_sha256(host_key, tag.as_bytes())))
+    format!(
+        "f-{}",
+        hex8(&hmac_sha256(host_key, format!("tag:{tag}").as_bytes()))
+    )
 }
 
 /// A short, lower-case-hex reference to a Mother job: the id's last eight
@@ -157,13 +162,17 @@ fn is_hex8(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// `r-` plus 8 hex of HMAC-SHA256(host_key, repo): stable per host, opaque to
-/// everyone without the key. Empty stays empty.
+/// `r-` plus 8 hex of HMAC-SHA256(host_key, `repo:` + repo): stable per host,
+/// opaque to everyone without the key (and apart from the tag pseudonyms by the
+/// prefix). Empty stays empty.
 fn pseudonymous_repo(host_key: &[u8; 32], repo: &str) -> String {
     if repo.is_empty() {
         return String::new();
     }
-    format!("r-{}", hex8(&hmac_sha256(host_key, repo.as_bytes())))
+    format!(
+        "r-{}",
+        hex8(&hmac_sha256(host_key, format!("repo:{repo}").as_bytes()))
+    )
 }
 
 fn is_pseudonymous_repo(s: &str) -> bool {
@@ -825,5 +834,30 @@ pub fn is_uplink_metadata_shape(msg: &ServerMsg) -> bool {
                 .all(|n| *n as u64 <= MAX_COUNT)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY: [u8; 32] = [7; 32];
+
+    #[test]
+    fn tag_and_repo_pseudonyms_are_domain_separated() {
+        // One string used as both a tag and a repository must not give the same
+        // digest: a primary could otherwise equate the two.
+        for s in ["perri", "Carefeed/admin-portal", "x"] {
+            assert_ne!(
+                &pseudonymous_tag(&KEY, s)[2..],
+                &pseudonymous_repo(&KEY, s)[2..],
+                "{s}"
+            );
+            // And neither is the bare keyed hash of the string.
+            let bare = hex8(&hmac_sha256(&KEY, s.as_bytes()));
+            assert_ne!(&pseudonymous_tag(&KEY, s)[2..], bare, "{s}");
+            assert_ne!(&pseudonymous_repo(&KEY, s)[2..], bare, "{s}");
+        }
+        assert_eq!(pseudonymous_repo(&KEY, ""), "", "empty stays empty");
     }
 }
