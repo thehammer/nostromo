@@ -190,17 +190,15 @@ fn vocab_opt(s: &Option<String>, set: &[&str]) -> Option<String> {
     s.as_deref().map(|v| vocab(v, set))
 }
 
-/// A pause reason: the crew vocabulary, or a quota pause (`quota_5h`, ...), which
-/// resumes on its own and which the push engine must be able to tell from a hold.
+/// The one token any quota pause is sent as. The push engine must tell a quota
+/// pause (which resumes on its own) from a hold, and needs only the prefix; the
+/// rest of the value (`quota_5h`, ...) is never sent.
+const QUOTA_PAUSE: &str = "quota_limit";
+
+/// A pause reason: the crew vocabulary, or [`QUOTA_PAUSE`] for any `quota_*`.
 fn paused_reason(s: &str) -> String {
-    let quota = s.strip_prefix("quota_").is_some_and(|rest| {
-        (1..=24).contains(&rest.len())
-            && rest
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-    });
-    if quota {
-        s.to_string()
+    if s.starts_with("quota_") {
+        QUOTA_PAUSE.to_string()
     } else {
         vocab(s, REASONS)
     }

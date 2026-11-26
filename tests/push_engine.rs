@@ -2792,7 +2792,7 @@ async fn a_quota_pause_on_a_work_satellite_makes_no_notification() {
         );
         assert_eq!(
             metadata, full,
-            "{reason}: on a work satellite the pause reads as `other`, which is not a quota pause"
+            "{reason}: on a work satellite a quota pause is still no item"
         );
     }
 }

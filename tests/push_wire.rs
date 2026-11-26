@@ -734,11 +734,11 @@ fn a_work_satellites_job_frame_keeps_when_the_job_paused() {
 
 #[test]
 fn a_work_satellites_job_frame_keeps_the_reasons_the_push_engine_reads() {
-    // BUG if this fails: `paused_reason` and `activity` go through a vocabulary
-    // without `user`, `adherence_blocked`, `operator_hold`, `cost_cap` or
-    // `pipeline_blocked`, and attention reasons without `progress_stalled`,
-    // `burn_ahead` or `gates_incomplete`; a quota pause (`quota_*`) must stay
-    // recognisable too, so that it can be left out.
+    // `paused_reason` and `activity` keep `user`, `adherence_blocked`,
+    // `operator_hold`, `cost_cap` and `pipeline_blocked`, and attention reasons
+    // keep `progress_stalled`, `burn_ahead` and `gates_incomplete`; any quota
+    // pause (`quota_*`) stays recognisable as the one fixed token `quota_limit`,
+    // never with the rest of its text, so that it can be left out.
     let jobs: Vec<nostromo::mother::MotherJob> = serde_json::from_value(json!([
         {"id": "20261126T100000Z-0000aaa1", "state": "awaiting", "paused_reason": "user"},
         {"id": "20261126T100000Z-0000aaa2", "state": "awaiting", "paused_reason": "adherence_blocked"},
@@ -750,6 +750,7 @@ fn a_work_satellites_job_frame_keeps_the_reasons_the_push_engine_reads() {
             {"reason": "progress_stalled", "since": "2026-11-26T09:00:00Z", "acked": false},
             {"reason": "burn_ahead", "since": "2026-11-26T09:00:00Z", "acked": false},
             {"reason": "gates_incomplete", "since": "2026-11-26T09:00:00Z", "acked": false}]},
+        {"id": "20261126T100000Z-0000aaa8", "state": "awaiting", "paused_reason": "quota_MARKER-secret-text"},
     ]))
     .unwrap();
     let out = redacted(ServerMsg::MotherJobs {
@@ -779,14 +780,13 @@ fn a_work_satellites_job_frame_keeps_the_reasons_the_push_engine_reads() {
         Some("pipeline_blocked"),
         "activity"
     );
-    assert!(
-        jobs[5]
-            .paused_reason
-            .as_deref()
-            .is_some_and(|r| r.starts_with("quota")),
-        "a quota pause must stay recognisable, got {:?}",
-        jobs[5].paused_reason
-    );
+    for quota in [&jobs[5], &jobs[7]] {
+        assert_eq!(
+            quota.paused_reason.as_deref(),
+            Some("quota_limit"),
+            "any quota pause is sent as the one fixed token"
+        );
+    }
     let attention: Vec<&str> = jobs[6]
         .attention_reasons
         .iter()
@@ -833,7 +833,9 @@ fn a_work_satellites_review_frame_keeps_the_changed_lines_number() {
     // in two repositories stay two items, and the name itself never leaves.
     let repo = &queue[0].repo;
     assert!(
-        repo.len() == 10 && repo.starts_with("r-") && repo[2..].bytes().all(|b| b.is_ascii_hexdigit()),
+        repo.len() == 10
+            && repo.starts_with("r-")
+            && repo[2..].bytes().all(|b| b.is_ascii_hexdigit()),
         "repo {repo:?}"
     );
     assert!(!repo.contains("admin-portal") && !repo.contains("Carefeed"));
