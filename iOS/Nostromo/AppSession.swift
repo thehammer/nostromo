@@ -24,6 +24,8 @@ final class AppSession: ObservableObject, PairingSideEffects {
 
     @Published private(set) var phase: Phase = .unpaired
     @Published private(set) var store: DaemonStore?
+    /// Push notifications (W13): present over the WebSocket transport, not the legacy TCP one.
+    @Published private(set) var push: PushModel?
     /// A valid `nostromo://pair` link that arrived and has not been used yet.
     @Published var pendingLink: PairLink?
     /// Set when a pairing link was malformed. Nothing was sent.
@@ -73,6 +75,9 @@ final class AppSession: ObservableObject, PairingSideEffects {
         let store = DaemonStore(client: client, cache: cache)
         self.client = client
         self.store = store
+        let push = PushModel(transport: client)
+        self.push = push
+        PushCoordinator.shared.model = push
         stateWatch = client.$state.sink { [weak self] state in
             if case .notPaired = state { self?.handleNotPaired() }
         }
@@ -87,6 +92,7 @@ final class AppSession: ObservableObject, PairingSideEffects {
         try? credentials.clear()           // 1. the credential
         store?.wipeAll()                   // 2. memory, then the cache file
         store = nil
+        push = nil
         client = nil
         stateWatch = nil
         phase = .noLongerPaired            // 3. the screen
@@ -135,6 +141,7 @@ final class AppSession: ObservableObject, PairingSideEffects {
         try? credentials.clear()
         store?.wipeAll()
         store = nil
+        push = nil
         client = nil
         stateWatch = nil
         forgottenNotice = reached ? nil : PairingCopy.forgotten(kind: kindName)
@@ -146,6 +153,7 @@ final class AppSession: ObservableObject, PairingSideEffects {
         client?.stop()
         store?.stop()
         store = nil
+        push = nil
         client = nil
         stateWatch = nil
         ConnectionSettings.transport = transport
