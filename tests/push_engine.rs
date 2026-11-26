@@ -3196,12 +3196,20 @@ fn unfetched_frame(host: Option<&str>) -> ServerMsg {
 /// The `PerriState` the daemon's builder makes once a queue fetch has landed.
 fn fetched_frame(host: Option<&str>, items: Vec<PrQueueItem>) -> ServerMsg {
     let snapshot = nostromo::data::perri_queue::PrQueueSnapshot {
-        generated_at: None,
+        generated_at: Some(base()),
         items,
         stale: false,
         error: None,
     };
-    match nostromo::ipc::perri_state::build_perri_state("f-00000000", Some(&snapshot), None, None) {
+    frame_of(&snapshot, host)
+}
+
+/// The `PerriState` the daemon's builder makes over `snapshot`, from `host`.
+fn frame_of(
+    snapshot: &nostromo::data::perri_queue::PrQueueSnapshot,
+    host: Option<&str>,
+) -> ServerMsg {
+    match nostromo::ipc::perri_state::build_perri_state("f-00000000", Some(snapshot), None, None) {
         ServerMsg::PerriState {
             tag,
             queue,
@@ -3264,6 +3272,120 @@ async fn a_daemon_restart_does_not_re_push_the_reviews_that_were_already_request
     let posts = rig.posts().await;
     assert_eq!(posts.len(), 1, "{posts:#?}");
     assert!(posts[0]["body"].as_str().unwrap().starts_with("PR #4823"));
+}
+
+/// What `perri_queue_native` publishes when GitHub fails before its first
+/// successful fetch (client init, auth check, first search): an empty queue,
+/// `stale`, an `error`, and no `generated_at`.
+fn failed_first_fetch_frame(host: Option<&str>) -> ServerMsg {
+    frame_of(
+        &nostromo::data::perri_queue::PrQueueSnapshot {
+            generated_at: None,
+            items: vec![],
+            stale: true,
+            error: Some("GitHub auth check failed: connection refused".into()),
+        },
+        host,
+    )
+}
+
+#[tokio::test]
+async fn a_restart_whose_first_github_answer_is_a_failure_does_not_re_push_the_reviews_either() {
+    // A daemon that starts before the network (or with an expired token) publishes
+    // an empty, stale, errored snapshot first. That is "unknown", not "nothing":
+    // seeding from it made every requested review look new once GitHub recovered.
+    let mut rig = Rig::new().await;
+    let t0 = base();
+    rig.register("dev-1", &token_a());
+    rig.start(&[], t0).await;
+
+    rig.engine.ingest(unfetched_frame(None), t0);
+    rig.engine
+        .ingest(failed_first_fetch_frame(None), t0 + secs(2));
+    rig.engine.ingest(
+        fetched_frame(None, vec![requested(4821), requested(4822)]),
+        t0 + secs(60),
+    );
+    for t in [60, 180, 600, 3600] {
+        rig.engine.step_at(t0 + secs(t)).await;
+    }
+    assert!(
+        rig.posts().await.is_empty(),
+        "what was waiting before the restart is not news: {:#?}",
+        rig.posts().await
+    );
+    let (items, badge) = rig.waiting("dev-1");
+    assert_eq!((items.len(), badge), (2, 2), "counted as already waiting");
+}
+
+#[tokio::test]
+async fn a_failure_after_a_good_fetch_keeps_the_old_queue_and_is_not_unfetched() {
+    // The old queue is real data: a stale, errored frame that still carries it (and
+    // its `generated_at`) must not be mistaken for a first fetch that never landed.
+    let flag = |msg: ServerMsg| match msg {
+        ServerMsg::PerriState {
+            queue_unfetched, ..
+        } => queue_unfetched,
+        other => panic!("{other:?}"),
+    };
+    let snapshot = nostromo::data::perri_queue::PrQueueSnapshot {
+        generated_at: Some(base()),
+        items: vec![requested(4821), requested(4822)],
+        stale: true,
+        error: Some("GitHub auth check failed: timed out".into()),
+    };
+    assert!(!flag(frame_of(&snapshot, None)));
+
+    let mut rig = Rig::new().await;
+    let t0 = base();
+    rig.register("dev-1", &token_a());
+    rig.start(&[], t0).await;
+    rig.engine.ingest(
+        fetched_frame(None, vec![requested(4821), requested(4822)]),
+        t0,
+    );
+    rig.engine.step_at(t0).await;
+    rig.engine.ingest(frame_of(&snapshot, None), t0 + secs(300));
+    rig.engine.step_at(t0 + secs(300)).await;
+    let (items, badge) = rig.waiting("dev-1");
+    assert_eq!(
+        (items.len(), badge),
+        (2, 2),
+        "the old queue is still what is waiting"
+    );
+    assert!(rig.posts().await.is_empty(), "{:#?}", rig.posts().await);
+}
+
+#[tokio::test]
+async fn a_retained_frame_built_before_any_fetch_does_not_seed_a_host_at_reconcile() {
+    // The reconcile fills in a host the engine has not heard from. A retained frame
+    // for it that says "queue never fetched" is no baseline: seeding from it would
+    // make every review pushed once the host's first real queue arrives.
+    let mut rig = Rig::new().await;
+    // The reconcile is due 30 s after the engine's own (real) start: real clock.
+    let t0 = Utc::now();
+    rig.register("dev-1", &token_a());
+    rig.start(&[], t0).await;
+
+    let retained: nostromo::push::RetainedSource =
+        Arc::new(|| vec![unfetched_frame(Some("osaka"))]);
+    let later = t0 + secs(31);
+    rig.engine.housekeeping(Some(&retained), later);
+    rig.engine.step_at(later).await;
+
+    rig.engine.ingest(
+        fetched_frame(Some("osaka"), vec![requested(4821), requested(4822)]),
+        later + secs(5),
+    );
+    for t in [5, 125, 600] {
+        rig.engine.step_at(later + secs(t)).await;
+    }
+    assert!(
+        rig.posts().await.is_empty(),
+        "the first real queue is the baseline, not news: {:#?}",
+        rig.posts().await
+    );
+    assert_eq!(rig.waiting("dev-1").1, 2, "but counted");
 }
 
 #[tokio::test]

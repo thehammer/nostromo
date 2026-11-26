@@ -39,7 +39,10 @@ pub fn build_perri_state(
         current: pr_snap.cloned().map(Box::new),
         jira_site: jira_site.and_then(bare_jira_host),
         host: None,
-        queue_unfetched: queue_snap.is_none(),
+        // `generated_at` is set only by a successful fetch. A snapshot published by
+        // a failure before the first fetch (client init, auth check, first
+        // search) has none, and its empty queue is "unknown", not "nothing".
+        queue_unfetched: queue_snap.is_none_or(|s| s.generated_at.is_none()),
     }
 }
 
@@ -151,6 +154,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use chrono::Utc;
+
     use super::*;
     use crate::data::perri_queue::PrQueueItem;
 
@@ -173,7 +178,7 @@ mod tests {
 
     fn queue() -> PrQueueSnapshot {
         PrQueueSnapshot {
-            generated_at: None,
+            generated_at: Some(Utc::now()),
             items: vec![PrQueueItem {
                 repo: "acme/web".into(),
                 number: 42,
@@ -373,11 +378,47 @@ mod tests {
         )));
         // An empty queue that WAS fetched is a real "nothing waiting".
         let empty = PrQueueSnapshot {
-            generated_at: None,
+            generated_at: Some(Utc::now()),
             items: vec![],
             stale: false,
             error: None,
         };
         assert!(!flag(build_perri_state("perri", Some(&empty), None, None)));
+    }
+
+    fn unfetched_flag(snap: &PrQueueSnapshot) -> bool {
+        match build_perri_state("perri", Some(snap), None, None) {
+            ServerMsg::PerriState {
+                queue_unfetched, ..
+            } => queue_unfetched,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_snapshot_published_by_a_failure_before_any_fetch_is_unfetched() {
+        // `generated_at` is set only by a successful fetch, so these are the
+        // shapes the first-GitHub-call failures publish: an empty queue that
+        // means "unknown".
+        let init_failed = PrQueueSnapshot {
+            error: Some("GitHub client init failed: no token".into()),
+            stale: true,
+            ..Default::default()
+        };
+        assert!(unfetched_flag(&init_failed));
+        let auth_failed = PrQueueSnapshot {
+            stale: true,
+            error: Some("GitHub auth check failed: refused".into()),
+            ..Default::default()
+        };
+        assert!(unfetched_flag(&auth_failed));
+    }
+
+    #[test]
+    fn a_failure_after_a_successful_fetch_keeps_its_queue_and_is_not_unfetched() {
+        let mut snap = queue();
+        snap.stale = true;
+        snap.error = Some("GitHub auth check failed: timed out".into());
+        assert!(!unfetched_flag(&snap), "the old queue is real data");
     }
 }

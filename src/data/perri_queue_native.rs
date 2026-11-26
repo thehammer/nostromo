@@ -697,11 +697,7 @@ impl PerriQueueNativeSource {
             Ok(c) => c,
             Err(e) => {
                 warn!("github client init failed: {e:#}");
-                let _ = tx.send(Some(PrQueueSnapshot {
-                    error: Some(format!("GitHub client init failed: {e:#}")),
-                    stale: true,
-                    ..Default::default()
-                }));
+                let _ = tx.send(Some(client_init_failed_snapshot(&e)));
                 return;
             }
         };
@@ -1411,6 +1407,17 @@ impl PerriQueueNativeSource {
     fn build_client(&self) -> Result<GithubClient> {
         let hosts_path = self.config.github_token_path.as_deref();
         GithubClient::new(hosts_path)
+    }
+}
+
+/// What the run loop publishes when the GitHub client cannot be built. No fetch
+/// has ever succeeded, so it carries no `generated_at`: consumers read its empty
+/// queue as "unknown", not "nothing waiting".
+fn client_init_failed_snapshot(e: &anyhow::Error) -> PrQueueSnapshot {
+    PrQueueSnapshot {
+        error: Some(format!("GitHub client init failed: {e:#}")),
+        stale: true,
+        ..Default::default()
     }
 }
 
@@ -2659,6 +2666,104 @@ mod tests {
             ..Default::default()
         };
         (PerriQueueNativeSource::new(cfg), dir)
+    }
+
+    // ── a first GitHub failure is "unknown", not "nothing waiting" ────────────
+    //
+    // Each way the run loop can fail before its first successful fetch publishes
+    // a snapshot with an empty queue. The daemon's `PerriState` builder must flag
+    // all three as unfetched, or the push engine baselines from the empty queue
+    // and pushes every requested review again once GitHub recovers.
+
+    fn is_unfetched(snap: &PrQueueSnapshot) -> bool {
+        match crate::ipc::perri_state::build_perri_state("perri", Some(snap), None, None) {
+            crate::ipc::protocol::ServerMsg::PerriState {
+                queue_unfetched, ..
+            } => queue_unfetched,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The first snapshot `run()` publishes against `server`'s GitHub.
+    async fn first_published(server: &wiremock::MockServer) -> PrQueueSnapshot {
+        API_BASE_OVERRIDE.with(|c| *c.borrow_mut() = Some(server.uri()));
+        let (source, dir) = make_source();
+        let suppress = Arc::new(Mutex::new(SuppressStore::new(
+            dir.path().join("approvals-state.json"),
+            std::time::Duration::from_secs(900),
+        )));
+        let (tx, mut rx) = watch::channel(None);
+        let (_dirty_tx, mut dirty_rx) = mpsc::unbounded_channel();
+        let (_refresh_tx, mut refresh_rx) = mpsc::unbounded_channel();
+        let (_approvals_tx, mut approvals_rx) = mpsc::unbounded_channel();
+        let (_relay_tx, mut relay_rx) = mpsc::unbounded_channel();
+        let run = source.run(
+            tx,
+            &mut dirty_rx,
+            &mut refresh_rx,
+            &mut approvals_rx,
+            &mut relay_rx,
+            suppress,
+            3600,
+        );
+        tokio::pin!(run);
+        tokio::select! {
+            _ = &mut run => panic!("run() returned before publishing"),
+            changed = rx.changed() => changed.expect("run() published"),
+        }
+        let snap = rx.borrow().clone();
+        snap.expect("a snapshot")
+    }
+
+    #[test]
+    fn a_github_client_that_cannot_be_built_publishes_an_unfetched_snapshot() {
+        let snap = client_init_failed_snapshot(&anyhow::anyhow!("No GitHub token found"));
+        assert!(snap.stale && snap.items.is_empty());
+        assert!(snap
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("client init failed"));
+        assert!(is_unfetched(&snap));
+    }
+
+    #[tokio::test]
+    async fn a_failed_startup_auth_check_publishes_an_unfetched_snapshot() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let snap = first_published(&server).await;
+        assert!(snap.stale && snap.items.is_empty());
+        assert!(snap.error.as_deref().unwrap().contains("auth check failed"));
+        assert!(is_unfetched(&snap), "{snap:?}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_first_fetch_publishes_an_unfetched_snapshot() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"login": "tester"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/search/issues"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let snap = first_published(&server).await;
+        assert!(snap.stale && snap.items.is_empty());
+        assert!(snap.error.is_some());
+        assert!(is_unfetched(&snap), "{snap:?}");
     }
 
     /// Call `fetch()` with the given suppress store, returning the snapshot.
