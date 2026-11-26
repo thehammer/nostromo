@@ -3353,6 +3353,7 @@ fn perri_state(tag: &str) -> ServerMsg {
         current: None,
         jira_site: None,
         host: None,
+        queue_unfetched: false,
     }
 }
 

@@ -3365,6 +3365,12 @@ pub enum ServerMsg {
         /// The satellite this frame came from; `None` is the daemon's own.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host: Option<String>,
+        /// True when no queue fetch has landed yet, so `queue` is empty because it
+        /// is *unknown*, not because nothing is waiting. Absent otherwise. The
+        /// push engine does not take a baseline from such a frame (a restart
+        /// would otherwise push every requested review once the fetch lands).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        queue_unfetched: bool,
     },
 
     /// Broadcast snapshot of Fred's mailbox + calendar state. Re-sent whenever
@@ -5601,6 +5607,7 @@ mod tests {
             current: None,
             jira_site: None,
             host: None,
+            queue_unfetched: false,
         });
     }
 
@@ -5654,6 +5661,7 @@ mod tests {
             current: Some(Box::new(snap)),
             jira_site: Some("carefeed.atlassian.net".into()),
             host: None,
+            queue_unfetched: false,
         });
     }
 
@@ -5665,6 +5673,7 @@ mod tests {
             current: None,
             jira_site: None,
             host: None,
+            queue_unfetched: false,
         })
         .unwrap();
         assert_eq!(v["type"], "perri_state");
@@ -5688,6 +5697,7 @@ mod tests {
             current: None,
             jira_site: Some("carefeed.atlassian.net".into()),
             host: None,
+            queue_unfetched: false,
         })
         .unwrap();
         assert_eq!(v["jira_site"], "carefeed.atlassian.net");

@@ -349,6 +349,7 @@ fn queue_frame(host: Option<&str>, queue: Vec<PrQueueItem>) -> ServerMsg {
         current: None,
         jira_site: None,
         host: host.map(str::to_string),
+        queue_unfetched: false,
     }
 }
 
@@ -3104,4 +3105,134 @@ async fn a_lagged_receiver_is_repaired_from_the_retained_frames_at_the_next_tick
         other => panic!("{other:?}"),
     }
     handle.abort();
+}
+
+// ── a restart's first frame is not a baseline ────────────────────────────────
+
+/// The `PerriState` the daemon's own builder makes before any queue fetch has
+/// landed (`None` queue): an empty queue that means "unknown", not "nothing".
+fn unfetched_frame(host: Option<&str>) -> ServerMsg {
+    match nostromo::ipc::perri_state::build_perri_state("f-00000000", None, None, None) {
+        ServerMsg::PerriState {
+            tag,
+            queue,
+            current,
+            jira_site,
+            queue_unfetched,
+            ..
+        } => ServerMsg::PerriState {
+            tag,
+            queue,
+            current,
+            jira_site,
+            host: host.map(str::to_string),
+            queue_unfetched,
+        },
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The `PerriState` the daemon's builder makes once a queue fetch has landed.
+fn fetched_frame(host: Option<&str>, items: Vec<PrQueueItem>) -> ServerMsg {
+    let snapshot = nostromo::data::perri_queue::PrQueueSnapshot {
+        generated_at: None,
+        items,
+        stale: false,
+        error: None,
+    };
+    match nostromo::ipc::perri_state::build_perri_state("f-00000000", Some(&snapshot), None, None) {
+        ServerMsg::PerriState {
+            tag,
+            queue,
+            current,
+            jira_site,
+            queue_unfetched,
+            ..
+        } => ServerMsg::PerriState {
+            tag,
+            queue,
+            current,
+            jira_site,
+            host: host.map(str::to_string),
+            queue_unfetched,
+        },
+        other => panic!("{other:?}"),
+    }
+}
+
+fn requested(n: u64) -> PrQueueItem {
+    pr("Carefeed/admin-portal", n, "requested", Some(10))
+}
+
+#[tokio::test]
+async fn a_daemon_restart_does_not_re_push_the_reviews_that_were_already_requested() {
+    // The broadcaster's first frame is built before the queue is fetched (an empty
+    // queue that means "unknown"). Seeding the local host from it made every
+    // requested PR look new when the first real snapshot landed.
+    let mut rig = Rig::new().await;
+    let t0 = base();
+    rig.register("dev-1", &token_a());
+    rig.start(&[], t0).await;
+
+    rig.engine.ingest(unfetched_frame(None), t0);
+    rig.engine.ingest(
+        fetched_frame(None, vec![requested(4821), requested(4822)]),
+        t0 + secs(5),
+    );
+    for t in [5, 125, 600, 3600] {
+        rig.engine.step_at(t0 + secs(t)).await;
+    }
+    assert!(
+        rig.posts().await.is_empty(),
+        "what was waiting before the restart is not news: {:#?}",
+        rig.posts().await
+    );
+    let (items, badge) = rig.waiting("dev-1");
+    assert_eq!((items.len(), badge), (2, 2), "but it is counted");
+
+    // The baseline did not swallow real news: a new request after it is pushed.
+    rig.engine.ingest(
+        fetched_frame(
+            None,
+            vec![requested(4821), requested(4822), requested(4823)],
+        ),
+        t0 + secs(3700),
+    );
+    rig.engine.step_at(t0 + secs(3700)).await;
+    rig.engine.step_at(t0 + secs(3820)).await;
+    let posts = rig.posts().await;
+    assert_eq!(posts.len(), 1, "{posts:#?}");
+    assert!(posts[0]["body"].as_str().unwrap().starts_with("PR #4823"));
+}
+
+#[tokio::test]
+async fn a_satellite_restart_neither_withdraws_nor_re_pushes_what_the_primary_remembers() {
+    // The primary kept the satellite's reviews. The satellite restarts and its
+    // first frame is the unfetched one: an empty queue read as real would
+    // withdraw every review, then push them all again as new.
+    let mut rig = Rig::new().await;
+    let t0 = base();
+    rig.register("dev-1", &token_a());
+    rig.start(&[], t0).await;
+    let full = vec![requested(4821), requested(4822)];
+    rig.engine
+        .ingest(fetched_frame(Some("kobe"), full.clone()), t0);
+    rig.engine.step_at(t0).await;
+
+    rig.engine
+        .ingest(unfetched_frame(Some("kobe")), t0 + secs(600));
+    rig.engine.step_at(t0 + secs(600)).await;
+    rig.engine
+        .ingest(fetched_frame(Some("kobe"), full), t0 + secs(610));
+    for t in [610, 740, 3600] {
+        rig.engine.step_at(t0 + secs(t)).await;
+    }
+
+    assert!(
+        rig.posts().await.is_empty(),
+        "no withdrawal and no fresh push: {:#?}",
+        rig.posts().await
+    );
+    let (items, badge) = rig.waiting("dev-1");
+    assert_eq!((items.len(), badge), (2, 2));
 }

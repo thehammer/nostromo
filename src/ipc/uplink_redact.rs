@@ -475,7 +475,11 @@ pub fn redact_for_uplink_metadata(
             None
         }
         ServerMsg::PerriState {
-            tag, queue, host, ..
+            tag,
+            queue,
+            host,
+            queue_unfetched,
+            ..
         } => Some(ServerMsg::PerriState {
             tag: pseudonymous_tag(host_key, &tag),
             queue: queue
@@ -494,6 +498,7 @@ pub fn redact_for_uplink_metadata(
             current: None,
             jira_site: None,
             host,
+            queue_unfetched,
         }),
         ServerMsg::SessionState { tag, state, host } => Some(ServerMsg::SessionState {
             tag: pseudonymous_tag(host_key, &tag),

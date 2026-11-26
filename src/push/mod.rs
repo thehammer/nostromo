@@ -355,6 +355,13 @@ impl PushEngine {
                 self.put_mother(&mut st, &host, mother_items(&host, &jobs), now);
                 true
             }
+            // A frame built before any queue fetch landed says nothing: its empty
+            // queue is unknown, not empty. Seeding from it would make every
+            // requested review look new once the first real snapshot lands.
+            ServerMsg::PerriState {
+                queue_unfetched: true,
+                ..
+            } => false,
             ServerMsg::PerriState { queue, host, .. } => {
                 let host = self.label(host);
                 self.put_reviews(&mut st, &host, review_items(&host, &queue), now);
@@ -465,6 +472,7 @@ impl PushEngine {
                     ServerMsg::PerriState {
                         queue,
                         host: Some(host),
+                        queue_unfetched: false,
                         ..
                     } if overwrite || !st.reviews.contains_key(&host) => {
                         self.put_reviews(&mut st, &host, review_items(&host, &queue), now);

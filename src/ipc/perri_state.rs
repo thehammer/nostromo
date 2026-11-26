@@ -39,6 +39,7 @@ pub fn build_perri_state(
         current: pr_snap.cloned().map(Box::new),
         jira_site: jira_site.and_then(bare_jira_host),
         host: None,
+        queue_unfetched: queue_snap.is_none(),
     }
 }
 
@@ -353,5 +354,30 @@ mod tests {
             ],
             "one frame per focus, each carrying only its own PR and the same fleet-wide queue"
         );
+    }
+
+    #[test]
+    fn a_frame_built_before_any_queue_fetch_says_so_and_a_fetched_one_does_not() {
+        let flag = |msg: ServerMsg| match msg {
+            ServerMsg::PerriState {
+                queue_unfetched, ..
+            } => queue_unfetched,
+            other => panic!("{other:?}"),
+        };
+        assert!(flag(build_perri_state("perri", None, None, None)));
+        assert!(!flag(build_perri_state(
+            "perri",
+            Some(&queue()),
+            None,
+            None
+        )));
+        // An empty queue that WAS fetched is a real "nothing waiting".
+        let empty = PrQueueSnapshot {
+            generated_at: None,
+            items: vec![],
+            stale: false,
+            error: None,
+        };
+        assert!(!flag(build_perri_state("perri", Some(&empty), None, None)));
     }
 }

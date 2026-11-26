@@ -800,6 +800,30 @@ fn a_work_satellites_job_frame_keeps_the_reasons_the_push_engine_reads() {
 }
 
 #[test]
+fn a_work_satellites_unfetched_queue_marker_survives_the_uplink() {
+    // The primary must be able to tell "the satellite has not fetched its queue
+    // yet" from "nothing is waiting", or a restart looks like every review leaving.
+    for unfetched in [true, false] {
+        let out = redacted(ServerMsg::PerriState {
+            tag: "perri".into(),
+            queue: vec![],
+            current: None,
+            jira_site: None,
+            host: Some("kobe".into()),
+            queue_unfetched: unfetched,
+        });
+        let ServerMsg::PerriState {
+            queue_unfetched, ..
+        } = &out
+        else {
+            panic!()
+        };
+        assert_eq!(*queue_unfetched, unfetched);
+        assert!(nostromo::ipc::uplink_redact::is_uplink_metadata_shape(&out));
+    }
+}
+
+#[test]
 fn a_work_satellites_review_frame_keeps_the_changed_lines_number() {
     // The PerriState metadata arm keeps `number`, `bucket` and `changed_lines`,
     // so a Kobe review can say "small change".
@@ -818,6 +842,7 @@ fn a_work_satellites_review_frame_keeps_the_changed_lines_number() {
         current: None,
         jira_site: None,
         host: Some("kobe".into()),
+        queue_unfetched: false,
     });
     let ServerMsg::PerriState { queue, .. } = &out else {
         panic!()
