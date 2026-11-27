@@ -58,9 +58,12 @@ pub enum ApiError {
     Forbidden,
     /// 429, or a 403 that is a limit: stop until `Retry-After`, the reset of an exhausted limit, or a minute.
     /// `wait` is the server's `Retry-After`; `None` means until the reset in `Meta::rate`
-    /// (or a minute when there is none).
+    /// (or a minute when there is none). `secondary`: GitHub's own secondary
+    /// limit, which backs off further each time it comes again; a stated
+    /// `Retry-After` or an exhausted allowance is obeyed as given.
     RateLimited {
         wait: Option<Duration>,
+        secondary: bool,
     },
     /// Any other non-success status, or a body that could not be read.
     Status(u16),
@@ -130,6 +133,69 @@ async fn says_secondary_limit(resp: &mut reqwest::Response) -> bool {
     }
     let text = String::from_utf8_lossy(&head).to_lowercase();
     text.contains("secondary rate limit") || text.contains("abuse")
+}
+
+/// What a 403 or 429 says about a limit.
+enum Limit {
+    /// GitHub gave a `Retry-After`.
+    Stated(Duration),
+    /// The allowance is spent: wait for its reset.
+    UntilReset,
+    /// A secondary limit that names no wait.
+    Secondary,
+}
+
+/// A 403 or 429 is a limit when it carries `Retry-After`, shows an allowance
+/// of zero, is a 429, or is a 403 whose body names a secondary limit; any
+/// other 403 is a permission refusal (`None`) and waiting would not help.
+/// One reading for every request, reads and merges alike.
+async fn limit_of(
+    resp: &mut reqwest::Response,
+    status: u16,
+    retry_after: Option<Duration>,
+    exhausted: bool,
+) -> Option<Limit> {
+    if let Some(wait) = retry_after {
+        Some(Limit::Stated(wait))
+    } else if exhausted {
+        Some(Limit::UntilReset)
+    } else if status == 403 && !says_secondary_limit(resp).await {
+        None
+    } else {
+        Some(Limit::Secondary)
+    }
+}
+
+/// How long a limit on a merge request says to wait: the server's wait, or
+/// else the reset of the spent allowance, or else (neither) a minute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LimitWait {
+    pub wait: Option<Duration>,
+    pub reset: Option<DateTime<Utc>>,
+}
+
+impl LimitWait {
+    /// A secondary limit that names no wait.
+    pub fn secondary() -> Self {
+        LimitWait {
+            wait: Some(SECONDARY_WAIT),
+            reset: None,
+        }
+    }
+
+    fn of(limit: Limit, meta: &Meta) -> Self {
+        match limit {
+            Limit::Stated(w) => LimitWait {
+                wait: Some(w),
+                reset: None,
+            },
+            Limit::UntilReset => LimitWait {
+                wait: None,
+                reset: meta.rate.map(|(_, o)| o.reset),
+            },
+            Limit::Secondary => LimitWait::secondary(),
+        }
+    }
 }
 
 fn read_meta(h: &HeaderMap) -> Meta {
@@ -210,20 +276,23 @@ impl Api {
             });
         }
         if status == 429 || status == 403 {
-            let error = if let Some(wait) = retry_after {
-                ApiError::RateLimited { wait: Some(wait) }
-            } else if remaining_zero {
-                ApiError::RateLimited { wait: None }
-            } else if status == 403 && !says_secondary_limit(&mut resp).await {
-                // A 403 with allowance left and no `Retry-After` is a limit only when
-                // GitHub's body says so; otherwise the token lacks access (SSO,
-                // permission) and waiting a minute will not change that.
-                ApiError::Forbidden
-            } else {
-                // A secondary limit: pause for a bounded minute.
-                ApiError::RateLimited {
+            // A 403 with allowance left and no `Retry-After` is a limit only when
+            // GitHub's body says so; otherwise the token lacks access (SSO,
+            // permission) and waiting a minute will not change that.
+            let error = match limit_of(&mut resp, status, retry_after, remaining_zero).await {
+                Some(Limit::Stated(wait)) => ApiError::RateLimited {
+                    wait: Some(wait),
+                    secondary: false,
+                },
+                Some(Limit::UntilReset) => ApiError::RateLimited {
+                    wait: None,
+                    secondary: false,
+                },
+                Some(Limit::Secondary) => ApiError::RateLimited {
                     wait: Some(SECONDARY_WAIT),
-                }
+                    secondary: true,
+                },
+                None => ApiError::Forbidden,
             };
             return Err(Failure { error, meta });
         }
@@ -414,6 +483,7 @@ impl Api {
             return Err(Failure {
                 error: ApiError::RateLimited {
                     wait: (!exhausted).then_some(SECONDARY_WAIT),
+                    secondary: !exhausted,
                 },
                 meta: reply.meta,
             });
@@ -530,7 +600,7 @@ impl Api {
         if !valid_repo(repo) {
             return Err(MergeError::NotFound);
         }
-        let resp = self
+        let mut resp = self
             .http
             .put(format!("{}/repos/{repo}/pulls/{number}/merge", self.base))
             .headers(self.headers())
@@ -539,17 +609,18 @@ impl Api {
             .await
             .map_err(|_| MergeError::Transport)?;
         let status = resp.status().as_u16();
-        let meta = read_meta(resp.headers());
-        let retry_after = header_str(resp.headers(), "retry-after").and_then(parse_retry_after);
-        let exhausted = meta.rate.is_some_and(|(_, o)| o.remaining == 0);
+        if (200..300).contains(&status) {
+            return Ok(());
+        }
+        if status == 401 {
+            return Err(MergeError::Unauthorized);
+        }
+        if status == 429 || status == 403 {
+            // A limit when GitHub says so, and a token without the right to
+            // merge otherwise.
+            return Err(merge_limit(&mut resp, status).await);
+        }
         Err(match status {
-            200..=299 => return Ok(()),
-            401 => MergeError::Unauthorized,
-            429 => MergeError::RateLimited,
-            // A 403 is a limit when GitHub says so, and a token without the
-            // right to merge otherwise.
-            403 if retry_after.is_some() || exhausted => MergeError::RateLimited,
-            403 => MergeError::Forbidden,
             404 => MergeError::NotFound,
             405 => MergeError::NotAllowed,
             409 => MergeError::HeadMoved,
@@ -571,7 +642,7 @@ impl Api {
         {
             return Err(MergeError::Unmergeable);
         }
-        let resp = self
+        let mut resp = self
             .http
             .post(format!("{}/graphql", self.base))
             .headers(self.headers())
@@ -583,15 +654,10 @@ impl Api {
             .await
             .map_err(|_| MergeError::Transport)?;
         let status = resp.status().as_u16();
-        let meta = read_meta(resp.headers());
-        let retry_after = header_str(resp.headers(), "retry-after").and_then(parse_retry_after);
-        let exhausted = meta.rate.is_some_and(|(_, o)| o.remaining == 0);
         match status {
             200..=299 => {}
             401 => return Err(MergeError::Unauthorized),
-            429 => return Err(MergeError::RateLimited),
-            403 if retry_after.is_some() || exhausted => return Err(MergeError::RateLimited),
-            403 => return Err(MergeError::Forbidden),
+            429 | 403 => return Err(merge_limit(&mut resp, status).await),
             404 => return Err(MergeError::NotFound),
             _ => return Err(MergeError::Transport),
         }
@@ -614,6 +680,18 @@ impl Api {
         } else {
             Err(MergeError::Unmergeable)
         }
+    }
+}
+
+/// A merge request's 403 or 429: the limit it carries (and the wait it gave),
+/// or `Forbidden` for a permission refusal.
+async fn merge_limit(resp: &mut reqwest::Response, status: u16) -> MergeError {
+    let meta = read_meta(resp.headers());
+    let retry_after = header_str(resp.headers(), "retry-after").and_then(parse_retry_after);
+    let exhausted = meta.rate.is_some_and(|(_, o)| o.remaining == 0);
+    match limit_of(resp, status, retry_after, exhausted).await {
+        Some(limit) => MergeError::RateLimited(LimitWait::of(limit, &meta)),
+        None => MergeError::Forbidden,
     }
 }
 
@@ -695,7 +773,7 @@ fn classify_enqueue_errors(errors: &[serde_json::Value]) -> MergeError {
             .any(|e| error_kinds(e).iter().any(|k| names.contains(&k.as_str())))
     };
     if has(&["RATE_LIMITED"]) {
-        return MergeError::RateLimited;
+        return MergeError::RateLimited(LimitWait::secondary());
     }
     if has(&["FORBIDDEN", "INSUFFICIENT_SCOPES"]) {
         return MergeError::Forbidden;
@@ -750,8 +828,8 @@ pub enum MergeError {
     HeadMoved,
     /// 422.
     Unmergeable,
-    /// 429, or a 403 that carries a limit.
-    RateLimited,
+    /// 429, or a 403 that carries a limit, with the wait it gave.
+    RateLimited(LimitWait),
     /// No answer, or an unexpected status.
     Transport,
 }
@@ -948,7 +1026,7 @@ mod tests {
     #[test]
     fn rate_limit_permission_and_missing_node_are_named_by_type_or_by_extensions_code() {
         let cases = [
-            ("RATE_LIMITED", MergeError::RateLimited),
+            ("RATE_LIMITED", MergeError::RateLimited(LimitWait::secondary())),
             ("FORBIDDEN", MergeError::Forbidden),
             ("INSUFFICIENT_SCOPES", MergeError::Forbidden),
             ("NOT_FOUND", MergeError::NotFound),
@@ -971,7 +1049,7 @@ mod tests {
                 {"type": "UNPROCESSABLE", "message": HEAD_WORDING},
                 {"type": "RATE_LIMITED", "message": "slow down"}
             ])),
-            MergeError::RateLimited
+            MergeError::RateLimited(LimitWait::secondary())
         );
     }
 

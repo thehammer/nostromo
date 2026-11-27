@@ -828,6 +828,9 @@ async fn githubs_answer_to_the_merge_is_a_code_and_none_of_its_words_or_the_pr_r
         assert_eq!(code_of(&answer), *want, "{what}: {answer:?}");
         assert_eq!(rig.fake.merges().len(), before + 1, "{what}: one request");
         answers.push_str(&serde_json::to_string(&answer).unwrap());
+        // A limit is remembered and refuses locally until its wait is over (at
+        // most a quarter of an hour): let it pass, so the next row is asked of GitHub.
+        rig.advance(mins(16)).await;
     }
     rig.fake.force("merge", None);
     rig.fake.set_rate(None);
@@ -1664,6 +1667,9 @@ async fn githubs_refusals_to_enqueue_map_to_codes_and_none_of_its_words_reach_th
             !wire.contains("CANARY") && !wire.contains("github.com"),
             "{wire}"
         );
+        // A limit is remembered and refuses locally until its wait is over (at
+        // most a quarter of an hour): let it pass, so the next row is asked of GitHub.
+        rig.advance(mins(16)).await;
     }
     assert!(rig.fake.merges().is_empty());
     // A refusal is not remembered as a success: a new id asks again.

@@ -11,8 +11,8 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use super::budget::{
-    error_backoff, Bucket, Demand, Posture, RateState, LINGER, MIN_SEARCH_GAP, RELAY_COALESCE,
-    TOKEN_EARLY_RETRY, TOKEN_RETRY,
+    error_backoff, Bucket, Demand, Posture, RateState, LINGER, MAX_RETRY_AFTER, MIN_SEARCH_GAP,
+    RELAY_COALESCE, TOKEN_EARLY_RETRY, TOKEN_RETRY,
 };
 use super::classify::{classify, group_of, Classified, RawPr};
 use super::exclude::ExcludedOrgs;
@@ -32,6 +32,10 @@ use crate::data::work::untrusted::one_line;
 use crate::mother::MotherJob;
 
 /// How often the relay's connected flag is looked at (it has no signal for "down").
+/// A pause is judged against the wall clock but slept on the monotonic one,
+/// which stands still while the machine sleeps: look at the wall clock again at
+/// least this often, so a pause that ended meanwhile is noticed within it.
+const WALL_RECHECK: Duration = Duration::from_secs(30);
 const RELAY_STATUS_POLL: Duration = Duration::from_secs(2);
 /// Snapshots are published at most this often.
 const DEBOUNCE: Duration = Duration::from_millis(250);
@@ -146,6 +150,8 @@ pub(super) struct Engine {
     resolver: Option<TokenResolver>,
     last_token_check: Instant,
     error_count: u32,
+    /// Secondary limits in a row with no success between: each waits twice as long.
+    secondary_streak: u32,
     last_error: bool,
     retry_at: Option<(Instant, DateTime<Utc>)>,
 
@@ -250,6 +256,7 @@ impl Engine {
             resolver: deps.token_resolver,
             last_token_check: Instant::now(),
             error_count: 0,
+            secondary_streak: 0,
             last_error: false,
             retry_at: None,
             // A relay that is configured has not been reconciled with yet.
@@ -800,6 +807,7 @@ impl Engine {
 
     fn succeeded(&mut self) {
         self.error_count = 0;
+        self.secondary_streak = 0;
         self.last_error = false;
         self.retry_at = None;
     }
@@ -815,7 +823,17 @@ impl Engine {
                 self.token_retry = Some(now + TOKEN_RETRY);
                 self.token_rejected_at = Some(now);
             }
-            ApiError::RateLimited { wait } => {
+            ApiError::RateLimited { wait, secondary } => {
+                // A secondary limit that keeps coming is waited out for longer each
+                // time; a wait GitHub states is obeyed as given.
+                let wait = match wait {
+                    Some(w) if secondary => {
+                        let doubled = w * 2u32.saturating_pow(self.secondary_streak.min(16));
+                        self.secondary_streak = self.secondary_streak.saturating_add(1);
+                        Some(doubled.min(MAX_RETRY_AFTER))
+                    }
+                    other => other,
+                };
                 let until = match wait {
                     Some(w) => wall + chrono::Duration::from_std(w).unwrap_or_default(),
                     None => f
@@ -1207,6 +1225,12 @@ impl Engine {
         }
         if let Some(t) = self.rate.next_change() {
             if let Ok(d) = (t - wall).to_std() {
+                // While paused the wall clock may jump past the end unseen.
+                let d = if self.posture == Posture::Paused {
+                    d.min(WALL_RECHECK)
+                } else {
+                    d
+                };
                 consider(now + d);
             }
         }
