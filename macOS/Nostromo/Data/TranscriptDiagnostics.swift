@@ -371,7 +371,7 @@ enum TranscriptDiagnostics {
         if let override = ProcessInfo.processInfo.environment["NOSTROMO_DIAG_PATH"] {
             return URL(fileURLWithPath: override)
         }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return NostromoHome.applicationSupportDirectory
             .appendingPathComponent("Nostromo/diagnostics.jsonl")
     }
 

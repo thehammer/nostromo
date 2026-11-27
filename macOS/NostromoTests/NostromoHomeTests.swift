@@ -60,6 +60,64 @@ final class NostromoHomeTests: XCTestCase {
     func testAMissingBundleIDIgnoresTheVariable() {
         XCTAssertEqual(resolve(env: [envKey: tempRoot.path], bundleID: nil), realHome.path)
     }
+
+    // MARK: Under tests
+
+    func testUnderTestsTheSeamIsTheTestHomeWhateverTheEnvironmentAndBundleSay() {
+        let testHome = tempRoot.appendingPathComponent("test-home", isDirectory: true)
+        for (env, bundle) in [([envKey: tempRoot.path], qaBundleID), ([:], realBundleID), ([:], nil)] as [([String: String], String?)] {
+            XCTAssertEqual(NostromoHome.url(env: env, bundleID: bundle, realHome: realHome, underTests: true,
+                                            testHome: testHome).path,
+                           testHome.path)
+        }
+    }
+
+    func testNotUnderTestsTheTestHomeIsNeverUsedAndNeverEvenMade() {
+        let testHome = tempRoot.appendingPathComponent("never-made", isDirectory: true)
+        var made = false
+        let got = NostromoHome.url(env: [:], bundleID: realBundleID, realHome: realHome, underTests: false,
+                                   testHome: { made = true; return testHome }())
+        XCTAssertEqual(got.path, realHome.path)
+        XCTAssertFalse(made, "the test home is only resolved under tests")
+    }
+
+    func testThisProcessIsUnderTestsAndEveryHomeResolvesInsideTheTestHome() {
+        XCTAssertTrue(NostromoHome.isRunningUnderTests)
+        let root = NostromoHome.testRoot.resolvingSymlinksInPath().path + "/"
+        let tmp = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path + "/"
+        XCTAssertTrue(root.hasPrefix(tmp), "the test home is under the temporary directory")
+        let realHomePath = FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath().path + "/"
+        for (name, url) in [("current", NostromoHome.current), ("userHome", NostromoHome.userHome),
+                            ("applicationSupportDirectory", NostromoHome.applicationSupportDirectory)] {
+            let path = url.resolvingSymlinksInPath().path + "/"
+            XCTAssertTrue(path.hasPrefix(root), "\(name) is inside the test home: \(path)")
+            XCTAssertNotEqual(path, realHomePath, "\(name) is not the real home")
+        }
+        XCTAssertTrue(NostromoHome.testHome.path.hasSuffix("/home"))
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: NostromoHome.testHome.path, isDirectory: &isDirectory) && isDirectory.boolValue,
+                      "the test home exists once asked for")
+    }
+
+    func testRemoveTestHomeDeletesATestsRootUnderTheTemporaryDirectory() throws {
+        let root = tempRoot.appendingPathComponent("\(NostromoHome.testRootPrefix)123", isDirectory: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("home"), withIntermediateDirectories: true)
+        XCTAssertTrue(NostromoHome.removeTestHome(root: root, temporaryDirectory: tempRoot))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+    }
+
+    func testRemoveTestHomeRefusesAnythingThatIsNotATestsRootDirectlyUnderTheTemporaryDirectory() throws {
+        let wrongName = tempRoot.appendingPathComponent("important", isDirectory: true)
+        let nested = tempRoot.appendingPathComponent("elsewhere/\(NostromoHome.testRootPrefix)1", isDirectory: true)
+        for dir in [wrongName, nested] {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            XCTAssertFalse(NostromoHome.removeTestHome(root: dir, temporaryDirectory: tempRoot), "\(dir.path)")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path), "\(dir.path) is still there")
+        }
+        // A real home, whatever its name, is refused: it is not under the temporary directory.
+        XCTAssertFalse(NostromoHome.removeTestHome(root: realHome.appendingPathComponent("\(NostromoHome.testRootPrefix)1"),
+                                                   temporaryDirectory: tempRoot))
+    }
 }
 
 final class MotherDaemonStartDecisionTests: XCTestCase {

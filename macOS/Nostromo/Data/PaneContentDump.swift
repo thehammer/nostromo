@@ -26,7 +26,7 @@ enum PaneContentDump {
     private static let maxFiles = 200
 
     static var directory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        NostromoHome.applicationSupportDirectory
             .appendingPathComponent("Nostromo/pane-content")
     }
 

@@ -103,7 +103,7 @@ final class PaneRenderWatch {
     fileprivate static var anyEvaluationRequested = false
     /// When a run-loop stall last wrote a capture, for any pane (see `mainThreadStalled`).
     private static var lastObservedStallCaptureMs = -minCaptureIntervalMs
-    static var isRunningTests: Bool { NSClassFromString("XCTestCase") != nil }
+    static var isRunningTests: Bool { NostromoHome.isRunningUnderTests }
 
     init(subject: PaneRenderSubject) {
         self.subject = subject

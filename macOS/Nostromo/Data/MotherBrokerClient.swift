@@ -190,7 +190,7 @@ class MotherBrokerClient {
     static let defaultSocketPath: String = {
         let env = ProcessInfo.processInfo.environment
         if let v = env["MOTHER_BROKER_SOCK"] { return v }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let home = NostromoHome.userHome.path
         let root = env["MOTHER_ROOT"] ?? "\(home)/.mother"
         return "\(root)/broker.sock"
     }()

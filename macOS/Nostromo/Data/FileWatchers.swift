@@ -39,7 +39,7 @@ class FileWatchers {
     private static let thresholdOffsetKey = "nostromo.postureEventsOffset"
 
     private static var eventsURL: URL = {
-        FileManager.default.homeDirectoryForCurrentUser
+        NostromoHome.userHome
             .appendingPathComponent(".claude/budget-posture.events.jsonl")
     }()
 
@@ -63,7 +63,7 @@ class FileWatchers {
     }
 
     private func pollPosture() {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let home = NostromoHome.userHome.path
         let path = "\(home)/.claude/budget-posture.json"
         let content = try? String(contentsOfFile: path, encoding: .utf8)
         guard content != lastPosture else { return }
@@ -76,7 +76,7 @@ class FileWatchers {
     // MARK: - pr-cache/ directory watcher
 
     private static var prCacheDirURL: URL = {
-        FileManager.default.homeDirectoryForCurrentUser
+        NostromoHome.userHome
             .appendingPathComponent(".claude/state/perri/pr-cache")
     }()
 

@@ -1115,7 +1115,7 @@ struct PostureSnapshot {
     }
 
     static func load() -> PostureSnapshot? {
-        let home = FileManager.default.homeDirectoryForCurrentUser
+        let home = NostromoHome.userHome
         let url  = home.appendingPathComponent(".claude/budget-posture.json")
         guard let data = try? Data(contentsOf: url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]

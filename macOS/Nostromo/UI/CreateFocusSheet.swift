@@ -346,7 +346,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
     /// Agents: ~/.claude/agents/*.md — filename sans extension is the agent tag.
     /// Also the agent list of the Send to agent sheet.
     static func discoverAgents() -> [String] {
-        let agentsDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/agents")
+        let agentsDir = NostromoHome.userHome.appendingPathComponent(".claude/agents")
         return (try? FileManager.default.contentsOfDirectory(
             at: agentsDir, includingPropertiesForKeys: nil))?
             .filter { $0.pathExtension == "md" }
@@ -358,7 +358,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
     /// A worktree has `.git` as a plain file; a normal repo has `.git` as a directory.
     /// Also the project list of the Send to agent sheet.
     static func discoverProjects() -> [String] {
-        let codeDir = CodeRoot.resolve()
+        let codeDir = CodeRoot.resolve(home: NostromoHome.userHome)
         let fm = FileManager.default
         return (try? fm.contentsOfDirectory(
             at: codeDir,

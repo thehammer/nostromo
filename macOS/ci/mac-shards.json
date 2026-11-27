@@ -210,7 +210,8 @@
         "WorkListRebuildTests",
         "WorkListSearchDebounceTests",
         "WorkQueryTests",
-        "ZPoolStarvationGuardTests"
+        "ZPoolStarvationGuardTests",
+        "ZRealNostromoGuardShard1Tests"
       ]
     },
     {
@@ -420,7 +421,8 @@
         "WakeMarkerFocusTests",
         "WorkListRefreshRowsTests",
         "WorkStoreConnectionLossTests",
-        "WorkStoreTests"
+        "WorkStoreTests",
+        "ZRealNostromoGuardShard2Tests"
       ]
     },
     {
