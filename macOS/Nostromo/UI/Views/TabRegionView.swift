@@ -81,7 +81,7 @@ final class TabRegionView: NSView {
     private var captions: [String: String] = [:]
 
     /// Whether the operator can close the tab for `paneId` with its × button.
-    /// The review queue and the REPL never can: the queue belongs to no PR and
+    /// The review queue and the REPL never can (nor can a Mother overview tab): the queue belongs to no PR and
     /// must always be reachable. The daemon enforces the same rule; this only
     /// decides whether to draw the button, so an un-closable tab doesn't offer
     /// a control that would be refused.
