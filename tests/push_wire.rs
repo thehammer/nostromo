@@ -177,6 +177,8 @@ fn push_status_names_prefs_host_classes_and_work_owners_and_omits_what_is_unknow
         work_owners: vec!["Carefeed".into()],
         last_ok_at: None,
         failing_since: None,
+        review_queue_unfetched: vec![],
+        registrations_refused: false,
     });
     let v = serde_json::to_value(&status).unwrap();
     assert_eq!(v["type"], "push_status");
@@ -197,6 +199,8 @@ fn push_status_names_prefs_host_classes_and_work_owners_and_omits_what_is_unknow
         work_owners: vec!["Carefeed".into()],
         last_ok_at: Some(Utc.with_ymd_and_hms(2026, 11, 26, 9, 0, 0).unwrap()),
         failing_since: Some(Utc.with_ymd_and_hms(2026, 11, 26, 9, 30, 0).unwrap()),
+        review_queue_unfetched: vec![],
+        registrations_refused: false,
     });
     let v = serde_json::to_value(&failing).unwrap();
     assert_eq!(v["last_ok_at"], "2026-11-26T09:00:00Z");

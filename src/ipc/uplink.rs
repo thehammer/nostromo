@@ -797,14 +797,28 @@ impl UplinkRelay {
     }
 
     /// The uplink is connected (`Some`) or not (`None`). When it drops, every
-    /// relayed open pairing is told `connection_lost` and every verb still
-    /// waiting is answered `server_unreachable`.
+    /// relayed open pairing is told `connection_lost`, every verb still
+    /// waiting is answered `server_unreachable`, and every local `devices`
+    /// follower gets an unsolicited `server_unreachable` (see below).
     pub fn set_up(&self, up: Option<mpsc::Sender<UplinkFrame>>) {
         let mut st = self.state.lock().unwrap();
         let connected = up.is_some();
-        st.up = up;
+        let was_up = std::mem::replace(&mut st.up, up).is_some();
         if connected {
             return;
+        }
+        // Local `devices` followers are told, with a frame every client
+        // already knows: a `DeviceAdminError` under no request id. The Mac
+        // reads `server_unreachable` from it whatever the id (it matches no
+        // pending request) and probes again; the CLI waits for its own id and
+        // ignores it. Only on the way down, not when the uplink never was up.
+        if was_up {
+            for tx in st.subscribers.values() {
+                let _ = tx.send(ServerMsg::DeviceAdminError {
+                    request_id: String::new(),
+                    reason: SERVER_UNREACHABLE.to_string(),
+                });
+            }
         }
         for (pairing_id, (_, tx)) in st.pairings.drain().collect::<Vec<_>>() {
             let _ = tx.send(ServerMsg::DevicePairOutcome {

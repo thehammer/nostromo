@@ -233,6 +233,17 @@ pub struct PushStatusBody {
     pub last_ok_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failing_since: Option<DateTime<Utc>>,
+    /// Hosts (the daemon's own and every satellite it has heard from) whose
+    /// review queue has not been fetched successfully since the daemon
+    /// started: no review of theirs can notify until it is. Absent when there
+    /// are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_queue_unfetched: Vec<String>,
+    /// `devices.json` could not be read: it is kept aside, every registration
+    /// is refused until it is handled, and no phone is notified. Absent when
+    /// the file is fine.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub registrations_refused: bool,
 }
 
 fn default_true() -> bool {
