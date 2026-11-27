@@ -400,6 +400,8 @@ pub struct State {
     /// Statuses for the next GraphQL requests, one each, in order (`200` is a
     /// normal answer); once used up GraphQL answers normally again.
     pub graphql_script: std::collections::VecDeque<u16>,
+    /// The `Retry-After` each scripted status carries (parallel to `graphql_script`).
+    pub graphql_script_retry: std::collections::VecDeque<Option<u64>>,
     /// How long a merge request is held before it is answered (real time: the
     /// fake runs on its own thread).
     pub merge_delay: Option<Duration>,
@@ -668,8 +670,14 @@ fn respond(state: &Arc<Mutex<State>>, req: &Request) -> ResponseTemplate {
         }
         "graphql" if st.graphql_script.front().is_some_and(|c| *c != 200) => {
             let code = st.graphql_script.pop_front().unwrap_or(500);
+            let retry = st.graphql_script_retry.pop_front().flatten();
             entry.status = code;
-            ResponseTemplate::new(code).set_body_json(json!({"message": "scripted failure"}))
+            let t =
+                ResponseTemplate::new(code).set_body_json(json!({"message": "scripted failure"}));
+            match retry {
+                Some(secs) => t.insert_header("retry-after", secs.to_string().as_str()),
+                None => t,
+            }
         }
         "graphql" if st.graphql_body.is_some() => {
             entry.status = 200;
@@ -677,6 +685,7 @@ fn respond(state: &Arc<Mutex<State>>, req: &Request) -> ResponseTemplate {
         }
         "graphql" => {
             st.graphql_script.pop_front();
+            st.graphql_script_retry.pop_front();
             let query = serde_json::from_str::<Value>(&body)
                 .ok()
                 .and_then(|v| v["query"].as_str().map(str::to_owned))
@@ -850,6 +859,7 @@ impl Fake {
                 etags: true,
                 graphql_body: None,
                 graphql_script: std::collections::VecDeque::new(),
+                graphql_script_retry: std::collections::VecDeque::new(),
                 merge_delay: None,
                 merge_marks_merged: true,
                 enqueue_reply: None,
@@ -933,7 +943,16 @@ impl Fake {
     /// The next GraphQL requests answer with these statuses, one each, in order
     /// (`200` is a normal answer); after that GraphQL is normal again.
     pub fn script_graphql(&self, statuses: &[u16]) {
-        self.lock().graphql_script = statuses.iter().copied().collect();
+        let mut st = self.lock();
+        st.graphql_script = statuses.iter().copied().collect();
+        st.graphql_script_retry = statuses.iter().map(|_| None).collect();
+    }
+
+    /// [`Fake::script_graphql`], each status with the `Retry-After` it carries.
+    pub fn script_graphql_waits(&self, replies: &[(u16, Option<u64>)]) {
+        let mut st = self.lock();
+        st.graphql_script = replies.iter().map(|r| r.0).collect();
+        st.graphql_script_retry = replies.iter().map(|r| r.1).collect();
     }
 
     /// Answer every GraphQL request `200` with `body` (`None`: back to normal).

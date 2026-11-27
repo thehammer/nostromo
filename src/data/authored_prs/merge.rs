@@ -41,7 +41,7 @@ use std::sync::Mutex;
 
 use super::actions::AuthoredPrActions;
 use super::classify::{classify, is_human, RawPr};
-use super::github::{ApiError, Failure, MergeError, Target, SECONDARY_WAIT};
+use super::github::{ApiError, Failure, LimitWait, MergeError, Target, SECONDARY_WAIT};
 use super::links::key_string;
 use super::snapshot::{
     valid_repo, AuthoredPr, ChecksState, Lifecycle, MergeVia, PollState, ReviewState,
@@ -329,7 +329,10 @@ impl AuthoredPrActions {
                     MergeError::Forbidden | MergeError::Unauthorized => "token_cannot_merge",
                     MergeError::NotFound => "not_found",
                     MergeError::Unmergeable => "not_mergeable",
-                    MergeError::RateLimited => "rate_limited",
+                    MergeError::RateLimited(limit) => {
+                        self.remember_wait(limit);
+                        "rate_limited"
+                    }
                     MergeError::Transport => "unreachable",
                 })
             }
@@ -364,7 +367,10 @@ impl AuthoredPrActions {
                     MergeError::HeadMoved => "head_changed",
                     MergeError::Forbidden | MergeError::Unauthorized => "token_cannot_merge",
                     MergeError::NotFound => "not_found",
-                    MergeError::RateLimited => "rate_limited",
+                    MergeError::RateLimited(limit) => {
+                        self.remember_wait(limit);
+                        "rate_limited"
+                    }
                     MergeError::Transport => "unreachable",
                     // GitHub declined to enqueue (not ready, conflicts, ...).
                     MergeError::NotAllowed | MergeError::Unmergeable => "queue_refused",
@@ -414,14 +420,20 @@ impl AuthoredPrActions {
     /// locally instead of spending the allowance while the poller, idle, has
     /// not noticed. A wait that has not ended is never shortened.
     pub(super) fn remember_rate_limit(&self, f: &Failure) {
+        let (wait, reset) = match f.error {
+            ApiError::RateLimited { wait, .. } => (wait, f.meta.rate.map(|(_, o)| o.reset)),
+            _ => (None, None),
+        };
+        self.remember_wait(LimitWait { wait, reset });
+    }
+
+    /// The same, for a limit GitHub gave the merge or enqueue request itself.
+    pub(super) fn remember_wait(&self, limit: LimitWait) {
         let now = self.clock.now();
-        let until = match f.error {
-            ApiError::RateLimited { wait: Some(w) } => {
-                now + chrono::Duration::from_std(w).unwrap_or_default()
-            }
-            _ => f.meta.rate.map(|(_, o)| o.reset).unwrap_or_else(|| {
-                now + chrono::Duration::from_std(SECONDARY_WAIT).unwrap_or_default()
-            }),
+        let minute = || now + chrono::Duration::from_std(SECONDARY_WAIT).unwrap_or_default();
+        let until = match limit.wait {
+            Some(w) => now + chrono::Duration::from_std(w).unwrap_or_default(),
+            None => limit.reset.unwrap_or_else(minute),
         }
         .min(now + chrono::Duration::minutes(MAX_READ_WAIT_MINUTES));
         let mut held = self.read_wait.lock().unwrap_or_else(|e| e.into_inner());

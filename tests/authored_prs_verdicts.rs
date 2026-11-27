@@ -856,3 +856,124 @@ async fn a_verdict_survives_a_restart_in_a_private_file_with_no_temporary_left_b
     let answer = second.merge("r1", REPO, N, &sha('a')[..8]).await;
     assert_eq!(code_of(&answer), "ok", "{answer:?}");
 }
+
+/// A permission refusal says nothing about the allowance: no wait is
+/// remembered, and the very next approval reads GitHub and is taken.
+#[tokio::test]
+async fn after_a_permission_403_on_the_read_the_next_approval_reads_github_at_once() {
+    let mut rig = idle_then_pushed(&sha('a'), &sha('b')).await;
+    rig.fake.force(
+        "graphql",
+        Some(Forced {
+            status: 403,
+            retry_after: None,
+        }),
+    );
+    let r = try_record(&mut rig, REPO, N, &sha('b'), Verdict::Approved).await;
+    assert_eq!(r, Err("unreachable"), "a permission 403, not a limit");
+    rig.fake.force("graphql", None);
+
+    let before = graphql_count(&rig);
+    let r = try_record(&mut rig, REPO, N, &sha('b'), Verdict::Approved).await;
+    assert_eq!(r, Ok(true), "no wait was remembered");
+    assert_eq!(graphql_count(&rig) - before, 1, "it read GitHub once");
+}
+
+/// The wait GitHub gave the first approval's read holds even when the daemon
+/// has never published a snapshot (no PR list yet).
+#[tokio::test]
+async fn the_wait_github_gave_an_approval_holds_before_any_snapshot_exists() {
+    let mut rig = start_with(pr_at(&sha('a'))).await;
+    rig.set_demand("idle").await;
+    // The verbs of a daemon whose list has not published: no snapshot.
+    let (_feed, no_snapshot) = tokio::sync::watch::channel(None);
+    let actions = std::sync::Arc::new(
+        nostromo::data::authored_prs::AuthoredPrActions::from_parts(
+            std::sync::Arc::clone(&rig.demand),
+            no_snapshot,
+            std::sync::Arc::clone(&rig.store),
+            std::sync::Arc::clone(&rig.memory),
+            rig.dir.path().join("projects"),
+            rig.dir.path().join("agents"),
+            std::sync::Arc::clone(&rig.clock),
+        )
+        .with_merge(
+            std::sync::Arc::clone(&rig.verdicts),
+            std::sync::Arc::clone(&rig.api),
+        ),
+    );
+    let approve = || {
+        let actions = std::sync::Arc::clone(&actions);
+        let head = sha('a');
+        tokio::spawn(async move {
+            actions
+                .record_verdict(REPO, N, &head, Verdict::Approved, Some("perri"), None)
+                .await
+        })
+    };
+
+    rig.fake.force(
+        "graphql",
+        Some(Forced {
+            status: 429,
+            retry_after: Some(600),
+        }),
+    );
+    let before = graphql_count(&rig);
+    let task = approve();
+    let r = rig.drive(task).await;
+    assert_eq!(r, Err("rate_limited"), "GitHub said to wait");
+    assert_eq!(graphql_count(&rig) - before, 1, "the first approval read");
+    rig.fake.force("graphql", None);
+
+    let mark = rig.fake.log_len();
+    for i in 0..5 {
+        let task = approve();
+        let r = rig.drive(task).await;
+        assert_eq!(r, Err("rate_limited"), "approval {i} inside the wait");
+    }
+    assert_eq!(rig.since(mark).len(), 0, "GitHub was read inside the wait");
+    assert!(rig.verdicts.is_empty(), "something was kept");
+
+    // Once the wait is over the approval reads and is taken.
+    rig.advance(secs(601)).await;
+    let task = approve();
+    let r = rig.drive(task).await;
+    assert_eq!(r, Ok(true), "the wait is over");
+}
+
+/// Two reads in flight at once: the second to come back is limited for much
+/// less than the first. A wait that has not ended is never shortened.
+#[tokio::test]
+async fn a_shorter_limit_arriving_later_never_shortens_the_wait_already_held() {
+    let mut rig = idle_then_pushed(&sha('a'), &sha('b')).await;
+    rig.fake
+        .script_graphql_waits(&[(429, Some(600)), (429, Some(5))]);
+    let spawn = |rig: &Rig| {
+        let actions = std::sync::Arc::clone(&rig.actions);
+        let head = sha('b');
+        tokio::spawn(async move {
+            actions
+                .record_verdict(REPO, N, &head, Verdict::Approved, Some("perri"), None)
+                .await
+        })
+    };
+    let (first, second) = (spawn(&rig), spawn(&rig));
+    let answers = [rig.drive(first).await, rig.drive(second).await];
+    assert_eq!(
+        answers,
+        [Err("rate_limited"), Err("rate_limited")],
+        "both reads were limited"
+    );
+
+    // Past the shorter wait, the longer one still holds.
+    rig.advance(secs(60)).await;
+    let mark = rig.fake.log_len();
+    let r = try_record(&mut rig, REPO, N, &sha('b'), Verdict::Approved).await;
+    assert_eq!(r, Err("rate_limited"), "the longer wait still holds");
+    assert_eq!(rig.since(mark).len(), 0, "GitHub was read inside the wait");
+
+    rig.advance(secs(600)).await;
+    let r = try_record(&mut rig, REPO, N, &sha('b'), Verdict::Approved).await;
+    assert_eq!(r, Ok(true), "the wait is over");
+}
