@@ -103,13 +103,12 @@ final class AuthoredPrsOverviewTests: XCTestCase {
                   question: nil, pausedReason: nil, adherenceStatus: nil, currentTier: nil)
     }
 
-    private func publish(_ jobs: [MotherJob]) {
+    /// Publishes `jobs` and waits for the Mother view's own list to show them (it takes them through a
+    /// main-queue hop), rather than for the store or a fixed pump.
+    private func publish(_ jobs: [MotherJob], in view: MotherView) {
         AppStore.shared.applyBrokerEventForTesting(.snapshot(jobs))
-        let deadline = Date().addingTimeInterval(3)
-        while AppStore.shared.motherJobs.map(\.id) != jobs.map(\.id), Date() < deadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-        }
-        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        let wanted = Set(jobs.map(\.id))
+        waitUntil("the view never listed \(wanted) (it lists \(view.listedJobIds))") { view.listedJobIds == wanted }
     }
 
     private func assertHeaderVisible(_ overview: AuthoredPrsOverviewView, _ context: String,
@@ -199,7 +198,7 @@ final class AuthoredPrsOverviewTests: XCTestCase {
     func testTheMotherJobLinkSelectsThatJob() {
         let (_, view) = makeMotherView()
         connect()
-        publish([job("job-16"), job("job-17")])
+        publish([job("job-16"), job("job-17")], in: view)
         view.showOverview()
         XCTAssertNil(view.selectedJobId, "precondition")
 

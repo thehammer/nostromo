@@ -5,7 +5,7 @@
 // decides, from nothing but a `PaneTree` and a `WidthClass`, whether iOS
 // renders one flattened strip (compact, W5's `TabPlan`) or the daemon's real
 // simultaneously-visible regions (regular). This function is this wedge's
-// only real defence — there is no simulator, no device in CI, and no way to
+// only real defence — there is no iPad and no way to
 // watch an iPad rendering itself wrong from here — so every criterion that
 // CAN be reduced to "given this tree and this width, this plan comes out"
 // lives in this file rather than being hoped for at the view layer. See

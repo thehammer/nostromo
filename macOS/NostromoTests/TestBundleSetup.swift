@@ -16,13 +16,18 @@ import XCTest
 final class TestBundleSetup: NSObject {
     /// `Unmanaged` on every object parameter and result: the initializers consume `self` and return it owned, and
     /// ARC-managed `AnyObject` in a swizzled `@convention(c)`/block pair gets that ownership wrong (segv).
+    /// On unless a test turns it off (`ProductionWindowAnimationTests`, in `TestIsolationTests.swift`, does, around
+    /// the production window factories): with the default on, every window the process makes is already `.none`,
+    /// so a production `animationBehavior = .none` that someone deleted would be invisible to any test.
+    static var defaultsWindowsToNoAnimation = true
+
     private static let installed: Bool = {
         typealias Obj = Unmanaged<AnyObject>
         typealias Rect4 = @convention(c) (Obj, Selector, NSRect, NSWindow.StyleMask, NSWindow.BackingStoreType, Bool) -> Obj?
         typealias Rect5 = @convention(c) (Obj, Selector, NSRect, NSWindow.StyleMask, NSWindow.BackingStoreType, Bool, NSScreen?) -> Obj?
         typealias Coder = @convention(c) (Obj, Selector, NSCoder) -> Obj?
         func quiet(_ w: Obj?) -> Obj? {
-            (w?.takeUnretainedValue() as? NSWindow)?.animationBehavior = .none
+            if defaultsWindowsToNoAnimation { (w?.takeUnretainedValue() as? NSWindow)?.animationBehavior = .none }
             return w
         }
         let rect4 = #selector(NSWindow.init(contentRect:styleMask:backing:defer:))

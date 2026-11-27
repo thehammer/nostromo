@@ -20,5 +20,7 @@ pub mod perri_cli;
 pub mod push;
 pub mod sensitive_text;
 pub mod terminal;
+#[cfg(test)]
+mod test_log;
 pub mod tracker;
 pub mod uplink_cli;

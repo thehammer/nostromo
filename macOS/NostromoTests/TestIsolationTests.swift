@@ -91,6 +91,66 @@ final class TestIsolationTests: XCTestCase {
 
 private final class ProbeWindow: NSWindow {}
 
+/// The production windows ask for `animationBehavior = .none` themselves (a closing window with the default
+/// animation parks a pool worker; see the header above). `TestBundleSetup` makes every window `.none` in tests,
+/// which would hide a deleted production line, so these tests switch that default off while the window is made
+/// and check the window's own setting.
+///
+/// Mutation: delete `animationBehavior = .none` in `NostromoWindow.prepareForDisplayRemovalClose`,
+/// `TaskWindowController.init`, `ApprovalsWindowManager.ensureWindow` or `PersistedRulesWindowManager.ensureWindow`
+/// -> the test for that window fails.
+final class ProductionWindowAnimationTests: XCTestCase {
+
+    override func setUp() {
+        super.setUp()
+        TestBundleSetup.install()
+        TestBundleSetup.defaultsWindowsToNoAnimation = false
+        addTeardownBlock { TestBundleSetup.defaultsWindowsToNoAnimation = true }
+        let probe = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 50, height: 50), styleMask: [.titled],
+                             backing: .buffered, defer: true)
+        probe.isReleasedWhenClosed = false
+        XCTAssertEqual(probe.animationBehavior, .default,
+                       "precondition: with the test default off a plain window animates, so a window that is .none asked for it")
+    }
+
+    func testANostromoWindowClosedForARemovedDisplayDoesNotAnimate() {
+        let window = NostromoWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100), styleMask: [.titled],
+                                    backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        window.animationBehavior = .default
+        window.prepareForDisplayRemovalClose()
+        XCTAssertEqual(window.animationBehavior, .none)
+    }
+
+    func testATaskWindowDoesNotAnimate() throws {
+        let w = BA4TWWorld(self)
+        w.ingest([w.task("job0")])
+        let controller = try XCTUnwrap(w.open("job0"))
+        XCTAssertEqual(controller.panel.animationBehavior, .none)
+    }
+
+    func testTheApprovalsWindowDoesNotAnimate() throws {
+        let suite = "ApprovalsLog-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        let log = ApprovalsLogWorld()
+        let windows = ApprovalsWindowManager(defaults: defaults, store: log.store, revealer: log.revealer,
+                                             visibleScreens: { [NSRect(x: 0, y: 0, width: 1600, height: 1000)] })
+        addTeardownBlock { windows.close(); defaults.removePersistentDomain(forName: suite) }
+        windows.show()
+        XCTAssertEqual(try XCTUnwrap(windows.panel).animationBehavior, .none)
+    }
+
+    func testTheApprovalRulesWindowDoesNotAnimate() throws {
+        let suite = "PersistedRules-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        let windows = PersistedRulesWindowManager(defaults: defaults,
+                                                  visibleScreens: { [NSRect(x: 0, y: 0, width: 1600, height: 1000)] })
+        addTeardownBlock { windows.close(); defaults.removePersistentDomain(forName: suite) }
+        windows.show()
+        XCTAssertEqual(try XCTUnwrap(windows.panel).animationBehavior, .none)
+    }
+}
+
 /// Named `Z...` so it sorts LAST: the shards run classes alphabetically, so this sits where the victims
 /// (`NoCodebaseCreateTests`, `NostromodClientHandshakeTests`, ...) do and fails if anything earlier in the
 /// run left the global pool short of workers. 64 concurrent user-interactive jobs need far more threads

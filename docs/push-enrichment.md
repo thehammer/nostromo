@@ -39,7 +39,7 @@ Enrichment is **default-deny**. The primary returns text for an item only if **a
 3. **The item's repository owner is known and is not a work owner.** `Carefeed` is always a work owner and
    cannot be removed; add others with `nostromo push work-owner add <owner>` or `push.work_owners` (case
    is ignored; no restart). An item with no repository, or whose owner cannot be told, shows no text.
-4. **The item is not on a sensitive tag** (Teri, Fred and work-item sessions) **and was not queued from a
+4. **The item is not on a sensitive tag** (Teri, Fred, Huey and work-item sessions) **and was not queued from a
    work item.** A decision that names no repository is denied too.
 
 ```toml

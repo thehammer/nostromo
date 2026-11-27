@@ -2393,6 +2393,104 @@ async fn the_engine_does_not_start_without_a_relay_or_when_disabled() {
     .is_none());
 }
 
+// ── the status says what the engine cannot yet see or save ───────────────────
+
+/// A review-queue frame built before any fetch landed: the queue is unknown.
+fn unfetched_queue_frame(host: Option<&str>) -> ServerMsg {
+    ServerMsg::PerriState {
+        tag: "f-00000000".into(),
+        queue: vec![],
+        current: None,
+        jira_site: None,
+        host: host.map(str::to_string),
+        queue_unfetched: true,
+    }
+}
+
+fn unfetched_hosts(status: &PushStatusBody) -> Vec<&str> {
+    status
+        .review_queue_unfetched
+        .iter()
+        .map(String::as_str)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_fresh_engine_reports_its_own_review_queue_as_not_fetched() {
+    let mut rig = Rig::new().await;
+    let status = rig.register("dev-1", &token_a());
+    assert_eq!(unfetched_hosts(&status), ["tokyo"]);
+}
+
+#[tokio::test]
+async fn the_local_review_queue_is_listed_until_a_fetched_one_arrives() {
+    let mut rig = Rig::new().await;
+    let t0 = base();
+    rig.register("dev-1", &token_a());
+    // The Mother snapshot does not stand in for the review queue.
+    rig.engine.ingest(jobs_frame(None, vec![]), t0);
+    assert_eq!(unfetched_hosts(&rig.status("dev-1")), ["tokyo"]);
+    // A frame built before any fetch landed says nothing.
+    rig.engine.ingest(unfetched_queue_frame(None), t0);
+    assert_eq!(unfetched_hosts(&rig.status("dev-1")), ["tokyo"]);
+    // A fetched (even empty) queue clears it.
+    rig.engine.ingest(queue_frame(None, vec![]), t0);
+    assert!(
+        rig.status("dev-1").review_queue_unfetched.is_empty(),
+        "{:?}",
+        rig.status("dev-1")
+    );
+}
+
+#[tokio::test]
+async fn a_satellite_the_engine_has_heard_from_is_listed_until_its_own_review_queue_arrives() {
+    let mut rig = Rig::new().await;
+    let t0 = base();
+    rig.register("dev-1", &token_a());
+    rig.engine.ingest(queue_frame(None, vec![]), t0);
+    assert!(
+        rig.status("dev-1").review_queue_unfetched.is_empty(),
+        "a satellite nobody has heard from is not listed"
+    );
+    rig.engine.ingest(jobs_frame(Some("kobe"), vec![]), t0);
+    assert_eq!(unfetched_hosts(&rig.status("dev-1")), ["kobe"]);
+    // Another host's queue, or an unfetched one of its own, does not clear it.
+    rig.engine.ingest(queue_frame(Some("sendai"), vec![]), t0);
+    rig.engine.ingest(unfetched_queue_frame(Some("kobe")), t0);
+    assert_eq!(unfetched_hosts(&rig.status("dev-1")), ["kobe"]);
+    rig.engine.ingest(queue_frame(Some("kobe"), vec![]), t0);
+    assert_eq!(
+        unfetched_hosts(&rig.status("dev-1")),
+        Vec::<&str>::new(),
+        "{:?}",
+        rig.status("dev-1")
+    );
+}
+
+#[tokio::test]
+async fn registrations_are_reported_refused_only_while_devices_json_is_unreadable() {
+    let mut healthy = Rig::new().await;
+    assert!(!healthy.register("dev-1", &token_a()).registrations_refused);
+
+    let mut rig = Rig::build(None, None, |cfg| {
+        let dir = cfg.state_dir.clone().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("devices.json"), b"{ not json, but registrations").unwrap();
+    })
+    .await;
+    rig.mount(ok_response(), None).await;
+    let status = rig.register("dev-1", &token_a());
+    assert!(
+        status.registrations_refused,
+        "the phone is told its registration was not kept: {status:?}"
+    );
+    assert_eq!(
+        std::fs::read(rig.state_dir().join("devices.json")).unwrap(),
+        b"{ not json, but registrations",
+        "and the file is untouched"
+    );
+}
+
 // ── caps: one satellite cannot crowd out another host's decisions ────────────
 
 #[tokio::test]

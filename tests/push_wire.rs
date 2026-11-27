@@ -177,6 +177,8 @@ fn push_status_names_prefs_host_classes_and_work_owners_and_omits_what_is_unknow
         work_owners: vec!["Carefeed".into()],
         last_ok_at: None,
         failing_since: None,
+        review_queue_unfetched: vec![],
+        registrations_refused: false,
     });
     let v = serde_json::to_value(&status).unwrap();
     assert_eq!(v["type"], "push_status");
@@ -197,12 +199,85 @@ fn push_status_names_prefs_host_classes_and_work_owners_and_omits_what_is_unknow
         work_owners: vec!["Carefeed".into()],
         last_ok_at: Some(Utc.with_ymd_and_hms(2026, 11, 26, 9, 0, 0).unwrap()),
         failing_since: Some(Utc.with_ymd_and_hms(2026, 11, 26, 9, 30, 0).unwrap()),
+        review_queue_unfetched: vec![],
+        registrations_refused: false,
     });
     let v = serde_json::to_value(&failing).unwrap();
     assert_eq!(v["last_ok_at"], "2026-11-26T09:00:00Z");
     assert_eq!(v["failing_since"], "2026-11-26T09:30:00Z");
     let back: ServerMsg = serde_json::from_value(v).unwrap();
     assert!(matches!(back, ServerMsg::PushStatus(_)));
+}
+
+fn status_body(review_queue_unfetched: Vec<String>, registrations_refused: bool) -> PushStatusBody {
+    PushStatusBody {
+        prefs: PushPrefs::default(),
+        host_classes: Default::default(),
+        work_owners: vec!["Carefeed".into()],
+        last_ok_at: None,
+        failing_since: None,
+        review_queue_unfetched,
+        registrations_refused,
+    }
+}
+
+#[test]
+fn a_status_with_nothing_unfetched_and_no_refusal_is_the_same_frame_as_before_the_two_fields() {
+    let v = serde_json::to_value(ServerMsg::PushStatus(status_body(vec![], false))).unwrap();
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["host_classes", "prefs", "type", "work_owners"],
+        "{v}"
+    );
+}
+
+#[test]
+fn unfetched_review_queues_are_named_by_host_and_omitted_when_there_are_none() {
+    let v = serde_json::to_value(ServerMsg::PushStatus(status_body(
+        vec!["kobe".into(), "tokyo".into()],
+        false,
+    )))
+    .unwrap();
+    assert_eq!(v["review_queue_unfetched"], json!(["kobe", "tokyo"]));
+    assert!(v.get("registrations_refused").is_none(), "{v}");
+    let back: ServerMsg = serde_json::from_value(v).unwrap();
+    match back {
+        ServerMsg::PushStatus(body) => {
+            assert_eq!(body.review_queue_unfetched, ["kobe", "tokyo"]);
+            assert!(!body.registrations_refused);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_refusal_of_registrations_is_a_true_flag_that_is_omitted_when_false() {
+    let v = serde_json::to_value(ServerMsg::PushStatus(status_body(vec![], true))).unwrap();
+    assert_eq!(v["registrations_refused"], json!(true));
+    assert!(v.get("review_queue_unfetched").is_none(), "{v}");
+    let back: ServerMsg = serde_json::from_value(v).unwrap();
+    match back {
+        ServerMsg::PushStatus(body) => {
+            assert!(body.registrations_refused);
+            assert!(body.review_queue_unfetched.is_empty());
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_push_status_from_before_the_two_fields_still_decodes_with_them_empty() {
+    let old = r#"{"type":"push_status","prefs":{},"host_classes":{"kobe":"work"},"work_owners":["Carefeed"]}"#;
+    match serde_json::from_str::<ServerMsg>(old).unwrap() {
+        ServerMsg::PushStatus(body) => {
+            assert!(body.review_queue_unfetched.is_empty());
+            assert!(!body.registrations_refused);
+            assert_eq!(body.work_owners, ["Carefeed"]);
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]

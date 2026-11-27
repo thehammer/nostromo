@@ -544,6 +544,7 @@ impl RulesStore {
     /// one bounded helper.
     pub fn first_match(
         &self,
+        slots: &rules::HelperCount,
         timeout: Duration,
         req: &super::request::PermissionRequest,
         reason_kind: super::request::ReasonKind,
@@ -566,7 +567,7 @@ impl RulesStore {
             return None;
         }
         let (req, home, cwd) = (req.clone(), home.to_path_buf(), cwd.map(Path::to_path_buf));
-        rules::bounded(timeout, move || {
+        rules::bounded_in(slots, timeout, move || {
             rules.into_iter().find(|r| {
                 scope_problem(&r.scope, &home).is_none()
                     && r.scope.covers(cwd.as_deref())
@@ -1129,6 +1130,7 @@ mod tests {
         let reason = req.reason(None, &NoSettings);
         store
             .first_match(
+                &rules::HelperCount::default(),
                 Duration::from_secs(5),
                 &req,
                 reason.kind,

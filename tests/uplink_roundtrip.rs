@@ -28,11 +28,14 @@ use nostromo::config::{SatelliteSetup, UplinkConfig};
 use nostromo::ipc::decisions::DecisionRegistry;
 use nostromo::ipc::devices::{DeviceKind, Egress, PairOutcomeKind, RevokedBy, SatelliteAdmin};
 use nostromo::ipc::peer_verify::testing::FakePeerVerifier;
-use nostromo::ipc::protocol::{ClientMsg, HostUnavailableReason, ServerMsg, Topic};
+use nostromo::ipc::protocol::{
+    ClientMsg, HostUnavailableReason, ServerMsg, Topic, FEATURE_MERGED_TURNS,
+};
 use nostromo::ipc::server::Server;
+use nostromo::ipc::session_manager::{merge, CLAUDE_BIN_ENV};
 use nostromo::ipc::uplink_wire::UplinkFrame;
 use nostromo::ipc::SessionManager;
-use serde_json::json;
+use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -795,6 +798,42 @@ async fn when_the_uplink_drops_every_open_pairing_reports_connection_lost() {
 }
 
 #[tokio::test]
+async fn a_local_follower_of_devices_hears_server_unreachable_when_the_primary_goes_away() {
+    let primary = Rig::new().await;
+    let sat = join(
+        &primary,
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::Full,
+        SatelliteAdmin::Full,
+    )
+    .await;
+    let mut a = follower(&sat).await;
+    // Up and heard from: the primary's level reaches the follower first.
+    a.next_matching("level", |m| matches!(m, ServerMsg::DeviceAdminLevel { .. }))
+        .await;
+    // Revoking the satellite closes its socket.
+    primary
+        .registry
+        .revoke(&sat.device_id, RevokedBy::Operator)
+        .unwrap();
+    match a
+        .next_matching("server unreachable", |m| {
+            matches!(m, ServerMsg::DeviceAdminError { .. })
+        })
+        .await
+    {
+        ServerMsg::DeviceAdminError { request_id, reason } => {
+            assert_eq!(
+                (request_id.as_str(), reason.as_str()),
+                ("", "server_unreachable")
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
 async fn closing_a_local_client_cancels_its_pairing_on_the_primary() {
     let primary = Rig::new().await;
     let sat = join(
@@ -1316,4 +1355,172 @@ async fn a_routed_attach_is_a_network_peer_so_it_can_never_close_a_merge_gate() 
         assert!(start.elapsed() < READ_TIMEOUT, "network peers: {ids:?}");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+// ── a routed peer and the merge gate, end to end ──────────────────────────────
+
+const FAKE_CLI: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/support/fake_claude_perm.py"
+);
+
+/// Ends the satellite's sessions and forgets the fake `claude` when the test
+/// ends, however it ends (the primary rig's exclusive environment lock is still
+/// held then: it was declared first).
+struct SatelliteSessions(Arc<Mutex<SessionManager>>);
+
+impl Drop for SatelliteSessions {
+    fn drop(&mut self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .kill_all_on_shutdown();
+        std::env::remove_var(CLAUDE_BIN_ENV);
+    }
+}
+
+/// A busy session of the hermetic fake `claude` (`HOLD:<path>` keeps a turn open
+/// until the file exists; every stdin frame is logged) under `cody-1` on the
+/// satellite. Returns the directory the fake logs into.
+fn start_fake_session_on(sat: &Sat) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let fake_dir = sat.tmp.path().join("fake");
+    std::fs::create_dir_all(&fake_dir).unwrap();
+    let wrapper = fake_dir.join("claude");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nFAKE_CLAUDE_LOG_DIR='{}' exec python3 -I '{FAKE_CLI}' \"$@\"\n",
+            fake_dir.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var(CLAUDE_BIN_ENV, &wrapper);
+    let work = sat.tmp.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    sat.session_mgr
+        .lock()
+        .unwrap()
+        .spawn_session(
+            "cody-1".into(),
+            "cody".into(),
+            "View".into(),
+            Some(work),
+            None,
+            false,
+        )
+        .expect("the session starts");
+    fake_dir
+}
+
+/// Everything the fake CLI read on stdin as user frames' contents.
+fn user_contents(fake_dir: &std::path::Path) -> Vec<Value> {
+    std::fs::read_to_string(fake_dir.join("stdin.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|f| f["type"] == "user")
+        .map(|f| f["message"]["content"].clone())
+        .collect()
+}
+
+fn send_to_cody(text: &str) -> ClientMsg {
+    ClientMsg::SessionSend {
+        tag: "cody-1".into(),
+        text: text.into(),
+        images: Vec::new(),
+        client_ref: None,
+    }
+}
+
+/// A personal satellite runs a busy fake-`claude` session with a merge-capable
+/// local client attached. When `routed_attach`, a client on the primary also
+/// attaches to it through the uplink and is waited for. Two typed messages are
+/// then queued behind a held turn on the satellite and the hold is released.
+/// Returns the stdin user frames the CLI saw.
+async fn frames_after_two_queued_messages(routed_attach: bool) -> Vec<Value> {
+    let primary = Rig::with_sessions().await;
+    let sat = join(
+        &primary,
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::Full,
+        SatelliteAdmin::Full,
+    )
+    .await;
+    let _sessions = SatelliteSessions(Arc::clone(&sat.session_mgr));
+    let fake_dir = start_fake_session_on(&sat);
+    // A routed read may only name a tag whose repo is known and shareable.
+    sat.session_mgr
+        .lock()
+        .unwrap()
+        .set_focus_registry(vec![focus_json("cody-1", "/code/blog")]);
+
+    let mut local = Rig::unix_at_with(&sat.socket, vec![], &[FEATURE_MERGED_TURNS]).await;
+    local
+        .send(&ClientMsg::SessionAttach {
+            tag: "cody-1".into(),
+            host: None,
+        })
+        .await;
+    local.sync().await;
+
+    let mut asker = primary.unix(vec![], false).await;
+    if routed_attach {
+        asker
+            .send(&ClientMsg::SessionAttach {
+                tag: "cody-1".into(),
+                host: Some("sat".into()),
+            })
+            .await;
+        // The satellite answers an attach with the session's snapshot, after the
+        // peer is registered and the merge gate recounted.
+        asker
+            .next_matching("the routed attach's snapshot", |m| {
+                matches!(m, ServerMsg::SessionTurns { .. })
+            })
+            .await;
+    }
+
+    let hold = sat.tmp.path().join("hold");
+    local
+        .send(&send_to_cody(&format!("first HOLD:{}", hold.display())))
+        .await;
+    Rig::wait_until("the first frame", || user_contents(&fake_dir).len() == 1).await;
+    local.send(&send_to_cody("oh and backfill the rows")).await;
+    local.send(&send_to_cody("use the new column name")).await;
+    local.sync().await;
+    std::fs::write(&hold, "").unwrap();
+
+    Rig::wait_until("a second frame", || user_contents(&fake_dir).len() >= 2).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    user_contents(&fake_dir)
+}
+
+#[tokio::test]
+async fn with_no_routed_peer_a_satellites_queued_messages_still_merge_into_one_frame() {
+    let frames = frames_after_two_queued_messages(false).await;
+    assert_eq!(frames.len(), 2, "one frame for both: {frames:#?}");
+    let parsed = merge::parse(frames[1].as_str().unwrap()).expect("a merged frame");
+    assert_eq!(
+        parsed.parts,
+        ["oh and backfill the rows", "use the new column name"]
+    );
+}
+
+#[tokio::test]
+async fn a_primarys_routed_attach_does_not_stop_a_satellites_queued_messages_from_merging() {
+    let frames = frames_after_two_queued_messages(true).await;
+    assert_eq!(
+        frames.len(),
+        2,
+        "one frame for both (the routed peer is a network peer and never closes the gate): \
+         {frames:#?}"
+    );
+    let parsed = merge::parse(frames[1].as_str().unwrap()).expect("a merged frame");
+    assert_eq!(
+        parsed.parts,
+        ["oh and backfill the rows", "use the new column name"]
+    );
 }

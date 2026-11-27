@@ -183,8 +183,11 @@ build` 122 s, `Rust tests` 666 s, `Python tooling tests` 273 s, `Rust clippy` 13
 match). With three shards the expected Mac wall-clock is setup ~90 s + build ~200 s +
 execution / 3 + the compile gate (about 11-13 min). The first assignment was balanced
 by test-method count and ran 356 s / 589 s / 580 s of test time; it was regenerated
-several times since. The current assignment comes from main run 45532884319's logs
-(10,446 tests, floor 10,133 = 97% of them): test seconds 865 / 955 / 955 for shards 1 / 2 / 3.
+several times since. The current assignment comes from main run 46044726091's logs
+(10,614 tests, floor 10,295 = 97% of them). That run's measured test seconds were 901 / 917 / 1,107 for
+shards 1 / 2 / 3 (W15's new classes had all landed in the catch-all); after the regeneration the
+PREDICTED test seconds are 915 / 1,005 / 1,005 (shard 1 plus the ~90 s compile gate is about 1,005 too). A
+prediction from per-class times, not a measurement: read the next green main run's `shard-<n>.json`.
 Shard 1 gets about 90 s less test time on purpose: it also runs the compile gate (~73-125 s
 outside the `make mac-test` step), so the target is equal job WALL, not equal test seconds.
 `regenerate --shard1-handicap 90` does that, and keeps the pinned slow Review classes in the listed shards

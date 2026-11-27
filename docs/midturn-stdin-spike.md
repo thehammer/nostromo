@@ -84,8 +84,8 @@ user's text.
 both messages. No second `init`, no second `result`, no `turn` marker. The only signal that something was
 absorbed is the `isReplay` user frame.
 
-**Echo timing:** the `isReplay: true` echo is emitted **at absorption**, immediately after the `tool_result`
-user frame and before the next `assistant` frame (a: tool_result at +21.2 s, echo at +29.8 s; the echo's own
+**Echo timing:** the `isReplay: true` echo is emitted **at absorption**, at the next boundary (after the `tool_result`
+user frame in this capture) and before the next `assistant` frame (a: tool_result at +21.2 s, echo at +29.8 s; the echo's own
 `timestamp` field is the *write* time, `14:01:26.551Z`). It is **not** emitted when the frame was written, so a
 client that renders from stdout only sees the message appear at the tool boundary.
 

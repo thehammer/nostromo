@@ -316,6 +316,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_log_line_contains_the_token() {
+        crate::test_log::install_global_capture();
         let logs = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
         #[derive(Clone)]
         struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);

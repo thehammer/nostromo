@@ -349,9 +349,10 @@ final class ResumeOrgLookupBoundTests: XCTestCase {
         let focus = resumed()
         store.commitFocus?(focus)
         sheet.cancelTapped()
-        let pumped = expectation(description: "past the limit")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { pumped.fulfill() }
-        wait(for: [pumped], timeout: 5)
+        // The lookup limit firing is what gives the tag back: that release is the signal that the sheet has
+        // finished with the cancelled resume, however long the limit takes on this machine.
+        waitUntil("the lookup limit never fired, so the tag was never given back") { !sender.releases.isEmpty }
+        drainMain()   // a stray late create would still be counted
         XCTAssertFalse(opened)
         XCTAssertEqual(sender.releases, [focus.sessionTag])
     }

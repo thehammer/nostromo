@@ -1269,6 +1269,133 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_about_a_different_focus_than_the_request_is_dropped() {
+        let router = Router::new();
+        let (host_tx, _host_rx) = unbounded_channel();
+        router.register("sendai", Egress::Personal, host_tx);
+        let tags = SensitiveTags::default();
+        let (id, _tx, mut rx) = issue(&router, attach("cody-1", "sendai"), "sendai");
+        let sendai = rec("sendai", Egress::Personal);
+        let state = |tag: &str| ServerMsg::SessionState {
+            tag: tag.into(),
+            state: crate::ipc::stream_json::SessionState::Idle,
+            host: Some("sendai".into()),
+        };
+        // Well formed, for this host, and the right variant: only the focus
+        // is wrong.
+        assert_eq!(
+            router.accept_routed_reply(&sendai, &id, state("cody-2"), &tags, Instant::now()),
+            Err(ReplyDrop::WrongTag)
+        );
+        assert!(rx.try_recv().is_err(), "nothing reached the requester");
+        // The id is still live, and the reply about the asked focus gets by.
+        assert_eq!(
+            router.accept_routed_reply(&sendai, &id, state("cody-1"), &tags, Instant::now()),
+            Ok(())
+        );
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::SessionState { .. })));
+    }
+
+    /// The `MsgTag::Missing => Err(WrongTag)` arm of `accept_routed_reply` is
+    /// UNREACHABLE today: `Missing` is what `server_msg_tag` says of a frame
+    /// whose focus tag is optional and absent (and of the never-constructed
+    /// `SessionPermissionRequest`), and `reply_allowed` admits none of those
+    /// for any verb, so `WrongVariant` always fires first. This pins that: if
+    /// a verb ever admits a variant that can come without a tag, the arm
+    /// becomes live and this fails, so the arm gets a test of its own.
+    #[test]
+    fn no_reply_a_verb_admits_can_be_classified_as_missing_a_tag() {
+        let samples: Vec<(&str, ServerMsg)> = [
+            (
+                "SessionListResp",
+                serde_json::json!({"type": "session_list_resp", "sessions": []}),
+            ),
+            (
+                "FocusListResp",
+                serde_json::json!({"type": "focus_list_resp", "focuses": []}),
+            ),
+            (
+                "SessionModelState",
+                serde_json::json!({"type": "session_model_state", "tag": "t", "running": false}),
+            ),
+            (
+                "ActivitySnapshot",
+                serde_json::json!({"type": "activity_snapshot", "tag": "t", "streams": []}),
+            ),
+            (
+                "SessionTurns",
+                serde_json::json!({"type": "session_turns", "tag": "t", "turns": []}),
+            ),
+            (
+                "SessionTurnDelta",
+                serde_json::json!({"type": "session_turn_delta", "tag": "t",
+                "delta": {"delta": "turn_errored", "turn_id": "t0", "message": "x"}}),
+            ),
+            (
+                "SessionTurnOrigin",
+                serde_json::json!({"type": "session_turn_origin", "tag": "t",
+                "turn_id": "t0", "origin": {"type": "task_wake", "items": [], "omitted": 0}}),
+            ),
+            (
+                "SessionState",
+                serde_json::json!({"type": "session_state", "tag": "t", "state": "idle"}),
+            ),
+            (
+                "SessionBridge",
+                serde_json::json!({"type": "session_bridge", "tag": "t", "connected": true}),
+            ),
+            (
+                "PaneContent",
+                serde_json::json!({"type": "pane_content", "tag": "t", "pane_id": "p",
+                "content": {"kind": "text", "text": "x"}}),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, v)| (name, decoded(v)))
+        .collect();
+        let verbs = [
+            Verb::SessionList,
+            Verb::FocusList,
+            Verb::SessionModelGet,
+            Verb::ActivitySnapshot,
+            Verb::SessionAttach,
+            Verb::SessionDetach,
+        ];
+        for (name, msg) in &samples {
+            assert!(
+                verbs.iter().any(|v| reply_allowed(*v, msg)),
+                "{name} is in this list but no verb admits it: keep the list in step"
+            );
+            assert_ne!(server_msg_tag(msg), MsgTag::Missing, "{name}");
+        }
+        // Every variant `reply_allowed` names (other than the two refusals,
+        // which carry no tag) has a sample above: a newly admitted variant
+        // must be added to the list before this passes.
+        let source = include_str!("router.rs");
+        let start = source.find("pub fn reply_allowed(").unwrap();
+        let end = start
+            + source[start..]
+                .find("/// Why a routed reply was dropped.")
+                .unwrap();
+        let named: std::collections::BTreeSet<&str> = source[start..end]
+            .split("ServerMsg::")
+            .skip(1)
+            .map(|rest| {
+                let n = rest
+                    .find(|c: char| !c.is_alphanumeric())
+                    .unwrap_or(rest.len());
+                &rest[..n]
+            })
+            .filter(|n| !matches!(*n, "Error" | "Withheld"))
+            .collect();
+        let sampled: std::collections::BTreeSet<&str> = samples.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            named, sampled,
+            "reply_allowed admits a variant with no sample"
+        );
+    }
+
+    #[test]
     fn an_attach_id_stays_live_for_deltas_until_detached() {
         let router = Router::new();
         let (host_tx, mut host_rx) = unbounded_channel();

@@ -697,6 +697,8 @@ struct Inner {
     preview_fs: Mutex<Arc<dyn PreviewFs>>,
     /// Preview walks in flight (this broker's own count).
     preview_slots: rules::HelperCount,
+    /// Rule-matching and candidate helper threads in flight (this broker's own count).
+    rule_slots: rules::HelperCount,
     /// How long the worker waits for the quick pass (and the quick pass's own budget).
     preview_quick_wait: Mutex<std::time::Duration>,
     weak: Weak<Inner>,
@@ -940,6 +942,7 @@ impl ApprovalBroker {
             persisted: Mutex::new(None),
             preview_fs: Mutex::new(Arc::new(RealFs)),
             preview_slots: rules::HelperCount::default(),
+            rule_slots: rules::HelperCount::default(),
             preview_quick_wait: Mutex::new(PREVIEW_QUICK_WAIT),
             weak: weak.clone(),
         });
@@ -2316,6 +2319,7 @@ impl Inner {
         // Outside the lock: a match looks at the file system, and a hung mount must not
         // stall this worker, so all rules together get one bounded helper; a timeout is no match.
         rules::first_match_within(
+            &self.rule_slots,
             RULE_MATCH_TIMEOUT,
             &candidates,
             req,
@@ -2432,7 +2436,14 @@ impl Inner {
     ) -> Option<PersistedRule> {
         let store = self.rules_store()?;
         let home = lock(&self.home).clone();
-        store.first_match(RULE_MATCH_TIMEOUT, req, reason.kind, &home, cwd)
+        store.first_match(
+            &self.rule_slots,
+            RULE_MATCH_TIMEOUT,
+            req,
+            reason.kind,
+            &home,
+            cwd,
+        )
     }
 
     /// The persisted rules and any quarantine, as one frame.
@@ -2748,8 +2759,14 @@ impl Inner {
             }
             let home = lock(&self.home).clone();
             // Bounded like the match: the paths in the command are the agent's choice.
-            let candidates =
-                rules::candidates_within(RULE_MATCH_TIMEOUT, &req, &reason, &home, cwd.as_deref());
+            let candidates = rules::candidates_within(
+                &self.rule_slots,
+                RULE_MATCH_TIMEOUT,
+                &req,
+                &reason,
+                &home,
+                cwd.as_deref(),
+            );
             let mut wire = approval_wire(
                 request_id,
                 &ident.tag,

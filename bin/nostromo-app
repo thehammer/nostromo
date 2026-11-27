@@ -56,6 +56,18 @@ SOCK = resolve_socket()
 SCREEN = os.environ.get("NOSTROMO_QA_SCREEN")   # also settable via the env, for scripts
 
 
+def since_as_one_argument(argv):
+    """`--since -2d` as `--since=-2d`. Before Python 3.13 argparse reads `-2d` as a flag, not
+    as the value of `--since`, and refuses the documented form."""
+    import re
+    argv = list(argv)
+    for i in range(len(argv) - 1):
+        if argv[i] == "--since" and re.fullmatch(r"-\d+d", argv[i + 1]):
+            argv[i:i + 2] = [f"--since={argv[i + 1]}"]
+            break
+    return argv
+
+
 def parse_since(text, parser):
     """`-Nd` (N days ago) or an ISO 8601 time, as milliseconds since the epoch."""
     import datetime, re, time
@@ -176,7 +188,7 @@ def main():
     wf = sub.add_parser("wait"); wf.add_argument("text"); wf.add_argument("--gone", action="store_true")
     wf.add_argument("--timeout", type=float, default=10.0)
     ex = sub.add_parser("expect"); ex.add_argument("text"); ex.add_argument("--absent", action="store_true")
-    a = p.parse_args()
+    a = p.parse_args(since_as_one_argument(sys.argv[1:]))
     explicit_window = a.window   # None unless -w was given (approvals list reads every window then)
     if a.window is None: a.window = 0
     global SCREEN, SOCK

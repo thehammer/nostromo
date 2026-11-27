@@ -1232,6 +1232,119 @@ async fn the_usage_line_is_logged_at_info_within_a_minute_of_starting_then_hourl
     );
 }
 
+/// A line logged on a thread that has no capture of its own (a multi-thread
+/// runtime's worker, `spawn_blocking`) used to be lost to the thread-local
+/// capture, and the test then failed with "the feature logged something".
+#[test]
+fn a_line_logged_from_another_thread_is_captured() {
+    let (log, _guard) = capture_logs();
+    tracing::info!("on-the-test-thread");
+    std::thread::spawn(|| tracing::info!("on-another-thread"))
+        .join()
+        .unwrap();
+    let text = log.text();
+    assert!(text.contains("on-the-test-thread"), "{text}");
+    assert!(text.contains("on-another-thread"), "{text}");
+}
+
+/// The same for a multi-thread runtime's workers, where the engine's tasks run
+/// off the test thread.
+#[test]
+fn a_line_logged_on_a_multi_thread_runtimes_worker_is_captured() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .build()
+        .unwrap();
+    let text = rt.block_on(async {
+        let (log, _guard) = capture_logs();
+        tokio::spawn(async { tracing::info!("on-a-runtime-worker") })
+            .await
+            .unwrap();
+        tokio::task::spawn_blocking(|| tracing::info!("on-a-blocking-thread"))
+            .await
+            .unwrap();
+        log.text()
+    });
+    assert!(text.contains("on-a-runtime-worker"), "{text}");
+    assert!(text.contains("on-a-blocking-thread"), "{text}");
+}
+
+/// Two tests that share a process (libtest) each see their own lines and not
+/// the other's: a line logged on a test's own thread goes to its capture only,
+/// whether that test captures or not.
+#[test]
+fn a_capture_never_sees_the_lines_another_tests_thread_logs() {
+    use std::sync::mpsc::channel;
+    let (ready_tx, ready_rx) = channel::<()>();
+    let (go_tx, go_rx) = channel::<()>();
+    let other = std::thread::Builder::new()
+        .name("another-test".into())
+        .spawn(move || {
+            let (log, _guard) = capture_logs();
+            ready_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            tracing::info!("line-from-the-other-test");
+            log.text()
+        })
+        .unwrap();
+    // A third test that does not capture at all, one of them on a runtime of its own.
+    let bystander = std::thread::Builder::new()
+        .name("a-test-that-does-not-capture".into())
+        .spawn(|| {
+            tracing::info!("line-from-a-bystander");
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                tokio::spawn(async { tracing::info!("line-from-a-bystanders-worker") })
+                    .await
+                    .unwrap();
+            });
+        })
+        .unwrap();
+
+    let (log, _guard) = capture_logs();
+    ready_rx.recv().unwrap();
+    tracing::info!("line-from-this-test");
+    go_tx.send(()).unwrap();
+    let theirs = other.join().unwrap();
+    bystander.join().unwrap();
+
+    let mine = log.text();
+    assert!(mine.contains("line-from-this-test"), "{mine}");
+    assert!(!mine.contains("line-from-the-other-test"), "{mine}");
+    assert!(!mine.contains("line-from-a-bystander"), "{mine}");
+    assert!(!mine.contains("line-from-a-bystanders-worker"), "{mine}");
+    assert!(theirs.contains("line-from-the-other-test"), "{theirs}");
+    assert!(!theirs.contains("line-from-this-test"), "{theirs}");
+}
+
+/// A second capture opened while the first is live (a helper that captures, called by a
+/// test that already does) gets the lines meanwhile, and the first has them back when it ends.
+#[test]
+fn a_second_capture_nests_inside_the_first() {
+    let (outer, _outer_guard) = capture_logs();
+    tracing::info!("before-the-inner");
+    {
+        let (inner, _inner_guard) = capture_logs();
+        tracing::info!("during-the-inner");
+        assert!(
+            inner.text().contains("during-the-inner"),
+            "{}",
+            inner.text()
+        );
+        assert!(!inner.text().contains("before-the-inner"));
+    }
+    tracing::info!("after-the-inner");
+    let text = outer.text();
+    assert!(
+        text.contains("before-the-inner") && text.contains("after-the-inner"),
+        "{text}"
+    );
+    assert!(!text.contains("during-the-inner"), "{text}");
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // The Mother jobs feed goes away
 // ═════════════════════════════════════════════════════════════════════════════

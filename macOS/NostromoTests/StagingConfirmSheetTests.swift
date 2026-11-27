@@ -24,8 +24,9 @@ final class StagingConfirmSheetTests: MouseQueueTestCase {
     override func tearDown() {
         // A sheet still up when its parent closes could be left behind in the app: end it first, then close.
         for rig in rigs {
+            let sheetWindow = rig.controller.confirmSheet?.window
             rig.controller.dismissConfirmation()
-            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            if let sheetWindow { waitUntil("the sheet never came off its parent window") { sheetWindow.sheetParent == nil } }
             rig.tearDown()
         }
         rigs = []
