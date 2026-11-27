@@ -1303,6 +1303,31 @@ fn a_capture_never_sees_the_lines_another_tests_thread_logs() {
     assert!(!theirs.contains("line-from-this-test"), "{theirs}");
 }
 
+/// A second capture opened while the first is live (a helper that captures, called by a
+/// test that already does) gets the lines meanwhile, and the first has them back when it ends.
+#[test]
+fn a_second_capture_nests_inside_the_first() {
+    let (outer, _outer_guard) = capture_logs();
+    tracing::info!("before-the-inner");
+    {
+        let (inner, _inner_guard) = capture_logs();
+        tracing::info!("during-the-inner");
+        assert!(
+            inner.text().contains("during-the-inner"),
+            "{}",
+            inner.text()
+        );
+        assert!(!inner.text().contains("before-the-inner"));
+    }
+    tracing::info!("after-the-inner");
+    let text = outer.text();
+    assert!(
+        text.contains("before-the-inner") && text.contains("after-the-inner"),
+        "{text}"
+    );
+    assert!(!text.contains("during-the-inner"), "{text}");
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // The Mother jobs feed goes away
 // ═════════════════════════════════════════════════════════════════════════════

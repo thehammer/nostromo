@@ -1660,8 +1660,10 @@ impl Captured {
 }
 
 thread_local! {
-    /// The capture bound to this thread by `capture_logs`, if any.
-    static BOUND: std::cell::RefCell<Option<Captured>> = const { std::cell::RefCell::new(None) };
+    /// The captures bound to this thread by `capture_logs`, innermost last (a
+    /// test may open a second while the first is live: the innermost gets the lines,
+    /// as with nested scoped subscribers).
+    static BOUND: std::cell::RefCell<Vec<Captured>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Every capture that is live, whichever thread built it.
@@ -1693,7 +1695,10 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogRouter {
 
 impl Write for RouterWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let bound = BOUND.try_with(|b| b.borrow().clone()).ok().flatten();
+        let bound = BOUND
+            .try_with(|b| b.borrow().last().cloned())
+            .ok()
+            .flatten();
         match bound {
             Some(mut own) => own.write_all(buf)?,
             None if is_helper_thread() => {
@@ -1737,7 +1742,10 @@ pub struct CaptureGuard {
 
 impl Drop for CaptureGuard {
     fn drop(&mut self) {
-        let _ = BOUND.try_with(|b| *b.borrow_mut() = None);
+        let _ = BOUND.try_with(|b| {
+            b.borrow_mut()
+                .retain(|c| !Arc::ptr_eq(&c.0, &self.captured.0))
+        });
         ACTIVE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1762,17 +1770,11 @@ impl Drop for CaptureGuard {
 /// be told from another test's helper and goes to every live capture, but a
 /// line from a test thread never crosses to another test.
 ///
-/// Call it on the thread that drives the engine. Hold one capture per thread.
+/// Call it on the thread that drives the engine.
 pub fn capture_logs() -> (Captured, CaptureGuard) {
     install_log_router();
     let captured = Captured::default();
-    BOUND.with(|b| {
-        assert!(
-            b.borrow().is_none(),
-            "this thread already has a log capture"
-        );
-        *b.borrow_mut() = Some(captured.clone());
-    });
+    BOUND.with(|b| b.borrow_mut().push(captured.clone()));
     ACTIVE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
