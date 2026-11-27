@@ -1450,8 +1450,8 @@ pub(super) fn spawn_apply(
     });
 }
 
-/// Run `task` (the switch) as its own task and, however it ends, answer
-/// `reply` and leave `Applying` ([`finish_apply`]). A panic inside the switch
+/// Run `task` (the switch) as its own task and, however it ends, leave
+/// `Applying` ([`finish_apply`]) and then answer `reply`. A panic inside the switch
 /// would otherwise leave `applying` set for good: every message would queue
 /// and crash recovery would never fire.
 pub(super) fn spawn_apply_task(

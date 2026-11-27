@@ -683,7 +683,8 @@ final class TrackerPaneView: NSView {
         return nil
     }
 
-    /// The item row the view shows for `id` (not a stub).
+    /// The item row the view shows for `id`; nil when that row is a stub (a held change) or absent. A `moving:` copy sits under
+    /// another key and is never returned.
     private func shownItem(_ id: String) -> TrackerItemRow? {
         guard let content = rowViews[TrackerRow.itemKey(id)]?.row.content, case .item(let item) = content else { return nil }
         return item
