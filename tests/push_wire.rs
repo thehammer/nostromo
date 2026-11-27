@@ -101,12 +101,9 @@ fn register_push_round_trips_and_names_its_fields() {
     let v = serde_json::to_value(&msg).unwrap();
     assert_eq!(v["type"], "register_push");
     assert_eq!(v["environment"], "production");
-    assert_eq!(v["capabilities"]["nse_withdraw"], false);
-    assert!(
-        v["capabilities"]
-            .get("nse")
-            .is_none_or(|nse| nse.as_bool() == Some(false)),
-        "W16 added the `nse` flag: it is absent or false here: {v}"
+    assert_eq!(
+        v["capabilities"],
+        json!({"nse": false, "nse_withdraw": false})
     );
     let back: ClientMsg = serde_json::from_value(v).unwrap();
     assert_eq!(
