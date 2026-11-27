@@ -968,12 +968,23 @@ final class ToolGroupSelectionTests: MouseQueueTestCase {
                        "hidden members must not be selectable")
     }
 
-    func testADragFromTheProseIntoTheRowSelectsOnlyProseText() throws {
+    /// Full Keyboard Access (`AppleKeyboardUIMode = 2`) makes a key window hand its first key view, a tool group
+    /// row, the keyboard when it comes forward; with it off nothing is focused. The result must not depend
+    /// on which machine this runs on, so the first-responder state is forced both ways.
+    func testADragFromTheProseIntoTheRowSelectsOnlyProseTextWhetherOrNotTheRowHasTheKeyboard() throws {
+        for rowHasTheKeyboard in [false, true] {
+            try dragFromTheProseIntoTheRow(rowHasTheKeyboard: rowHasTheKeyboard)
+        }
+    }
+
+    private func dragFromTheProseIntoTheRow(rowHasTheKeyboard: Bool) throws {
         let prose = "Intro prose that is long enough to be a real paragraph of assistant text. " + F.prose
         let rig = makeTranscriptRig(self, blocks: [.text(prose)] + F.run(3, output: { "result \($0) \(Self.sentinel)" }))
         let proseLabel = try XCTUnwrap(textFields(in: rig.turn).first { $0.stringValue == prose },
                                        "the first paragraph is a label: \(textFields(in: rig.turn).map(\.stringValue))")
         let row = try XCTUnwrap(rigAllSubviews(of: rig.turn).compactMap { $0 as? ToolGroupRowView }.first)
+        XCTAssertTrue(rig.window.makeFirstResponder(rowHasTheKeyboard ? row : nil), "the keyboard state is set deliberately")
+        XCTAssertEqual(rig.window.firstResponder === row, rowHasTheKeyboard, "precondition: the row has the keyboard: \(rowHasTheKeyboard)")
 
         let from = proseLabel.convert(NSPoint(x: 12, y: proseLabel.bounds.midY), to: nil)
         let rowRect = row.convert(row.bounds, to: nil)

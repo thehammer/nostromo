@@ -113,7 +113,7 @@ func rigPrivatePasteboard(_ testCase: XCTestCase) -> NSPasteboard {
 func makeRigWindow(_ testCase: XCTestCase, size: NSSize = NSSize(width: 900, height: 700),
                    appearance: NSAppearance? = nil) -> RigWindow {
     _ = NSApplication.shared
-    _ = RigWindow.handsLabelClicksToFieldEditor
+    _ = RigWindow.handsLabelClicksToFieldEditor   // installed for the whole test process, never uninstalled (see its doc)
     let window = RigWindow(contentRect: NSRect(origin: .zero, size: size),
                            styleMask: .borderless, backing: .buffered, defer: false)
     window.isReleasedWhenClosed = false
@@ -404,16 +404,9 @@ final class ProseSelectionTests: MouseQueueTestCase {
 
     // MARK: hit-testing
 
-    func testInstallingTheLabelClickShimTwiceWrapsTextFieldMouseDownOnlyOnce() throws {
-        let sel = #selector(NSResponder.mouseDown(with:))
-        _ = RigWindow.handsLabelClicksToFieldEditor   // the first install (makeRigWindow does it too)
-        let once = try XCTUnwrap(class_getInstanceMethod(NSTextField.self, sel).map(method_getImplementation))
-        _ = RigWindow.handsLabelClicksToFieldEditor
-        _ = makeRigWindow(self)
-        let again = try XCTUnwrap(class_getInstanceMethod(NSTextField.self, sel).map(method_getImplementation))
-        XCTAssertEqual(unsafeBitCast(again, to: Int.self), unsafeBitCast(once, to: Int.self),
-                       "a second install must not wrap the already-wrapped method again")
-    }
+    // (The shim's "installed once" guarantee is Swift's own: `handsLabelClicksToFieldEditor` is a `static let`
+    // initialiser, which runs exactly once per process. A test that read it twice and compared two method
+    // pointers could not fail, so there is none; the shim's behaviour is covered by every drag test below.)
 
     func testAMouseDownOverTheTextReachesTheTextItself() {
         for element in ProseElement.allCases {
