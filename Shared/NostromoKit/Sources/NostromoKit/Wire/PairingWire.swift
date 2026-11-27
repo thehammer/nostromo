@@ -24,7 +24,7 @@ public struct SecretToken: Equatable, CustomStringConvertible, CustomDebugString
 }
 
 /// What a satellite host may do with content (`Egress`). `work` is metadata only.
-public enum HostEgress: String, Equatable {
+public enum HostEgress: String, Equatable, Sendable {
     case work
     case personal
 }

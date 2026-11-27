@@ -75,6 +75,13 @@ struct ClientSubscribe: Encodable {
         self.seqEpoch = resume.isEmpty ? nil : seqEpoch
     }
 
+    /// What a one-shot authenticated socket sends after the `Welcome` (the notification extension's
+    /// `push_detail`, `DeviceUnpairer`'s `device_unpair_self`): the daemon hangs up on a connection whose
+    /// second frame is not a `subscribe`. One topic, never `[]` (which means every topic, with the
+    /// attach-time replay of each: more than a one-shot socket can read). `terminal` is a topic a paired
+    /// device is never sent a frame on, so only the few frames the daemon sends every connection arrive.
+    static let oneShot = ClientSubscribe(topics: ["terminal"], rendersDecisions: false)
+
     enum CodingKeys: String, CodingKey {
         case type_            = "type"
         case topics

@@ -31,7 +31,7 @@ final class WebSocketChannel: @unchecked Sendable {
     }
 
     /// `bearer == nil` opens a pairing-only socket. Throws `BadAddress` for a host that has no URL.
-    init(host: String, port: UInt16, bearer: String?) throws {
+    init(host: String, port: UInt16, bearer: String?, maximumMessageSize: Int? = nil) throws {
         guard let url = Self.url(host: host, port: port) else { throw BadAddress() }
         var request = URLRequest(url: url)
         // Longer than the 20 s ping so an idle but healthy socket is never cut by the request timeout;
@@ -44,6 +44,7 @@ final class WebSocketChannel: @unchecked Sendable {
         configuration.httpShouldSetCookies = false
         session = URLSession(configuration: configuration)
         task = session.webSocketTask(with: request)
+        if let maximumMessageSize { task.maximumMessageSize = maximumMessageSize }
     }
 
     func resume() { task.resume() }
@@ -99,6 +100,9 @@ struct TimeoutError: Error {}
 /// soon as the deadline passes: a socket read does not end on task cancellation, so the caller closes
 /// the channel to end the abandoned `body`.
 func withDeadline<T: Sendable>(_ seconds: TimeInterval,
+                               sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { seconds in
+                                   try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                               },
                                _ body: @escaping @Sendable () async throws -> T) async throws -> T {
     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
         let once = ResumeOnce(continuation)
@@ -106,7 +110,7 @@ func withDeadline<T: Sendable>(_ seconds: TimeInterval,
             do { once.resume(.success(try await body())) } catch { once.resume(.failure(error)) }
         }
         Task {
-            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            try? await sleep(seconds)
             if once.resume(.failure(TimeoutError())) { work.cancel() }
         }
     }

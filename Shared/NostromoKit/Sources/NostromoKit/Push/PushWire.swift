@@ -131,11 +131,25 @@ extension PushEnvironmentWire {
     }
 }
 
-/// What this build of the app can do. W13's app sends `nseWithdraw: false`.
+/// What this build of the app can do. `nse` says the build embeds the Notification Service Extension
+/// (W16), so the primary marks every alert push mutable and the extension may enrich it. `nseWithdraw`
+/// is false in every shipped build: the extension cannot hide a notification without Apple's
+/// filtering entitlement, which is not requested.
 public struct PushCapabilitiesWire: Codable, Equatable, Sendable {
+    public var nse: Bool
     public var nseWithdraw: Bool
-    public init(nseWithdraw: Bool = false) { self.nseWithdraw = nseWithdraw }
-    enum CodingKeys: String, CodingKey { case nseWithdraw = "nse_withdraw" }
+    public init(nse: Bool = false, nseWithdraw: Bool = false) {
+        self.nse = nse
+        self.nseWithdraw = nseWithdraw
+    }
+    enum CodingKeys: String, CodingKey { case nse, nseWithdraw = "nse_withdraw" }
+
+    /// Tolerant: a flag that is absent (an older shape) reads as `false`.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        nse = try c.decodeIfPresent(Bool.self, forKey: .nse) ?? false
+        nseWithdraw = try c.decodeIfPresent(Bool.self, forKey: .nseWithdraw) ?? false
+    }
 }
 
 /// The phone's Apple push token (hex), once iOS has issued one. Mirrors `ClientMsg::RegisterPush`.
@@ -277,7 +291,11 @@ extension ServerMsg {
     /// The push frames, or `nil` for any other type. Tolerant: an unknown field is ignored and an
     /// unknown outcome reads as `other`.
     static func decodePushFrame(type_: String, data: Data) -> ServerMsg? {
-        guard type_ == "push_sent_log" || type_ == "push_waiting" || type_ == "push_status" else { return nil }
+        guard type_ == "push_sent_log" || type_ == "push_waiting" || type_ == "push_status"
+                || type_ == "push_detail" else { return nil }
+        if type_ == "push_detail" {
+            return PushDetailWire.parse(data).map(ServerMsg.pushDetail) ?? .unknown
+        }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return .unknown }
         switch type_ {
         case "push_sent_log":

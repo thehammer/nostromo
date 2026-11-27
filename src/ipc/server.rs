@@ -161,6 +161,9 @@ pub struct Server {
     /// The device registry and pairing table, once the daemon installs them
     /// (see [`Server::bind_ws`]); empty on a daemon with no WebSocket listener.
     hub: HubSlot,
+    /// The daemon's sensitive-tag registry, handed to the push engine so that
+    /// `PushDetail` never returns text for a sensitive focus (W16).
+    sensitive: SensitiveTags,
 }
 
 impl Server {
@@ -232,7 +235,8 @@ impl Server {
 
         // Every frame a producer sends is numbered (and kept for replay) by one
         // task before the connections see it.
-        let seq = SeqHub::new(session_mgr.lock().unwrap().sensitive_tags());
+        let sensitive = session_mgr.lock().unwrap().sensitive_tags();
+        let seq = SeqHub::new(sensitive.clone());
         seq::spawn_sequencer(Arc::clone(&seq), tx.subscribe());
 
         // Subscribe before returning so no broadcast sent after `bind` can be missed.
@@ -287,6 +291,7 @@ impl Server {
             republish,
             terminals,
             hub,
+            sensitive,
         })
     }
 
@@ -416,6 +421,7 @@ impl Server {
         let retained = Arc::clone(&self.retained);
         let source: crate::push::RetainedSource =
             Arc::new(move || retained.lock().unwrap().values().cloned().collect());
+        engine.set_sensitive_tags(self.sensitive.clone());
         engine.spawn(self.tx.subscribe(), Some(source));
         self.hub.set_push(engine).is_ok()
     }
@@ -1033,6 +1039,7 @@ where
     // A primary that runs the push engine (W13).
     if let (ServerMsg::Welcome { features, .. }, Some(_)) = (&mut welcome, hub.push()) {
         features.push(crate::push::FEATURE_PUSH.to_string());
+        features.push(crate::push::FEATURE_PUSH_DETAIL.to_string());
     }
     // Which run of the daemon numbers the topics (the `"seq"` feature's epoch).
     if let ServerMsg::Welcome { seq_epoch, .. } = &mut welcome {
@@ -4395,7 +4402,8 @@ fn handle_client_msg(
         ClientMsg::RegisterPush { .. }
         | ClientMsg::SetPushPrefs { .. }
         | ClientMsg::PushSentLog
-        | ClientMsg::PushWaiting => {
+        | ClientMsg::PushWaiting
+        | ClientMsg::PushDetail { .. } => {
             debug!(?trust, "push verb ignored on this connection");
         }
 
@@ -5896,6 +5904,7 @@ pub(super) fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool 
         | ServerMsg::Unauthorized { .. }
         | ServerMsg::PushSentLog { .. }
         | ServerMsg::PushWaiting { .. }
+        | ServerMsg::PushDetail { .. }
         | ServerMsg::PushStatus(_)
         | ServerMsg::DeviceUnpaired => false,
         ServerMsg::MotherPeek { .. } => subscribed(topics, Topic::MotherPeek),

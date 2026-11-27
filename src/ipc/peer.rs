@@ -935,6 +935,7 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         // and the device's own settings.
         ServerMsg::PushSentLog { .. }
         | ServerMsg::PushWaiting { .. }
+        | ServerMsg::PushDetail { .. }
         | ServerMsg::PushStatus(_) => ServerClass::Open,
 
         // Device administration: local peers only.
@@ -1312,6 +1313,7 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::SetPushPrefs { .. }
         | ClientMsg::PushSentLog
         | ClientMsg::PushWaiting
+        | ClientMsg::PushDetail { .. }
         | ClientMsg::OperatorPresence { .. } => NetworkPolicy::Refused,
     }
 }
@@ -1371,6 +1373,7 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::SetPushPrefs { .. }
         | ClientMsg::PushSentLog
         | ClientMsg::PushWaiting
+        | ClientMsg::PushDetail { .. }
         | ClientMsg::OperatorPresence { .. }
         | ClientMsg::Hello { .. }
         | ClientMsg::Subscribe { .. }
@@ -2500,6 +2503,9 @@ mod tests {
             },
             ClientMsg::PushSentLog,
             ClientMsg::PushWaiting,
+            ClientMsg::PushDetail {
+                item_ref: "0123456789abcdef".into(),
+            },
             ClientMsg::OperatorPresence {
                 state: crate::push::wire::Presence::Away,
             },
@@ -2731,7 +2737,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 111;
+    const CLIENT_MSG_VARIANTS: usize = 112;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2847,6 +2853,7 @@ mod tests {
             ClientMsg::PushSentLog => 108,
             ClientMsg::PushWaiting => 109,
             ClientMsg::OperatorPresence { .. } => 110,
+            ClientMsg::PushDetail { .. } => 111,
         }
     }
 
@@ -2893,9 +2900,10 @@ mod tests {
         // 92 with the four authored-PR hand-off verbs (preview, notify, start session, link);
         // 93 with `TrackerEdit` (T3a); 94 with `AuthoredPrMerge`; 97 with the three queue verbs; 98 with `SessionMcp`;
         // 106 with the seven pairing and device-admin verbs (W9) and `DeviceSetAdmin`;
-        // 111 with the four push verbs and `OperatorPresence` (W13).
-        assert_eq!(CLIENT_MSG_VARIANTS, 111);
-        assert_eq!(every_client_msg().len(), 111);
+        // 111 with the four push verbs and `OperatorPresence` (W13);
+        // 112 with `PushDetail` (W16).
+        assert_eq!(CLIENT_MSG_VARIANTS, 112);
+        assert_eq!(every_client_msg().len(), 112);
     }
 
     #[test]

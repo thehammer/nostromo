@@ -187,6 +187,8 @@ public enum ServerMsg {
     case pushWaiting(items: [PushWaitingItemWire], badge: Int)
     /// This device's settings and whether notifications are getting through.
     case pushStatus(PushStatusWire)
+    /// The answer to `push_detail` (W16): whether an item still waits and, for a personal item, its first line.
+    case pushDetail(PushDetailWire)
 
     case unknown
 }

@@ -89,6 +89,13 @@ impl PushEnvironment {
 /// as "cannot".
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PushCapabilities {
+    /// W16: the build embeds the Notification Service Extension, so every alert
+    /// push to this device carries `mutable-content` and the extension may
+    /// enrich it on the phone. Independent of `nse_withdraw`.
+    #[serde(default)]
+    pub nse: bool,
+    /// W16, optional and off in every shipped build: the extension can hide a
+    /// withdrawn item's notification (needs Apple's filtering entitlement).
     #[serde(default)]
     pub nse_withdraw: bool,
 }

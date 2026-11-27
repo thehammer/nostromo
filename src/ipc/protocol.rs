@@ -2826,6 +2826,13 @@ pub enum ClientMsg {
     PushSentLog,
     /// What waits on the operator now (reply: `PushWaiting`).
     PushWaiting,
+    /// The first line of one waiting item's question, PR title or decision
+    /// prompt, for the phone's notification extension (W16; reply:
+    /// `PushDetail`). A paired phone's, scoped to its own connection; `text` is
+    /// absent for anything but a personal, non-PHI, non-work-owner item.
+    PushDetail {
+        item_ref: String,
+    },
     /// Whether the operator is at this Mac, from the verified app only
     /// (W15's reporter sends it when the daemon advertises `presence`). No reply.
     OperatorPresence {
@@ -4313,6 +4320,19 @@ pub enum ServerMsg {
     PushWaiting {
         items: Vec<crate::push::wire::PushWaitingItem>,
         badge: u32,
+    },
+    /// The answer to `PushDetail` (W16). `waiting` is whether the item still
+    /// waits on the operator; `text` is its first line (at most 140 characters),
+    /// present only for a personal-host, non-PHI, non-sensitive item in a
+    /// repository whose owner is known and is not a work owner. Never a
+    /// decision's `detail` or a choice label.
+    PushDetail {
+        item_ref: String,
+        waiting: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
     /// This device's settings, the read-only host classes and work owners, and
     /// whether notifications are getting through.

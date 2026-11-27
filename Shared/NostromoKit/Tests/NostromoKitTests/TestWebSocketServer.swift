@@ -249,6 +249,28 @@ final class TestWebSocketServer: @unchecked Sendable {
     }
 }
 
+// MARK: - The daemon's rule for a connection's second frame
+
+extension TestWebSocketServer {
+    /// A text handler that behaves like the daemon's `handle_client` toward a one-shot client: the
+    /// SECOND frame of a connection must be a `subscribe` (or a `ping`); anything else ends the
+    /// connection (here: the socket is dropped) and nothing is ever answered. A verb sent before a
+    /// `subscribe` is therefore never answered, as on a device. Once subscribed, `verb` is answered
+    /// with `replies` (in order).
+    static func daemonRule(answering verb: String,
+                           with replies: [String]) -> @Sendable (Connection, String) -> Void {
+        return { connection, text in
+            let texts = connection.receivedTexts
+            if texts.count == 2, wireType(text) != "subscribe", wireType(text) != "ping" {
+                connection.cancel()
+                return
+            }
+            guard texts.count >= 3, wireType(texts[1]) == "subscribe" else { return }
+            if wireType(text) == verb { for reply in replies { connection.send(reply) } }
+        }
+    }
+}
+
 // MARK: - Fake local-network probe
 
 /// A `LocalNetworkProbing` whose answer a test sets and whose calls it can read.

@@ -189,6 +189,14 @@ same outbound socket; with the uplink down it answers `server_unreachable` at
 once. On a managed laptop use a split-tunnel WireGuard profile (`AllowedIPs` =
 the home subnet) so corporate traffic stays on its own VPN.
 
+### Push notifications
+
+A primary with a `[push]` table (`relay_url`, plus `hosts`, `work_owners`, `phi_repos`) sends the paired phone
+fixed-vocabulary notifications through a relay you deploy: setup in
+[`infra/push-relay/README.md`](infra/push-relay/README.md). Classifying a host `personal`
+(`nostromo push host sendai personal`) also lets the phone show the first line of its items; what that needs,
+what it can expose and how to turn it off: [`docs/push-enrichment.md`](docs/push-enrichment.md).
+
 ### Install
 
 ```bash

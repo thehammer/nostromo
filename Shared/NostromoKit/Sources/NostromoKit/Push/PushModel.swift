@@ -53,12 +53,20 @@ public final class PushModel: ObservableObject {
     /// `sandbox` in a development build, `production` otherwise.
     public var environment: PushEnvironmentWire
 
+    /// What this build can do, sent with every registration (`nse` once the extension is embedded).
+    public var capabilities: PushCapabilitiesWire
+
+    /// The operator's per-host "Show full details" switches (W16); only a host switched off is stored.
+    @Published public private(set) var enrichment: EnrichmentPrefs
+
     /// How long the first screen waits for the reconcile before it accepts input anyway.
     public let reconcileTimeout: TimeInterval
 
     // MARK: - Wiring
 
     private let transport: DaemonTransport
+    /// What the extension reads (W16): the host classes and the switches. Never a token.
+    private let shared: SharedPushState?
     private var bag = Set<AnyCancellable>()
     private var reconcileDeadline: Task<Void, Never>?
     /// The settings the primary has not acknowledged yet.
@@ -69,10 +77,15 @@ public final class PushModel: ObservableObject {
     private var gateArmed = false
 
     public init(transport: DaemonTransport, environment: PushEnvironmentWire = .production,
-                reconcileTimeout: TimeInterval = 2) {
+                reconcileTimeout: TimeInterval = 2,
+                capabilities: PushCapabilitiesWire = PushCapabilitiesWire(),
+                shared: SharedPushState? = nil) {
         self.transport = transport
         self.environment = environment
         self.reconcileTimeout = reconcileTimeout
+        self.capabilities = capabilities
+        self.shared = shared
+        self.enrichment = shared?.enrichment ?? EnrichmentPrefs()
         transport.framePublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.handle($0) }
@@ -91,7 +104,16 @@ public final class PushModel: ObservableObject {
     /// Tell the primary about this device's token, if the link is up and iOS issued one.
     public func registerIfPossible() {
         guard transport.connected, let token = apnsToken, !token.isEmpty else { return }
-        transport.send(ClientRegisterPush(apnsToken: token, environment: environment))
+        transport.send(ClientRegisterPush(apnsToken: token, environment: environment, capabilities: capabilities))
+    }
+
+    /// Turn "Show full details" on or off for one personal host. Kept on the phone: the extension
+    /// enforces it, and the primary never hears of it.
+    public func setDetails(_ enabled: Bool, host: String) {
+        var next = enrichment
+        next.set(host: host, enabled: enabled)
+        enrichment = next
+        shared?.enrichment = next
     }
 
     /// Ask what waits on the operator now.
@@ -161,6 +183,7 @@ public final class PushModel: ObservableObject {
         switch hosted.msg {
         case .pushStatus(let status):
             self.status = status
+            shared?.hostClasses = status.hostClasses
             acknowledge(status.prefs)
         case .pushWaiting(let items, let badge):
             waiting = items

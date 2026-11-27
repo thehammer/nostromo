@@ -232,6 +232,10 @@ async fn the_welcome_names_presence_on_every_daemon_and_push_only_once_the_engin
             !features.iter().any(|f| f == "push"),
             "{what}: no engine yet: {features:?}"
         );
+        assert!(
+            !features.iter().any(|f| f == "push_detail"),
+            "{what}: no engine yet: {features:?}"
+        );
     }
 
     assert!(
@@ -242,6 +246,8 @@ async fn the_welcome_names_presence_on_every_daemon_and_push_only_once_the_engin
     let features = paired.features();
     assert!(features.iter().any(|f| f == "push"), "{features:?}");
     assert!(features.iter().any(|f| f == "presence"), "{features:?}");
+    // W16: a primary that runs the engine answers `PushDetail`.
+    assert!(features.iter().any(|f| f == "push_detail"), "{features:?}");
     let unix = rig.unix(vec![], false).await;
     assert!(unix.features().iter().any(|f| f == "presence"));
 }
@@ -1176,6 +1182,7 @@ async fn every_daemon_says_presence_and_a_satellite_never_runs_the_engine() {
     let features = conn.features();
     assert!(features.iter().any(|f| f == "presence"), "{features:?}");
     assert!(!features.iter().any(|f| f == "push"), "{features:?}");
+    assert!(!features.iter().any(|f| f == "push_detail"), "{features:?}");
     // A satellite has no device registry, so `start_push` cannot start an engine there.
     let source: ConfigSource = Arc::new(|| PushConfig {
         relay_url: Some("http://127.0.0.1:9".into()),

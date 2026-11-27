@@ -75,7 +75,11 @@ final class AppSession: ObservableObject, PairingSideEffects {
         let store = DaemonStore(client: client, cache: cache)
         self.client = client
         self.store = store
-        let push = PushModel(transport: client)
+        // The extension reads the address, the host classes and the "Show full details" switches
+        // from the App Group (never a token), and runs only for a device that says it has it.
+        let shared = SharedPushState.app
+        shared.address = SharedPushState.Address(host: address, port: port)
+        let push = PushModel(transport: client, capabilities: PushCapabilitiesWire(nse: true), shared: shared)
         self.push = push
         PushCoordinator.shared.model = push
         stateWatch = client.$state.sink { [weak self] state in
@@ -128,6 +132,7 @@ final class AppSession: ObservableObject, PairingSideEffects {
     /// the new address answers "not paired", `handleNotPaired` takes it from there.
     func changeAddress(to address: String, port: UInt16) {
         ConnectionSettings.saveAddress(host: address, webSocketPort: port)
+        SharedPushState.app.address = SharedPushState.Address(host: address, port: port)
         client?.host = address
         client?.port = port
     }

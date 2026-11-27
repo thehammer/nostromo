@@ -134,6 +134,9 @@ pub struct PushConfig {
     /// Owners whose repositories never show a name. `Carefeed` is always in
     /// it: the list can only grow.
     pub work_owners: Vec<String>,
+    /// Extra PHI repository names, added to [`DEFAULT_PHI_REPOS`]: an item in one
+    /// never carries extra detail on the phone (W16). Can only grow.
+    pub phi_repos: Vec<String>,
     /// Seconds a decision waits before it is pushed when the Mac is in use (default 30).
     pub decision_grace_secs: Option<u64>,
     /// Seconds a Mother job or review waits before it is pushed (default 120; tests only).
@@ -150,6 +153,7 @@ impl Default for PushConfig {
             enabled: true,
             hosts: Default::default(),
             work_owners: Vec::new(),
+            phi_repos: Vec::new(),
             decision_grace_secs: None,
             grace_secs: None,
             state_dir: None,
@@ -172,6 +176,19 @@ impl PushConfig {
             }
         }
         owners
+    }
+
+    /// [`DEFAULT_PHI_REPOS`] plus the configured names, de-duplicated ignoring
+    /// case. The defaults cannot be removed by configuration.
+    pub fn resolved_phi_repos(&self) -> Vec<String> {
+        let mut repos: Vec<String> = DEFAULT_PHI_REPOS.iter().map(|s| s.to_string()).collect();
+        for repo in &self.phi_repos {
+            let repo = repo.trim();
+            if !repo.is_empty() && !repos.iter().any(|r| r.eq_ignore_ascii_case(repo)) {
+                repos.push(repo.to_string());
+            }
+        }
+        repos
     }
 }
 

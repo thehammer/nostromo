@@ -513,7 +513,10 @@ mod tests {
                 &"cd".repeat(32),
                 PushEnvironment::Production,
                 "Asia/Tokyo",
-                PushCapabilities { nse_withdraw: true },
+                PushCapabilities {
+                    nse_withdraw: true,
+                    ..Default::default()
+                },
             )
             .unwrap();
         assert!(changed);
@@ -539,7 +542,10 @@ mod tests {
                 &token(),
                 PushEnvironment::Sandbox,
                 "UTC",
-                PushCapabilities { nse_withdraw: true }
+                PushCapabilities {
+                    nse_withdraw: true,
+                    ..Default::default()
+                }
             )
             .unwrap(),
             "only the capabilities changed"
