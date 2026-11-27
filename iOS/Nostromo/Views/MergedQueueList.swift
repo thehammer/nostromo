@@ -2,8 +2,11 @@
 //
 // The Queue tab over the WebSocket transport: one merged list across Macs (Q8, PRD AC52, AC53).
 // "Needs you" first, then recency. Every row carries its Mac's name only when the list holds rows
-// from more than one Mac. It is read-only: no cancel, retry, answer or approve control (B10).
-// A work host's row is a fixed phrase; tapping it opens a card that says where the details are.
+// from more than one Mac, or while the scope is a group of Macs (All, Work, Personal). It is
+// read-only: no cancel, retry, answer or approve control (B10). A work host's row is a fixed phrase;
+// tapping it opens a card that says where the details are. A satellite's held decision or approval
+// is a row that says to answer it on the Mac. A Mac that is not connected shows its last-known rows
+// dimmed, with when it was last seen.
 
 import SwiftUI
 import NostromoKit
@@ -14,7 +17,13 @@ struct MergedQueueList: View {
     var body: some View {
         // The phone's own Sessions tab shows the primary's sessions; this list adds every job and
         // the other Macs' sessions.
-        let rows = store.mergedQueue(primaryName: "this Mac").filter { $0.kind == .job || $0.host != nil }
+        let rows = store.mergedQueue(primaryName: HostNames.primary).filter { $0.kind == .job || $0.host != nil }
+        content(rows)
+            .safeAreaInset(edge: .top, spacing: 0) { HostScopePicker() }
+    }
+
+    @ViewBuilder
+    private func content(_ rows: [MergedQueueRow]) -> some View {
         if rows.isEmpty {
             VStack(spacing: 12) {
                 Image(systemName: "tray").font(.system(size: 48)).foregroundStyle(.secondary)
@@ -53,7 +62,13 @@ struct MergedQueueList: View {
                 Text(badge).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
             }
             Text(row.text).font(.body)
+            if let footnote = row.footnote {
+                Text(footnote).font(.caption).foregroundStyle(.secondary)
+            }
+            LastKnownCaption(text: row.lastKnownLabel)
         }
+        .opacity(row.isLastKnown ? 0.55 : 1)
+        .accessibilityElement(children: .combine)
     }
 }
 

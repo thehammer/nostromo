@@ -1,0 +1,24 @@
+{
+  "focuses": [
+    {
+      "agent_name": "perri",
+      "display_name": "perri",
+      "is_built_in": true,
+      "tag": "f-33acb7de"
+    },
+    {
+      "agent_name": "cody",
+      "display_name": "cody",
+      "is_built_in": false,
+      "tag": "f-48a0007a"
+    },
+    {
+      "agent_name": "other",
+      "display_name": "other",
+      "is_built_in": false,
+      "tag": "f-70e15afe"
+    }
+  ],
+  "host": "kobe",
+  "type": "focus_registry_updated"
+}

@@ -142,6 +142,26 @@ public struct PerriHostSection: Identifiable, Equatable {
 
     public var id: String { host.id }
     public var isLastKnown: Bool { !host.connected }
+
+    /// The rows under their bucket headings, in the Perri tab's order; a bucket the host sent that
+    /// the tab does not know is listed last under its own name.
+    public var groups: [PerriHostGroup] {
+        var groups: [PerriHostGroup] = []
+        let known = HostedPerri.buckets.map(\.key)
+        for bucket in HostedPerri.buckets {
+            let inBucket = rows.filter { $0.bucket == bucket.key }
+            if !inBucket.isEmpty { groups.append(PerriHostGroup(id: bucket.key, label: bucket.label, rows: inBucket)) }
+        }
+        let other = rows.filter { !known.contains($0.bucket) }
+        if !other.isEmpty { groups.append(PerriHostGroup(id: "other", label: "Other", rows: other)) }
+        return groups
+    }
+}
+
+public struct PerriHostGroup: Identifiable, Equatable {
+    public let id: String
+    public let label: String
+    public let rows: [HostedPerriRow]
 }
 
 public enum HostedPerri {

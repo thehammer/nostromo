@@ -12,6 +12,11 @@ with no way to turn sharing on, and the only sentence in the app about them is
 So no string literal under `iOS/Nostromo/**` may mention mail, calendar or todos, and the one
 sentence lives in Kit's `PairingCopy.notShared` exactly as written.
 
+W11 slice 2 (hosts on the phone) adds one more: the code that shows a satellite's focuses, Perri
+rows and held decisions (the new Kit files, the scope picker, the merged queue list, the focus
+list, and the hosted parts of the Perri tab and of the store's hosted-frame handler) names no
+answering or mutating call and no `.send(`: the phone answers nothing for another Mac (B10).
+
 W11 fix round 1 adds five more source checks (each with a "bites" test):
   - the client's `allowedTypes` equals the daemon's `NETWORK_ALLOWED` (`src/ipc/peer.rs`), and its
     separate `pairedDeviceTypes` is exactly the five push verbs (W13's `register_push`,
@@ -412,6 +417,84 @@ class MailCalendarTodosCopyPolicyTests(unittest.TestCase):
     def test_ignores_code_and_comments_that_only_name_the_words(self):
         ok = [("iOS/Nostromo/V.swift", "// the mail tab\nlet todoCount = 3\nText(PairingCopy.notShared)")]
         self.assertEqual(topic_string_violations(ok), [])
+
+
+# W11 slice 2: what the hosted-content code may not name. Every one of these changes state on a Mac.
+ANSWERING_CALL = re.compile(
+    r"\b(?:perriApprove|perriLoadPr|perriClear|motherAction|motherResume|answerDecision|closeDecision"
+    r"|ClientPerriAction|ClientMotherAction|ClientMotherResume|ClientDecisionAnswer|ClientApproval\w*)\b"
+    r"|\.send\(|\"(?:approve|perri_action|mother_action|decision_answer)\"|swipeActions|\bApprove\b")
+
+HOSTED_WHOLE_FILES = (
+    os.path.join(KIT_DIR, "NostromoKit", "Store", "HostScope.swift"),
+    os.path.join(KIT_DIR, "NostromoKit", "Store", "HostedContent.swift"),
+    os.path.join(IOS_DIR, "Views", "HostScopePicker.swift"),
+    os.path.join(IOS_DIR, "Views", "MergedQueueList.swift"),
+    os.path.join(IOS_DIR, "Views", "FocusListView.swift"),
+)
+PERRI_VIEW = os.path.join(IOS_DIR, "Views", "PerriView.swift")
+DAEMON_STORE = os.path.join(KIT_DIR, "NostromoKit", "Store", "DaemonStore.swift")
+
+
+def between(source, start, end):
+    """The text from the first `start` to the next `end` after it ('' if either is missing)."""
+    i = source.find(start)
+    if i < 0:
+        return ""
+    j = source.find(end, i + len(start))
+    return source[i:j] if j >= 0 else source[i:]
+
+
+def answering_call_violations(files):
+    """An answering or mutating call named in code that only displays another Mac's content."""
+    out = []
+    for path, source in files:
+        for m in ANSWERING_CALL.finditer(_strip_line_comments(source)):
+            out.append((path, m.group(0)))
+    return out
+
+
+def hosted_regions():
+    """(label, text) for every piece of code that shows a satellite's content."""
+    regions = [(os.path.relpath(p, REPO_ROOT), _read(p)) for p in HOSTED_WHOLE_FILES]
+    perri = _read(PERRI_VIEW)
+    regions.append(("PerriView.swift (hosted rows)",
+                    between(perri, "// MARK: - A satellite's queue (read-only)", "// MARK: - Queue section")))
+    regions.append(("PerriView.swift (hosted row view)",
+                    between(perri, "// MARK: - A satellite's PR row", "// MARK: - Preview")))
+    store = _read(DAEMON_STORE)
+    regions.append(("DaemonStore.swift (handle(_:host:))",
+                    between(store, "private func handle(_ msg: ServerMsg, host: String?) {",
+                            "private func handle(_ msg: ServerMsg) {")))
+    return regions
+
+
+class HostedContentReadOnlyPolicyTests(unittest.TestCase):
+    def test_every_hosted_region_is_found_and_not_empty(self):
+        for label, text in hosted_regions():
+            self.assertGreater(len(text.strip()), 200, "%s: the scan must not pass over an empty region" % label)
+
+    def test_no_hosted_code_names_an_answering_or_mutating_call(self):
+        self.assertEqual(answering_call_violations(hosted_regions()), [])
+
+    def test_the_hosted_handler_sends_nothing(self):
+        text = dict(hosted_regions())["DaemonStore.swift (handle(_:host:))"]
+        self.assertNotIn("send(", text)
+
+    def test_bites_on_each_kind_of_call(self):
+        for code in ("store.perriApprove(number: 1, repo: r)", "store.answerDecision(requestId: a, choiceId: b)",
+                     "store.motherAction(jobId: j, action: a)", "client.send(ClientFocusList())",
+                     'let verb = "decision_answer"', ".swipeActions { }", 'Button("Approve") {}',
+                     "ClientPerriAction(action: a)"):
+            self.assertEqual(len(answering_call_violations([("V.swift", code)])), 1, code)
+
+    def test_ignores_comments_and_the_words_inside_other_names(self):
+        ok = [("V.swift", "// Approve is hidden: the phone answers nothing\nlet approvalLine = 1\nlet x = 2")]
+        self.assertEqual(answering_call_violations(ok), [])
+
+    def test_between_finds_and_bounds_a_region(self):
+        self.assertEqual(between("a START b END c", "START", "END"), "START b ")
+        self.assertEqual(between("a b", "START", "END"), "")
 
 
 class SuiteNeverSkipsTests(unittest.TestCase):

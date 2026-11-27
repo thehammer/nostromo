@@ -1,0 +1,8 @@
+{
+  "choice_id": "yes",
+  "host": "studio",
+  "request_id": "req-0a1b2c3d",
+  "resolution": "answered",
+  "tag": "cody-1a2b3c4d",
+  "type": "decision_resolved"
+}
