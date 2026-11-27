@@ -2342,6 +2342,35 @@ mod tests {
         ));
     }
 
+    // The cap on stuck helpers is per owner: one broker's helpers in flight must not make
+    // another's work "too many earlier helpers" (no candidates, no match) in the same process.
+    #[test]
+    fn one_owners_stuck_helpers_do_not_use_up_another_owners_cap() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let busy = HelperCount::default();
+        let other = HelperCount::default();
+        let (release, held) = channel::<()>();
+        let held = std::sync::Arc::new(std::sync::Mutex::new(held));
+        for _ in 0..MAX_HELPERS {
+            let held = std::sync::Arc::clone(&held);
+            assert!(spawn_capped(&busy, MAX_HELPERS, "stuck", move || {
+                let _ = held.lock().unwrap().recv();
+            }));
+        }
+        assert_eq!(
+            bounded_in(&busy, Duration::from_secs(5), || 7),
+            None,
+            "the busy owner is at its cap: refused, not queued"
+        );
+        assert_eq!(
+            bounded_in(&other, Duration::from_secs(5), || 7),
+            Some(7),
+            "another owner's cap is its own"
+        );
+        drop(release);
+    }
+
     // Round 3: candidate derivation and the all-rules match share one bounded helper.
     #[test]
     fn candidates_within_and_first_match_within_agree_with_the_plain_functions() {
