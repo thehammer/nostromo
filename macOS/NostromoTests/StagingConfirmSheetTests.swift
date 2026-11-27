@@ -25,7 +25,7 @@ final class StagingConfirmSheetTests: MouseQueueTestCase {
         // A sheet still up when its parent closes could be left behind in the app: end it first, then close.
         for rig in rigs {
             rig.controller.dismissConfirmation()
-            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            flushMain()   // the sheet's end-of-sheet work is queued behind this marker
             rig.tearDown()
         }
         rigs = []

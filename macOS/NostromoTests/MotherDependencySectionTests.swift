@@ -491,18 +491,19 @@ final class MotherDependencySectionTests: XCTestCase {
         XCTAssertTrue(condition(), what, file: file, line: line)
     }
 
-    private func publish(_ jobs: [MotherJob]) {
+    /// Publishes `jobs` and waits for the Mother view's own list to show them: the view takes them through a
+    /// main-queue hop, so the view's state (not the store's, and not a fixed delay) is the signal.
+    private func publish(_ jobs: [MotherJob], in view: MotherView) {
         AppStore.shared.applyBrokerEventForTesting(.snapshot(jobs))
         let wanted = Set(jobs.map(\.id))
-        waitUntil("the store never published \(wanted)") { Set(AppStore.shared.motherJobs.map(\.id)) == wanted }
-        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        waitUntil("the view never listed \(wanted) (it lists \(view.listedJobIds))") { view.listedJobIds == wanted }
     }
 
     func testClickingADependencyRowSelectsThatJobAndShowsItsDetail() throws {
         let view = makeMotherView()
         let upstream = F.job(dep, state: "running", title: "Upstream work")
         let dependent = F.job("j-dependent", deps: [dep], wait: F.wait(dep, "dep_not_finished"))
-        publish([dependent, upstream])
+        publish([dependent, upstream], in: view)
         view.listDidSelect(dependent)
         let detail = try XCTUnwrap(view.shownDetail)
         waitUntil("the dependency never showed as in the queue") { detail.dependencySection.rows.first?.inQueue == true }
@@ -519,7 +520,7 @@ final class MotherDependencySectionTests: XCTestCase {
         let view = makeMotherView()
         let upstream = F.job(dep, state: "running", title: "Upstream work")
         let dependent = F.job("j-dependent", deps: [dep], wait: F.wait(dep, "dep_not_finished"))
-        publish([dependent, upstream])
+        publish([dependent, upstream], in: view)
         view.setOriginFilter(.focus(tag: "claudia-ABCDEF12"))
         view.listDidSelect(dependent)
         let detail = try XCTUnwrap(view.shownDetail)
@@ -536,12 +537,12 @@ final class MotherDependencySectionTests: XCTestCase {
     func testADependencyChangingStateUpdatesTheOpenOverviewWhileTheDependentIsUnchanged() throws {
         let view = makeMotherView()
         let dependent = F.job("j-dependent", deps: [dep], wait: F.wait(dep, "dep_not_finished"))
-        publish([dependent, F.job(dep, state: "running", title: "Upstream work")])
+        publish([dependent, F.job(dep, state: "running", title: "Upstream work")], in: view)
         view.listDidSelect(dependent)
         let detail = try XCTUnwrap(view.shownDetail)
         waitUntil("running dependency never showed") { detail.dependencySection.rows.first?.state == "running" }
 
-        publish([dependent, F.job(dep, state: "succeeded", title: "Upstream work")])
+        publish([dependent, F.job(dep, state: "succeeded", title: "Upstream work")], in: view)
         waitUntil("the row never followed the dependency to succeeded") {
             detail.dependencySection.rows.first?.state == "succeeded"
         }
