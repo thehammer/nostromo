@@ -441,6 +441,31 @@ final class TrackerEditingTests: XCTestCase {
         XCTAssertEqual(h.sent.last?.ops, [.edit(id: withNote, title: nil, text: nil, body: "changed")])
     }
 
+    /// A pending editor (its save is in flight) that was asked for focus remembers it, so a late refusal can give
+    /// focus back. Focus then moving to another control INSIDE the pane (the `isDescendant(of: documentView)`
+    /// branch of `firstResponderChanged`) leaves that alone; focus moving to the composer withdraws it.
+    func testFocusMovingWithinThePaneKeepsAPendingEditorsWantForFocusAndTheComposerDropsIt() throws {
+        let h = try TrackerEditHarness(self)
+        h.pane.beginEdit(item: plain, kind: .title)
+        let editor = try XCTUnwrap(try h.row(plain).titleEditor)
+        h.type("Saved title", into: editor)
+        h.window.makeFirstResponder(h.rig.composer)   // losing focus saves; the save is not answered
+        XCTAssertEqual(h.pane.editSessions[plain]?.phase, .saving, "precondition: the save is in flight")
+        XCTAssertEqual(h.pane.editSessions[plain]?.editorWantsFocus, false, "precondition: the editor did not hold focus")
+
+        try h.row(plain).focusEditor()   // refused while pending, and remembered
+        XCTAssertEqual(h.pane.editSessions[plain]?.editorWantsFocus, true, "precondition: the try to focus it is remembered")
+
+        h.pane.beginEdit(item: withNote, kind: .title)   // another editor in the pane takes the keyboard
+        let other = try XCTUnwrap(try h.row(withNote).titleEditor)
+        XCTAssertTrue(other.isDescendant(of: h.pane), "precondition: the focus stayed inside the pane")
+        XCTAssertEqual(h.pane.editSessions[plain]?.editorWantsFocus, true, "focus moved inside the pane: the want stays")
+
+        XCTAssertTrue(h.window.makeFirstResponder(h.rig.composer))
+        XCTAssertEqual(h.pane.editSessions[plain]?.editorWantsFocus, false,
+                       "focus went to the composer: a late refusal must not pull it back")
+    }
+
     func testALegacyItemsDetailsAreTheRestPlusTheNoteAndSaveRestructures() throws {
         let h = try TrackerEditHarness(self, configure: { script in
             try self.setText("check-1000", self.longLegacy)(&script)
