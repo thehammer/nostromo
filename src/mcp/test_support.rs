@@ -4,7 +4,8 @@
 //! `tools/apply_layout.rs`, `tools/refresh_pane.rs`, `tools/set_pane.rs`) each
 //! built a daemon-hosted `McpSharedState` over a throwaway store dir, and each
 //! independently leaked its `TempDir` with `std::mem::forget`. This module is
-//! the one place that does the leak now; the four helpers delegate to it.
+//! the one place that does the leak now; the four helpers delegate to it, as do
+//! the builders in `tools/mod.rs`'s tests.
 
 use std::sync::{Arc, Mutex};
 
