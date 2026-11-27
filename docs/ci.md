@@ -12,17 +12,20 @@ instead; see "Skipping the Swift jobs" below.
 
 | Check name | Runner | What it runs | Local equivalent | Typical runtime |
 |---|---|---|---|---|
-| `Build & Lint` | ubuntu-latest | **the aggregate of the three Rust jobs below**: succeeds only if all three did. This is the required status check. | fmt, clippy and test together | the slowest of the three |
-| `Rust format` | ubuntu-latest | `cargo fmt --check` | same | ~15 s |
-| `Rust clippy` | ubuntu-latest | `cargo clippy --all-targets -- -D warnings`, then `systemd-analyze verify` on the rendered `dist/systemd/nostromd.service` (the Linux primary's unit) | same; the verify step needs a Linux host with systemd | ~2.5 min |
-| `Rust tests` | ubuntu-latest | `cargo nextest run --no-fail-fast` (compiles and links the lib, the bins and every test binary; cargo-nextest pinned, no retries), then `cargo test --doc` as its own step because nextest skips doc tests | same (see `docs/rwx-sandbox.md` for the install) | see "Where the time goes" |
-| `Detect changed paths` | ubuntu-latest | `scripts/ci_changes.py` over the PR's changed paths | n/a | ~10 s |
-| `Python tooling tests` | macos-latest | `make python-test` (fails on any skip) | `make python-test` | ~4 min |
+| `Build & Lint` | ubuntu-24.04 | **the aggregate of the three Rust jobs below**: succeeds only if all three did. This is the required status check. | fmt, clippy and test together | the slowest of the three |
+| `Rust format` | ubuntu-24.04 | `cargo fmt --check` | same | ~15 s |
+| `Rust clippy` | ubuntu-24.04 | `cargo clippy --all-targets -- -D warnings`, then `systemd-analyze verify` on the rendered `dist/systemd/nostromd.service` (the Linux primary's unit) | same; the verify step needs a Linux host with systemd | ~2.5 min |
+| `Rust tests` | ubuntu-24.04 | `cargo nextest run --no-fail-fast` (compiles and links the lib, the bins and every test binary; cargo-nextest pinned, no retries), then `cargo test --doc` as its own step because nextest skips doc tests | same (see `docs/rwx-sandbox.md` for the install) | see "Where the time goes" |
+| `Detect changed paths` | ubuntu-24.04 | `scripts/ci_changes.py` over the PR's changed paths | n/a | ~10 s |
+| `Python tooling tests` | macos-26 | `make python-test` (fails on any skip) | `make python-test` | ~4 min |
 | `Mac tests shard 1/3`, `2/3`, `3/3` | macos-26 (x3, parallel) | `make mac-test SHARD=<n>`: one third of the `NostromoTests` classes (~10,450 tests in all, serial inside a shard); shard 1 also runs the compile gate | `make mac-test` (all classes) or `make mac-test SHARD=<n>` | see "Where the time goes" |
-| `Swift tests (Mac app)` | ubuntu-latest | **the aggregate of the three Mac shards** (`scripts/ci_mac_aggregate.py`): green only if every shard ran, passed and reported tests, and the total reaches the floor in `macOS/ci/mac-shards.json`. Takes no macOS slot. | n/a | seconds after the last shard |
+| `Swift tests (Mac app)` | ubuntu-24.04 | **the aggregate of the three Mac shards** (`scripts/ci_mac_aggregate.py`): green only if every shard ran, passed and reported tests, and the total reaches the floor in `macOS/ci/mac-shards.json`. Takes no macOS slot. | n/a | seconds after the last shard |
 | `Swift tests (NostromoKit)` | macos-26 | `make kit-test` — `swift test` over `Shared/NostromoKit`, ~570 tests | `make kit-test` | ~2.5 min |
 | `iOS simulator build` | macos-26 | two steps: the generic-simulator compile (`xcodebuild -scheme Nostromo -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build`), then `make ios-test`, the hosted `NostromoTests` bundle (L5, `docs/ios-verification.md`) on the `iPhone 17` simulator, signed ad hoc (`CODE_SIGN_IDENTITY=-`, no team). The name is a required check, so it keeps "build". | `make ios-test` (needs an installed Simulator runtime); `make ios-build` is the device build | compile ~1.7 min; the test step's time is in "iOS L5 timing" below |
 | `Launch smoke (advisory)` | macos-26 | see below (path-filtered, advisory) | `make mac-smoke` | ~5 min |
+
+Every runner is pinned to an explicit image (`ubuntu-24.04`, `macos-26`), never `*-latest`; see
+"Runner and action pins" below.
 
 The Linux Rust jobs are also the primary-host smoke: `tests/linux_startup.rs` starts the
 real `nostromd` with a tempdir `HOME`, an empty `PATH` and the documented primary
@@ -98,7 +101,7 @@ you add many tests.
 **macOS slots.** GitHub Free allows 5 concurrent macOS jobs for the account. One
 run now uses 3 shards + one Kit-then-iOS chain (`iOS simulator build` `needs`
 `Swift tests (NostromoKit)`, so they share a slot) + `Python tooling tests`
-(`macos-latest`, ~4.5 min) = 5, plus `Launch smoke (advisory)` on the PRs it
+(`macos-26`, ~5.5 min) = 5, plus `Launch smoke (advisory)` on the PRs it
 runs for, which queues briefly. A second overlapping run (or a `make ci-remote`
 dispatch) queues behind. Five shards are deliberately not used: they would starve
 everything else for ~2 min of gain.
@@ -310,12 +313,13 @@ failed build) stays green. The app-build step is the compile gate.
 The Rust toolchain is **pinned to 1.100.0** so a new stable cannot turn main red.
 It is set in three places, kept in agreement by
 `tests/ci_policy/test_rust_toolchain_pin.py` (part of `make python-test`):
-`rust-toolchain.toml` (`channel`), every `dtolnay/rust-toolchain@X` ref in
-`.github/workflows/ci.yml`, and `RUST_VERSION` in `.rwx/sandbox.yml`.
+`rust-toolchain.toml` (`channel`), the `toolchain:` input of every
+`dtolnay/rust-toolchain` step in `.github/workflows/*.yml` (the action is pinned by commit SHA,
+so it cannot infer the version from `@X`), and `RUST_VERSION` in `.rwx/sandbox.yml`.
 
 A bump is a deliberate PR:
 
-1. Change all three to the new version in one PR.
+1. Change all three to the new version in one PR (every workflow's `toolchain:` input).
 2. Run `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` and the full
    `cargo nextest run` and `cargo test --doc` (in the RWX sandbox, see `docs/rwx-sandbox.md`), and fix new lints.
 3. Merge once CI is green; the toolchain install step in the PR's CI log must report
@@ -323,6 +327,37 @@ A bump is a deliberate PR:
 
 Follow-up idea (not built): a nightly, non-blocking job on the newest stable that
 reports new lint failures before a deliberate bump.
+
+### Runner and action pins
+
+Nothing in CI floats.
+
+- **Runners.** Every `runs-on` is an explicit image: `ubuntu-24.04`, `macos-26`. `ubuntu-latest`
+  rolled to 26.04 on 2026-11-16 and broke three PTY tests (`open_terminal_*` in
+  `tests/mcp_terminal_guards.rs`: the 26.04 shell integration prints systemd OSC 3008 markers in
+  front of command output). Those tests now strip OSC sequences from what they read, and their
+  private `$HOME` has rc files that make the login shell print the markers on every run, so they
+  pass whatever the image's own shell setup is. The pin stays regardless, on purpose: an image
+  also changes the compiler environment, the preinstalled tools and the Python the policy suites
+  run under, and a rollover should arrive as a reviewed diff, not as an unexplained red on an
+  unrelated PR. (`ubuntu-latest` was not tried on a throwaway dispatch: the pin is the policy.)
+  `Python tooling tests` was the last `macos-latest`; it is `macos-26` now, like the Swift jobs.
+  `tests/ci_policy/test_linux_runner_pin.py` fails on any `*-latest`, any unversioned image and any
+  `runs-on` expression that yields no literal (`${{ matrix.os }}`), over every `*.yml` and
+  `*.yaml` workflow.
+  *To bump an image deliberately:* change the literal everywhere the policy test lists, dispatch
+  the changed workflows on the branch (`gh workflow run ci.yml --ref <branch>`), merge when green.
+- **Actions.** Every `uses:` (checkout, upload/download-artifact, `taiki-e/install-action`,
+  `dtolnay/rust-toolchain`) is a full commit SHA with a trailing `# vX.Y.Z` comment; first-party
+  `actions/*` are pinned too (no allow-list). A tag can be moved by whoever controls or
+  compromises the action's repository; a SHA cannot. `dtolnay/rust-toolchain` has no release
+  tags: the SHA is its `master` commit and the version is the `toolchain:` input.
+  `tests/ci_policy/test_action_pins.py` fails on any unpinned action (including job-level
+  reusable workflows and `docker://` without a digest).
+  *To bump one:* resolve the release tag to its commit
+  (`gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object`; if `type` is `tag`, one more hop
+  through `git/tags/<sha>`), confirm with `git ls-remote --tags https://github.com/<owner>/<repo>.git`
+  that the SHA is that tag's, then write `@<sha> # <tag>`.
 
 ### Making a check required
 
@@ -334,6 +369,25 @@ names above: `Swift tests (Mac app)` (the aggregate; do **not** add the
 `iOS simulator build` (and `Build & Lint` / `Python tooling tests` if they
 are not already required). Keep `Launch smoke (advisory)` out of the
 required set; see its promotion criteria below.
+
+**Push relay.** `.github/workflows/push-relay.yml` (the standalone `infra/push-relay` crate:
+fmt, clippy `-D warnings`, tests) has no `paths:` filter, so it always starts and always reports.
+A `changes` job skips the relay job on a pull request that touches nothing under
+`infra/push-relay/` (or the workflow file); a job skipped by its `if:` counts as passed for a
+required check, and its name is the plain literal `Push relay (fmt, clippy, tests)` for that
+reason. If `changes` itself fails the relay job runs. To make it required (an admin action; do it
+after the workflow has merged and run green once on `main`, because GitHub only offers a context
+it has seen):
+
+```
+gh api -X POST repos/thehammer/nostromo/branches/main/protection/required_status_checks/contexts \
+  --input - <<< '["Push relay (fmt, clippy, tests)"]'
+```
+
+(`POST .../contexts` adds to the existing list; it does not replace it. Read the list back with
+`gh api repos/thehammer/nostromo/branches/main/protection/required_status_checks --jq .contexts`.)
+`Launch smoke (advisory)` stays path-filtered and non-required on purpose, and `mac-scroll-loop`
+is manual only.
 
 **The required check did not change.** Today the only required context on
 `main` is `Build & Lint`. After the Rust job was split into `Rust format`,
@@ -365,7 +419,10 @@ by Runner of type hosted even after multiple attempts") and failed. Pushes to
 `main`, dispatches and any PR touching non-allow-listed paths still get `macos-26`.
 There is still no job-level `if:` (the PR #370 problem above).
 `Python tooling tests` is unchanged: it needs macOS for `codesign`/`lipo` and is
-never gated, so it still takes a macOS slot.
+never gated, so it still takes a macOS slot. That includes a docs-only PR (the #524 path
+above only moves the three Swift jobs to Linux): during a macOS capacity shortage a
+docs-only PR can still queue on this one job. Moving it to Linux would first mean reworking
+the BSD-`ps`, `codesign`/`lipo` and Swift-tree-scanning tests, so it is not done.
 
 It is default-run, not default-skip. The Swift jobs are skipped **only if every
 changed path** is on a short allow-list:
@@ -500,9 +557,12 @@ dispatch plus a PR run will queue. Prefer
 Step limits: Rust `Test` 35 min in a 45 min job, Mac shard 35 min in a 45 min job.
 
 If the repo ever goes private (rates assumed; check current pricing): a full
-run bills about 14 macOS minutes (8 + 2 + 2 + 2, rounded up per job) at about
-$0.06-0.08/min plus about 15 Linux minutes at about $0.006-0.008/min, so about
-$1.0-1.25 per full run, and about $0.5-0.65 for `ONLY=mac`.
+run bills about 79 macOS minutes (the jobs of run 45931615860, a full `main` push on
+2026-11-27, rounded up per job: Python tooling 6, Mac shards 21 + 20 + 21, NostromoKit 4, iOS 7)
+at about $0.06-0.08/min, plus about 24 Linux minutes at about $0.006-0.008/min (Rust tests 17,
+clippy 3, and one each for format, `changes`, `Build & Lint` and the Mac aggregate). That is about
+$4.9-6.5 per full run, and about $3.7-5.0 for `ONLY=mac` (62 macOS minutes plus the Linux jobs
+that always run). Re-measure from a recent run before relying on it: the shards grow with the test count.
 
 ## `macos-launch-smoke` (advisory)
 

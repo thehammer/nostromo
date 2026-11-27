@@ -8,7 +8,7 @@ Linux only: nothing that needs AppKit, CryptoKit or Xcode runs here (see §5).
 ## 1. What it is
 
 - One sandbox per **worktree + branch** (its identity is the branch plus the absolute config path). A detached HEAD counts as a different branch, so it gets its own sandbox.
-- Ubuntu 24.04 with Rust **1.100.0**, pinned (the same version CI's `dtolnay/rust-toolchain@1.100.0` and `rust-toolchain.toml` use, with `clippy` and `rustfmt`), Python 3.12 and shellcheck 0.9. The version is `RUST_VERSION` in `.rwx/sandbox.yml`; the `rust` task fails if `rustc -V` differs. `tests/ci_policy/test_rust_toolchain_pin.py` fails if it drifts from `rust-toolchain.toml` or `ci.yml`. To bump it, see "Bumping the Rust toolchain" in [ci.md](ci.md).
+- Ubuntu 24.04 with Rust **1.100.0**, pinned (the same version CI's `dtolnay/rust-toolchain` `toolchain: 1.100.0` and `rust-toolchain.toml` use, with `clippy` and `rustfmt`), Python 3.12 and shellcheck 0.9. The version is `RUST_VERSION` in `.rwx/sandbox.yml`; the `rust` task fails if `rustc -V` differs. `tests/ci_policy/test_rust_toolchain_pin.py` fails if it drifts from `rust-toolchain.toml` or `ci.yml`. To bump it, see "Bumping the Rust toolchain" in [ci.md](ci.md).
 - Cargo dependencies are compiled once in a cached `deps` layer (keyed on `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and the Rust version). A new or restarted sandbox compiles only the `nostromo` crate, not its dependencies.
 - Before each exec, local changes (staged, unstaged, untracked) sync **up**; after it, the sandbox's changes sync **down**. Gitignored files (`target/`) never sync either way.
 - The repo is public, so the sandbox clones `https://github.com/thehammer/nostromo.git` anonymously. No token, no secrets.

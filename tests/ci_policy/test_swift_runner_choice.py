@@ -49,14 +49,58 @@ def check_no_job_level_if_on_the_classifier(text):
     return out
 
 
+def _split_top_level(expr, op):
+    """`expr` split on `op` outside quotes and parentheses (GitHub expression syntax: strings are
+    single-quoted, `''` is a quote inside one)."""
+    parts, depth, start, i = [], 0, 0, 0
+    while i < len(expr):
+        c = expr[i]
+        if c == "'":
+            i += 1
+            while i < len(expr) and not (expr[i] == "'" and expr[i + 1:i + 2] != "'"):
+                i += 2 if expr[i:i + 2] == "''" else 1
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        elif depth == 0 and expr.startswith(op, i):
+            parts.append(expr[start:i])
+            start = i + len(op)
+            i += len(op) - 1
+        i += 1
+    parts.append(expr[start:])
+    return [p.strip() for p in parts]
+
+
+def _literal(operand):
+    """The string a single-quoted literal or `format('literal', ...)` call produces, else None."""
+    m = re.fullmatch(r"'((?:[^']|'')*)'", operand)
+    if m is None:
+        m = re.fullmatch(r"format\(\s*'((?:[^']|'')*)'\s*(?:,.*)?\)", operand, re.S)
+    return None if m is None else m.group(1).replace("''", "'")
+
+
+def final_name(name_value):
+    """The check name a job's `name:` value yields when no earlier branch applies.
+
+    A plain scalar is its own value. An expression `${{ A && 'x' || B || 'Check' }}` is read by
+    splitting on its top-level `||` and taking the last operand, so spacing, quoting style and
+    a `format('Check', ...)` call do not matter. None when the last operand is not a literal.
+    """
+    value = d._unquote(name_value.strip())
+    m = re.fullmatch(r"\$\{\{(.*)\}\}", value, re.S)
+    if m is None:
+        return value
+    return _literal(_split_top_level(m.group(1).strip(), "||")[-1])
+
+
 def check_required_names_are_produced(text):
-    """The non-dispatch branch of each required job's `name:` is exactly the required check."""
+    """The final branch of each required job's `name:` is exactly the required check."""
     blocks = d._job_blocks(text)
     out = []
     for check, key in REQUIRED.items():
-        name = d._unquote(d._job_level(blocks.get(key, ""), "name") or "")
-        # `A || 'Check'` or `A || format('Check', ...)` with the plain name as the final branch.
-        if not name.endswith("|| '%s' }}" % check):
+        name = d._job_level(blocks.get(key, ""), "name") or ""
+        if final_name(name) != check:
             out.append("job `%s` name %r does not evaluate to %r" % (key, name, check))
     return out
 
@@ -70,8 +114,8 @@ def check_python_tooling_stays_on_macos_ungated(text):
     # Python tooling tests stays on macOS, ungated (needs codesign/lipo).
     block = d._job_blocks(text).get("python-tooling", "")
     out = []
-    if d._job_level(block, "runs-on") != "macos-latest":
-        out.append("python-tooling must stay on macos-latest")
+    if d._job_level(block, "runs-on") != "macos-26":
+        out.append("python-tooling must stay on macos-26 (pinned, not macos-latest)")
     if "needs.changes" in block:
         out.append("python-tooling must stay ungated")
     return out
@@ -138,8 +182,58 @@ class BitesTests(unittest.TestCase):
 
     def test_moving_python_tooling_off_macos_fails(self):
         mutated = mutate_job(
-            self.text, "python-tooling", lambda b: b.replace("macos-latest", "ubuntu-24.04"))
+            self.text, "python-tooling", lambda b: b.replace("macos-26", "ubuntu-24.04"))
         self.assertTrue(check_python_tooling_stays_on_macos_ungated(mutated))
+
+    def test_unpinning_python_tooling_fails(self):
+        mutated = mutate_job(
+            self.text, "python-tooling", lambda b: b.replace("macos-26", "macos-latest"))
+        self.assertTrue(check_python_tooling_stays_on_macos_ungated(mutated))
+
+
+class FinalNameParserTests(unittest.TestCase):
+    """The name parser reads the expression, not one spelling of it."""
+
+    def test_the_real_spelling(self):
+        self.assertEqual(
+            final_name("${{ github.event_name == 'workflow_dispatch' && 'Build & Lint (dispatch)' || 'Build & Lint' }}"),
+            "Build & Lint")
+
+    def test_a_harmless_reformat_still_parses(self):
+        for value in (
+            "${{github.event_name=='workflow_dispatch'&&'X (dispatch)'||'X'}}",
+            "${{   github.event_name == 'workflow_dispatch'   &&   'X (dispatch)'   ||   'X'   }}",
+            '"${{ github.event_name == \'workflow_dispatch\' && \'X (dispatch)\' || \'X\' }}"',
+            "X",
+            "'X'",
+            "${{ format('X') }}",
+            "${{ github.event_name == 'workflow_dispatch' && format('X {0} (dispatch)', matrix.shard) || format('X', matrix.shard) }}",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(final_name(value), "X")
+
+    def test_an_or_inside_a_string_or_call_is_not_a_branch(self):
+        self.assertEqual(final_name("${{ a && 'p || q' || 'X' }}"), "X")
+        self.assertEqual(final_name("${{ a && 'p' || format('X || {0}', b) }}"), "X || {0}")
+        self.assertEqual(final_name("${{ a && 'it''s' || 'X' }}"), "X")
+        self.assertEqual(final_name("${{ a && 'x' || 'p || X' }}"), "p || X")
+        self.assertEqual(final_name("${{ a && 'x' || format('p ) || X', b) }}"), "p ) || X")
+
+    def test_a_final_branch_that_is_not_a_literal_is_none(self):
+        self.assertIsNone(final_name("${{ a && 'X' || github.job }}"))
+        self.assertIsNone(final_name("${{ a && 'X' || b.c }}"))
+
+    def test_a_reformatted_real_workflow_still_passes_the_check(self):
+        text = CI_YML.read_text()
+        reformatted = text.replace("' || 'Build & Lint' }}", "'||'Build & Lint'}}")
+        self.assertNotEqual(reformatted, text)
+        self.assertEqual(check_required_names_are_produced(reformatted), [])
+
+    def test_a_wrong_final_branch_fails_the_check(self):
+        text = CI_YML.read_text()
+        mutated = text.replace("|| 'Build & Lint' }}", "|| 'Build and Lint' }}")
+        self.assertNotEqual(mutated, text)
+        self.assertTrue(check_required_names_are_produced(mutated))
 
 
 if __name__ == "__main__":

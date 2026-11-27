@@ -72,7 +72,7 @@ make python-test
 
 which runs `tests/ios_policy` alongside `tests/transcript_load` and
 `tests/doctor`. This is the same command CI runs
-(`.github/workflows/ci.yml`, the `python-tooling` job, on `macos-latest`),
+(`.github/workflows/ci.yml`, the `python-tooling` job, on `macos-26`),
 so a local pass and a CI pass can't drift apart. **No paired iOS device and
 no simulator required or used** — it's a plain Python source scan.
 

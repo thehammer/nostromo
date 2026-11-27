@@ -51,6 +51,41 @@ def _step(job, name):
     return m.group(1)
 
 
+def _step_key(step, key):
+    """Value of a step-level (eight-space indented) `key:` line, comments aside; None if absent."""
+    m = re.search(rf"(?m)^        {re.escape(key)}:[ \t]*(.*?)[ \t]*$", step)
+    return None if m is None else m.group(1)
+
+
+def check_test_step_cannot_swallow_nextests_exit_status(step):
+    """The `Test` step's only command is `cargo nextest run ... | tee file` under bash's pipefail."""
+    out = []
+    if _step_key(step, "shell") != "bash":
+        out.append("the Test step must set `shell: bash` (bash -e -o pipefail), or `tee` hides nextest's status")
+    if _step_key(step, "continue-on-error") not in (None, "false"):
+        out.append("the Test step must not set continue-on-error")
+    run = _step_key(step, "run")
+    if run is None or run in ("|", "|-", ">", ">-"):
+        out.append("the Test step's command must be one line `run:` (a block could hide a swallowed status)")
+        return out
+    if re.search(r"&&|\|\||;", run):
+        out.append(f"the Test step chains another command (`;`, `&&`, `||`) that could swallow nextest's status: {run!r}")
+    if not re.fullmatch(r"cargo nextest run [^|]*\| tee [^|]*", run):
+        out.append(f"the Test step must be exactly `cargo nextest run ... | tee FILE`, found {run!r}")
+    return out
+
+
+def check_hang_naming_step_runs_after_a_failed_test_step(step):
+    """The step that names hung tests has an `if:` that survives the Test step failing or timing out."""
+    cond = _step_key(step, "if") or ""
+    out = []
+    if not re.search(r"\balways\(\)", cond):
+        out.append(f"the hang-naming step's own `if:` must contain always(), found {cond!r}")
+    if "steps.test.outcome" not in cond:
+        out.append(f"the hang-naming step's `if:` must test steps.test.outcome, found {cond!r}")
+    return out
+
+
 class RustTestHangGuardTests(unittest.TestCase):
     def setUp(self):
         with open(CI_YML) as f:
@@ -77,8 +112,6 @@ class RustTestHangGuardTests(unittest.TestCase):
     def test_the_step_runs_every_test_binary_and_keeps_a_failing_exit_status(self):
         step = _step(self.job, "Test")
         self.assertIn("--no-fail-fast", step)
-        # `tee` must not hide cargo's exit status.
-        self.assertRegex(step, r"(?m)^        shell: bash$")
         self.assertRegex(step, r"cargo nextest run .*\| tee ")
 
     def test_doc_tests_keep_their_own_step_because_nextest_skips_them(self):
@@ -87,8 +120,20 @@ class RustTestHangGuardTests(unittest.TestCase):
 
     def test_a_follow_up_step_names_the_tests_still_running(self):
         step = _step(self.job, "Name the tests still running")
-        self.assertIn("always()", step)
+        self.assertEqual(check_hang_naming_step_runs_after_a_failed_test_step(step), [])
         self.assertIn("SLOW", step)
+
+    def test_the_hang_naming_check_bites_without_always_even_with_always_in_a_comment(self):
+        step = _step(self.job, "Name the tests still running")
+        # The real step text runs on into the next job's comment, which mentions `always()`:
+        # a substring test over the whole step would pass this mutation.
+        self.assertIn("always()", step)
+        mutated = step.replace("always() && ", "")
+        self.assertNotEqual(mutated, step)
+        self.assertTrue(check_hang_naming_step_runs_after_a_failed_test_step(mutated))
+        self.assertTrue(check_hang_naming_step_runs_after_a_failed_test_step(step.replace("always() && steps.test.outcome != 'success'", "success()")))
+        self.assertTrue(check_hang_naming_step_runs_after_a_failed_test_step(step.replace("steps.test.outcome", "steps.doc.outcome")))
+        self.assertTrue(check_hang_naming_step_runs_after_a_failed_test_step(step.replace("        if: ", "        # if: ", 1)))
 
     # The fixture is real nextest 0.9.152 output (slow-timeout 100 ms, through tee):
     # SLOW lines carry the placeholder counter `(───────)`, PASS lines `(103/103)`.
@@ -132,12 +177,42 @@ class RustTestHangGuardTests(unittest.TestCase):
         self.assertNotEqual(_names_reported(mutated, self._fixture()), [])
 
     def test_the_test_step_cannot_swallow_nextests_exit_status(self):
+        self.assertEqual(check_test_step_cannot_swallow_nextests_exit_status(_step(self.job, "Test")), [])
+
+    def test_the_exit_status_check_bites_on_every_way_to_swallow_it(self):
         step = _step(self.job, "Test")
-        self.assertRegex(step, r"(?m)^        shell: bash$")  # bash -e -o pipefail
-        run = re.search(r"(?m)^        run: (.*)$", step).group(1)
-        self.assertNotRegex(run, r"\|\|\s*(true|:)")
-        self.assertNotRegex(run, r";\s*(true|:)\b")
-        self.assertRegex(run, r"^cargo nextest run [^;|]*\| tee [^;|]*$")
+        run = _step_key(step, "run")
+        self.assertTrue(run.endswith("| tee \"$RUNNER_TEMP/nextest.log\""), run)
+        for label, new in (
+            ("|| true after tee", run + " || true"),
+            ("|| : after tee", run + " || :"),
+            ("; true after tee", run + "; true"),
+            ("&& true after tee", run + " && true"),
+            ("; exit 0", run + "; exit 0"),
+            ("| cat; true | tee", run.replace("| tee", "| cat; true | tee")),
+            ("| cat then tee", run.replace("| tee", "| cat | tee")),
+            ("a leading true", "true; " + run),
+            ("no tee at all", run.split(" | tee")[0]),
+        ):
+            with self.subTest(label=label):
+                mutated = step.replace(f"run: {run}", f"run: {new}")
+                self.assertNotEqual(mutated, step)
+                self.assertTrue(check_test_step_cannot_swallow_nextests_exit_status(mutated))
+
+    def test_the_exit_status_check_bites_without_bash_or_with_continue_on_error(self):
+        step = _step(self.job, "Test")
+        no_shell = step.replace("        shell: bash\n", "")
+        self.assertNotEqual(no_shell, step)
+        self.assertTrue(check_test_step_cannot_swallow_nextests_exit_status(no_shell))
+        self.assertTrue(check_test_step_cannot_swallow_nextests_exit_status(step.replace("        shell: bash\n", "        shell: sh\n")))
+        coe = step.replace("        shell: bash\n", "        shell: bash\n        continue-on-error: true\n")
+        self.assertTrue(check_test_step_cannot_swallow_nextests_exit_status(coe))
+
+    def test_the_exit_status_check_bites_on_a_block_scalar_command(self):
+        step = _step(self.job, "Test")
+        run = _step_key(step, "run")
+        block = step.replace(f"        run: {run}", f"        run: |\n          {run}\n          true")
+        self.assertTrue(check_test_step_cannot_swallow_nextests_exit_status(block))
 
     def test_build_and_lint_still_needs_the_job_and_demands_success(self):
         build = _job(self.text, "build")
