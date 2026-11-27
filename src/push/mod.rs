@@ -323,7 +323,22 @@ impl PushEngine {
             work_owners: cfg.resolved_work_owners(),
             last_ok_at: status.last_ok_at,
             failing_since: status.failing_since,
+            review_queue_unfetched: self.hosts_without_a_review_queue(&st),
+            registrations_refused: st.devices.unreadable_file().is_some(),
         })
+    }
+
+    /// The daemon's own host and every satellite heard from, minus those whose
+    /// review queue has arrived at least once since start (a frame built
+    /// before any fetch landed, `queue_unfetched`, does not count).
+    fn hosts_without_a_review_queue(&self, st: &State) -> Vec<String> {
+        let mut hosts: BTreeSet<&String> = st.host_seen.keys().collect();
+        hosts.insert(&self.local_host);
+        hosts
+            .into_iter()
+            .filter(|h| !st.seeded_reviews.contains(*h))
+            .cloned()
+            .collect()
     }
 
     fn waiting_for(&self, device_id: &str, now: DateTime<Utc>) -> ServerMsg {

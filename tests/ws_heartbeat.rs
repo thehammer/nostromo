@@ -742,3 +742,64 @@ async fn a_satellite_uplink_that_swallows_its_pings_is_closed_with_1001_and_its_
     assert!(!rig.hub.is_connected(&sat.device_id));
     assert!(!rig.hub.router().is_connected("kobe"));
 }
+
+/// The ten-second `Hello` deadline (here 3 s) is for a socket that never says
+/// hello. A satellite whose `Hello` was accepted is past it for good: when the
+/// deadline passes, and long after, an uplink that answers its pings is not
+/// closed 1008 "no hello", and its host stays connected.
+#[tokio::test]
+async fn an_admitted_satellite_uplink_is_not_closed_for_no_hello_long_after_the_handshake_timeout()
+{
+    let rig = Rig::with_limits(WsLimits {
+        handshake_timeout: secs(3),
+        ping_every: secs(2),
+        pong_timeout: secs(7),
+        ..Default::default()
+    })
+    .await;
+    let (sat, device) = admitted_uplink(&rig, Reading::AnsweringPings).await;
+    assert!(rig.hub.router().is_connected("kobe"), "admitted");
+
+    // Ten times the handshake timeout.
+    device.elapse(secs(30)).await;
+    assert!(
+        device.close().is_none(),
+        "no close of any kind (1008 \"no hello\" least of all): {:?}",
+        device.events()
+    );
+    assert!(
+        rig.hub.is_connected(&sat.device_id),
+        "the daemon still holds the uplink's slot"
+    );
+    assert!(
+        rig.hub.router().is_connected("kobe"),
+        "and the host is still admitted"
+    );
+}
+
+/// The same short deadline has passed by the time the heartbeat gives up on an
+/// admitted uplink that swallows its pings (at about 7 s, the deadline at 3 s):
+/// the close says why it really happened, 1001 "no pong", not 1008.
+#[tokio::test]
+async fn an_admitted_satellite_uplink_that_swallows_pings_past_the_handshake_timeout_is_closed_1001_not_1008(
+) {
+    let rig = Rig::with_limits(WsLimits {
+        handshake_timeout: secs(3),
+        ping_every: secs(2),
+        pong_timeout: secs(7),
+        ..Default::default()
+    })
+    .await;
+    let (sat, device) = admitted_uplink(&rig, Reading::Silently).await;
+    assert!(rig.hub.router().is_connected("kobe"), "admitted");
+
+    device.elapse(secs(14)).await;
+    let (at, code) = device.close().expect("the daemon closed the uplink");
+    assert_eq!(code, Some(1001), "no pong, not no hello");
+    assert!(
+        at + STEP >= secs(7),
+        "closed at {at:?}: by the heartbeat, after the pong timeout, not at the 3 s handshake deadline"
+    );
+    assert!(!rig.hub.is_connected(&sat.device_id));
+    assert!(!rig.hub.router().is_connected("kobe"));
+}

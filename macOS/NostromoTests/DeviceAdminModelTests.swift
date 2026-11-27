@@ -465,6 +465,20 @@ final class DeviceAdminModelTests: XCTestCase {
         XCTAssertEqual(DeviceAdminCopy.blocked(model.adminAvailability, pairFrom: model.pairFrom), DeviceAdminCopy.unreachable)
     }
 
+    // The satellite now says so itself: an unsolicited `server_unreachable` under no request id, sent to every
+    // local `devices` follower when its uplink drops. It matches no pending request and still marks the server
+    // unreachable; a level frame lifts it again when the uplink returns.
+    func testAnUnsolicitedServerUnreachableMarksTheServerUnreachableAndALevelFrameLiftsIt() {
+        connect(level: "full")
+        XCTAssertEqual(model.adminAvailability, .available, "precondition")
+        model.handle(adminError("", "server_unreachable"))
+        XCTAssertEqual(model.adminAvailability, .serverUnreachable)
+        XCTAssertFalse(model.canPair)
+        XCTAssertEqual(model.pair, .idle, "no pairing was asked for; none is disturbed")
+        model.handle(.deviceAdminLevel(DeviceAdminLevelWire(level: "full")))
+        XCTAssertEqual(model.adminAvailability, .available)
+    }
+
     func testAProbeAnsweredConnectionLostMarksTheServerUnreachable() {
         connect(level: "revoke_only", pairFrom: ["sendai"])
         model.beginPairing(gesture: human)
