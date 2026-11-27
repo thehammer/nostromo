@@ -323,7 +323,7 @@ softer approximation of the device's — and anything perceptual (see the
 worked example below). A green L5 means "this iOS-process behaviour holds on
 the Simulator," not "the app works on the phone."
 
-**What is in it today:** the two smoke files, and W11's three backplane files. `NostromoSmokeTests`: the
+**What is in it today:** the two smoke files, W11's backplane files, W13's `PushSheetEnvironmentTests` and W16's `NotificationExtensionBundleTests` (the last two are not described below; read their `// L5:` headers). `NostromoSmokeTests`: the
 app is a SwiftUI `@main App` with no hand-written app delegate, so the honest equivalent of "the app
 delegate launches" is that UIKit's delegate for the app is live in the process, and that the bundle can
 reach app-module code (`ConnectionSettings`) and construct `NetworkClient` the way `NostromoApp` does.
