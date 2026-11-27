@@ -402,7 +402,7 @@ author L and either
   conflict. (An edit's old value, a `restore_text`'s included, counts the same
   way; a move changes no field value. Only the last 1,000 log entries are
   kept, so "at any age" means "as far back as the log reaches": a value that
-  left the board, by an edit or a removal, more than 1,000 changes ago can no
+  left the board, by an edit or a removal, more than 1,000 log entries ago can no
   longer be recognised as one the field once had.) A pane or agent removing an item the
   log did not see added, across a history gap, keeps the item's markdown as a
   guess even when the only logged changes to it are its own.

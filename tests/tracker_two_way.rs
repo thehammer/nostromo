@@ -736,8 +736,8 @@ fn a_status_op_on_a_command_the_person_saw_is_accepted_even_after_other_changes(
 
 /// The same line when the log no longer reaches back to the person's view: it
 /// cannot show that the item did not become a command (or change its command)
-/// meanwhile, so the status op is refused as stale. The control: a view the
-/// log still covers ticks the same command.
+/// meanwhile, so the status op is refused as stale. The control: the current
+/// view ticks the same command (a covered older view is the test above).
 #[test]
 fn a_status_op_on_a_command_from_a_view_older_than_the_log_is_refused() {
     let rig = Rig::new();
