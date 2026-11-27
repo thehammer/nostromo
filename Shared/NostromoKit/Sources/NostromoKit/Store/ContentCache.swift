@@ -19,10 +19,17 @@ public final class ContentCache: @unchecked Sendable {
         "mother_jobs", "perri_state", "focus_list_resp", "focus_registry_updated", "session_list_resp", "hosts",
     ]
 
+    /// Wire `type`s the cache accepts ONLY when they name a satellite host: its held decisions and
+    /// approval counts, shown read-only as "Answer it on your Mac". The primary's own are never kept
+    /// (a decision's question is the operator's own to answer at the Mac). A `decision_resolved` for
+    /// a host is not kept either: it removes the decision it resolved.
+    public static let hostedOnlyTypes: Set<String> = ["decision_request", "approval_pending"]
+
     public struct Frame: Codable, Equatable {
         public let type: String
         public let host: String?
-        /// `tag` for `perri_state` (one per focus); `nil` for the single-instance frames.
+        /// `tag` for `perri_state` and `approval_pending` (one per focus), `request_id` for
+        /// `decision_request`; `nil` for the single-instance frames.
         public let key: String?
         public let json: String
     }
@@ -76,12 +83,16 @@ public final class ContentCache: @unchecked Sendable {
     /// write. Anything else is ignored.
     public func record(host: String?, raw: Data) {
         guard let json = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
-              let type = json["type"] as? String, Self.cachedTypes.contains(type),
+              let type = json["type"] as? String,
               let text = String(data: raw, encoding: .utf8) else { return }
+        if host != nil, type == "decision_resolved" {
+            forgetDecision(host: host, requestId: json["request_id"] as? String)
+            return
+        }
+        guard Self.cachedTypes.contains(type) || (host != nil && Self.hostedOnlyTypes.contains(type)) else { return }
         // A registry update replaces the list, so they share a slot.
         let canonical = type == "focus_registry_updated" ? "focus_list_resp" : type
-        let frame = Frame(type: canonical, host: host,
-                          key: type == "perri_state" ? json["tag"] as? String : nil, json: text)
+        let frame = Frame(type: canonical, host: host, key: Self.key(type: type, json: json), json: text)
         queue.async { [self] in
             frames[Self.slot(frame)] = frame
             scheduleWrite()
@@ -110,6 +121,32 @@ public final class ContentCache: @unchecked Sendable {
     }
 
     // MARK: - Private
+
+    /// A resolved decision is no longer there to answer: drop it from what is held and from disk.
+    private func forgetDecision(host: String?, requestId: String?) {
+        guard let requestId else { return }
+        let probe = Frame(type: "decision_request", host: host, key: requestId, json: "")
+        queue.async { [self] in
+            guard frames.removeValue(forKey: Self.slot(probe)) != nil else { return }
+            if frames.isEmpty {
+                // `write()` keeps the file when there is nothing to write, so remove it here: the
+                // decision must not outlive its resolution on disk.
+                pendingWrite?.cancel()
+                pendingWrite = nil
+                try? FileManager.default.removeItem(at: url)
+            } else {
+                scheduleWrite()
+            }
+        }
+    }
+
+    private static func key(type: String, json: [String: Any]) -> String? {
+        switch type {
+        case "perri_state", "approval_pending": return json["tag"] as? String
+        case "decision_request":                return json["request_id"] as? String
+        default:                                return nil
+        }
+    }
 
     private func scheduleWrite() {
         guard pendingWrite == nil else { return }   // one write per debounce window

@@ -33,10 +33,27 @@ public enum HostEgress: String, Equatable, Sendable {
 public struct HostInfoWire: Equatable {
     public let name: String
     public let egress: HostEgress
+    /// When the satellite connected and when the primary last heard from it. `nil` from a primary
+    /// that does not send them, or a value that is not a timestamp.
+    public let connectedSince: Date?
+    public let lastSeen: Date?
 
-    public init(name: String, egress: HostEgress) {
+    public init(name: String, egress: HostEgress, connectedSince: Date? = nil, lastSeen: Date? = nil) {
         self.name = name
         self.egress = egress
+        self.connectedSince = connectedSince
+        self.lastSeen = lastSeen
+    }
+
+    /// An RFC 3339 timestamp as chrono writes it (with or without fractional seconds).
+    static func parseTimestamp(_ text: String?) -> Date? {
+        guard let text else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: text) { return date }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: text)
     }
 }
 
@@ -91,7 +108,12 @@ extension ServerMsg {
         let replaced: Bool?
     }
     private struct HostsWrapper: Decodable {
-        struct Entry: Decodable { let name: String; let egress: String? }
+        struct Entry: Decodable {
+            let name: String
+            let egress: String?
+            let connected_since: String?
+            let last_seen: String?
+        }
         let hosts: [Entry]
     }
 
@@ -137,7 +159,9 @@ extension ServerMsg {
             guard let m = try? dec.decode(HostsWrapper.self, from: data) else { return .unknown }
             return .hosts(m.hosts.map {
                 // An unknown or absent egress is the strict one: metadata only.
-                HostInfoWire(name: $0.name, egress: $0.egress.flatMap(HostEgress.init(rawValue:)) ?? .work)
+                HostInfoWire(name: $0.name, egress: $0.egress.flatMap(HostEgress.init(rawValue:)) ?? .work,
+                             connectedSince: HostInfoWire.parseTimestamp($0.connected_since),
+                             lastSeen: HostInfoWire.parseTimestamp($0.last_seen))
             })
         case "host_unavailable":
             guard let host = json?["host"] as? String else { return .unknown }

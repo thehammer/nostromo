@@ -139,9 +139,11 @@ final class PairingWireTests: XCTestCase {
         ]}
         """)
         guard case .hosts(let hosts) = msg else { return XCTFail("expected hosts, got \(msg)") }
+        let connected = Date(timeIntervalSince1970: 1_793_527_200)   // 2026-11-01T10:00:00Z
+        let seen = Date(timeIntervalSince1970: 1_793_527_500)        // 2026-11-01T10:05:00Z
         XCTAssertEqual(hosts, [
-            HostInfoWire(name: "kobe", egress: .work),
-            HostInfoWire(name: "studio", egress: .personal),
+            HostInfoWire(name: "kobe", egress: .work, connectedSince: connected, lastSeen: seen),
+            HostInfoWire(name: "studio", egress: .personal, connectedSince: connected, lastSeen: seen),
             HostInfoWire(name: "mini", egress: .work),
         ])
     }

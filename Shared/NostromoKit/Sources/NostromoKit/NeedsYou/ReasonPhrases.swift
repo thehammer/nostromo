@@ -77,6 +77,17 @@ public enum ReasonPhrases {
         "\(agent(agentName)) · \(state)"
     }
 
+    /// A held decision with no question text of its own: the fixed `asked a question` phrase.
+    public static var decisionLine: String { "\(agentFallback) \(pausedReason["user"] ?? defaultReason)" }
+
+    /// A focus holding `count` permission requests: a number and fixed words, nothing else.
+    public static func approvalLine(count: Int) -> String {
+        "\(agentFallback) has \(count) \(count == 1 ? "request" : "requests") waiting"
+    }
+
+    /// What a row says when only the Mac can answer it. The phone answers nothing (B10).
+    public static let answerOnYourMac = "Answer it on your Mac"
+
     /// The card's closing line for a row whose content stays on its host.
     public static func detailsStayOn(_ host: String) -> String { "Details stay on \(host)." }
 }
