@@ -159,7 +159,7 @@ public final class DaemonStore: ObservableObject {
                          egress: hostEgress, primaryName: primaryName,
                          hostedDecisions: hostedDecisions,
                          approvalCounts: approvalCounts.filter { !$0.key.isEmpty },
-                         scope: effectiveScope(primaryName: primaryName),
+                         scope: displayScope(primaryName: primaryName),
                          hosts: hostEntries(primaryName: primaryName))
     }
 
@@ -178,6 +178,13 @@ public final class DaemonStore: ObservableObject {
     /// The selected scope, or All when it names a host that is gone (or a kind no host has).
     public func effectiveScope(primaryName: String) -> HostScope {
         scopeSelection.resolved(against: hostEntries(primaryName: primaryName))
+    }
+
+    /// The scope the lists are drawn with. With only one Mac there is nothing to choose between, so no
+    /// group scope applies and no Mac name is added to a row (Q8: rows from one Mac carry none).
+    public func displayScope(primaryName: String) -> HostScope {
+        let hosts = hostEntries(primaryName: primaryName)
+        return hosts.count > 1 ? scopeSelection.resolved(against: hosts) : .host(primaryName)
     }
 
     /// What the scope picker offers right now.
@@ -201,14 +208,14 @@ public final class DaemonStore: ObservableObject {
                 return (pr?.repo, pr?.prNumber)
             },
             hostedFocuses: hostedFocuses, hostedSessions: hostedSessions, hostedPerri: hostedPerri,
-            hosts: hostEntries(primaryName: primaryName), scope: effectiveScope(primaryName: primaryName),
+            hosts: hostEntries(primaryName: primaryName), scope: displayScope(primaryName: primaryName),
             now: now)
     }
 
     /// The satellites' Perri sections under the current scope. The primary's own queue is drawn
     /// separately (and only when `showsPrimary(primaryName:)`).
     public func perriSections(primaryName: String, now: Date = Date()) -> [PerriHostSection] {
-        let scope = effectiveScope(primaryName: primaryName)
+        let scope = displayScope(primaryName: primaryName)
         return HostedPerri.sections(hostedPerri: hostedPerri, hosts: hostEntries(primaryName: primaryName),
                                     scope: scope, includePrimary: scope.matches(host: primaryName, egress: .personal)
                                         && !perriQueue.isEmpty,
@@ -239,7 +246,8 @@ public final class DaemonStore: ObservableObject {
     public var hasLastKnownContent: Bool {
         !motherJobs.isEmpty || !sessions.isEmpty || !focuses.isEmpty || !perriQueue.isEmpty
             || !hostedMotherJobs.isEmpty || !hostedSessions.isEmpty || !hostedFocuses.isEmpty
-            || hostedPerri.values.contains { !$0.queue.isEmpty }
+            || hostedPerri.values.contains { !$0.queue.isEmpty } || !hostedDecisions.isEmpty
+            || approvalCounts.contains { !$0.key.isEmpty && $0.value.values.contains { $0 > 0 } }
     }
 
     /// Whether the Fred and Teri tabs should say "Mail, calendar and todos stay on your Mac in this

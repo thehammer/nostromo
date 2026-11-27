@@ -77,7 +77,7 @@ struct PerriView: View {
 
     private func contentList(hosted: [PerriHostSection], showsPrimary: Bool) -> some View {
         // The primary's headings carry its name once another Mac is on the list or the scope is a group.
-        let scope = store.effectiveScope(primaryName: HostNames.primary)
+        let scope = store.displayScope(primaryName: HostNames.primary)
         let primaryTitle = (!hosted.isEmpty || !scope.isSingleHost) ? HostNames.primary : nil
         return List {
             if showsPrimary {
