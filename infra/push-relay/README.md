@@ -155,6 +155,10 @@ nostromo push work-owner add my-employer-org     # only if you have another empl
 nostromo push status                              # devices, settings, last delivery; never tokens
 ```
 
+Listing a host as `personal` is also what lets a notification from it show the first line of the item
+(on-phone enrichment); with no `personal` host nothing but the fixed sentences is ever shown. What it
+needs, what it can still expose and how to turn it off: [`docs/push-enrichment.md`](../../docs/push-enrichment.md).
+
 ### Host names
 
 Set `host_name` explicitly in each satellite's `config.toml`. The default comes from
