@@ -459,6 +459,7 @@ final class TrackerEditingTests: XCTestCase {
         h.pane.beginEdit(item: withNote, kind: .title)   // another editor in the pane takes the keyboard
         let other = try XCTUnwrap(try h.row(withNote).titleEditor)
         XCTAssertTrue(other.isDescendant(of: h.pane), "precondition: the focus stayed inside the pane")
+        XCTAssertTrue(h.window.firstResponder === other.currentEditor(), "precondition: the other editor holds the keyboard")
         XCTAssertEqual(h.pane.editSessions[plain]?.editorWantsFocus, true, "focus moved inside the pane: the want stays")
 
         XCTAssertTrue(h.window.makeFirstResponder(h.rig.composer))

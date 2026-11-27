@@ -491,8 +491,10 @@ final class MotherDependencySectionTests: XCTestCase {
         XCTAssertTrue(condition(), what, file: file, line: line)
     }
 
-    /// Publishes `jobs` and waits for the Mother view's own list to show them: the view takes them through a
-    /// main-queue hop, so the view's state (not the store's, and not a fixed delay) is the signal.
+    /// Publishes `jobs` and waits for the Mother view's own list to show those ids: the view takes them through a
+    /// main-queue hop, so the view's state (not the store's, and not a fixed delay) is the signal. It sees ids
+    /// only: a publish that changes a job's state but not the id set returns at once, and its test waits on the
+    /// state it cares about (the dependency row) itself.
     private func publish(_ jobs: [MotherJob], in view: MotherView) {
         AppStore.shared.applyBrokerEventForTesting(.snapshot(jobs))
         let wanted = Set(jobs.map(\.id))
