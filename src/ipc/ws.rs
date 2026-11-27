@@ -44,6 +44,7 @@ use super::router::{
 };
 use super::server::{
     handle_client, purge_host_retained, HeldMotherJobs, PeerOrigin, RetainedCache, SatelliteLink,
+    UplinkAdmission,
 };
 use super::session_manager::SessionManager;
 use super::uplink_wire::{wrap_server_bytes, UplinkFrame};
@@ -571,7 +572,7 @@ struct UplinkSession {
     client: Bucket,
     /// Set by the handler once the `Hello` was accepted and the satellite is
     /// registered. Nothing it publishes or answers counts before that.
-    admitted: Arc<AtomicBool>,
+    admitted: Arc<UplinkAdmission>,
 }
 
 /// What reading one uplink frame decided.
@@ -618,7 +619,7 @@ impl UplinkSession {
                     }
                     Verdict::Allow => {}
                 }
-                if !self.admitted.load(Ordering::SeqCst) {
+                if !self.admitted.is_admitted() {
                     router.drops.unadmitted.fetch_add(1, Ordering::Relaxed);
                     return Inbound::Done;
                 }
@@ -647,7 +648,7 @@ impl UplinkSession {
                     }
                     Verdict::Allow => {}
                 }
-                if !self.admitted.load(Ordering::SeqCst) {
+                if !self.admitted.is_admitted() {
                     router.drops.unadmitted.fetch_add(1, Ordering::Relaxed);
                     return Inbound::Done;
                 }
@@ -663,6 +664,14 @@ impl UplinkSession {
             UplinkFrame::Server { .. } | UplinkFrame::Request { .. } => Inbound::Done,
         }
     }
+}
+
+/// Is the `Hello` deadline still to be enforced? Only for an uplink, and only
+/// until a `Hello` was accepted once: `is_admitted` is cleared again when the
+/// handler unregisters the host, and the (long expired) deadline must not
+/// re-arm then and close 1008 where the handler's end decides 1000 or 4001.
+fn hello_deadline_armed(is_uplink: bool, admission: &UplinkAdmission) -> bool {
+    is_uplink && !admission.was_admitted()
 }
 
 /// Wait for the next routed request, or for ever when this is not an uplink.
@@ -731,7 +740,7 @@ async fn run_paired(
     let (mut sink, mut stream) = ws.split();
 
     let role_refused = Arc::new(AtomicBool::new(false));
-    let admitted = Arc::new(AtomicBool::new(false));
+    let admitted = Arc::new(UplinkAdmission::default());
     let (req_tx, req_rx) = mpsc::unbounded_channel::<UplinkFrame>();
     let (link, mut req_rx, mut uplink) = match &satellite {
         Some(info) => {
@@ -963,7 +972,7 @@ async fn run_paired(
                     break;
                 }
             }
-            _ = &mut hello_deadline, if uplink.is_some() && !admitted.load(Ordering::SeqCst) => {
+            _ = &mut hello_deadline, if hello_deadline_armed(uplink.is_some(), &admitted) => {
                 closing = Some(close_msg(1008, "no hello"));
                 break;
             }
@@ -1093,5 +1102,25 @@ mod tests {
         assert_eq!(bearer(&req("/", Some("Basic abc"))), None);
         assert_eq!(bearer(&req("/", Some("Bearer "))), None);
         assert_eq!(bearer(&req("/?token=abc", None)), None);
+    }
+
+    #[test]
+    fn the_hello_deadline_is_off_for_a_phone_and_once_a_hello_was_accepted_even_after_unregister() {
+        let admission = UplinkAdmission::default();
+        assert!(
+            hello_deadline_armed(true, &admission),
+            "an uplink awaiting its Hello"
+        );
+        assert!(
+            !hello_deadline_armed(false, &admission),
+            "a phone has no Hello deadline"
+        );
+        admission.admit();
+        assert!(!hello_deadline_armed(true, &admission), "admitted");
+        admission.release();
+        assert!(
+            !hello_deadline_armed(true, &admission),
+            "released at unregister: the expired deadline must not re-arm"
+        );
     }
 }

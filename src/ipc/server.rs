@@ -570,8 +570,40 @@ pub(super) enum PeerOrigin {
         /// Set once a satellite's `Hello` was accepted and it is registered
         /// with the router; until then `run_paired` drops its `publish` and
         /// `reply` frames.
-        admitted: Arc<AtomicBool>,
+        admitted: Arc<UplinkAdmission>,
     },
+}
+
+/// Whether a satellite's `Hello` was accepted: `is_admitted` follows the
+/// registration (cleared again when the host unregisters, so frames read
+/// after that are dropped), `was_admitted` never goes back. The `Hello`
+/// deadline reads the second: once a `Hello` was accepted the (long expired)
+/// deadline must not fire when the handler's exit clears the first, or the
+/// socket would close 1008 rather than the 1000 / 4001 the handler's end
+/// decides.
+#[derive(Debug, Default)]
+pub(super) struct UplinkAdmission {
+    now: AtomicBool,
+    ever: AtomicBool,
+}
+
+impl UplinkAdmission {
+    pub(super) fn admit(&self) {
+        self.ever.store(true, Ordering::SeqCst);
+        self.now.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn release(&self) {
+        self.now.store(false, Ordering::SeqCst);
+    }
+
+    pub(super) fn is_admitted(&self) -> bool {
+        self.now.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn was_admitted(&self) -> bool {
+        self.ever.load(Ordering::SeqCst)
+    }
 }
 
 /// What `run_paired` knows about an uplink before its `Hello`.
@@ -1225,7 +1257,7 @@ where
         if let Some((info, req_tx)) = origin.take_uplink() {
             let conn_id = h.router().register(&info.name, info.egress, req_tx);
             if let PeerOrigin::Ws { admitted, .. } = &origin {
-                admitted.store(true, Ordering::SeqCst);
+                admitted.admit();
             }
             uplink = Some((info.name, conn_id));
             let pair_from = h.registry().full_hosts();
@@ -1993,7 +2025,7 @@ where
             // published is not replayed to a later subscriber. A replaced
             // uplink leaves the newer one's frames alone.
             if let PeerOrigin::Ws { admitted, .. } = &origin {
-                admitted.store(false, Ordering::SeqCst);
+                admitted.release();
             }
             if h.router().unregister(name, *conn_id) {
                 purge_host_retained(&retained, name);
@@ -6050,6 +6082,43 @@ mod tests {
 
     use super::*;
     use crate::ipc::protocol::DecisionChoice;
+
+    // ── uplink admission (the `Hello` deadline reads `was_admitted`) ──────────
+
+    #[test]
+    fn an_uplink_is_neither_admitted_nor_was_admitted_before_its_hello() {
+        let admission = UplinkAdmission::default();
+        assert!(!admission.is_admitted());
+        assert!(!admission.was_admitted());
+    }
+
+    #[test]
+    fn an_admitted_uplink_is_admitted_and_was_admitted() {
+        let admission = UplinkAdmission::default();
+        admission.admit();
+        assert!(admission.is_admitted());
+        assert!(admission.was_admitted());
+    }
+
+    #[test]
+    fn a_released_uplink_is_no_longer_admitted_but_always_was() {
+        let admission = UplinkAdmission::default();
+        admission.admit();
+        admission.release();
+        assert!(!admission.is_admitted(), "frames after the release drop");
+        assert!(
+            admission.was_admitted(),
+            "the Hello deadline must never re-arm for a satellite that was admitted"
+        );
+    }
+
+    #[test]
+    fn releasing_an_uplink_that_was_never_admitted_does_not_make_it_admitted() {
+        let admission = UplinkAdmission::default();
+        admission.release();
+        assert!(!admission.is_admitted());
+        assert!(!admission.was_admitted());
+    }
 
     // ── slash commands ────────────────────────────────────────────────────────
 
