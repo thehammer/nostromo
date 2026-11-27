@@ -40,8 +40,17 @@
 //!   early. Nothing reads while the clock is paused.
 
 use std::collections::BTreeMap;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
+use nostromo::approvals::audit::AuditLog;
+use nostromo::approvals::broker::{
+    ApprovalBroker, BrokerParts, Incoming, SessionInfo, SessionSink,
+};
+use nostromo::approvals::guard::{PaneInfo, PaneProbe, ProbeError, TmuxSocket};
+use nostromo::approvals::request::{AskRule, SettingsSource};
 use nostromo::data::teri_todos::TeriTodosSnapshot;
 use nostromo::data::work::{WorkItem, WorkSource};
 use nostromo::ipc::peer::SensitiveTags;
@@ -2009,6 +2018,19 @@ async fn stalled_client_on(transport: Transport, small_jobs: u64, focus_frames: 
             paired(&rig, &phone.token, &topics, &[]).await
         }
     };
+    stalled_from(rig, slow, transport, small_jobs, focus_frames).await
+}
+
+/// [`stalled_client_on`] for a `slow` connection the caller made (on `mother_jobs`
+/// and `focuses`) on a `rig` it set up.
+async fn stalled_from(
+    rig: Rig,
+    slow: Conn,
+    transport: Transport,
+    small_jobs: u64,
+    focus_frames: u64,
+) -> Stalled {
+    let topics = [Topic::MotherJobs, Topic::Focuses];
     let mut fast = local(&rig, &topics, &[]).await;
     let blockers = transport.blockers();
 
@@ -3073,6 +3095,170 @@ async fn a_stalled_local_client_that_cannot_be_sent_a_frame_with_no_topic_is_clo
         "the reconnect gets everything after the last number the old connection saw"
     );
     assert!(gaps(&again).is_empty());
+}
+
+/// tmux as the guard sees it: nothing is running.
+struct NoTmux;
+
+impl PaneProbe for NoTmux {
+    fn pane(&self, _socket: &TmuxSocket, _target: &str) -> Result<Option<PaneInfo>, ProbeError> {
+        Ok(None)
+    }
+
+    fn all_panes(&self, _socket: &TmuxSocket) -> Result<Vec<PaneInfo>, ProbeError> {
+        Ok(Vec::new())
+    }
+
+    fn subtree_args(&self, _pid: u32) -> Result<Vec<String>, ProbeError> {
+        Ok(Vec::new())
+    }
+
+    fn servers(&self, _extra_dirs: &[PathBuf]) -> Result<Vec<TmuxSocket>, ProbeError> {
+        Ok(vec![TmuxSocket::Default])
+    }
+}
+
+/// The user has no ask rules (and nothing here reads the real settings files).
+struct NoRules;
+
+impl SettingsSource for NoRules {
+    fn ask_rules(&self, _cwd: Option<&Path>) -> Vec<AskRule> {
+        Vec::new()
+    }
+}
+
+/// A session's stdin: takes any answer.
+struct StubSink;
+
+impl SessionSink for StubSink {
+    fn live(&self) -> bool {
+        true
+    }
+
+    fn respond(&self, _cli_request_id: &str, _response: &Value) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The verified Mac app, on `mother_jobs` and `focuses`, rendering approvals: the one
+/// local client an approval request is shown to. Its attach-time replay (the
+/// approvals snapshot) is in the inbox.
+async fn presenting_app(rig: &Rig) -> Conn {
+    let mut conn = rig.unix_raw().await;
+    conn.send(&Conn::hello(&[], true)).await;
+    let welcome = conn
+        .next_matching("the Welcome", |m| matches!(m, ServerMsg::Welcome { .. }))
+        .await;
+    conn.welcome = Some(welcome);
+    conn.send(&ClientMsg::Subscribe {
+        topics: vec![Topic::MotherJobs, Topic::Focuses],
+        renders_decisions: false,
+        renders_approvals: true,
+        capabilities: vec![],
+        operator_nonce: None,
+        resume: Default::default(),
+        seq_epoch: None,
+    })
+    .await;
+    conn.sync().await;
+    conn
+}
+
+/// The approvals a presenting app was told were pending when it attached.
+fn pending_on_attach(app: &mut Conn) -> Vec<nostromo::approvals::wire::ApprovalRequestWire> {
+    app.inbox
+        .iter()
+        .find_map(|m| match m {
+            ServerMsg::ApprovalsSnapshot { requests } => Some(requests.clone()),
+            _ => None,
+        })
+        .expect("a presenting app is sent the approvals snapshot when it attaches")
+}
+
+/// The Mac app that stalls is closed when the approval request (a frame with no
+/// topic, shown to it alone) cannot be queued for it, and when it reconnects the
+/// request, still waiting for a human, is shown to it again: the close loses
+/// nothing.
+#[tokio::test]
+async fn a_stalled_app_closed_for_an_approval_request_it_could_not_be_sent_is_shown_it_on_reconnect(
+) {
+    let rig = Rig::new().await;
+    let broker = ApprovalBroker::new(
+        AuditLog::open(&rig.tmp.path().join("approvals")).unwrap(),
+        BrokerParts {
+            probe: Arc::new(|| Box::new(NoTmux)),
+            settings: Arc::new(NoRules),
+            ..BrokerParts::system()
+        },
+    );
+    broker.configure_broadcast(rig.server.tx.clone());
+    rig.session_mgr
+        .lock()
+        .unwrap()
+        .configure_approvals(broker.clone());
+    let generation = broker.register_session(
+        SessionInfo {
+            tag: "proj".into(),
+            agent: "cody".into(),
+            session_id: Some("sid-proj".into()),
+            cwd: Some(PathBuf::from("/work/proj")),
+            guarded: true,
+        },
+        Arc::new(StubSink),
+    );
+
+    // The app is the one presenter, and then it stops reading.
+    let app = presenting_app(&rig).await;
+    let mut s = stalled_from(rig, app, Transport::Local, 600, 0).await;
+
+    // A session asks. Nothing but the app could be asked, so the request is held.
+    let accepted = broker.submit(Incoming::Request {
+        tag: "proj".into(),
+        generation,
+        cli_request_id: "cli-1".into(),
+        value: json!({
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "display_name": "Bash",
+            "input": { "command": "rm -rf /tmp/x/a", "description": "remove a" },
+            "description": "remove a",
+            "decision_reason_type": "rule",
+            "tool_use_id": "toolu_reconnect_0",
+        }),
+    });
+    assert!(
+        accepted.is_ok(),
+        "the broker takes a request without waiting"
+    );
+    // The request is broadcast just before its count (`approval_pending`, on
+    // `decision`): once that is numbered the request has been offered to every
+    // connection, and none has read a byte since. (Had the app been reading, it
+    // would have room for the request and not be closed.)
+    numbered_upto(&s.rig.server, &Topic::Decision, 1).await;
+    settle().await;
+
+    // The stalled app is closed: the request could not be queued for it, and it
+    // is never sent it (it reads what was already on its way, then EOF).
+    s.slow.expect_close_within(Duration::from_secs(20)).await;
+    assert!(
+        !s.slow.raw.iter().any(|r| r.contains("approval_request")),
+        "the closed app was never sent the request"
+    );
+
+    // The reconnect (right away: the request waits for a presenter only a few
+    // seconds) is told what is still waiting for a human.
+    let mut again = presenting_app(&s.rig).await;
+    let pending = pending_on_attach(&mut again);
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    let request = &pending[0];
+    assert_eq!(request.tag, "proj");
+    assert_eq!(request.tool_use_id, "toolu_reconnect_0");
+    assert_eq!(request.tool_name, "Bash");
+    assert_eq!(request.input["command"], "rm -rf /tmp/x/a");
+    assert!(
+        !again.raw.is_empty() && again.closed.is_none(),
+        "the reconnect is a healthy connection"
+    );
 }
 
 /// The same when it is frames with no topic that fill the queue.

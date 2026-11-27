@@ -178,6 +178,11 @@ pub struct Rig {
     pub registry_path: PathBuf,
     pub session_mgr: Arc<Mutex<SessionManager>>,
     pub tmp: TempDir,
+    /// What a sessions rig replaced in the process environment, put back when
+    /// it drops (while its exclusive lock is still held): `HOME` and the rest
+    /// point into the rig's temp dir, which is deleted, and a later test in
+    /// the same process (plain `cargo test`) must not inherit them.
+    saved_env: Vec<(&'static str, Option<std::ffi::OsString>)>,
     _env: EnvGuard,
 }
 
@@ -187,6 +192,12 @@ impl Drop for Rig {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .kill_all_on_shutdown();
+        for (name, was) in self.saved_env.drain(..) {
+            match was {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
     }
 }
 
@@ -228,17 +239,24 @@ impl Rig {
             EnvGuard::Shared(ENV.read().await)
         };
         let tmp = TempDir::new().expect("tempdir");
+        let mut saved_env = Vec::new();
         if sessions {
             let home = tmp.path().join("home");
             std::fs::create_dir_all(&home).unwrap();
-            std::env::set_var("HOME", &home);
-            std::env::set_var(
+            let set = |saved: &mut Vec<_>, name: &'static str, value: &std::path::Path| {
+                saved.push((name, std::env::var_os(name)));
+                std::env::set_var(name, value);
+            };
+            set(&mut saved_env, "HOME", &home);
+            set(
+                &mut saved_env,
                 nostromo::approvals::APPROVALS_DIR_ENV,
-                tmp.path().join("approvals"),
+                &tmp.path().join("approvals"),
             );
-            std::env::set_var(
+            set(
+                &mut saved_env,
                 nostromo::approvals::guard::GUARD_BIN_ENV,
-                env!("CARGO_BIN_EXE_nostromo-guard"),
+                std::path::Path::new(env!("CARGO_BIN_EXE_nostromo-guard")),
             );
         }
         let socket_path = tmp.path().join("test.sock");
@@ -292,6 +310,7 @@ impl Rig {
             registry_path,
             session_mgr,
             tmp,
+            saved_env,
             _env: env,
         }
     }
@@ -332,6 +351,14 @@ impl Rig {
         let stream = UnixStream::connect(path).await.expect("unix connect");
         let mut conn = Conn::new(Io::Unix(stream));
         conn.handshake(&[], topics, false).await;
+        conn
+    }
+
+    /// [`Rig::unix_at`] with the capabilities its Hello declares.
+    pub async fn unix_at_with(path: &std::path::Path, topics: Vec<Topic>, caps: &[&str]) -> Conn {
+        let stream = UnixStream::connect(path).await.expect("unix connect");
+        let mut conn = Conn::new(Io::Unix(stream));
+        conn.handshake(caps, topics, false).await;
         conn
     }
 
