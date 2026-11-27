@@ -296,6 +296,10 @@ struct GitFileId {
     len: u64,
     modified: Option<std::time::SystemTime>,
     inode: Option<u64>,
+    /// Status-change time (seconds, nanoseconds): it moves on every write,
+    /// including one that keeps the length and, inside a coarse clock tick,
+    /// the modification time.
+    changed: Option<(i64, i64)>,
 }
 
 impl GitFileId {
@@ -307,13 +311,17 @@ impl GitFileId {
             return None;
         }
         #[cfg(unix)]
-        let inode = Some(std::os::unix::fs::MetadataExt::ino(&meta));
+        let (inode, changed) = {
+            use std::os::unix::fs::MetadataExt;
+            (Some(meta.ino()), Some((meta.ctime(), meta.ctime_nsec())))
+        };
         #[cfg(not(unix))]
-        let inode = None;
+        let (inode, changed) = (None, None);
         Some(Self {
             len: meta.len(),
             modified: meta.modified().ok(),
             inode,
+            changed,
         })
     }
 }
@@ -2718,6 +2726,7 @@ mod tests {
             len,
             modified: Some(std::time::UNIX_EPOCH + Duration::from_secs(1_000)),
             inode: Some(7),
+            changed: Some((1_000, 0)),
         }
     }
 
@@ -2760,7 +2769,7 @@ mod tests {
     }
 
     #[test]
-    fn a_gitdir_is_read_again_when_the_git_file_changes_in_length_time_or_inode() {
+    fn a_gitdir_is_read_again_when_the_git_file_changes_in_length_time_inode_or_status_change() {
         let mut cache = GitdirCache::default();
         let reads = std::cell::Cell::new(0);
         let first = file_id(40);
@@ -2777,8 +2786,17 @@ mod tests {
             inode: Some(8),
             ..later.clone()
         };
+        // Same length, same modification time, same inode: a rewrite in place
+        // within one clock tick still moves the status-change time.
+        let rewritten = GitFileId {
+            changed: Some((1_000, 500)),
+            ..replaced.clone()
+        };
         let mut expected_reads = 0;
-        for (n, id) in [first, longer, later, replaced].iter().enumerate() {
+        for (n, id) in [first, longer, later, replaced, rewritten]
+            .iter()
+            .enumerate()
+        {
             let on_disk = format!("/a/.git/worktrees/v{n}");
             expected_reads += 1;
             assert_eq!(
