@@ -1026,7 +1026,10 @@ mod tests {
     #[test]
     fn rate_limit_permission_and_missing_node_are_named_by_type_or_by_extensions_code() {
         let cases = [
-            ("RATE_LIMITED", MergeError::RateLimited(LimitWait::secondary())),
+            (
+                "RATE_LIMITED",
+                MergeError::RateLimited(LimitWait::secondary()),
+            ),
             ("FORBIDDEN", MergeError::Forbidden),
             ("INSUFFICIENT_SCOPES", MergeError::Forbidden),
             ("NOT_FOUND", MergeError::NotFound),

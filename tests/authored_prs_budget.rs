@@ -1114,7 +1114,8 @@ async fn a_secondary_limit_that_keeps_coming_backs_off_and_a_success_starts_it_o
     rig.run_until(mins(15), secs(1), |r| {
         r.since(mark)
             .iter()
-            .any(|q| q.kind() == Kind::Search && q.status == 200)
+            // Unchanged results come back 304: a success all the same.
+            .any(|q| q.kind() == Kind::Search && matches!(q.status, 200 | 304))
     })
     .await
     .expect("a search succeeds once the pause is over");
