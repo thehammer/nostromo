@@ -2259,3 +2259,201 @@ async fn a_moved_head_that_github_names_by_a_structured_code_is_head_changed_wha
         .await;
     assert_eq!(code_of(&answer), "queue_refused", "{answer:?}");
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A limit GitHub gives the merge request itself is waited out, like one it
+// gives a read; a plain permission refusal is not a limit
+// ═════════════════════════════════════════════════════════════════════════════
+
+const SECONDARY_WORDS: &str = "You have exceeded a secondary rate limit";
+
+/// `merge` as one verb call (`via`: how the app worded the confirmation).
+async fn merge_as(
+    rig: &mut Rig,
+    id: &str,
+    via: Option<MergeVia>,
+) -> nostromo::data::authored_prs::wire::AuthoredPrResult<
+    nostromo::data::authored_prs::merge::MergeDone,
+> {
+    let task = rig.spawn_merge_via(id, REPO, N, &short('a'), via);
+    rig.drive(task).await
+}
+
+/// Perri's approval of `N` at head `a`, as the tool asks for it (a live read).
+async fn approve_live(rig: &mut Rig) -> Result<bool, &'static str> {
+    let actions = Arc::clone(&rig.actions);
+    let head = sha('a');
+    let task = tokio::spawn(async move {
+        actions
+            .record_verdict(REPO, N, &head, Verdict::Approved, Some("perri"), None)
+            .await
+    });
+    rig.drive(task).await
+}
+
+/// Inside the wait, `times` merges (`step` apart) and an approval are all
+/// answered `rate_limited`, and not one of them reaches GitHub.
+async fn refused_without_a_request(
+    rig: &mut Rig,
+    via: Option<MergeVia>,
+    times: usize,
+    step: Duration,
+) {
+    let mark = rig.fake.log_len();
+    for i in 0..times {
+        rig.advance(step).await;
+        let answer = merge_as(rig, &format!("inside-{i}"), via).await;
+        assert_eq!(
+            code_of(&answer),
+            "rate_limited",
+            "merge {i} inside the wait: {answer:?}"
+        );
+    }
+    let r = approve_live(rig).await;
+    assert_eq!(r, Err("rate_limited"), "an approval inside the wait");
+    assert_eq!(rig.since(mark).len(), 0, "GitHub was asked inside the wait");
+}
+
+/// The engine idle (nobody is looking, so it asks nothing of its own), Perri
+/// having approved `N`'s head.
+async fn quiet_rig(pr: FakePr) -> Rig {
+    let mut rig = queue_rig(pr).await;
+    rig.set_demand("idle").await;
+    rig
+}
+
+fn force_merge(rig: &Rig, status: u16, retry_after: Option<u64>, words: Option<&str>) {
+    rig.fake.force_words("merge", words);
+    rig.fake.force(
+        "merge",
+        Some(Forced {
+            status,
+            retry_after,
+        }),
+    );
+}
+
+fn unforce_merge(rig: &Rig) {
+    rig.fake.force("merge", None);
+    rig.fake.force_words("merge", None);
+}
+
+#[tokio::test]
+async fn a_403_naming_a_secondary_limit_on_the_merge_is_rate_limited_and_the_next_attempts_wait_for_about_a_minute(
+) {
+    let mut rig = quiet_rig(ready_pr(N)).await;
+    force_merge(&rig, 403, None, Some(SECONDARY_WORDS));
+    let answer = rig.merge("r1", REPO, N, &short('a')).await;
+    assert_eq!(code_of(&answer), "rate_limited", "{answer:?}");
+    assert_eq!(merge_requests_for(&rig, N).len(), 1, "the merge was tried");
+    unforce_merge(&rig);
+
+    refused_without_a_request(&mut rig, None, 3, secs(10)).await;
+
+    // About a minute on, a merge reaches GitHub again and goes through.
+    rig.advance(secs(35)).await;
+    let answer = merge_as(&mut rig, "after", None).await;
+    assert_eq!(code_of(&answer), "ok", "{answer:?}");
+    assert_eq!(merge_requests_for(&rig, N).len(), 2);
+}
+
+#[tokio::test]
+async fn a_plain_permission_403_on_the_merge_is_token_cannot_merge_and_no_wait_is_remembered() {
+    let mut rig = quiet_rig(ready_pr(N)).await;
+    force_merge(&rig, 403, None, None);
+    let answer = rig.merge("r1", REPO, N, &short('a')).await;
+    assert_eq!(code_of(&answer), "token_cannot_merge", "{answer:?}");
+    unforce_merge(&rig);
+
+    // The very next attempt reaches GitHub (a read and the merge) and succeeds.
+    let mark = rig.fake.log_len();
+    let answer = merge_as(&mut rig, "r2", None).await;
+    assert_eq!(code_of(&answer), "ok", "{answer:?}");
+    assert!(rig.since(mark).len() >= 2, "it read and merged");
+    assert_eq!(merge_requests_for(&rig, N).len(), 2);
+}
+
+#[tokio::test]
+async fn a_429_with_retry_after_on_the_merge_is_rate_limited_and_the_next_attempts_wait_it_out() {
+    let mut rig = quiet_rig(ready_pr(N)).await;
+    force_merge(&rig, 429, Some(600), None);
+    let answer = rig.merge("r1", REPO, N, &short('a')).await;
+    assert_eq!(code_of(&answer), "rate_limited", "{answer:?}");
+    unforce_merge(&rig);
+
+    refused_without_a_request(&mut rig, None, 3, secs(30)).await;
+
+    rig.advance(mins(10)).await;
+    let answer = merge_as(&mut rig, "after", None).await;
+    assert_eq!(code_of(&answer), "ok", "{answer:?}");
+    assert_eq!(merge_requests_for(&rig, N).len(), 2);
+}
+
+#[tokio::test]
+async fn a_403_naming_a_secondary_limit_on_the_enqueue_is_rate_limited_and_the_next_attempts_wait_for_about_a_minute(
+) {
+    let mut rig = quiet_rig(queue_pr(N)).await;
+    rig.fake.enqueue_responds(Some((
+        403,
+        json!({"message": format!("{SECONDARY_WORDS} CANARY-ERROR-BODY")}),
+    )));
+    let answer = merge_as(&mut rig, "r1", Some(MergeVia::Queue)).await;
+    assert_eq!(code_of(&answer), "rate_limited", "{answer:?}");
+    assert_eq!(rig.fake.enqueues().len(), 1, "the enqueue was tried");
+    rig.fake.enqueue_responds(None);
+
+    refused_without_a_request(&mut rig, Some(MergeVia::Queue), 3, secs(10)).await;
+
+    rig.advance(secs(35)).await;
+    let answer = merge_as(&mut rig, "after", Some(MergeVia::Queue)).await;
+    assert_eq!(code_of(&answer), "queued", "{answer:?}");
+    assert_eq!(rig.fake.enqueues().len(), 2);
+}
+
+#[tokio::test]
+async fn a_plain_permission_403_on_the_enqueue_is_token_cannot_merge_and_no_wait_is_remembered() {
+    let mut rig = quiet_rig(queue_pr(N)).await;
+    rig.fake
+        .enqueue_responds(Some((403, json!({"message": "Resource not accessible"}))));
+    let answer = merge_as(&mut rig, "r1", Some(MergeVia::Queue)).await;
+    assert_eq!(code_of(&answer), "token_cannot_merge", "{answer:?}");
+    rig.fake.enqueue_responds(None);
+
+    let mark = rig.fake.log_len();
+    let answer = merge_as(&mut rig, "r2", Some(MergeVia::Queue)).await;
+    assert_eq!(code_of(&answer), "queued", "{answer:?}");
+    assert!(rig.since(mark).len() >= 2, "it read and enqueued");
+    assert_eq!(rig.fake.enqueues().len(), 2);
+}
+
+/// The other direction of "one allowance": a limit GitHub gave an approval's
+/// live read holds back the merge verb too.
+#[tokio::test]
+async fn a_merge_waits_out_a_limit_github_gave_an_approvals_read() {
+    let mut rig = start(vec![ready_pr(N)]).await;
+    record(&mut rig, N, &sha('a'), Verdict::Approved).await;
+    rig.set_demand("idle").await;
+    rig.fake.force(
+        "graphql",
+        Some(Forced {
+            status: 429,
+            retry_after: Some(600),
+        }),
+    );
+    let r = approve_live(&mut rig).await;
+    assert_eq!(r, Err("rate_limited"), "GitHub said to wait");
+    rig.fake.force("graphql", None);
+
+    let mark = rig.fake.log_len();
+    for i in 0..3 {
+        rig.advance(secs(30)).await;
+        let answer = rig.merge(&format!("m-{i}"), REPO, N, &short('a')).await;
+        assert_eq!(code_of(&answer), "rate_limited", "merge {i}: {answer:?}");
+    }
+    assert_eq!(rig.since(mark).len(), 0, "GitHub was read inside the wait");
+    assert!(rig.fake.merges().is_empty());
+
+    rig.advance(mins(10)).await;
+    let answer = rig.merge("last", REPO, N, &short('a')).await;
+    assert_eq!(code_of(&answer), "ok", "{answer:?}");
+}

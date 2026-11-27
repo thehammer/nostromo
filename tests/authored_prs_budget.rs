@@ -986,3 +986,164 @@ async fn a_graphql_rate_limited_error_in_a_200_is_a_pause_of_about_a_minute() {
     rig.run(secs(30), secs(1)).await;
     assert!(rig.row("thehammer/proj", 2).is_some(), "the list fills in");
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A pause is measured on the wall clock, with nothing else to wake the engine
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn with_no_relay_a_pause_still_ends_within_a_minute_of_the_wall_clock_jumping_past_it() {
+    let jump = WallJump::new();
+    let fake = Fake::new();
+    twenty(&fake);
+    let mut rig = Rig::start(
+        fake.clone(),
+        RigOpts {
+            // No relay: nothing else wakes the engine during the pause.
+            relay: false,
+            wall_jump: Some(jump.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+    rig.set_demand("visible").await;
+    rig.run(secs(10), secs(1)).await;
+    fake.force(
+        "search",
+        Some(Forced {
+            status: 429,
+            retry_after: Some(3600),
+        }),
+    );
+    rig.run_until(mins(3), secs(1), |r| {
+        r.snapshot().map(|s| s.poll.state) == Some(PollState::Paused)
+    })
+    .await
+    .expect("paused for the Retry-After");
+
+    fake.force("search", None);
+    let mark = rig.fake.log_len();
+    rig.run(mins(5), secs(5)).await;
+    assert_eq!(rig.fake.log_len(), mark, "no request while paused");
+
+    // Five hours pass on the wall clock in an instant; no monotonic time does.
+    jump.jump(Duration::from_secs(5 * 3600));
+    let jumped_at = rig.elapsed;
+    rig.run_until(secs(75), secs(1), |r| r.fake.log_len() > mark)
+        .await
+        .expect("requests resume within about a minute of the wall clock passing the pause");
+    assert!(rig.elapsed - jumped_at <= secs(75));
+    rig.run(secs(5), secs(1)).await;
+    assert_ne!(rig.snapshot().unwrap().poll.state, PollState::Paused);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A secondary limit that keeps coming backs off; a stated Retry-After is obeyed
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Wait for a pause other than `previous` (by its end) and say how long it is.
+async fn next_pause(rig: &mut Rig, previous: &mut Option<chrono::DateTime<chrono::Utc>>) -> Chrono {
+    let seen = *previous;
+    rig.run_until(mins(15), secs(1), |r| {
+        r.snapshot().is_some_and(|s| {
+            s.poll.state == PollState::Paused
+                && s.poll.resumes_at.is_some()
+                && s.poll.resumes_at != seen
+        })
+    })
+    .await
+    .expect("the engine paused again");
+    let resumes = rig.snapshot().unwrap().poll.resumes_at.unwrap();
+    *previous = Some(resumes);
+    resumes - now_of(rig)
+}
+
+fn within(left: Chrono, lo: i64, hi: i64, what: &str) {
+    assert!(
+        left >= Chrono::seconds(lo) && left <= Chrono::seconds(hi),
+        "{what}: paused for {left}, wanted {lo}..={hi} s"
+    );
+}
+
+async fn visible_rig_over_twenty() -> Rig {
+    let fake = Fake::new();
+    twenty(&fake);
+    fake.set_rate(Some(Rate {
+        remaining: 4000,
+        limit: 5000,
+        reset: t0() + Chrono::hours(5),
+    }));
+    let mut rig = Rig::start(fake, RigOpts::default()).await;
+    rig.set_demand("visible").await;
+    rig.run(secs(10), secs(1)).await;
+    rig
+}
+
+fn force_search(rig: &Rig, status: u16, retry_after: Option<u64>, words: Option<&str>) {
+    rig.fake.force_words("search", words);
+    rig.fake.force(
+        "search",
+        Some(Forced {
+            status,
+            retry_after,
+        }),
+    );
+}
+
+#[tokio::test]
+async fn a_secondary_limit_that_keeps_coming_backs_off_and_a_success_starts_it_over() {
+    let mut rig = visible_rig_over_twenty().await;
+    force_search(
+        &rig,
+        403,
+        None,
+        Some("You have exceeded a secondary rate limit"),
+    );
+    let mut prev = None;
+    let first = next_pause(&mut rig, &mut prev).await;
+    within(first, 50, 90, "the first");
+    let second = next_pause(&mut rig, &mut prev).await;
+    within(second, 100, 150, "the second in a row");
+    let third = next_pause(&mut rig, &mut prev).await;
+    within(third, 200, 300, "the third in a row");
+
+    // GitHub is well again: a request succeeds, and the count starts over.
+    rig.fake.force("search", None);
+    rig.fake.force_words("search", None);
+    let mark = rig.fake.log_len();
+    rig.run_until(mins(15), secs(1), |r| {
+        r.since(mark)
+            .iter()
+            .any(|q| q.kind() == Kind::Search && q.status == 200)
+    })
+    .await
+    .expect("a search succeeds once the pause is over");
+    force_search(
+        &rig,
+        403,
+        None,
+        Some("You have exceeded a secondary rate limit"),
+    );
+    let again = next_pause(&mut rig, &mut prev).await;
+    within(again, 50, 90, "the first after a success");
+}
+
+async fn a_stated_retry_after_is_obeyed_as_given(status: u16) {
+    let mut rig = visible_rig_over_twenty().await;
+    force_search(&rig, status, Some(30), None);
+    let mut prev = None;
+    for i in 0..3 {
+        let left = next_pause(&mut rig, &mut prev).await;
+        within(left, 20, 40, &format!("{status} with Retry-After 30, #{i}"));
+    }
+}
+
+#[tokio::test]
+async fn a_429_with_retry_after_thirty_is_thirty_seconds_every_time_never_escalated() {
+    a_stated_retry_after_is_obeyed_as_given(429).await;
+}
+
+#[tokio::test]
+async fn a_403_with_retry_after_thirty_is_thirty_seconds_every_time_never_escalated() {
+    a_stated_retry_after_is_obeyed_as_given(403).await;
+}
