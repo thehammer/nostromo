@@ -61,6 +61,16 @@ Guards (each is a failing check, not a log line):
 | total executed across shards < `expected_min_executed` | aggregate |
 | a skipped, cancelled, failed or missing shard job | aggregate (`needs.<shard>.result` must be `success`; "skipped" fails when Swift paths changed, because a skipped required check counts as passing on GitHub) |
 | no shard reported a passing `MotherDetailWidthConstraintTests` case | aggregate (the per-shard step rejects skips) |
+| a test run changed the operator's real `~/.nostromo` | `ZRealNostromoGuardShard<n>Tests` (one per shard: a shard runs only its own classes, and `mac-shards.json` lists a class once, so shards 1 and 2 list theirs and shard 3 picks its up as catch-all). Do not rename or move them. |
+
+**Tests never touch the real `~/.nostromo`.** Under XCTest `NostromoHome` (`macOS/Nostromo/Data/NostromoHome.swift`)
+resolves every app-state path (`~/.nostromo`, `~/.mother`, `~/.claude`, `~/Library/Application Support`) into a
+per-process temporary home that is removed when the test bundle finishes. New code builds such paths from
+`NostromoHome` only; `tests/state_path_policy` (in `make python-test`) fails on a direct
+`homeDirectoryForCurrentUser` / `NSHomeDirectory()` / `.nostromo` path elsewhere, with a tiny explicit allow-list
+for display-only uses. `NostromoStateIsolationTests` pins each store's default path to the test home, and the
+`ZRealNostromoGuard*` classes compare the real files tests are known to have touched before and after the run
+(sizes and times too when the real app is not running; existence only when it is).
 
 `swift == 'false'` (the path classifier) makes the aggregate green without any
 shard, exactly as the single job behaved with its steps skipped. A shard that ran

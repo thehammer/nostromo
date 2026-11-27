@@ -7,7 +7,7 @@ fails when something else starts to:
 
   1. asking the system for the home directory (`homeDirectoryForCurrentUser`, `NSHomeDirectory()`,
      `.applicationSupportDirectory`, ...), or spelling a `~/.nostromo` path;
-  2. building a `.nostromo` path whose base is not `NostromoHome` (the string literal must have
+  2. building a `.nostromo`, `.mother` or `.claude` path whose base is not `NostromoHome` (the string literal must have
      `NostromoHome.` in the same statement: the few lines before it).
 
 The allow-list below is deliberately tiny and explicit: file -> token -> the most occurrences allowed,
@@ -36,11 +36,19 @@ FORBIDDEN = {
     ".libraryDirectory": r"\.libraryDirectory",
     ".cachesDirectory": r"\.cachesDirectory",
     "getpwuid": r"getpwuid",
+    'environment["HOME"]': r'environment\[\s*"HOME"\s*\]',
+    "getenv(HOME)": r'getenv\(\s*"HOME"',
+    "expandingTildeInPath": r"expandingTildeInPath",
+    "/Users/ literal": r'"/Users/',
     '"~/.nostromo': r'"~/\.nostromo',
 }
-# A path component `.nostromo` inside a string literal ("com.hammer.nostromo" is a bundle id, not a path).
-NOSTROMO_LITERAL = re.compile(r'"[^"\n]*(?<![A-Za-z0-9_])\.nostromo(?=["/])')
+# A path component `.nostromo` / `.mother` / `.claude` inside a string literal ("com.hammer.nostromo" is a
+# bundle id, not a path; `~/.claude/...` is text shown to the operator: Swift never expands a `~`, and
+# `expandingTildeInPath` is forbidden above).
+NOSTROMO_LITERAL = re.compile(r'"[^"\n]*(?<![A-Za-z0-9_])(?<!~/)\.(?:nostromo|mother|claude)(?=["/])')
 LOOKBACK_LINES = 4
+
+PATH_LITERAL = "a dot-directory path literal"
 
 # file -> {token: most occurrences allowed}: why each is not state access.
 ALLOWED = {
@@ -54,7 +62,12 @@ ALLOWED = {
     "macOS/Nostromo/Data/TerminalSessionStore.swift": {"NSHomeDirectory(": 1},
     # Looks for tool binaries (`gh`, `mother`, ...) in the user's real bin directories: it must see the
     # real ones and only checks they are executable.
-    "macOS/Nostromo/Data/AppStore.swift": {"homeDirectoryForCurrentUser": 1},
+    "macOS/Nostromo/Data/AppStore.swift": {"homeDirectoryForCurrentUser": 1, PATH_LITERAL: 1},
+    # Project-relative file names (`.claude/settings.json` under a project root), not paths in the home.
+    "macOS/Nostromo/Data/NoCodebaseFolder.swift": {PATH_LITERAL: 2},
+    # Synthetic fixture text (demo plan paths, a fake tool-call transcript); nothing is opened.
+    "macOS/Nostromo/UI/Views/MotherView.swift": {"/Users/ literal": 2, PATH_LITERAL: 2},
+    "macOS/Nostromo/Data/TranscriptLoadHarness.swift": {"/Users/ literal": 1},
     # NostromoKit is shared with iOS and cannot see `NostromoHome`: the default `home` of a pure resolver.
     # The Mac callers (`CreateFocusSheet`, `NoCodebaseFolder`) pass `NostromoHome.userHome`.
     "Shared/NostromoKit/Sources/NostromoKit/Config/CodeRoot.swift": {"NSHomeDirectory(": 1},
@@ -113,29 +126,33 @@ def strip_comments(source):
     return "".join(out)
 
 
+def occurrences(source):
+    """(token, line number) for each reach into the home that is not built from the seam, comments ignored."""
+    lines = strip_comments(source).split("\n")
+    found = []
+    for number, line in enumerate(lines, 1):
+        for token, pattern in FORBIDDEN.items():
+            found.extend((token, number) for _ in re.findall(pattern, line))
+        if NOSTROMO_LITERAL.search(line):
+            window = "\n".join(lines[max(0, number - 1 - LOOKBACK_LINES):number])
+            if "NostromoHome." not in window:
+                found.append((PATH_LITERAL, number))
+    return found
+
+
 def violations(files):
     """`files` is a list of (repo-relative path, source). Returns a sorted list of violation strings."""
     found = []
     for path, source in files:
         if path == SEAM:
             continue
-        code = strip_comments(source)
-        lines = code.split("\n")
-        allowed = dict(ALLOWED.get(path, {}))
-        counts = {}
-        for number, line in enumerate(lines, 1):
-            for token, pattern in FORBIDDEN.items():
-                hits = len(re.findall(pattern, line))
-                if not hits:
-                    continue
-                counts[token] = counts.get(token, 0) + hits
-                if counts[token] > allowed.get(token, 0):
-                    found.append(f"{path}:{number}: `{token}` reaches the user's home without NostromoHome")
-            if NOSTROMO_LITERAL.search(line):
-                window = "\n".join(lines[max(0, number - 1 - LOOKBACK_LINES):number])
-                if "NostromoHome." not in window and not (path in ALLOWED and any(
-                        line.count(t) for t in ALLOWED[path])):
-                    found.append(f"{path}:{number}: a `.nostromo` path not built from NostromoHome")
+        seen = {}
+        for token, number in occurrences(source):
+            seen[token] = seen.get(token, 0) + 1
+            if seen[token] > ALLOWED.get(path, {}).get(token, 0):
+                what = ("a `.nostromo`/`.mother`/`.claude` path not built from NostromoHome" if token == PATH_LITERAL
+                        else f"`{token}` reaches the user's home without NostromoHome")
+                found.append(f"{path}:{number}: {what}")
     return sorted(set(found))
 
 
@@ -164,10 +181,12 @@ class StatePathPolicyTests(unittest.TestCase):
         by_path = dict(swift_files())
         for path, tokens in ALLOWED.items():
             self.assertIn(path, by_path, f"allow-list names a file that is gone: {path}")
-            code = strip_comments(by_path[path])
+            used = {}
+            for token, _ in occurrences(by_path[path]):
+                used[token] = used.get(token, 0) + 1
             for token, most in tokens.items():
-                self.assertGreaterEqual(code.count(token), 1, f"{path}: allow-list entry `{token}` is unused; drop it")
-                self.assertLessEqual(code.count(token), most)
+                self.assertGreaterEqual(used.get(token, 0), 1, f"{path}: allow-list entry `{token}` is unused; drop it")
+                self.assertLessEqual(used.get(token, 0), most)
 
     def test_the_seam_owns_the_test_home_redirect(self):
         source = dict(swift_files())[SEAM]
@@ -193,6 +212,18 @@ class BitesTests(unittest.TestCase):
 
     def test_a_dot_nostromo_path_on_another_base_is_flagged(self):
         self.assertTrue(self.check('let u = base.appendingPathComponent(".nostromo/x.json")'))
+
+    def test_a_mother_or_claude_path_on_another_base_is_flagged(self):
+        self.assertTrue(self.check('let u = base.appendingPathComponent(".mother/broker.sock")'))
+        self.assertTrue(self.check('let u = "\\(home)/.claude/agents"'))
+
+    def test_a_home_taken_from_the_environment_is_flagged(self):
+        self.assertTrue(self.check('let h = ProcessInfo.processInfo.environment["HOME"]!'))
+        self.assertTrue(self.check('let p = ("~/x" as NSString).expandingTildeInPath'))
+        self.assertTrue(self.check('let p = "/Users/someone/x"'))
+
+    def test_operator_facing_tilde_text_is_not_a_path(self):
+        self.assertEqual(self.check('let m = "see ~/.claude/ecs-local.json"'), [])
 
     def test_a_tilde_nostromo_literal_is_flagged(self):
         self.assertTrue(self.check('let p = "~/.nostromo/focuses.json"'))

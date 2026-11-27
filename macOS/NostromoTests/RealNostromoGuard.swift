@@ -9,11 +9,13 @@ import XCTest
 /// home under XCTest, so this is the net under that seam: a path that bypasses it shows up here.
 ///
 /// Watched: exactly the paths past incidents touched (`logs/window-placement.log` by `TaskWindowTests`,
-/// `composer-history.v1/sensitive-marks.v1.json` by the #511 job tests) plus the other files the Mac app owns
-/// in `~/.nostromo`. NOT the whole directory: on a Mac where the real app and daemon run they write all
-/// over it. When the real app is running the guard only compares which watched files exist (a test that
-/// creates or deletes one is still caught); with no app running (CI, a quiet Mac) it compares size and
-/// modification time as well.
+/// `composer-history.v1/sensitive-marks.v1.json` by the #511 job tests) plus the other files only the Mac app
+/// writes in `~/.nostromo`. NOT the whole directory, and nothing the daemon (`nostromd`, a launchd agent that
+/// runs on a dev Mac whether or not the app does) owns (`huey/`, `audit/`, the staged `attachments/` it
+/// cleans up): those change under a test run for reasons that are not the tests'. When the real app is
+/// running (at the start of the run or at the end of it) the guard only compares which watched files exist
+/// (a test that creates or deletes one is still caught); with no app running (CI, a quiet Mac) it compares
+/// size and modification time as well.
 enum RealNostromoGuard {
 
     /// Relative to `~/.nostromo`. Files are compared by existence (and size and mtime when `full`).
@@ -21,11 +23,10 @@ enum RealNostromoGuard {
         "composer-history.v1/sensitive-marks.v1.json",
         "logs/window-placement.log",
         "transcript-folds.v1.json",
-        "audit/terminal.jsonl",
         "focuses.json",
     ]
     /// Directories whose entry names are compared (only when `full`: a live app adds entries as you work).
-    static let watchedDirectories = ["composer-history.v1", "attachments", "huey"]
+    static let watchedDirectories = ["composer-history.v1"]
 
     static let realRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".nostromo", isDirectory: true)
 
@@ -70,10 +71,13 @@ enum RealNostromoGuard {
     }
 
     private static var baseline: [String: String]?
+    private static var appWasRunningAtBaseline = false
 
     /// Called once by the principal class, before any test runs.
     static func recordBaseline() {
-        if baseline == nil { baseline = snapshot() }
+        guard baseline == nil else { return }
+        appWasRunningAtBaseline = realAppIsRunning
+        baseline = snapshot()
     }
 
     static var hasBaseline: Bool { baseline != nil }
@@ -85,7 +89,7 @@ enum RealNostromoGuard {
 
     /// The assertion every `ZRealNostromoGuard*Tests` class makes.
     static func assertRealNostromoUntouched(file: StaticString = #filePath, line: UInt = #line) {
-        let drift = currentDifferences(full: !realAppIsRunning)
+        let drift = currentDifferences(full: !(appWasRunningAtBaseline || realAppIsRunning))
         XCTAssertTrue(drift.isEmpty,
                       "the test run changed the real ~/.nostromo (a path that bypasses NostromoHome?):\n" + drift.joined(separator: "\n"),
                       file: file, line: line)

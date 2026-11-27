@@ -14,7 +14,7 @@ import Foundation
 /// Under XCTest every path here resolves into a per-process temporary directory (`testHome`), removed when the
 /// test bundle finishes, so no test can read, write or delete the operator's real data. The decision is made in
 /// `url(env:bundleID:realHome:underTests:testHome:)`, which takes "running under tests" as a parameter; the one
-/// place that detects XCTest is `isRunningUnderTests`. A policy test (`tests/mac_policy`) fails when source
+/// place that detects XCTest is `isRunningUnderTests`. A policy test (`tests/state_path_policy`) fails when source
 /// outside this file builds a `.nostromo` path or asks the system for the home directory.
 enum NostromoHome {
     static let qaBundleID = "com.hammer.nostromo.qa"
@@ -80,6 +80,7 @@ enum NostromoHome {
     /// `<tmp>/nostromo-tests-<pid>/home`, created on first use. One per test process, so concurrent test
     /// processes never share it, and `removeTestHome()` takes it away when the run ends.
     static let testHome: URL = {
+        removeTestHome()   // a crashed earlier run may have left this pid's directory behind
         let home = testRoot.appendingPathComponent("home", isDirectory: true)
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         return home

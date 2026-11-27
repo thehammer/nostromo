@@ -17,7 +17,8 @@ final class NostromoStateIsolationTests: XCTestCase {
     private var testRoot: String { NostromoHome.testRoot.resolvingSymlinksInPath().path + "/" }
 
     /// `path` is inside this process's test home and nowhere in the real one. A path that an environment
-    /// variable overrides (the daemon's own sockets) is the variable's value when it is set.
+    /// variable overrides (the daemon's own sockets) is the variable's value when it is set: inside a Nostromo
+    /// agent session `NOSTROMO_MCP_SOCKET` is, so that one assertion only bites where it is unset (CI).
     private func assertInTestHome(_ path: String, overriddenBy env: String? = nil, file: StaticString = #filePath,
                                   line: UInt = #line) {
         if let env, let value = ProcessInfo.processInfo.environment[env], !value.isEmpty {
