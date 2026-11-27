@@ -81,10 +81,11 @@ final class TabRegionView: NSView {
     private var captions: [String: String] = [:]
 
     /// Whether the operator can close the tab for `paneId` with its × button.
-    /// The review queue and the REPL never can (nor can a Mother overview tab): the queue belongs to no PR and
-    /// must always be reachable. The daemon enforces the same rule; this only
-    /// decides whether to draw the button, so an un-closable tab doesn't offer
-    /// a control that would be refused.
+    /// The review queue and the REPL never can: the queue belongs to no PR and
+    /// must always be reachable. The daemon's `close_tab` refuses the REPL, the queue and the
+    /// protected native panes, not every id listed here (no pane is named `mother_overview` today, so
+    /// that clause is a defensive guard only). This decides whether to draw the button, so an
+    /// un-closable tab doesn't offer a control that would be refused.
     static func isClosable(paneId: String) -> Bool {
         paneId != "queue" && paneId != "repl" && paneId != "mother_overview"
     }
