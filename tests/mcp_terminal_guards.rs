@@ -86,9 +86,57 @@ fn init_process_env() {
     ONCE.call_once(|| {
         let home = home_path();
         std::fs::create_dir_all(home.join(".nostromo")).expect("create the private $HOME");
+        write_osc_context_rc_files(&home);
         std::env::set_var("HOME", &home);
         std::env::set_var("NOSTROMO_CLAUDE_BIN", "/bin/sh");
     });
+}
+
+/// OSC 3008 ("context") markers, as the systemd shell integration of newer distros (Ubuntu 26.04)
+/// prints them: one before a command's output (bash `PS0`, zsh `preexec`) and one when the prompt
+/// comes back (`PROMPT_COMMAND`, zsh `precmd`). They land right in front of what a probe printed.
+const OSC_START: &str = r"\033]3008;start=nostromo-test;type=command\033\\";
+const OSC_END: &str = r"\033]3008;end=nostromo-test;exit=success\007";
+
+/// Rc files for the private `$HOME` that make the login shell (bash or zsh) print the markers
+/// above, so every test here runs against them whatever the runner image's own shell setup is.
+fn write_osc_context_rc_files(home: &Path) {
+    let bash = format!("PS0='{OSC_START}'\nPROMPT_COMMAND=\"printf '{OSC_END}'\"\n");
+    let zsh =
+        format!("preexec() {{ printf '{OSC_START}'; }}\nprecmd() {{ printf '{OSC_END}'; }}\n");
+    for (name, body) in [
+        (".bashrc", bash.as_str()),
+        (".bash_profile", ". ~/.bashrc\n"),
+        (".zshrc", zsh.as_str()),
+    ] {
+        std::fs::write(home.join(name), body).expect("write a shell rc file");
+    }
+}
+
+/// `text` without its OSC sequences: `ESC ]` up to and including `BEL` or `ESC \`. A sequence
+/// that never ends is left alone (it is not a marker, and swallowing the rest of the output
+/// could hide what a test is looking for).
+fn strip_osc(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("\x1b]") {
+        out.push_str(&rest[..at]);
+        let body = &rest[at + 2..];
+        let end = body.char_indices().find_map(|(i, c)| match c {
+            '\x07' => Some(i + 1),
+            '\x1b' if body[i..].starts_with("\x1b\\") => Some(i + 2),
+            _ => None,
+        });
+        match end {
+            Some(n) => rest = &body[n..],
+            None => {
+                out.push_str(&rest[at..]);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Tests find "their" shell among this process's children, so they take turns.
@@ -440,7 +488,9 @@ impl Ipc {
         .await;
         let deadline = Instant::now() + WAIT;
         loop {
-            let seen = String::from_utf8_lossy(&self.bytes_since(from, terminal_id)).into_owned();
+            let seen = strip_osc(&String::from_utf8_lossy(
+                &self.bytes_since(from, terminal_id),
+            ));
             if let Some(at) = seen.find(&marker) {
                 return seen[..at].to_string();
             }
@@ -2435,4 +2485,39 @@ async fn apply_layout_cannot_bury_a_terminal_in_an_inactive_tab_or_squeeze_it_ou
     .await;
 
     live.prove_responsive().await;
+}
+
+// ── the PTY helper tolerates OSC markers ─────────────────────────────────────
+
+#[test]
+fn strip_osc_removes_bel_and_string_terminated_sequences_and_nothing_else() {
+    let osc3008 = "\x1b]3008;start=abc;type=command\x1b\\";
+    assert_eq!(strip_osc(&format!("{osc3008}CWD=/tmp\n")), "CWD=/tmp\n");
+    assert_eq!(
+        strip_osc("a\x1b]0;title\x07b\x1b]7;file:///x\x1b\\c"),
+        "abc"
+    );
+    assert_eq!(strip_osc("plain\r\n"), "plain\r\n");
+    // Other escape sequences (colour, cursor) are not OSC: untouched.
+    assert_eq!(strip_osc("\x1b[1;32mok\x1b[0m"), "\x1b[1;32mok\x1b[0m");
+    // An ESC inside the body that is not `ESC \` does not end it; the BEL after does.
+    assert_eq!(strip_osc("a\x1b]x\x1b[y\x07b"), "ab");
+    // Never terminated: kept, so nothing a test looks for can be swallowed.
+    assert_eq!(strip_osc("a\x1b]3008;start=1"), "a\x1b]3008;start=1");
+}
+
+#[test]
+fn the_private_home_makes_the_login_shell_print_osc_markers_before_probe_output() {
+    let dir = TempDir::new().expect("tempdir");
+    write_osc_context_rc_files(dir.path());
+    let bashrc = std::fs::read_to_string(dir.path().join(".bashrc")).expect(".bashrc");
+    assert!(
+        bashrc.contains("PS0=") && bashrc.contains("3008"),
+        "{bashrc}"
+    );
+    let zshrc = std::fs::read_to_string(dir.path().join(".zshrc")).expect(".zshrc");
+    assert!(
+        zshrc.contains("preexec") && zshrc.contains("3008"),
+        "{zshrc}"
+    );
 }
