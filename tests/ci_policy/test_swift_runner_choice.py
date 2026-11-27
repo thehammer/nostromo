@@ -216,6 +216,8 @@ class FinalNameParserTests(unittest.TestCase):
         self.assertEqual(final_name("${{ a && 'p || q' || 'X' }}"), "X")
         self.assertEqual(final_name("${{ a && 'p' || format('X || {0}', b) }}"), "X || {0}")
         self.assertEqual(final_name("${{ a && 'it''s' || 'X' }}"), "X")
+        self.assertEqual(final_name("${{ a && 'x' || 'p || X' }}"), "p || X")
+        self.assertEqual(final_name("${{ a && 'x' || format('p ) || X', b) }}"), "p ) || X")
 
     def test_a_final_branch_that_is_not_a_literal_is_none(self):
         self.assertIsNone(final_name("${{ a && 'X' || github.job }}"))

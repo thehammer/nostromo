@@ -68,10 +68,10 @@ def check_test_step_cannot_swallow_nextests_exit_status(step):
     if run is None or run in ("|", "|-", ">", ">-"):
         out.append("the Test step's command must be one line `run:` (a block could hide a swallowed status)")
         return out
-    if re.search(r"&&|\|\||;", run) or not re.fullmatch(r"cargo nextest run [^|]*\| tee [^|]*", run):
+    if re.search(r"&&|\|\||;", run):
+        out.append(f"the Test step chains another command (`;`, `&&`, `||`) that could swallow nextest's status: {run!r}")
+    if not re.fullmatch(r"cargo nextest run [^|]*\| tee [^|]*", run):
         out.append(f"the Test step must be exactly `cargo nextest run ... | tee FILE`, found {run!r}")
-    if re.search(r"\|\|\s*(true|:|exit\s+0)\b", run) or re.search(r"[;&]\s*(true|:|exit\s+0)\b", run):
-        out.append(f"the Test step swallows nextest's exit status: {run!r}")
     return out
 
 

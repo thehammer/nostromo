@@ -141,6 +141,7 @@ class NextestPinBitesTests(unittest.TestCase):
             'default-filter = "not test(slow)"\n',
             "[test-groups]\nserial = { max-threads = 1 }\n",
             "[[profile.default.overrides]]\nfilter = 'test(x)'\nthreads-required = 4\n",
+            '[[profile.default.overrides]]\nplatform = "cfg(unix)"\nslow-timeout = "5m"\n',
         ):
             with self.subTest(extra=extra):
                 self.assertTrue(violations(self.CI, self.TOML + extra))
