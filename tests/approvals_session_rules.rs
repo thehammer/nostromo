@@ -614,10 +614,12 @@ async fn a_held_rm_in_the_users_cache_offers_allow_session_with_an_exact_and_a_p
         wire.session_rule_candidates[1].id
     );
     // The same wire reaches the app by frame and by snapshot.
-    let frames = rig.frames();
-    assert!(frames
-        .iter()
-        .any(|m| matches!(m, ServerMsg::ApprovalRequest { request, .. } if *request == wire)));
+    // The snapshot shows the held request before its frame is broadcast, so wait for the frame.
+    rig.frames_until(
+        "the request's frame",
+        |m| matches!(m, ServerMsg::ApprovalRequest { request, .. } if *request == wire),
+    )
+    .await;
     assert_eq!(rig.broker.snapshot(), vec![wire.clone()]);
     let json = serde_json::to_value(&wire).unwrap();
     let options = json["options"].as_array().unwrap();
