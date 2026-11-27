@@ -1,0 +1,209 @@
+{
+ "about": "Shared by tests/push_text_fixture.rs (src/push/detail.rs::first_line) and NotificationContentComposerTests (NotificationContentComposer.flattened). `rust` is what the daemon sends for `input` as the first line of one field; `swift` is what the phone shows for `input` as the whole of a detail text (the daemon sends one line, so the two differ only where the input has more than one). null means no text. Inputs are JSON-escaped so the invisible characters are visible here.",
+ "cases": [
+  {
+   "name": "plain text is unchanged",
+   "input": "Ship the retry budget tonight?",
+   "rust": "Ship the retry budget tonight?",
+   "swift": "Ship the retry budget tonight?"
+  },
+  {
+   "name": "LF ends the line: Rust keeps the first, Kit joins the lines with a space",
+   "input": "first\nSECONDLINE",
+   "rust": "first",
+   "swift": "first SECONDLINE"
+  },
+  {
+   "name": "CR ends the line: Rust keeps the first, Kit joins the lines with a space",
+   "input": "first\rSECONDLINE",
+   "rust": "first",
+   "swift": "first SECONDLINE"
+  },
+  {
+   "name": "VT ends the line: Rust keeps the first, Kit joins the lines with a space",
+   "input": "first\u000bSECONDLINE",
+   "rust": "first",
+   "swift": "first SECONDLINE"
+  },
+  {
+   "name": "FF ends the line: Rust keeps the first, Kit joins the lines with a space",
+   "input": "first\fSECONDLINE",
+   "rust": "first",
+   "swift": "first SECONDLINE"
+  },
+  {
+   "name": "NEL ends the line: Rust keeps the first, Kit joins the lines with a space",
+   "input": "first\u0085SECONDLINE",
+   "rust": "first",
+   "swift": "first SECONDLINE"
+  },
+  {
+   "name": "LS ends the line: Rust keeps the first, Kit joins the lines with a space",
+   "input": "first\u2028SECONDLINE",
+   "rust": "first",
+   "swift": "first SECONDLINE"
+  },
+  {
+   "name": "PS ends the line: Rust keeps the first, Kit joins the lines with a space",
+   "input": "first\u2029SECONDLINE",
+   "rust": "first",
+   "swift": "first SECONDLINE"
+  },
+  {
+   "name": "CRLF is one line break",
+   "input": "first\r\nSECONDLINE",
+   "rust": "first",
+   "swift": "first SECONDLINE"
+  },
+  {
+   "name": "blank lines of every kind are skipped",
+   "input": "\n\r\u2028\u2029\u000b\f\u0085   \u2029hello",
+   "rust": "hello",
+   "swift": "hello"
+  },
+  {
+   "name": "a tab is a space",
+   "input": "a\tb",
+   "rust": "a b",
+   "swift": "a b"
+  },
+  {
+   "name": "runs of spaces collapse",
+   "input": "a  \t  b",
+   "rust": "a b",
+   "swift": "a b"
+  },
+  {
+   "name": "surrounding whitespace is trimmed",
+   "input": "   padded line   ",
+   "rust": "padded line",
+   "swift": "padded line"
+  },
+  {
+   "name": "control characters are dropped, not turned into spaces",
+   "input": "a\u001b[31mb\u0000c\u0007d\u007fe",
+   "rust": "a[31mbcde",
+   "swift": "a[31mbcde"
+  },
+  {
+   "name": "zero-width space is dropped",
+   "input": "ig\u200bnore",
+   "rust": "ignore",
+   "swift": "ignore"
+  },
+  {
+   "name": "bidi controls are dropped",
+   "input": "a\u202eb\u2066c\u2069d\u200ee\u200ff\u061cg",
+   "rust": "abcdefg",
+   "swift": "abcdefg"
+  },
+  {
+   "name": "word joiner and invisible operators are dropped",
+   "input": "a\u2060b\u2061c\u2062d\u2063e\u2064f",
+   "rust": "abcdef",
+   "swift": "abcdef"
+  },
+  {
+   "name": "deprecated format characters U+206A..U+206F are dropped",
+   "input": "a\u206ab\u206fc",
+   "rust": "abc",
+   "swift": "abc"
+  },
+  {
+   "name": "byte-order mark is dropped",
+   "input": "\ufeffhello",
+   "rust": "hello",
+   "swift": "hello"
+  },
+  {
+   "name": "soft hyphen is dropped",
+   "input": "ig\u00adnore",
+   "rust": "ignore",
+   "swift": "ignore"
+  },
+  {
+   "name": "Mongolian vowel separator is dropped",
+   "input": "a\u180eb",
+   "rust": "ab",
+   "swift": "ab"
+  },
+  {
+   "name": "Hangul fillers are dropped",
+   "input": "a\u3164b\u115fc\u1160d\uffa0e",
+   "rust": "abcde",
+   "swift": "abcde"
+  },
+  {
+   "name": "interlinear annotation marks are dropped",
+   "input": "a\ufff9b\ufffac\ufffbd",
+   "rust": "abcd",
+   "swift": "abcd"
+  },
+  {
+   "name": "tag characters hide ASCII and are dropped",
+   "input": "visible\udb40\udc69\udb40\udc67\udb40\udc6e\udb40\udc6f\udb40\udc72\udb40\udc65\udb40\udc20\udb40\udc61\udb40\udc6c\udb40\udc6c\udb40\udc20\udb40\udc72\udb40\udc75\udb40\udc6c\udb40\udc65\udb40\udc73",
+   "rust": "visible",
+   "swift": "visible"
+  },
+  {
+   "name": "the tag language tag and cancel tag are dropped",
+   "input": "a\udb40\udc01b\udb40\udc7fc",
+   "rust": "abc",
+   "swift": "abc"
+  },
+  {
+   "name": "a line of tag characters only is no text",
+   "input": "\udb40\udc73\udb40\udc65\udb40\udc63\udb40\udc72\udb40\udc65\udb40\udc74",
+   "rust": null,
+   "swift": null
+  },
+  {
+   "name": "other format characters are dropped",
+   "input": "a\u0600b\u06ddc\u070fd\u0890e\u08e2f\ud804\udcbdg\ud804\udccdh\ud80d\udc30i\ud82f\udca0j\ud834\udd73k\ud834\udd7al",
+   "rust": "abcdefghijkl",
+   "swift": "abcdefghijkl"
+  },
+  {
+   "name": "a line of invisible characters only is no text",
+   "input": "\u200b\u3164\u00ad\ufeff\u2060",
+   "rust": null,
+   "swift": null
+  },
+  {
+   "name": "a family emoji keeps its zero-width joiners",
+   "input": "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67",
+   "rust": "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67",
+   "swift": "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67"
+  },
+  {
+   "name": "Persian keeps its zero-width non-joiner",
+   "input": "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645",
+   "rust": "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645",
+   "swift": "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645"
+  },
+  {
+   "name": "variation selectors stay with their emoji",
+   "input": "\u2764\ufe0f ok",
+   "rust": "\u2764\ufe0f ok",
+   "swift": "\u2764\ufe0f ok"
+  },
+  {
+   "name": "empty input is no text",
+   "input": "",
+   "rust": null,
+   "swift": null
+  },
+  {
+   "name": "whitespace and breaks only is no text",
+   "input": " \t\n\r\u2028 \u2029",
+   "rust": null,
+   "swift": null
+  },
+  {
+   "name": "controls only is no text",
+   "input": "\u0000\u0007\u001b",
+   "rust": null,
+   "swift": null
+  }
+ ]
+}

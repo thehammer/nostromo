@@ -371,7 +371,7 @@ impl PushEngine {
             None => ServerMsg::PushDetail {
                 item_ref: item_ref
                     .chars()
-                    .take(detail::MAX_ITEM_REF_BYTES)
+                    .take(detail::MAX_ITEM_REF_CHARS)
                     .collect::<String>(),
                 waiting: false,
                 text: None,

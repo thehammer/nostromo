@@ -42,17 +42,20 @@ public enum NotificationContentComposer {
         return out
     }
 
-    /// One printable line of at most `PushDetailWire.maxTextCharacters` characters, or `nil`. Control
-    /// characters and line breaks become spaces; characters that only reorder or hide text (bidirectional
-    /// controls, zero-width space, the byte-order mark) are dropped. Joiners stay: they are part of
-    /// emoji sequences and of Persian words.
+    /// One printable line of at most `PushDetailWire.maxTextCharacters` characters, or `nil`. Line breaks
+    /// (LF, VT, FF, CR, NEL, U+2028, U+2029) and tabs become spaces, so no two words are glued together;
+    /// control characters and invisible format characters are dropped (see `isInvisibleFormat`); runs
+    /// of spaces collapse. Joiners stay: they are part of emoji sequences and of Persian words.
+    ///
+    /// The daemon sends one line already (`first_line` in `src/push/detail.rs`); `tests/fixtures/
+    /// push-detail/text_cases.json` holds the inputs both implementations are tested against.
     static func flattened(_ text: String?) -> String? {
         guard let text else { return nil }
         var out = String.UnicodeScalarView()
         for scalar in text.unicodeScalars {
-            if scalar.properties.generalCategory == .control || CharacterSet.newlines.contains(scalar) {
+            if isLineBreak(scalar) || scalar == "\t" {
                 out.append(" ")
-            } else if !isInvisibleFormat(scalar) {
+            } else if scalar.properties.generalCategory != .control && !isInvisibleFormat(scalar) {
                 out.append(scalar)
             }
         }
@@ -63,9 +66,23 @@ public enum NotificationContentComposer {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private static func isInvisibleFormat(_ scalar: Unicode.Scalar) -> Bool {
+    private static func isLineBreak(_ scalar: Unicode.Scalar) -> Bool {
         switch scalar.value {
-        case 0x061C, 0x200B, 0x200E, 0x200F, 0x202A...0x202E, 0x2060...0x2064, 0x2066...0x2069, 0xFEFF:
+        case 0x0A, 0x0B, 0x0C, 0x0D, 0x85, 0x2028, 0x2029: return true
+        default: return false
+        }
+    }
+
+    /// Every Unicode format character (category Cf) except the joiners (U+200C, U+200D), the tag block
+    /// (a known way to hide ASCII text), the Mongolian vowel separator and the Hangul fillers. The same
+    /// ranges as `is_invisible_format` in `src/push/detail.rs`; `NotificationContentComposerTests` fails if
+    /// this platform's Unicode database knows a format character this list does not.
+    static func isInvisibleFormat(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x00AD, 0x0600...0x0605, 0x061C, 0x06DD, 0x070F, 0x0890...0x0891, 0x08E2, 0x115F...0x1160,
+             0x180E, 0x200B, 0x200E...0x200F, 0x2028...0x202E, 0x2060...0x206F, 0x3164, 0xFEFF, 0xFFA0,
+             0xFFF9...0xFFFB, 0x110BD, 0x110CD, 0x13430...0x1343F, 0x1BCA0...0x1BCA3, 0x1D173...0x1D17A,
+             0xE0001, 0xE0020...0xE007F:
             return true
         default:
             return false

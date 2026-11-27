@@ -24,14 +24,14 @@ use crate::data::perri_queue::PrQueueItem;
 use crate::ipc::peer::SensitiveTags;
 use crate::ipc::uplink::PhiScope;
 use crate::mother::MotherJob;
-use crate::push::items::{ItemKey, Waiting};
+use crate::push::items::{Detail, Waiting};
 use crate::push::wire::HostClass;
 
 /// The longest line a notification gains, in characters.
 pub const MAX_TEXT_CHARS: usize = 140;
 
-/// The longest `item_ref` echoed back. Real refs are 16 hex characters.
-pub const MAX_ITEM_REF_BYTES: usize = 64;
+/// The longest `item_ref` echoed back, in characters. Real refs are 16 hex characters.
+pub const MAX_ITEM_REF_CHARS: usize = 64;
 
 /// What the engine kept about one item's text, and what decides whether it may
 /// leave. The deciding inputs are kept, not the verdict, so a PHI repository
@@ -53,17 +53,29 @@ pub struct ItemText {
     work_send: bool,
 }
 
-/// The first non-blank line of `text`, control characters removed, at most
-/// [`MAX_TEXT_CHARS`] characters (cut on a character boundary; the cut is marked
-/// with an ellipsis that counts toward the limit). `None` if nothing is left.
+/// The first non-blank line of `text`, as one printable line: lines end at `\n`, `\r`, VT, FF, NEL,
+/// U+2028 and U+2029 (the same characters the phone treats as line breaks, so no text is glued
+/// together by deleting a break); a tab is a space; control characters and invisible format
+/// characters are dropped; runs of spaces collapse. At most [`MAX_TEXT_CHARS`] characters, cut on a
+/// character boundary and never between a zero-width joiner and what it joins; the cut is marked with
+/// an ellipsis that counts toward the limit. `None` if nothing is left.
+///
+/// `tests/fixtures/push-detail/text_cases.json` is read by this function's tests and by the phone's
+/// `NotificationContentComposer.flattened`: the two must agree.
 pub fn first_line(text: &str) -> Option<String> {
     let line = text
-        .lines()
+        .split(is_line_break)
         .map(|l| {
             l.chars()
-                .map(|c| if matches!(c, '\t' | '\r') { ' ' } else { c })
+                .map(|c| if c == '\t' { ' ' } else { c })
                 .filter(|c| !c.is_control() && !is_invisible_format(*c))
                 .collect::<String>()
+        })
+        .map(|l| {
+            l.split(' ')
+                .filter(|w| !w.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
         })
         .map(|l| l.trim().to_string())
         .find(|l| !l.is_empty())?;
@@ -71,24 +83,57 @@ pub fn first_line(text: &str) -> Option<String> {
         return Some(line);
     }
     let mut cut: String = line.chars().take(MAX_TEXT_CHARS - 1).collect();
+    // No crate for grapheme clusters is vendored: back off a dangling joiner instead, so a cut never
+    // leaves `👨‍` (an emoji waiting for the rest of its sequence).
+    while cut.ends_with('\u{200D}') {
+        cut.pop();
+    }
     cut = cut.trim_end().to_string();
     cut.push('…');
     Some(cut)
 }
 
-/// Characters that draw nothing or change how the text around them reads: zero-width and
-/// bidirectional controls, line and paragraph separators, the byte-order mark.
+/// Where a line ends: LF, VT, FF, CR, NEL, line separator, paragraph separator.
+fn is_line_break(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\u{0B}' | '\u{0C}' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
+/// Characters that draw nothing or change how the text around them reads: every Unicode format
+/// character (category Cf) except the joiners, plus the tag block (a known way to hide ASCII text),
+/// the Mongolian vowel separator and the Hangul fillers. Written out because the standard library has
+/// no general category; `NotificationContentComposer.isInvisibleFormat` lists the same ranges, and the
+/// phone's tests fail if its Unicode database knows a format character this list does not.
 fn is_invisible_format(c: char) -> bool {
     // Joiners (U+200C, U+200D) stay: they belong to emoji sequences and Persian words.
     matches!(
-        c,
-        '\u{061C}'
-            | '\u{200B}'
-            | '\u{200E}'..='\u{200F}'
-            | '\u{2028}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{FEFF}'
+        c as u32,
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x115F..=0x1160
+            | 0x180E
+            | 0x200B
+            | 0x200E..=0x200F
+            | 0x2028..=0x202E
+            | 0x2060..=0x206F
+            | 0x3164
+            | 0xFEFF
+            | 0xFFA0
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
     )
 }
 
@@ -166,7 +211,6 @@ impl ItemText {
 
 /// The owner of the item's repository, as the item carries it.
 pub fn owner_of(item: &Waiting) -> Option<&str> {
-    use crate::push::items::Detail;
     match &item.detail {
         Detail::Mother { owner, .. } | Detail::Decision { owner, .. } => owner.as_deref(),
         Detail::Review { owner, .. } => owner.as_deref(),
@@ -189,7 +233,13 @@ pub fn text_for(
     if crate::push::host_class(cfg, &item.host) != HostClass::Personal {
         return None;
     }
-    // An unknown owner counts as a work owner.
+    // A decision that names no repository cannot be checked against the PHI repositories, so it is
+    // denied whoever its owner is (`ask_decision` always sets both, so this guards a future caller).
+    if matches!(&item.detail, Detail::Decision { repo: None, .. }) {
+        return None;
+    }
+    // An unknown owner counts as a work owner. A count-only attention item has no owner either, so
+    // this also keeps it text-less.
     let owner = owner_of(item).filter(|o| !o.is_empty())?;
     if cfg
         .resolved_work_owners()
@@ -198,16 +248,13 @@ pub fn text_for(
     {
         return None;
     }
-    // Count-only items have no source text, and never will.
-    if matches!(item.key, ItemKey::Attention { .. }) {
-        return None;
-    }
     text.line.clone()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::push::items::ItemKey;
 
     #[test]
     fn the_first_non_blank_line_is_taken_and_bounded() {
@@ -244,7 +291,7 @@ mod tests {
             item_ref: "0123456789abcdef".into(),
             host: "sendai".into(),
             start: None,
-            detail: crate::push::items::Detail::Mother {
+            detail: Detail::Mother {
                 job_ref: None,
                 reason: crate::push::items::MotherReason::Asked,
                 repo: Some("nostromo".into()),
@@ -284,5 +331,61 @@ mod tests {
     #[test]
     fn control_characters_never_survive() {
         assert_eq!(first_line("a\u{1b}[31mb\u{0}c"), Some("a[31mbc".into()));
+    }
+
+    #[test]
+    fn every_line_break_ends_the_line_and_is_never_deleted() {
+        for br in [
+            "\n", "\r", "\r\n", "\u{0B}", "\u{0C}", "\u{85}", "\u{2028}", "\u{2029}",
+        ] {
+            assert_eq!(
+                first_line(&format!("first{br}SECONDLINE")),
+                Some("first".into()),
+                "{br:?}"
+            );
+            assert_eq!(
+                first_line(&format!("{br}{br}  second{br}third")),
+                Some("second".into()),
+                "{br:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cut_never_leaves_a_dangling_zero_width_joiner() {
+        let (man, woman, girl) = ('\u{1F468}', '\u{1F469}', '\u{1F467}');
+        // 137 letters, the man, a joiner, the woman, a joiner, the girl: 142 characters. The first
+        // 139 end on the first joiner, which would leave the man waiting for the rest of his family.
+        let line = format!("{}{man}\u{200D}{woman}\u{200D}{girl}", "a".repeat(137));
+        assert_eq!(
+            first_line(&line),
+            Some(format!("{}{man}…", "a".repeat(137)))
+        );
+    }
+
+    #[test]
+    fn a_decision_that_names_an_owner_but_no_repository_has_no_text() {
+        let cfg = personal_cfg();
+        let sensitive = SensitiveTags::in_memory();
+        let mut item = waiting_with_owner("thehammer");
+        item.detail = Detail::Decision {
+            agent: crate::push::wire::AgentClass::Claudia,
+            choices: 2,
+            deadline: None,
+            presence: None,
+            repo: Some("nostromo".into()),
+            owner: Some("thehammer".into()),
+        };
+        let text = Capture::decision("focus", Some("nostromo"), "Ship it?");
+        assert_eq!(
+            text_for(&item, Some(&text), &cfg, &sensitive),
+            Some("Ship it?".into()),
+            "control: the same decision with its repository"
+        );
+        if let Detail::Decision { repo, .. } = &mut item.detail {
+            *repo = None;
+        }
+        let text = Capture::decision("focus", None, "Ship it?");
+        assert_eq!(text_for(&item, Some(&text), &cfg, &sensitive), None);
     }
 }

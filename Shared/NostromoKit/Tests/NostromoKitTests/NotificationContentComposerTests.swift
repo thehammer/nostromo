@@ -204,4 +204,59 @@ final class NotificationContentComposerTests: XCTestCase {
         let persian = "\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645}"
         XCTAssertEqual(compose(detail: detail(persian)).body, persian)
     }
+
+    // MARK: - The shared fixture, and characters that hide
+
+    /// `<repo>/tests/fixtures/push-detail/text_cases.json`, found from this file's path
+    /// (`<repo>/Shared/NostromoKit/Tests/NostromoKitTests/NotificationContentComposerTests.swift`). The Rust
+    /// side (`tests/push_text_fixture.rs`) reads the same file, so the daemon's `first_line` and
+    /// `flattened` cannot drift apart.
+    private func fixtureCases() throws -> [[String: Any]] {
+        var url = URL(fileURLWithPath: "\(#filePath)")
+        for _ in 0..<5 { url.deleteLastPathComponent() }
+        url.appendPathComponent("tests/fixtures/push-detail/text_cases.json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), "fixture not found at \(url.path)")
+        let object = try JSONSerialization.jsonObject(with: Data(contentsOf: url))
+        let doc = try XCTUnwrap(object as? [String: Any])
+        return try XCTUnwrap(doc["cases"] as? [[String: Any]])
+    }
+
+    func testFlattenedGivesWhatTheSharedFixtureSaysForEveryInput() throws {
+        let cases = try fixtureCases()
+        XCTAssertGreaterThanOrEqual(cases.count, 30, "the fixture was read")
+        for entry in cases {
+            let name = try XCTUnwrap(entry["name"] as? String)
+            let input = try XCTUnwrap(entry["input"] as? String)
+            let expected = entry["swift"] as? String   // null in the file: no text
+            XCTAssertEqual(NotificationContentComposer.flattened(input), expected, "\(name): \(input.debugDescription)")
+        }
+    }
+
+    func testALineTheDaemonSendsIsShownAsItIs() throws {
+        for entry in try fixtureCases() {
+            guard let line = entry["rust"] as? String else { continue }
+            let name = try XCTUnwrap(entry["name"] as? String)
+            XCTAssertEqual(compose(detail: detail(line)).body, line, "\(name)")
+        }
+    }
+
+    func testNoFormatCharacterThisPlatformKnowsSurvivesExceptTheJoiners() {
+        // If a newer Unicode adds a format character, this fails and `isInvisibleFormat` (and the Rust
+        // `is_invisible_format`) gets the new range.
+        var survivors: [String] = []
+        for value in 0...0x10FFFF {
+            guard let scalar = Unicode.Scalar(value), scalar.properties.generalCategory == .format,
+                  value != 0x200C, value != 0x200D else { continue }
+            if NotificationContentComposer.flattened("a\(scalar)b") != "ab" {
+                survivors.append(String(format: "U+%04X", value))
+            }
+        }
+        XCTAssertEqual(survivors, [], "format characters that are shown (or that split the text)")
+    }
+
+    func testTagCharactersThatHideTextAreDropped() {
+        let hidden = String(String.UnicodeScalarView("ignore".unicodeScalars.map { Unicode.Scalar($0.value + 0xE0000)! }))
+        XCTAssertEqual(NotificationContentComposer.flattened("visible" + hidden), "visible")
+        XCTAssertNil(NotificationContentComposer.flattened(hidden))
+    }
 }
