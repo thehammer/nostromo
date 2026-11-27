@@ -1666,25 +1666,23 @@ thread_local! {
     static BOUND: std::cell::RefCell<Vec<Captured>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Every capture that is live, whichever thread built it.
-static ACTIVE: Mutex<Vec<Captured>> = Mutex::new(Vec::new());
+/// Every capture that is live, whichever thread built it, with the tokio runtime it was
+/// opened inside, if any.
+static ACTIVE: Mutex<Vec<(Captured, Option<tokio::runtime::Id>)>> = Mutex::new(Vec::new());
 
-/// Where the process-wide subscriber writes an event: into the capture bound
-/// to the emitting thread; or, when that thread has none and is a helper thread
-/// (unnamed, as `std::thread::spawn` makes it, or one of tokio's `tokio-*`
-/// workers), into every live capture. A thread with any other name is another
-/// test's own thread (libtest names them after the test) and its lines are
-/// nobody's: they must not leak into this test's capture.
+/// Where the process-wide subscriber writes an event, by who emitted it:
+/// - a thread with a capture bound to it (the test's own thread): that capture;
+/// - else a thread inside a tokio runtime (a multi-thread worker, `spawn_blocking`):
+///   the captures opened inside that same runtime, so a worker's lines reach
+///   the test that owns the runtime and no other;
+/// - else an unnamed thread (`std::thread::spawn`): every live capture;
+/// - else (a thread with a name and no runtime: another test's own thread, which
+///   libtest names after the test): nobody's, so another test's lines never
+///   leak in.
 #[derive(Clone, Copy)]
 struct LogRouter;
 
 struct RouterWriter;
-
-fn is_helper_thread() -> bool {
-    std::thread::current()
-        .name()
-        .is_none_or(|name| name.starts_with("tokio-"))
-}
 
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogRouter {
     type Writer = RouterWriter;
@@ -1699,15 +1697,21 @@ impl Write for RouterWriter {
             .try_with(|b| b.borrow().last().cloned())
             .ok()
             .flatten();
-        match bound {
-            Some(mut own) => own.write_all(buf)?,
-            None if is_helper_thread() => {
-                let live = ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                for mut capture in live {
-                    capture.write_all(buf)?;
-                }
+        if let Some(mut own) = bound {
+            own.write_all(buf)?;
+            return Ok(buf.len());
+        }
+        let runtime = tokio::runtime::Handle::try_current().ok().map(|h| h.id());
+        let unnamed = std::thread::current().name().is_none();
+        let live = ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        for (mut capture, opened_in) in live {
+            let ours = match runtime {
+                Some(id) => opened_in == Some(id),
+                None => unnamed,
+            };
+            if ours {
+                capture.write_all(buf)?;
             }
-            None => {}
         }
         Ok(buf.len())
     }
@@ -1749,13 +1753,14 @@ impl Drop for CaptureGuard {
         ACTIVE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|c| !Arc::ptr_eq(&c.0, &self.captured.0));
+            .retain(|(c, _)| !Arc::ptr_eq(&c.0, &self.captured.0));
     }
 }
 
 /// Capture every tracing event (TRACE and up) the test makes until the guard
-/// drops: the events of the calling thread, and the ones emitted on a helper
-/// thread (see [`LogRouter`]).
+/// drops: the events of the calling thread, those of a tokio runtime this was
+/// called inside (its workers and blocking threads), and those of unnamed
+/// threads (see [`LogRouter`]).
 ///
 /// A scoped subscriber (`set_default`) is thread-local, so a line logged from
 /// another thread (a multi-thread runtime's worker, `spawn_blocking`) was lost
@@ -1763,22 +1768,21 @@ impl Drop for CaptureGuard {
 /// another test's subscriber is being built or dropped can be cached as
 /// disabled for a later capture ("the feature logged something" failed about 1
 /// in 100 whole-binary runs under load). So the subscriber is one process-wide
-/// [`install_log_router`]: always interested, routing each event to the
-/// capture bound to its thread. Under nextest (one process per test) the only
-/// live capture is the test's own, so a helper thread's line is always its
-/// own. Under libtest (tests share the process) a helper thread's line cannot
-/// be told from another test's helper and goes to every live capture, but a
-/// line from a test thread never crosses to another test.
+/// [`install_log_router`]: always interested, routing each event as the
+/// router says. Tests in one libtest process never receive each other's lines
+/// from a test thread or a runtime; only an unnamed `std::thread` of another
+/// test could reach every live capture, and under nextest (one process per test)
+/// there is no other test.
 ///
 /// Call it on the thread that drives the engine.
 pub fn capture_logs() -> (Captured, CaptureGuard) {
     install_log_router();
     let captured = Captured::default();
     BOUND.with(|b| b.borrow_mut().push(captured.clone()));
-    ACTIVE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(captured.clone());
+    ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).push((
+        captured.clone(),
+        tokio::runtime::Handle::try_current().ok().map(|h| h.id()),
+    ));
     (captured.clone(), CaptureGuard { captured })
 }
 

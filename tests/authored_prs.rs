@@ -1251,17 +1251,22 @@ fn a_line_logged_from_another_thread_is_captured() {
 /// off the test thread.
 #[test]
 fn a_line_logged_on_a_multi_thread_runtimes_worker_is_captured() {
-    let (log, _guard) = capture_logs();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .build()
         .unwrap();
-    rt.block_on(async {
+    let text = rt.block_on(async {
+        let (log, _guard) = capture_logs();
         tokio::spawn(async { tracing::info!("on-a-runtime-worker") })
             .await
             .unwrap();
+        tokio::task::spawn_blocking(|| tracing::info!("on-a-blocking-thread"))
+            .await
+            .unwrap();
+        log.text()
     });
-    assert!(log.text().contains("on-a-runtime-worker"), "{}", log.text());
+    assert!(text.contains("on-a-runtime-worker"), "{text}");
+    assert!(text.contains("on-a-blocking-thread"), "{text}");
 }
 
 /// Two tests that share a process (libtest) each see their own lines and not
@@ -1282,10 +1287,21 @@ fn a_capture_never_sees_the_lines_another_tests_thread_logs() {
             log.text()
         })
         .unwrap();
-    // A third test that does not capture at all.
+    // A third test that does not capture at all, one of them on a runtime of its own.
     let bystander = std::thread::Builder::new()
         .name("a-test-that-does-not-capture".into())
-        .spawn(|| tracing::info!("line-from-a-bystander"))
+        .spawn(|| {
+            tracing::info!("line-from-a-bystander");
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                tokio::spawn(async { tracing::info!("line-from-a-bystanders-worker") })
+                    .await
+                    .unwrap();
+            });
+        })
         .unwrap();
 
     let (log, _guard) = capture_logs();
@@ -1299,6 +1315,7 @@ fn a_capture_never_sees_the_lines_another_tests_thread_logs() {
     assert!(mine.contains("line-from-this-test"), "{mine}");
     assert!(!mine.contains("line-from-the-other-test"), "{mine}");
     assert!(!mine.contains("line-from-a-bystander"), "{mine}");
+    assert!(!mine.contains("line-from-a-bystanders-worker"), "{mine}");
     assert!(theirs.contains("line-from-the-other-test"), "{theirs}");
     assert!(!theirs.contains("line-from-this-test"), "{theirs}");
 }
