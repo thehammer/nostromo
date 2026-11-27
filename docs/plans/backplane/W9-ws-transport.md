@@ -687,7 +687,7 @@ Technical criteria:
 - [ ] **W9-22** D4: `PairCheck` never uses up a code, a wrong `PairCheck` counts toward
   the lockout, and expiry or cancel between check and `Pair` gives
   `PairRefused { expired }` / `{ invalid }` (test (t)).
-- [ ] **W9-23** Q2 (PRD AC56): no `TeriState`, `FredState` or work frame reaches a
+- [ ] **W9-23** Q2 (pairing-PRD AC56): no `TeriState`, `FredState` or work frame reaches a
   `Paired` peer, the withheld reason is `not_shared`, there is no
   mail-and-todos verb, flag, config key or frame field, and the CLI prints
   only "Mail, calendar and todos aren't shared from your Macs in this
@@ -760,7 +760,7 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   only an ordinary `DeviceUnpairSelf`.
 - Enforcing the `revoke_only` level for relayed admin verbs (W10) and its Mac
   UI (W15).
-- Any way to share mail, calendar or todos with a device (Q2, PRD AC56): no
+- Any way to share mail, calendar or todos with a device (Q2, pairing-PRD AC56): no
   flag, key, verb or field in v1; opening it up is a later wedge.
 - Widening what a `Paired` device may *do* (it gets the `Tcp` allow-list
   plus `DeviceUnpairSelf`, and W13's self-scoped push verbs later). Per bet

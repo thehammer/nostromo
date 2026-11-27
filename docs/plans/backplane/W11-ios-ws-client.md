@@ -149,7 +149,7 @@ older body text, this section wins. Nothing here waits on anyone any more.
   a failure*, `cost_cap` → *paused at its spend cap*, `activity`
   `pipeline_blocked` → *pipeline blocked*, anything else → *needs you*. Criterion W11-20.
 - **Operator Q2: mail, calendar and todos stay home in v1, with no way to
-  turn sharing on** (PRD AC56). This wedge builds **no** per-device scope:
+  turn sharing on** (pairing-PRD AC56). This wedge builds **no** per-device scope:
   no `sensitive` in the credential, cache or store, no `device_scope`
   handling, and the cache never holds Fred or Teri data. Final v1 copy (the
   PRD's "Final v1 copy" table): the Fred tab, the Teri tab and device
@@ -518,7 +518,7 @@ Technical criteria:
   `tests/fixtures/push-vocab/reason_phrases.json`), with marker strings in
   title, question, branch, repository and session name appearing nowhere;
   the card says "Details stay on kobe." with no content request.
-- [ ] **W11-21** Q2 (PRD AC56 and the "Final v1 copy" table): the Fred tab, Teri tab
+- [ ] **W11-21** Q2 (pairing-PRD AC56 and the "Final v1 copy" table): the Fred tab, Teri tab
   and Settings show exactly "Mail, calendar and todos stay on your Mac in this
   version."; no other iOS string mentions mail, calendar or todos (an
   `ios_policy` string scan); no control or setting can turn sharing on.

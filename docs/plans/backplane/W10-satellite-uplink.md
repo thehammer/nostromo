@@ -558,7 +558,7 @@ Memo, "Decision log 2026-11-23". What changes here:
     reaches a live uplink by closing it with 1012 and re-admitting it
     (2026-11-24 section, item 9).
 - **Q2: mail, calendar and todos stay home in v1, on every host, with no
-  way to turn sharing on** (PRD AC56). This wedge **does not build**
+  way to turn sharing on** (pairing-PRD AC56). This wedge **does not build**
   `uplink.publish_sensitive`: no satellite ever publishes `TeriState`,
   `FredState`, `Work*` or `TeriPicks` upstream, on either profile, so they
   never reach Tokyo's memory or retained cache either. Reason recorded in the
@@ -1030,7 +1030,7 @@ the operator's own host.
   and a reconnecting client receives both.
 - [ ] **W10-8** `personal` withholds exactly the frames
   `peer::may_receive(PeerTrust::Tcp, …)` would withhold, which includes every
-  Teri, Fred and work frame, and no config key changes that (Q2, PRD AC56).
+  Teri, Fred and work frame, and no config key changes that (Q2, pairing-PRD AC56).
   `work` and PHI-scoped frames follow `redact_for_uplink_metadata`.
 - [ ] **W10-9** With the uplink unreachable, the satellite's Unix-socket clients see no
   behaviour change other than a `Hosts`-style status frame indicating
