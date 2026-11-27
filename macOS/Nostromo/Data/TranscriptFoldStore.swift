@@ -222,7 +222,8 @@ final class TranscriptFoldStore {
 
     private static let log = Logger(subsystem: "com.hammer.nostromo.mac", category: "TranscriptFoldStore")
 
-    private let fileURL: URL
+    /// The file this store persists to (internal: tests assert the shared one lives in `NostromoHome`).
+    let fileURL: URL
     private let defaults: UserDefaults
     private let scheduler: WorkScheduler
     private let now: () -> Date

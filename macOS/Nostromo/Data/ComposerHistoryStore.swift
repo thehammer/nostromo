@@ -155,7 +155,8 @@ final class ComposerHistoryStore {
         var entries: [String]
     }
 
-    private let directory: URL
+    /// The history directory (internal: tests assert the shared store lives in `NostromoHome`).
+    let directory: URL
     private let persists: Bool
     private let sensitivity: FocusSensitivityProviding
     private let scheduler: WorkScheduler

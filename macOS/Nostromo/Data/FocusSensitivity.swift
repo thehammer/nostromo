@@ -24,12 +24,13 @@ final class FocusSensitivity: FocusSensitivityProviding {
         entriesChanged: ConversationHistoryStore.shared.changes.eraseToAnyPublisher(),
         known: { ConversationHistoryStore.shared.sensitivityKnown },
         knownChanged: ConversationHistoryStore.shared.knownChanges.eraseToAnyPublisher(),
-        marksDirectory: persistsMarks ? ComposerHistoryStore.sharedDirectory : nil)
+        marksDirectory: sharedMarksDirectory)
 
-    /// Not under XCTest: a test that sends a work item through `SendToAgentSheet` would otherwise write marks
-    /// into the real `~/.nostromo` (the repo's other on-disk stores gate on the same class lookup).
-    private static var persistsMarks: Bool {
-        ComposerHistoryStore.persistsAcrossRelaunch && NSClassFromString("XCTestCase") == nil
+    /// Where the shared instance keeps its marks: the history store's directory, which `NostromoHome` puts inside
+    /// the per-process temporary home under XCTest, so a test that sends a work item through `SendToAgentSheet`
+    /// never writes marks into the real `~/.nostromo`.
+    static var sharedMarksDirectory: URL? {
+        ComposerHistoryStore.persistsAcrossRelaunch ? ComposerHistoryStore.sharedDirectory : nil
     }
 
     static let marksFileName = "sensitive-marks.v1.json"

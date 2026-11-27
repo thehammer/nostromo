@@ -15,7 +15,8 @@ final class FocusStore {
     /// `FileWatchers.shared.thresholdEvents`.
     let focusRemovals = PassthroughSubject<Focus, Never>()
 
-    private let storageURL: URL
+    /// The `focuses.json` this store persists to (internal: tests assert the shared one lives in `NostromoHome`).
+    let storageURL: URL
 
     /// Where the last welcome's disabled-agent set is cached (`[String]`), so a
     /// launch does not flash hidden agents before the first welcome arrives.

@@ -293,7 +293,7 @@ class AppStore: ObservableObject {
     /// The Perri state directory (sentinels and the PR cache). Settable so
     /// tests can point it away from the real home.
     var perriStateDirectory: String =
-        "\(FileManager.default.homeDirectoryForCurrentUser.path)/.claude/state/perri"
+        "\(NostromoHome.userHome.path)/.claude/state/perri"
 
     /// The Jira site (bare host) the daemon reported on its last `perri_state`
     /// frame; nil when none is configured. Nothing reads it yet.

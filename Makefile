@@ -56,6 +56,7 @@ python-test:
 	python3 -m unittest discover -s tests/mother_contract -v
 	python3 -m unittest discover -s tests/mother_policy -v
 	python3 -m unittest discover -s tests/hit_test_policy -v
+	python3 -m unittest discover -s tests/state_path_policy -v
 	python3 -m unittest discover -s tests/app_control -v
 	python3 -m unittest discover -s tests/qa_instance -v
 	python3 -m unittest discover -s tests/launch_smoke -v
@@ -73,7 +74,7 @@ python-test:
 ## slow for the extra targets; tests/gates/test_python_test_split.py fails if the recipe and the
 ## two lists ever disagree, so nothing can drop out. The `-par` targets run a list in parallel
 ## (scripts/python-test-parallel.sh, PY_JOBS=4 by default); each suite's output is printed whole.
-PY_FAST_SUITES := tests/transcript_load tests/doctor tests/doctor_preflight tests/ios_policy tests/hit_test_policy tests/app_control tests/launch_smoke scripts/tracker/tests tests/gates tests/restart_guard
+PY_FAST_SUITES := tests/transcript_load tests/doctor tests/doctor_preflight tests/ios_policy tests/hit_test_policy tests/state_path_policy tests/app_control tests/launch_smoke scripts/tracker/tests tests/gates tests/restart_guard
 PY_SLOW_SUITES := tests/fake_mother tests/fake_claude_perm tests/mother_contract tests/mother_policy tests/qa_instance tests/ci_policy tests/operator_pin tests/ci_remote tests/mac_shards scripts/qa/tests
 
 python-test-fast:

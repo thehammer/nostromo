@@ -664,7 +664,7 @@ final class MotherJobDetail: NSView {
     }
 
     init(host: MotherJobDetailHost,
-         logDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+         logDirectory: URL = NostromoHome.userHome
              .appendingPathComponent(".mother/logs", isDirectory: true),
          frame: NSRect = .zero) {
         self.host = host

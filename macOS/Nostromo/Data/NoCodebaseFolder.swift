@@ -63,7 +63,7 @@ enum NoCodebaseFolder {
     /// ignores the QA launcher's `HOME`).
     static func root(env: [String: String] = ProcessInfo.processInfo.environment,
                      bundleID: String? = Bundle.main.bundleIdentifier,
-                     realHome: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
+                     realHome: URL = NostromoHome.userHome) -> URL {
         if NostromoHome.isQAInstance(bundleID: bundleID), let v = env[environmentKey], !v.isEmpty {
             return URL(fileURLWithPath: v, isDirectory: true)
         }
@@ -74,7 +74,7 @@ enum NoCodebaseFolder {
     /// anything is created except the root itself (made 0700 when missing); a failure leaves no folder behind.
     static func create(root: URL = NoCodebaseFolder.root(),
                        home: URL = NostromoHome.current,
-                       codeRoot: URL = CodeRoot.resolve(),
+                       codeRoot: URL = CodeRoot.resolve(home: NostromoHome.userHome),
                        makeID: () -> String = { UUID().uuidString }) -> Result<URL, Failure> {
         let fm = FileManager.default
         var isDir: ObjCBool = false

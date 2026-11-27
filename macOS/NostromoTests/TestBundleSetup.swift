@@ -1,5 +1,6 @@
 import AppKit
 import ObjectiveC
+import XCTest
 
 /// The test bundle's principal class (`INFOPLIST_KEY_NSPrincipalClass` on the NostromoTests target). XCTest
 /// instantiates it once, before any test runs.
@@ -52,6 +53,10 @@ final class TestBundleSetup: NSObject {
         let suite = "nostromo.tests.authoredPrsFilter"
         UserDefaults().removePersistentDomain(forName: suite)
         if let defaults = UserDefaults(suiteName: suite) { AuthoredPrsFilterStore.defaults = defaults }
+        // The operator's real ~/.nostromo is watched for the whole run (`RealNostromoGuard`), and the temporary
+        // home every `NostromoHome` path resolves to under tests is removed when the run ends.
+        RealNostromoGuard.recordBaseline()
+        XCTestObservationCenter.shared.addTestObserver(TestHomeCleanup())
         return true
     }()
 

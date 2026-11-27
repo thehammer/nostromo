@@ -270,7 +270,7 @@ final class ConversationHistoryStore {
 extension ConversationHistoryStore {
     /// A regular `.jsonl` file that really lives under `~/.claude/projects` (symlinks resolved): the
     /// only thing Show Transcript in Finder will reveal.
-    static func isShowableTranscript(_ path: String, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
+    static func isShowableTranscript(_ path: String, home: URL = NostromoHome.userHome) -> Bool {
         let url = URL(fileURLWithPath: path)
         guard url.pathExtension == "jsonl" else { return false }
         let projects = home.appendingPathComponent(".claude/projects").resolvingSymlinksInPath().path + "/"

@@ -97,7 +97,7 @@ class MainLayout: NSView {
     private var overflowCapturePending = false
 
     private var effectiveCaptureDirectory: URL? {
-        overflowCaptureDirectory ?? (NSClassFromString("XCTestCase") == nil ? OverflowCapture.defaultDirectory : nil)
+        overflowCaptureDirectory ?? (NostromoHome.isRunningUnderTests ? nil : OverflowCapture.defaultDirectory)
     }
 
     /// The newest capture file of this window, for `nostromo-app windows` (`overflowCapture`).
