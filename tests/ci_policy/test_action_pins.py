@@ -28,6 +28,10 @@ from test_linux_runner_pin import workflow_files
 ROOT = Path(__file__).resolve().parents[2]
 USES_LINE = re.compile(r"^[ \t]*(?:-[ \t]+)?uses:[ \t]*(?P<value>[^\s#]+)(?:[ \t]+#[ \t]*(?P<comment>.*?))?[ \t]*$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
+# What the trailing comment must start with: a release (`v4.4.0`) or, for an action with no
+# release tags, `master`.
+COMMENT = re.compile(r"^(v\d+(\.\d+)*\S*|master\b.*)$")
+ANY_USES = re.compile(r"\buses[ \t]*:")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -38,7 +42,9 @@ def violations(name, text):
             continue
         m = USES_LINE.match(line)
         if not m:
-            if re.match(r"^[ \t]*(?:-[ \t]+)?uses:", line):
+            # Anything that mentions `uses:` but is not the plain `uses: ref` form (flow style
+            # `- {uses: a/b@v1}`, an empty value) is refused: it cannot be checked.
+            if ANY_USES.search(line.split("#", 1)[0]):
                 out.append(f"{name}:{n}: unreadable `uses:` line {line.strip()!r}")
             continue
         value, comment = m.group("value").strip("'\""), m.group("comment")
@@ -52,8 +58,8 @@ def violations(name, text):
         _, at, ref = value.partition("@")
         if not at or not SHA.match(ref):
             out.append(f"{where} is not pinned to a full 40-character commit SHA")
-        elif not comment:
-            out.append(f"{where} has no trailing `# vX.Y.Z` comment naming the release")
+        elif not comment or not COMMENT.match(comment):
+            out.append(f"{where} needs a trailing `# vX.Y.Z` comment naming the release (or `# master` for an action with no releases), found {comment!r}")
     return out
 
 
@@ -64,7 +70,7 @@ class ActionPinTests(unittest.TestCase):
         found, out = 0, []
         for f in files:
             text = f.read_text()
-            found += len(re.findall(r"(?m)^[ \t]*(?:-[ \t]+)?uses:", text))
+            found += sum(1 for l in text.splitlines() if ANY_USES.search(l.split("#", 1)[0]))
             out += violations(f.name, text)
         self.assertGreater(found, 0)
         self.assertEqual(out, [])
@@ -117,6 +123,18 @@ class ActionPinBitesTests(unittest.TestCase):
 
     def test_an_unreadable_uses_line_fails_closed(self):
         self.assertTrue(violations("x", "      - uses:\n"))
+
+    def test_flow_style_uses_is_refused(self):
+        self.assertTrue(violations("x", "      - {uses: actions/checkout@v4}\n"))
+        self.assertTrue(violations("x", "      - { name: x, uses: a/b@main }\n"))
+        self.assertTrue(violations("x", f"      - {{uses: a/b@{self.SHA_A}}} # v1\n"))
+
+    def test_the_comment_must_name_a_release(self):
+        self.assertTrue(violations("x", self.line(f"a/b@{self.SHA_A}", " # nope")))
+        self.assertTrue(violations("x", self.line(f"a/b@{self.SHA_A}", " # x")))
+        self.assertEqual(violations("x", self.line(f"a/b@{self.SHA_A}", " # v2.90.8")), [])
+        self.assertEqual(violations("x", self.line(f"a/b@{self.SHA_A}", " # v1")), [])
+        self.assertEqual(violations("x", self.line(f"a/b@{self.SHA_A}", " # master 2026-11-15 (no release tags)")), [])
 
 
 if __name__ == "__main__":

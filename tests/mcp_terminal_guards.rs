@@ -2507,7 +2507,7 @@ fn strip_osc_removes_bel_and_string_terminated_sequences_and_nothing_else() {
 }
 
 #[test]
-fn the_private_home_makes_the_login_shell_print_osc_markers_before_probe_output() {
+fn the_private_home_rc_files_arm_bash_and_zsh_to_print_osc_markers() {
     let dir = TempDir::new().expect("tempdir");
     write_osc_context_rc_files(dir.path());
     let bashrc = std::fs::read_to_string(dir.path().join(".bashrc")).expect(".bashrc");

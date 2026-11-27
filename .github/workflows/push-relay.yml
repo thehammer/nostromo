@@ -59,7 +59,9 @@ jobs:
           relay=true
           if [ "$EVENT_NAME" = pull_request ] && git rev-parse --verify --quiet 'HEAD^2' >/dev/null \
              && files=$(git diff --no-renames --name-only 'HEAD^1' HEAD) && [ -n "$files" ]; then
-            if ! printf '%s\n' "$files" | grep -qE '^(infra/push-relay/|\.github/workflows/push-relay\.yml$)'; then
+            # A here-string, not `printf | grep -q`: under GitHub's `bash -eo pipefail` the early exit of
+            # `grep -q` on a long list kills printf with SIGPIPE and `!` would then read "no match".
+            if ! grep -qE '^(infra/push-relay/|\.github/workflows/push-relay\.yml$)' <<< "$files"; then
               relay=false
             fi
           fi

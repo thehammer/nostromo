@@ -41,6 +41,11 @@ CHECK_NAME = "Push relay (fmt, clippy, tests)"
 CLIPPY = "cargo clip" + "py"  # spelled in two parts so a repo-wide grep for the tool finds only real uses
 
 
+# The relay job's gate, spelled once: skipped (counts as passed) only when `changes` succeeded and
+# found nothing, never when cancelled, and run when `changes` failed.
+RELAY_IF = "${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.relay == 'true') }}"
+
+
 def pinned_channel(toolchain_toml):
     m = re.search(r'^\s*channel\s*=\s*"([^"]+)"', toolchain_toml, re.M)
     return m.group(1) if m else None
@@ -48,13 +53,20 @@ def pinned_channel(toolchain_toml):
 
 def violations(text, channel):
     out = []
-    for needed in ("cargo fmt --check", f"{CLIPPY} --all-targets -- -D warnings", "cargo test"):
-        if needed not in text:
-            out.append(f"the workflow never runs `{needed}`")
-    if "--no-default-features" not in text:
-        out.append("the handler-only build (--no-default-features) is not exercised")
+    blocks = d._job_blocks(text)
+    relay = blocks.get("push-relay")
+    # The commands must be real commands of the relay job (an `echo cargo fmt` or a command in
+    # another job does not count).
+    commands = []
+    for line in (relay or "").splitlines():
+        commands.append(re.sub(r"^\s*(?:- )?(?:run:\s*)?", "", line))
+    for needed in ("cargo fmt --check", f"{CLIPPY} --all-targets -- -D warnings", f"{CLIPPY} --all-targets --no-default-features -- -D warnings", "cargo test", "cargo test --no-default-features"):
+        if not any(c.startswith(needed) for c in commands):
+            out.append(f"the relay job never runs `{needed}`")
     if not re.search(r"working-directory:\s*infra/push-relay\b", text):
         out.append("steps do not run in infra/push-relay")
+    if re.search(r"(?m)^\s*continue-on-error:\s*(?!false\b)", text):
+        out.append("no step or job may set continue-on-error: a failure would not fail the check")
 
     on = d._top_level_block(text, "on") or []
     triggers = {m.group(1) for l in on if (m := re.match(r"^  ([a-z_]+):", l))}
@@ -64,10 +76,8 @@ def violations(text, channel):
     if any(re.match(r"^\s+paths(-ignore)?:", l) for l in on):
         out.append("a `paths:` filter stops the workflow from reporting, so it can never be a required check")
 
-    blocks = d._job_blocks(text)
     if "changes" not in blocks:
         out.append("no `changes` job to decide whether the relay job is needed")
-    relay = blocks.get("push-relay")
     if relay is None:
         out.append("no `push-relay` job")
     else:
@@ -76,13 +86,9 @@ def violations(text, channel):
             out.append(f"the relay job's name must be the literal {CHECK_NAME!r}, found {name!r}")
         if not re.search(r"(?m)^    needs:\s*(\[\s*changes\s*\]|changes)\s*$", relay):
             out.append("the relay job must need `changes`")
-        cond = d._job_level(relay, "if") or ""
-        if "!cancelled()" not in cond:
-            out.append("the relay job's `if:` must start from `!cancelled()`")
-        if "needs.changes.result != 'success'" not in cond:
-            out.append("the relay job must run when `changes` did not succeed (fail closed)")
-        if "needs.changes.outputs.relay == 'true'" not in cond:
-            out.append("the relay job must run when `changes` says the relay changed")
+        cond = re.sub(r"\s+", " ", d._job_level(relay, "if") or "")
+        if cond != RELAY_IF:
+            out.append(f"the relay job's `if:` must be exactly {RELAY_IF!r} (skip only when `changes` succeeded and found nothing; fail closed), found {cond!r}")
 
     toolchains = tc.toolchain_versions(f'[toolchain]\nchannel = "{channel}"\n', text, "")[1]
     if not toolchains:
@@ -119,7 +125,7 @@ jobs:
   push-relay:
     name: {CHECK_NAME}
     needs: changes
-    if: ${{{{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.relay == 'true') }}}}
+    if: {RELAY_IF}
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -132,6 +138,7 @@ jobs:
       - run: {CLIPPY} --all-targets -- -D warnings
       - run: {CLIPPY} --all-targets --no-default-features -- -D warnings
       - run: cargo test
+      - run: cargo test --no-default-features
 """
 
 PATHS = '    paths:\n      - "infra/push-relay/**"\n'
@@ -175,13 +182,30 @@ class PushRelayWorkflowTests(unittest.TestCase):
         self.assertTrue(violations(no_if, "1.100.0"))
         self.assertTrue(violations(GOOD.replace("  changes:\n", "  classify:\n").replace("needs: changes", "needs: classify"), "1.100.0"))
 
-    def test_bites_when_a_failed_changes_job_would_skip_the_relay_check(self):
-        bad = GOOD.replace("needs.changes.result != 'success' || ", "")
-        self.assertTrue(any("fail closed" in v for v in violations(bad, "1.100.0")))
-        bad = GOOD.replace("!cancelled() && ", "")
-        self.assertTrue(any("!cancelled()" in v for v in violations(bad, "1.100.0")))
-        bad = GOOD.replace("needs.changes.outputs.relay == 'true'", "needs.changes.outputs.relay == 'false'")
-        self.assertTrue(any("relay changed" in v for v in violations(bad, "1.100.0")))
+    def test_bites_when_the_relay_if_is_edited_in_any_way(self):
+        for label, bad in (
+            ("fail-open (no result test)", GOOD.replace("needs.changes.result != 'success' || ", "")),
+            ("always() for !cancelled()", GOOD.replace("!cancelled()", "always()")),
+            ("no !cancelled()", GOOD.replace("!cancelled() && ", "")),
+            ("AND for OR", GOOD.replace("'success' || needs", "'success' && needs")),
+            ("always skipped", GOOD.replace("(needs.changes.result", "false && (needs.changes.result")),
+            ("extra condition", GOOD.replace(" }}\n    runs-on", " && github.event_name == 'x' }}\n    runs-on", 1)),
+            ("inverted output", GOOD.replace("relay == 'true'", "relay == 'false'")),
+        ):
+            with self.subTest(label=label):
+                self.assertNotEqual(bad, GOOD)
+                self.assertTrue(any("`if:`" in v for v in violations(bad, "1.100.0")), label)
+        spaced = GOOD.replace("!cancelled() &&", "!cancelled()   &&")
+        self.assertEqual(violations(spaced, "1.100.0"), [])
+
+    def test_bites_when_a_command_is_not_really_run_by_the_relay_job(self):
+        self.assertTrue(violations(GOOD.replace("- run: cargo fmt --check", "- run: echo cargo fmt --check"), "1.100.0"))
+        moved = GOOD.replace("      - run: cargo test\n      - run: cargo test --no-default-features\n", "").replace(
+            "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
+            "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n      - run: cargo test\n      - run: cargo test --no-default-features\n", 1)
+        self.assertNotEqual(moved, GOOD)
+        self.assertTrue(violations(moved, "1.100.0"))
+        self.assertTrue(violations(GOOD.replace("      - run: cargo fmt --check\n", "      - run: cargo fmt --check\n        continue-on-error: true\n"), "1.100.0"))
 
     def test_bites_on_a_moving_toolchain_or_runner(self):
         self.assertTrue(violations(GOOD.replace("df2a88e9fe4098bad09cb42c3dec7187f15861fc", "stable"), "1.100.0"))
@@ -243,7 +267,8 @@ def classify(script, event, changed, merge=True):
             git("add", "-A")
             git("commit", "-q", "-m", "push")
         out_file = Path(tmp) / "output"
-        run = subprocess.run(["bash", "-e", "-c", script], cwd=repo, capture_output=True, text=True,
+        # GitHub runs `run:` steps as `bash --noprofile --norc -eo pipefail {0}`.
+        run = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script], cwd=repo, capture_output=True, text=True,
                              env={**env, "EVENT_NAME": event, "GITHUB_OUTPUT": str(out_file)})
         assert run.returncode == 0, run.stderr
         return out_file.read_text().strip()
@@ -264,6 +289,12 @@ class PushRelayChangesClassifierTests(unittest.TestCase):
 
     def test_a_pull_request_touching_the_workflow_file_runs_it(self):
         self.assertEqual(classify(self.script, "pull_request", [".github/workflows/push-relay.yml"]), "relay=true")
+
+    def test_a_very_long_changed_file_list_still_finds_the_relay(self):
+        # Past the 64 KB pipe buffer an early-exiting `grep -q` fed by `printf |` kills printf with
+        # SIGPIPE, and under `pipefail` a negated pipeline then reads as "no match".
+        many = [f"docs/generated/{'x' * 60}-{i:04d}.md" for i in range(1500)]  # about 115 KB of names
+        self.assertEqual(classify(self.script, "pull_request", [".github/workflows/push-relay.yml", *many]), "relay=true")
 
     def test_a_lookalike_path_does_not_run_it(self):
         self.assertEqual(classify(self.script, "pull_request", ["infra/push-relay-docs/a.md", "x/infra/push-relay/a"]), "relay=false")
