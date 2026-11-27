@@ -70,7 +70,7 @@ fn ready_pr(number: u64) -> FakePr {
 
 /// Capture this test's log lines (see `capture_logs` for why a process-wide
 /// subscriber backs it).
-fn logs() -> (Captured, tracing::subscriber::DefaultGuard) {
+fn logs() -> (Captured, CaptureGuard) {
     capture_logs()
 }
 

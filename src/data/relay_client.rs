@@ -826,6 +826,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_token_is_never_logged() {
+        crate::test_log::install_global_capture();
         let captured = Captured::default();
         let writer = captured.clone();
         let subscriber = tracing_subscriber::fmt()
@@ -860,6 +861,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_event_log_line_names_only_the_event_type() {
+        crate::test_log::install_global_capture();
         let captured = Captured::default();
         let writer = captured.clone();
         let subscriber = tracing_subscriber::fmt()

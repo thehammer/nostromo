@@ -249,17 +249,9 @@ impl Drop for Env {
 /// `board`: the PR list is on; `actions`: the hand-off verbs are wired too.
 async fn env_with(board: bool, actions: bool) -> Env {
     install_stub_claude();
-    // Tests that capture the log (per thread) must not race the tests that do
-    // not: with a process-wide subscriber every callsite stays enabled.
-    static GLOBAL_LOG: std::sync::Once = std::sync::Once::new();
-    GLOBAL_LOG.call_once(|| {
-        let _ = tracing::subscriber::set_global_default(
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::TRACE)
-                .with_writer(std::io::sink)
-                .finish(),
-        );
-    });
+    // Tests that capture the log must not race the tests that do not: the
+    // process-wide subscriber keeps every callsite enabled.
+    rig::install_log_router();
     let tmp = TempDir::new().expect("tempdir");
     let work = unique_folder(tmp.path());
     let new_folder = unique_folder(tmp.path());

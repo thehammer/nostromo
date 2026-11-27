@@ -1162,6 +1162,7 @@ impl Captured {
 
 #[tokio::test]
 async fn nothing_the_tracker_logs_at_trace_or_audits_carries_a_repo_title_or_command_output() {
+    crate::test_log::install_global_capture();
     let captured = Captured::default();
     let writer = captured.clone();
     let subscriber = tracing_subscriber::fmt()

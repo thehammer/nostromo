@@ -478,6 +478,7 @@ pub fn candidates(
 /// (a hung mount under the home directory, `/Network`, `/Volumes`) means no candidates, so
 /// the broker's single worker cannot stall on an agent-chosen path.
 pub fn candidates_within(
+    slots: &HelperCount,
     timeout: std::time::Duration,
     req: &PermissionRequest,
     reason: &Reason,
@@ -490,7 +491,7 @@ pub fn candidates_within(
         home.to_path_buf(),
         cwd.map(Path::to_path_buf),
     );
-    bounded(timeout, move || {
+    bounded_in(slots, timeout, move || {
         candidates(&req, &reason, &home, cwd.as_deref())
     })
     .unwrap_or_default()
@@ -547,6 +548,7 @@ pub(super) fn spec_covers(
 /// [`matches`], but a file system that does not answer within `timeout` (a hung network
 /// mount under `/Volumes`) counts as no match, so the broker's single worker cannot stall.
 pub fn matches_within(
+    slots: &HelperCount,
     timeout: std::time::Duration,
     rule: &SessionRule,
     req: &PermissionRequest,
@@ -555,6 +557,7 @@ pub fn matches_within(
     cwd: Option<&Path>,
 ) -> bool {
     first_match_within(
+        slots,
         timeout,
         std::slice::from_ref(rule),
         req,
@@ -569,6 +572,7 @@ pub fn matches_within(
 /// `timeout` (so 32 rules on a slow mount stall the worker once, not 32 times); `None` on
 /// no match or on a timeout.
 pub fn first_match_within(
+    slots: &HelperCount,
     timeout: std::time::Duration,
     rules: &[SessionRule],
     req: &PermissionRequest,
@@ -582,7 +586,7 @@ pub fn first_match_within(
         home.to_path_buf(),
         cwd.map(Path::to_path_buf),
     );
-    bounded(timeout, move || {
+    bounded_in(slots, timeout, move || {
         rules
             .into_iter()
             .find(|r| matches(r, &req, reason_kind, &home, cwd.as_deref()))
@@ -782,7 +786,19 @@ pub(super) fn bounded<T: Send + 'static>(
     timeout: std::time::Duration,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Option<T> {
-    bounded_capped(&HELPERS_IN_FLIGHT, MAX_HELPERS, "rule-match", timeout, f)
+    bounded_in(&HELPERS_IN_FLIGHT, timeout, f)
+}
+
+/// [`bounded`] counted in `slots`, the owner's own count (each broker has one): the cap is
+/// there to stop one stuck mount piling up threads, so what one owner has in flight must
+/// not make another's work "too many earlier helpers" (which it did, in one process, for
+/// brokers that share the process-wide count: a request got no candidates and no match).
+pub(super) fn bounded_in<T: Send + 'static>(
+    slots: &HelperCount,
+    timeout: std::time::Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    bounded_capped(slots, MAX_HELPERS, "rule-match", timeout, f)
 }
 
 /// A request that passed every eligibility check: its trimmed command and words.
@@ -2316,6 +2332,7 @@ mod tests {
         let rule = rule_for("ls /work/build", 0);
         let req = cmd("ls /work/build");
         assert!(matches_within(
+            &HelperCount::default(),
             Duration::from_secs(5),
             &rule,
             &req,
@@ -2325,6 +2342,35 @@ mod tests {
         ));
     }
 
+    // The cap on stuck helpers is per owner: one broker's helpers in flight must not make
+    // another's work "too many earlier helpers" (no candidates, no match) in the same process.
+    #[test]
+    fn one_owners_stuck_helpers_do_not_use_up_another_owners_cap() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let busy = HelperCount::default();
+        let other = HelperCount::default();
+        let (release, held) = channel::<()>();
+        let held = std::sync::Arc::new(std::sync::Mutex::new(held));
+        for _ in 0..MAX_HELPERS {
+            let held = std::sync::Arc::clone(&held);
+            assert!(spawn_capped(&busy, MAX_HELPERS, "stuck", move || {
+                let _ = held.lock().unwrap().recv();
+            }));
+        }
+        assert_eq!(
+            bounded_in(&busy, Duration::from_secs(5), || 7),
+            None,
+            "the busy owner is at its cap: refused, not queued"
+        );
+        assert_eq!(
+            bounded_in(&other, Duration::from_secs(5), || 7),
+            Some(7),
+            "another owner's cap is its own"
+        );
+        drop(release);
+    }
+
     // Round 3: candidate derivation and the all-rules match share one bounded helper.
     #[test]
     fn candidates_within_and_first_match_within_agree_with_the_plain_functions() {
@@ -2332,6 +2378,7 @@ mod tests {
         let req = cmd("ls /work/build");
         let reason = req.reason(None, &NoSettings);
         let got: Vec<String> = candidates_within(
+            &HelperCount::default(),
             Duration::from_secs(5),
             &req,
             &reason,
@@ -2344,6 +2391,7 @@ mod tests {
         assert_eq!(got, ["Bash(ls /work/build)"]);
         let rules = [rule_for("ls /work/other", 0), rule_for("ls /work/build", 0)];
         let hit = first_match_within(
+            &HelperCount::default(),
             Duration::from_secs(5),
             &rules,
             &req,
@@ -2356,6 +2404,7 @@ mod tests {
             Some("Bash(ls /work/build)".to_owned())
         );
         assert!(first_match_within(
+            &HelperCount::default(),
             Duration::from_secs(5),
             &[],
             &req,

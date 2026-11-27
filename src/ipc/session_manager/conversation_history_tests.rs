@@ -1165,43 +1165,9 @@ async fn a_resumed_conversation_on_a_retired_model_runs_on_the_default_and_the_n
 
 // ── nothing about a conversation reaches a log ────────────────────────────────
 
-static LOG_LINES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-
-struct LogCapture;
-
-struct LogFields(String);
-
-impl tracing::field::Visit for LogFields {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        use std::fmt::Write;
-        let _ = write!(self.0, "{}={:?} ", field.name(), value);
-    }
-}
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogCapture {
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        let mut fields = LogFields(String::new());
-        event.record(&mut fields);
-        LOG_LINES
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(format!("{} {}", event.metadata().target(), fields.0));
-    }
-}
-
 #[tokio::test]
 async fn no_first_prompt_title_label_or_branch_reaches_a_log_line() {
-    use tracing_subscriber::layer::SubscriberExt;
-    static INSTALL: std::sync::Once = std::sync::Once::new();
-    INSTALL.call_once(|| {
-        let _ = tracing::subscriber::set_global_default(
-            tracing_subscriber::registry().with(LogCapture),
-        );
-    });
+    crate::test_log::install_global_capture();
     let mut rig = Rig::new();
     let mut meta = test_focus("cody-aaaa1111");
     meta.display_name = "TITLESENTINEL-5a9d".into();
@@ -1230,7 +1196,7 @@ async fn no_first_prompt_title_label_or_branch_reaches_a_log_line() {
     std::fs::write(&bad, "PROMPTSENTINEL-7c1e not json").unwrap();
     let _ = ConversationHistory::open(bad);
 
-    let lines = LOG_LINES.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let lines = crate::test_log::global_lines();
     assert!(!lines.is_empty(), "the capture works");
     for line in &lines {
         for needle in [

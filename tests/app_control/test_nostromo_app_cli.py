@@ -505,7 +505,18 @@ class ApprovalsLogCliTests(unittest.TestCase):
         import time
         before = time.time()
         sent, _, _ = self.run_log(["--since", "-2d"], [{"state": "ready", "rows": []}])
-        self.assertAlmostEqual(sent[0]["since_ms"] / 1000, before - 2 * 86400, delta=5)
+        after = time.time()
+        # Bracketed by the clock either side of the call, not a tolerance a stalled machine can exceed.
+        self.assertGreaterEqual(sent[0]["since_ms"], int((before - 2 * 86400) * 1000))
+        self.assertLessEqual(sent[0]["since_ms"], int((after - 2 * 86400) * 1000))
+
+    def test_days_ago_is_joined_to_since_whatever_the_python_version(self):
+        # Python before 3.13 reads a separate `-2d` as a flag and rejects `--since -2d`.
+        self.assertEqual(cli.since_as_one_argument(["approvals", "log", "--since", "-2d", "--limit", "5"]),
+                         ["approvals", "log", "--since=-2d", "--limit", "5"])
+        self.assertEqual(cli.since_as_one_argument(["log", "--since", "2026-11-01T00:00:00Z"]),
+                         ["log", "--since", "2026-11-01T00:00:00Z"])
+        self.assertEqual(cli.since_as_one_argument(["log", "--since"]), ["log", "--since"])
 
     def test_asks_again_while_loading_and_prints_the_rows(self):
         import json

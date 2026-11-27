@@ -183,6 +183,7 @@ impl Captured {
 
 #[test]
 fn nothing_the_engine_logs_at_trace_or_audits_carries_a_title_question_or_pr() {
+    crate::test_log::install_global_capture();
     let captured = Captured::default();
     let writer = captured.clone();
     let subscriber = tracing_subscriber::fmt()

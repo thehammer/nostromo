@@ -1659,33 +1659,131 @@ impl Captured {
     }
 }
 
-/// Capture every tracing event of this thread (TRACE and up) until the guard
-/// drops. The engine runs on the test's own thread, so it is captured too.
-///
-/// A process-wide subscriber that discards everything goes in first, so every
-/// callsite stays enabled. Without it, a test thread that reaches a callsite
-/// while no scoped subscriber is registered (or while another test's is being
-/// built or dropped) can leave that callsite cached as disabled for a later
-/// capture: the feature's lines silently go missing ("the feature logged
-/// something" failed about 1 in 100 whole-binary runs under load).
-pub fn capture_logs() -> (Captured, tracing::subscriber::DefaultGuard) {
-    static GLOBAL_LOG: std::sync::Once = std::sync::Once::new();
-    GLOBAL_LOG.call_once(|| {
-        let _ = tracing::subscriber::set_global_default(
+thread_local! {
+    /// The captures bound to this thread by `capture_logs`, innermost last (a
+    /// test may open a second while the first is live: the innermost gets the lines,
+    /// as with nested scoped subscribers).
+    static BOUND: std::cell::RefCell<Vec<Captured>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Every capture that is live, whichever thread built it, with the tokio runtime it was
+/// opened inside, if any.
+static ACTIVE: Mutex<Vec<(Captured, Option<tokio::runtime::Id>)>> = Mutex::new(Vec::new());
+
+/// Where the process-wide subscriber writes an event, by who emitted it:
+/// - a thread with a capture bound to it (the test's own thread): that capture;
+/// - else a thread inside a tokio runtime (a multi-thread worker, `spawn_blocking`):
+///   the captures opened inside that same runtime, so a worker's lines reach
+///   the test that owns the runtime and no other;
+/// - else an unnamed thread (`std::thread::spawn`): every live capture;
+/// - else (a thread with a name and no runtime: another test's own thread, which
+///   libtest names after the test): nobody's, so another test's lines never
+///   leak in.
+#[derive(Clone, Copy)]
+struct LogRouter;
+
+struct RouterWriter;
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogRouter {
+    type Writer = RouterWriter;
+    fn make_writer(&'a self) -> RouterWriter {
+        RouterWriter
+    }
+}
+
+impl Write for RouterWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let bound = BOUND
+            .try_with(|b| b.borrow().last().cloned())
+            .ok()
+            .flatten();
+        if let Some(mut own) = bound {
+            own.write_all(buf)?;
+            return Ok(buf.len());
+        }
+        let runtime = tokio::runtime::Handle::try_current().ok().map(|h| h.id());
+        let unnamed = std::thread::current().name().is_none();
+        let live = ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        for (mut capture, opened_in) in live {
+            let ours = match runtime {
+                Some(id) => opened_in == Some(id),
+                None => unnamed,
+            };
+            if ours {
+                capture.write_all(buf)?;
+            }
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Install the process-wide subscriber that `capture_logs` reads from (once).
+/// It is interested in every event at every level, so every callsite stays
+/// enabled; an event with no capture to go to is dropped. Test binaries that
+/// build their own engines without capturing call this too, so a capturing
+/// test never races them.
+pub fn install_log_router() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        tracing::subscriber::set_global_default(
             tracing_subscriber::fmt()
                 .with_max_level(tracing::Level::TRACE)
-                .with_writer(std::io::sink)
+                .with_ansi(false)
+                .with_writer(LogRouter)
                 .finish(),
-        );
+        )
+        .expect("no other subscriber is installed process-wide");
     });
+}
+
+/// Ends a capture when dropped.
+pub struct CaptureGuard {
+    captured: Captured,
+}
+
+impl Drop for CaptureGuard {
+    fn drop(&mut self) {
+        let _ = BOUND.try_with(|b| {
+            b.borrow_mut()
+                .retain(|c| !Arc::ptr_eq(&c.0, &self.captured.0))
+        });
+        ACTIVE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(c, _)| !Arc::ptr_eq(&c.0, &self.captured.0));
+    }
+}
+
+/// Capture every tracing event (TRACE and up) the test makes until the guard
+/// drops: the events of the calling thread, those of a tokio runtime this was
+/// called inside (its workers and blocking threads), and those of unnamed
+/// threads (see [`LogRouter`]).
+///
+/// A scoped subscriber (`set_default`) is thread-local, so a line logged from
+/// another thread (a multi-thread runtime's worker, `spawn_blocking`) was lost
+/// to it, and with scoped subscribers alone a callsite first reached while
+/// another test's subscriber is being built or dropped can be cached as
+/// disabled for a later capture ("the feature logged something" failed about 1
+/// in 100 whole-binary runs under load). So the subscriber is one process-wide
+/// [`install_log_router`]: always interested, routing each event as the
+/// router says. Tests in one libtest process never receive each other's lines
+/// from a test thread or a runtime; only an unnamed `std::thread` of another
+/// test could reach every live capture, and under nextest (one process per test)
+/// there is no other test.
+///
+/// Call it on the thread that drives the engine.
+pub fn capture_logs() -> (Captured, CaptureGuard) {
+    install_log_router();
     let captured = Captured::default();
-    let writer = captured.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    (captured, tracing::subscriber::set_default(subscriber))
+    BOUND.with(|b| b.borrow_mut().push(captured.clone()));
+    ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).push((
+        captured.clone(),
+        tokio::runtime::Handle::try_current().ok().map(|h| h.id()),
+    ));
+    (captured.clone(), CaptureGuard { captured })
 }
 
 /// The code of a verb answer (`ok` for success).
