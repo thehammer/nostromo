@@ -6019,6 +6019,29 @@ pub fn activity_health_msg(mgr: &SessionManager, hook_installed: bool) -> Server
     }
 }
 
+/// A [`LocalDispatch`] over an empty, in-memory daemon, for the uplink's tests
+/// (its fields are private to this module).
+#[cfg(test)]
+mod local_dispatch_for_tests {
+    use super::*;
+
+    impl LocalDispatch {
+        pub(in crate::ipc) fn for_test(
+            session_mgr: Arc<Mutex<SessionManager>>,
+            perri_state_dir: PathBuf,
+        ) -> Self {
+            Self {
+                session_mgr,
+                perri_state_dir,
+                decisions: Arc::new(Mutex::new(DecisionRegistry::new())),
+                held_mother_jobs: Arc::new(Mutex::new(HashSet::new())),
+                terminals: TerminalManager::in_memory(),
+                broadcast_tx: broadcast::channel(8).0,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

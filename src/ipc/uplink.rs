@@ -129,13 +129,15 @@ impl PhiScope {
             .any(|r| n == *r || n.starts_with(&format!("{r}-")) || n.starts_with(&format!("{r}.")))
     }
 
-    /// [`gitdir_of`], remembered briefly (see [`GitdirCache`]): the same few paths are
-    /// looked up for every frame that passes, under the forwarder's lock.
+    /// [`gitdir_of`], read again only when the `.git` file changed (see
+    /// [`GitdirCache`]): the same few paths are looked up for every frame
+    /// that passes, under the forwarder's lock.
     fn gitdir(&self, dir: &str) -> Option<String> {
+        let id = GitFileId::of(dir)?;
         self.gitdirs
             .lock()
             .unwrap()
-            .get_or_read(dir, Instant::now(), gitdir_of)
+            .get_or_read(dir, &id, gitdir_of)
     }
 
     /// Any component of the path names a PHI repo: a worktree inside the repo,
@@ -282,43 +284,60 @@ impl PhiScope {
     }
 }
 
-/// How long a [`gitdir_of`] answer that found a pointer is reused: a stale one
-/// only withholds more (it fails closed), and a worktree's pointer does not
-/// move.
-const GITDIR_TTL_FOUND: Duration = Duration::from_secs(60);
-/// How long "this is not a worktree" is reused. A stale one fails open (a
-/// worktree whose `.git` file is written just after its first lookup would be
-/// judged by its name alone), so the window is kept to a couple of seconds:
-/// enough to spare the filesystem a read per frame, short enough that a new
-/// worktree is classified at once for practical purposes. Its path and name
-/// are judged on every frame regardless.
-const GITDIR_TTL_ABSENT: Duration = Duration::from_secs(2);
 /// Most directories remembered; past it the cache starts over.
 const GITDIR_CACHE_MAX: usize = 512;
 
-/// Recent answers of [`gitdir_of`], by directory.
+/// One version of a worktree's `.git` file, as a stat sees it. The cache is
+/// keyed on it, so a file that was rewritten or replaced is read again at
+/// once: nothing here can go stale (a TTL would fail open for a worktree
+/// whose pointer was written just after a first lookup).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitFileId {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    inode: Option<u64>,
+}
+
+impl GitFileId {
+    /// `None` unless `dir/.git` is a small regular file (what [`gitdir_of`]
+    /// reads): a directory, or nothing, is not a worktree pointer.
+    fn of(dir: &str) -> Option<Self> {
+        let meta = std::fs::metadata(Path::new(dir).join(".git")).ok()?;
+        if !meta.is_file() || meta.len() > 4096 {
+            return None;
+        }
+        #[cfg(unix)]
+        let inode = Some(std::os::unix::fs::MetadataExt::ino(&meta));
+        #[cfg(not(unix))]
+        let inode = None;
+        Some(Self {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            inode,
+        })
+    }
+}
+
+/// The answers of [`gitdir_of`] by directory, each good for as long as the
+/// `.git` file it was read from keeps its [`GitFileId`]. A lookup costs one
+/// stat; the file is opened and read only when it changed.
 #[derive(Debug, Default)]
 struct GitdirCache {
-    entries: HashMap<String, (Instant, Option<String>)>,
+    entries: HashMap<String, (GitFileId, Option<String>)>,
 }
 
 impl GitdirCache {
-    /// The answer for `dir`: the remembered one if it is still fresh at `now`
-    /// ([`GITDIR_TTL_FOUND`] for a pointer, [`GITDIR_TTL_ABSENT`] for none),
-    /// else what `read` says (and it is remembered).
+    /// The answer for `dir` whose `.git` file is `id`: the remembered one if
+    /// it was read from that same version, else what `read` says (and it is
+    /// remembered).
     fn get_or_read(
         &mut self,
         dir: &str,
-        now: Instant,
+        id: &GitFileId,
         read: impl FnOnce(&str) -> Option<String>,
     ) -> Option<String> {
-        if let Some((at, answer)) = self.entries.get(dir) {
-            let ttl = if answer.is_some() {
-                GITDIR_TTL_FOUND
-            } else {
-                GITDIR_TTL_ABSENT
-            };
-            if now.saturating_duration_since(*at) < ttl {
+        if let Some((seen, answer)) = self.entries.get(dir) {
+            if seen == id {
                 return answer.clone();
             }
         }
@@ -326,7 +345,8 @@ impl GitdirCache {
         if self.entries.len() >= GITDIR_CACHE_MAX {
             self.entries.clear();
         }
-        self.entries.insert(dir.to_string(), (now, answer.clone()));
+        self.entries
+            .insert(dir.to_string(), (id.clone(), answer.clone()));
         answer
     }
 }
@@ -2418,5 +2438,449 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    // ── routed reads: how many, and which ids ─────────────────────────────────
+
+    /// A personal satellite's uplink end over an empty in-memory daemon: what
+    /// `handle_request` needs, and a way to see what it answered and opened.
+    struct RoutedRig {
+        env: Env,
+        shared: Arc<Mutex<Shared>>,
+        mgr: Arc<Mutex<crate::ipc::session_manager::SessionManager>>,
+        routed: RoutedReads,
+        out: mpsc::Sender<UplinkFrame>,
+        out_rx: mpsc::Receiver<UplinkFrame>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl RoutedRig {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let mgr = Arc::new(Mutex::new(
+                crate::ipc::session_manager::SessionManager::new(),
+            ));
+            let tags = SensitiveTags::default();
+            let env = Env {
+                setup: SatelliteSetup {
+                    host: "kobe".into(),
+                    uplink: crate::config::UplinkConfig {
+                        egress: Egress::Personal,
+                        ..Default::default()
+                    },
+                    phi_repos: vec!["admin-portal".into()],
+                },
+                tag_key_path: dir.path().join("tag-key"),
+                tx: broadcast::channel(8).0,
+                sensitive: tags.clone(),
+                dispatch: LocalDispatch::for_test(Arc::clone(&mgr), dir.path().to_path_buf()),
+                relay: UplinkRelay::new(SatelliteAdmin::Full),
+            };
+            let (out, out_rx) = mpsc::channel(OUT_QUEUE);
+            Self {
+                env,
+                shared: Arc::new(Mutex::new(shared_for(Egress::Personal, &tags))),
+                mgr,
+                routed: RoutedReads::default(),
+                out,
+                out_rx,
+                _dir: dir,
+            }
+        }
+
+        /// The primary routes a `SessionList` read under `id`.
+        fn request(&mut self, id: &str) {
+            handle_request(
+                &self.env,
+                &self.shared,
+                &mut self.routed,
+                &self.out,
+                true,
+                id.to_string(),
+                ClientMsg::SessionList { host: None },
+            );
+        }
+
+        /// Is a local connection standing in for the requester `id` open?
+        fn opened(&self, id: &str) -> bool {
+            self.mgr
+                .lock()
+                .unwrap()
+                .client_sender_registry()
+                .lock()
+                .unwrap()
+                .contains_key(&format!("uplink:{id}"))
+        }
+
+        /// The next frame sent upward, which must be a reply.
+        async fn next_reply(&mut self) -> (String, ServerMsg) {
+            let frame = tokio::time::timeout(Duration::from_secs(5), self.out_rx.recv())
+                .await
+                .expect("a reply was sent upward")
+                .expect("the uplink queue is open");
+            match frame {
+                UplinkFrame::Reply { id, msg } => (id, msg),
+                other => panic!("{other:?}"),
+            }
+        }
+
+        /// Nothing (more) was sent upward, after the runtime had every chance.
+        async fn assert_silent(&mut self) {
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            let extra = self.out_rx.try_recv();
+            assert!(extra.is_err(), "no reply was expected: {extra:?}");
+        }
+
+        /// `MAX_ROUTED` distinct reads, each answered and each still open.
+        async fn fill_to_the_cap(&mut self) {
+            for i in 0..MAX_ROUTED {
+                self.request(&format!("r{i}"));
+            }
+            for _ in 0..MAX_ROUTED {
+                let (id, msg) = self.next_reply().await;
+                assert!(
+                    matches!(msg, ServerMsg::SessionListResp { .. }),
+                    "{id}: {msg:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_routed_read_beyond_the_cap_is_refused_withheld_and_opens_nothing() {
+        let mut rig = RoutedRig::new();
+        rig.fill_to_the_cap().await;
+        rig.request("one-too-many");
+        let (id, msg) = rig.next_reply().await;
+        assert_eq!(id, "one-too-many");
+        assert!(matches!(msg, ServerMsg::Withheld { .. }), "{msg:?}");
+        assert!(!rig.opened("one-too-many"), "no read was opened");
+        rig.assert_silent().await;
+    }
+
+    #[tokio::test]
+    async fn a_routed_read_that_is_already_open_is_not_refused_by_the_cap() {
+        let mut rig = RoutedRig::new();
+        rig.fill_to_the_cap().await;
+        // The primary asks again under an id this uplink already serves.
+        rig.request("r0");
+        let (id, msg) = rig.next_reply().await;
+        assert_eq!(id, "r0");
+        assert!(
+            matches!(msg, ServerMsg::SessionListResp { .. }),
+            "answered, not refused: {msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_routed_request_id_of_the_longest_allowed_length_is_served() {
+        let mut rig = RoutedRig::new();
+        let id = "a".repeat(128);
+        rig.request(&id);
+        let (answered, msg) = rig.next_reply().await;
+        assert_eq!(answered, id);
+        assert!(matches!(msg, ServerMsg::SessionListResp { .. }), "{msg:?}");
+        assert!(rig.opened(&id));
+    }
+
+    #[tokio::test]
+    async fn a_routed_request_id_one_byte_too_long_is_dropped_without_a_reply() {
+        let mut rig = RoutedRig::new();
+        let id = "a".repeat(129);
+        rig.request(&id);
+        assert!(!rig.opened(&id), "no read was opened");
+        rig.assert_silent().await;
+    }
+
+    #[tokio::test]
+    async fn an_empty_routed_request_id_is_dropped_without_a_reply() {
+        let mut rig = RoutedRig::new();
+        rig.request("");
+        assert!(!rig.opened(""), "no read was opened");
+        rig.assert_silent().await;
+    }
+
+    // ── a pairing cancel is not lost to a full queue ──────────────────────────
+
+    /// A relay whose uplink queue holds one frame and is full, with a pairing
+    /// open for `conn-1`. The queue's sender and receiver are returned.
+    fn relay_with_a_pairing_and_a_full_queue() -> (
+        Arc<UplinkRelay>,
+        mpsc::Sender<UplinkFrame>,
+        mpsc::Receiver<UplinkFrame>,
+    ) {
+        let relay = UplinkRelay::new(SatelliteAdmin::Full);
+        let (up_tx, mut up_rx) = mpsc::channel(1);
+        relay.set_up(Some(up_tx.clone()));
+        level(&relay, SatelliteAdmin::Full);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        relay.relay_verb(
+            ClientMsg::DevicePairStart {
+                request_id: "a".into(),
+                name_hint: None,
+                satellite: None,
+                admin: None,
+                egress: None,
+                origin: None,
+            },
+            "conn-1",
+            &tx,
+        );
+        let UplinkFrame::Client {
+            msg: ClientMsg::DevicePairStart { request_id, .. },
+        } = up_rx.try_recv().unwrap()
+        else {
+            panic!("expected a relayed DevicePairStart")
+        };
+        relay.from_primary(ServerMsg::DevicePairing {
+            request_id,
+            pairing_id: "p1".into(),
+            code: "1".into(),
+            server_url: "u".into(),
+            expires_at: chrono::Utc::now(),
+        });
+        // The queue is now full of something else.
+        up_tx
+            .try_send(UplinkFrame::Client {
+                msg: ClientMsg::Ping,
+            })
+            .unwrap();
+        (relay, up_tx, up_rx)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pairing_cancel_that_finds_the_queue_full_is_sent_once_room_appears() {
+        let (relay, _up_tx, mut up_rx) = relay_with_a_pairing_and_a_full_queue();
+        relay.drop_connection("conn-1");
+        // The socket drains: first what was queued, then the cancel.
+        assert!(matches!(
+            up_rx.recv().await,
+            Some(UplinkFrame::Client {
+                msg: ClientMsg::Ping
+            })
+        ));
+        let next = tokio::time::timeout(Duration::from_secs(5), up_rx.recv())
+            .await
+            .expect("the cancel was not lost to the full queue");
+        match next {
+            Some(UplinkFrame::Client {
+                msg:
+                    ClientMsg::DevicePairCancel {
+                        pairing_id, origin, ..
+                    },
+            }) => {
+                assert_eq!(pairing_id, "p1");
+                assert_eq!(origin.as_deref(), Some("conn-1"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pairing_cancel_is_given_up_when_the_queue_stays_full_past_the_wait() {
+        let (relay, _up_tx, mut up_rx) = relay_with_a_pairing_and_a_full_queue();
+        relay.drop_connection("conn-1");
+        tokio::time::sleep(CANCEL_WAIT + Duration::from_secs(1)).await;
+        // Room appears only now: the cancel is not still waiting for it.
+        assert!(matches!(
+            up_rx.recv().await,
+            Some(UplinkFrame::Client {
+                msg: ClientMsg::Ping
+            })
+        ));
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        let late = up_rx.try_recv();
+        assert!(late.is_err(), "a cancel waits for ever: {late:?}");
+    }
+
+    // ── the gitdir cache ──────────────────────────────────────────────────────
+
+    fn file_id(len: u64) -> GitFileId {
+        GitFileId {
+            len,
+            modified: Some(std::time::UNIX_EPOCH + Duration::from_secs(1_000)),
+            inode: Some(7),
+        }
+    }
+
+    /// One `get_or_read` of `dir` whose `.git` file is `id`, where the disk
+    /// says `on_disk`; the number of reads that reached the disk is `reads`.
+    fn lookup(
+        cache: &mut GitdirCache,
+        dir: &str,
+        id: &GitFileId,
+        on_disk: Option<&str>,
+        reads: &std::cell::Cell<u32>,
+    ) -> Option<String> {
+        cache.get_or_read(dir, id, |_| {
+            reads.set(reads.get() + 1);
+            on_disk.map(String::from)
+        })
+    }
+
+    #[test]
+    fn a_gitdir_is_read_once_for_as_long_as_the_git_file_keeps_its_identity() {
+        let mut cache = GitdirCache::default();
+        let reads = std::cell::Cell::new(0);
+        let id = file_id(40);
+        assert_eq!(
+            lookup(&mut cache, "/w", &id, Some("/a/.git/worktrees/w"), &reads).as_deref(),
+            Some("/a/.git/worktrees/w")
+        );
+        // The same file version: the disk is not asked again, whatever it says.
+        for _ in 0..3 {
+            assert_eq!(
+                lookup(&mut cache, "/w", &id, Some("/b/.git/worktrees/w"), &reads).as_deref(),
+                Some("/a/.git/worktrees/w")
+            );
+        }
+        assert_eq!(reads.get(), 1);
+        // A file with no `gitdir:` line is remembered as that, too.
+        assert_eq!(lookup(&mut cache, "/n", &id, None, &reads), None);
+        assert_eq!(lookup(&mut cache, "/n", &id, Some("/c"), &reads), None);
+        assert_eq!(reads.get(), 2);
+    }
+
+    #[test]
+    fn a_gitdir_is_read_again_when_the_git_file_changes_in_length_time_or_inode() {
+        let mut cache = GitdirCache::default();
+        let reads = std::cell::Cell::new(0);
+        let first = file_id(40);
+        // Each version differs from the one before in exactly one respect.
+        let longer = GitFileId {
+            len: 41,
+            ..first.clone()
+        };
+        let later = GitFileId {
+            modified: Some(std::time::UNIX_EPOCH + Duration::from_secs(1_001)),
+            ..longer.clone()
+        };
+        let replaced = GitFileId {
+            inode: Some(8),
+            ..later.clone()
+        };
+        let mut expected_reads = 0;
+        for (n, id) in [first, longer, later, replaced].iter().enumerate() {
+            let on_disk = format!("/a/.git/worktrees/v{n}");
+            expected_reads += 1;
+            assert_eq!(
+                lookup(&mut cache, "/w", id, Some(&on_disk), &reads).as_deref(),
+                Some(on_disk.as_str()),
+                "version {n} is read at once"
+            );
+            assert_eq!(reads.get(), expected_reads, "version {n}");
+            // And is then remembered.
+            lookup(&mut cache, "/w", id, Some("/elsewhere"), &reads);
+            assert_eq!(reads.get(), expected_reads, "version {n} is remembered");
+        }
+    }
+
+    #[test]
+    fn the_gitdir_cache_starts_over_at_the_513th_directory_and_stays_bounded() {
+        let mut cache = GitdirCache::default();
+        let reads = std::cell::Cell::new(0);
+        let id = file_id(40);
+        let dir = |i: usize| format!("/d{i}");
+        for i in 0..GITDIR_CACHE_MAX {
+            lookup(&mut cache, &dir(i), &id, None, &reads);
+        }
+        assert_eq!(reads.get() as usize, GITDIR_CACHE_MAX);
+        // All of them are remembered.
+        lookup(&mut cache, &dir(0), &id, None, &reads);
+        assert_eq!(reads.get() as usize, GITDIR_CACHE_MAX);
+        // The 513th restarts the cache: it is remembered, the others are not.
+        lookup(&mut cache, &dir(GITDIR_CACHE_MAX), &id, None, &reads);
+        assert!(cache.entries.len() <= GITDIR_CACHE_MAX);
+        let after_restart = reads.get();
+        lookup(&mut cache, &dir(GITDIR_CACHE_MAX), &id, None, &reads);
+        assert_eq!(reads.get(), after_restart, "the newest is still remembered");
+        lookup(&mut cache, &dir(1), &id, None, &reads);
+        assert_eq!(
+            reads.get(),
+            after_restart + 1,
+            "the older ones were dropped"
+        );
+        // Never more than the bound, however many directories pass.
+        for i in 0..3 * GITDIR_CACHE_MAX {
+            lookup(&mut cache, &dir(10_000 + i), &id, None, &reads);
+            assert!(cache.entries.len() <= GITDIR_CACHE_MAX);
+        }
+    }
+
+    #[test]
+    fn a_git_file_id_exists_only_for_a_small_regular_file_and_follows_rewrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_str().unwrap();
+        let git = dir.path().join(".git");
+        assert_eq!(GitFileId::of(d), None, "no .git at all");
+        std::fs::create_dir(&git).unwrap();
+        assert_eq!(GitFileId::of(d), None, "a .git directory is not a pointer");
+        std::fs::remove_dir(&git).unwrap();
+        std::fs::write(&git, vec![b'x'; 4097]).unwrap();
+        assert_eq!(GitFileId::of(d), None, "over 4096 bytes is not read");
+        std::fs::write(&git, "gitdir: /a/.git/worktrees/w\n").unwrap();
+        let short = GitFileId::of(d).expect("a small file has an identity");
+        assert_eq!(
+            GitFileId::of(d),
+            Some(short.clone()),
+            "stable while untouched"
+        );
+        std::fs::write(&git, "gitdir: /a/.git/worktrees/wider-name\n").unwrap();
+        let longer = GitFileId::of(d).expect("still a small file");
+        assert_ne!(longer, short, "a rewrite with another length is another id");
+    }
+
+    #[test]
+    fn classifying_a_worktree_goes_through_the_gitdir_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("scratch-checkout");
+        std::fs::create_dir_all(&wt).unwrap();
+        let git_file = wt.join(".git");
+        let wt_str = wt.to_str().unwrap().to_string();
+        std::fs::write(&git_file, "gitdir: /x/admin-portal/.git/worktrees/w\n").unwrap();
+        let meta = focus("cody-w", &wt_str);
+        let mut scope = PhiScope::new(vec!["admin-portal".into()]);
+        scope.refresh(std::slice::from_ref(&meta));
+        assert!(!scope.tag_is_shareable("cody-w"), "withheld: PHI worktree");
+        // What was read is remembered under the directory.
+        {
+            let cache = scope.gitdirs.lock().unwrap();
+            assert_eq!(cache.entries.len(), 1);
+            assert_eq!(
+                cache.entries[&wt_str].1.as_deref(),
+                Some("/x/admin-portal/.git/worktrees/w")
+            );
+        }
+        // The next classification of the unchanged file uses that memory: an
+        // answer planted in it is the one acted on.
+        scope
+            .gitdirs
+            .lock()
+            .unwrap()
+            .entries
+            .get_mut(&wt_str)
+            .unwrap()
+            .1 = Some("/x/blog/.git/worktrees/w".into());
+        scope.refresh(std::slice::from_ref(&meta));
+        assert!(
+            scope.tag_is_shareable("cody-w"),
+            "the remembered answer was used, not the file read again"
+        );
+        // A rewritten file is read again at once, with nothing to wait for.
+        std::fs::write(
+            &git_file,
+            "gitdir: /x/admin-portal/.git/worktrees/another-name\n",
+        )
+        .unwrap();
+        scope.refresh(std::slice::from_ref(&meta));
+        assert!(!scope.tag_is_shareable("cody-w"), "the new pointer is seen");
+        // And a file that is gone is not remembered into existence.
+        std::fs::remove_file(&git_file).unwrap();
+        scope.refresh(std::slice::from_ref(&meta));
+        assert!(scope.tag_is_shareable("cody-w"), "no pointer, no PHI by it");
     }
 }
