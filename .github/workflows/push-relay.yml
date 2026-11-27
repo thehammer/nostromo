@@ -1,23 +1,25 @@
 # The push relay (infra/push-relay, W13) is a standalone crate outside the daemon's build, so
 # ci.yml never compiles it. This workflow does: fmt, clippy (`-D warnings`) and its hermetic tests.
 #
-# It is a separate workflow, not a job in ci.yml, because ci.yml deliberately has no `paths:` filter
-# (a filtered workflow leaves a required check pending; see the comment there). Nothing here is a
-# required status check: it only runs when the relay (or this file) changes. To make it required,
-# add `Push relay (fmt, clippy, tests)` to branch protection and drop the filter.
+# It is a separate workflow, not a job in ci.yml, so the relay's Rust toolchain steps stay out of
+# the daemon's jobs. It has NO workflow-level `paths:` filter, on purpose, for the reason ci.yml
+# gives: a workflow that a path filter stops from starting never reports a check, so a required
+# check from it would stay "Expected" and block every unrelated PR. Instead the `changes` job
+# below decides whether the relay job is needed; a job skipped by its `if:` counts as passed for a
+# required check, and its `name:` is a plain literal (a skipped job posts its check under the raw
+# `name:` text, which is the real name only when it is not an expression).
+#
+# `Push relay (fmt, clippy, tests)` is meant to be a required status check: the operator adds it
+# with the `gh api` command in docs/ci.md, after a green run on main. The relay job fails closed:
+# if `changes` itself fails, the relay job runs instead of being skipped.
 name: Push relay
 
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "infra/push-relay/**"
-      - ".github/workflows/push-relay.yml"
   push:
     branches: [main]
-    paths:
-      - "infra/push-relay/**"
-      - ".github/workflows/push-relay.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -31,8 +33,44 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  # Decides whether the relay job is needed. Only a pull request whose every changed path is
+  # outside the relay (and this file) skips it; pushes to main and dispatches always run it, and a
+  # classification that cannot be made means "run".
+  changes:
+    name: Detect push relay changes
+    # Pinned, not ubuntu-latest (see ci.yml).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      relay: ${{ steps.classify.outputs.relay }}
+
+    steps:
+      # The pull_request checkout is the merge commit of the PR head into the base: `HEAD^1..HEAD`
+      # is exactly what the PR changes.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 2
+
+      - name: Classify changed paths
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          relay=true
+          if [ "$EVENT_NAME" = pull_request ] && git rev-parse --verify --quiet 'HEAD^2' >/dev/null \
+             && files=$(git diff --no-renames --name-only 'HEAD^1' HEAD) && [ -n "$files" ]; then
+            if ! printf '%s\n' "$files" | grep -qE '^(infra/push-relay/|\.github/workflows/push-relay\.yml$)'; then
+              relay=false
+            fi
+          fi
+          echo "relay=$relay" >> "$GITHUB_OUTPUT"
+          echo "Push relay job needed: $relay"
+
   push-relay:
     name: Push relay (fmt, clippy, tests)
+    needs: changes
+    # Skipped (counts as passed) only when `changes` succeeded and found nothing for the relay.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.relay == 'true') }}
     # Pinned, not ubuntu-latest (see ci.yml).
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -41,11 +79,12 @@ jobs:
         working-directory: infra/push-relay
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.100.0
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master 2026-11-15 (no release tags)
         with:
+          toolchain: 1.100.0
           components: rustfmt, clippy
 
       - name: Format

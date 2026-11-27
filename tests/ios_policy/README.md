@@ -34,7 +34,7 @@ See `docs/ios-verification.md` for the full picture. In short:
   XCTest, run by `make kit-test`. No simulator, no device.
 - **L2 — wiring and policy.** This directory. Runs as part of
   `make python-test`, which already runs in CI (`.github/workflows/ci.yml`,
-  the `python-tooling` job) on `macos-latest`.
+  the `python-tooling` job) on `macos-26`.
 - **L3 — compile.** `make ios-build` is the device build (the `Makefile`'s
   `IOS_DEVICE_ID` targets a paired physical iPhone), so it is local-only. CI
   runs the same compile for the simulator in the `iOS simulator build` job.

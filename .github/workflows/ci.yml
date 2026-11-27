@@ -53,7 +53,7 @@ jobs:
       # The pull_request checkout is the merge commit of the PR head into the
       # base, so its first parent is the base tip and `HEAD^1..HEAD` is exactly
       # what the PR changes. Depth 2 fetches both parents.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 2
 
@@ -99,11 +99,12 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.100.0
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master 2026-11-15 (no release tags)
         with:
+          toolchain: 1.100.0
           components: rustfmt
 
       - name: Format
@@ -117,11 +118,12 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.100.0
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master 2026-11-15 (no release tags)
         with:
+          toolchain: 1.100.0
           components: clippy
 
       - name: Clippy
@@ -147,10 +149,12 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.100.0
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master 2026-11-15 (no release tags)
+        with:
+          toolchain: 1.100.0
 
       # cargo-nextest, pinned: the action by commit SHA (tag v2.90.8) and the tool by exact
       # version, so a new release changes nothing until someone bumps both here.
@@ -234,10 +238,12 @@ jobs:
     # either fail for environmental reasons or — worse — *skip*, and a skipped
     # test is a vacuously passing test, which is the exact bug class this suite
     # exists to catch.
-    runs-on: macos-latest
+    # Pinned to macos-26 like the Swift jobs, not macos-latest: a runner-image rollover
+    # shows up as a diff here, not as an unexplained red.
+    runs-on: macos-26
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install shellcheck
         run: brew install shellcheck
@@ -353,7 +359,7 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Select Xcode
         if: needs.changes.outputs.swift == 'true'
@@ -421,7 +427,7 @@ jobs:
 
       - name: Upload shard report
         if: needs.changes.outputs.swift == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mac-shard-report-${{ matrix.shard }}
           path: ${{ runner.temp }}/shard-${{ matrix.shard }}.json
@@ -432,7 +438,7 @@ jobs:
       # Per-class durations for `scripts/mac_shards.py regenerate` (main pushes and dispatches).
       - name: Upload full test log
         if: needs.changes.outputs.swift == 'true' && github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mac-test-log-shard-${{ matrix.shard }}
           path: macOS/build/mac-test-full.log
@@ -459,7 +465,7 @@ jobs:
 
       - name: Upload app build log
         if: needs.changes.outputs.swift == 'true' && failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mac-app-build-log-${{ matrix.shard }}
           path: ${{ runner.temp }}/mac-app-build.log
@@ -470,7 +476,7 @@ jobs:
       # .xcresult bundle is where the per-test failure detail lives.
       - name: Upload test results
         if: needs.changes.outputs.swift == 'true' && failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: swift-tests-mac-xcresult-${{ matrix.shard }}
           path: macOS/build/Logs/Test
@@ -491,11 +497,11 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Download shard reports
         if: needs.changes.outputs.swift == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: mac-shard-report-*
           path: shard-reports
@@ -519,7 +525,7 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Select Xcode
         if: needs.changes.outputs.swift == 'true'
@@ -540,7 +546,7 @@ jobs:
 
       - name: Upload test log
         if: needs.changes.outputs.swift == 'true' && failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: swift-tests-kit-log
           path: ${{ runner.temp }}/kit-test.log
@@ -564,7 +570,7 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Select Xcode
         if: needs.changes.outputs.swift == 'true'
@@ -598,7 +604,7 @@ jobs:
 
       - name: Upload build and test logs
         if: needs.changes.outputs.swift == 'true' && failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ios-simulator-build-log
           path: |

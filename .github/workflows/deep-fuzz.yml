@@ -33,10 +33,12 @@ jobs:
       TRACKER_FUZZ_COUNT: ${{ inputs.count || '5000' }}
       QUEUE_RACE_SEEDS: ${{ inputs.count || '5000' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.100.0
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master 2026-11-15 (no release tags)
+        with:
+          toolchain: 1.100.0
 
       - name: Tracker lost-edit oracle
         run: cargo test --test tracker_concurrency -- --nocapture
@@ -44,3 +46,32 @@ jobs:
       - name: Queue race tests
         if: always()
         run: cargo test --lib ipc::session_manager::queue_tests -- --nocapture
+
+  # A failed nightly would otherwise be a red run nobody opens. Scheduled runs only: a manual
+  # dispatch has a human watching it. One open issue is reused (a comment per further failure), so
+  # a bug that stays unfixed does not open an issue a night. Only `issues: write`, no checkout.
+  notify-failure:
+    name: Report a failed nightly deep fuzz
+    needs: deep-fuzz
+    if: ${{ failure() && github.event_name == 'schedule' }}
+    # Pinned, not ubuntu-latest (see ci.yml).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open an issue, or comment on the open one
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Nightly deep fuzz failed"
+          body="The scheduled deep fuzz failed: $RUN_URL. The failing seed is in the step log; pin it as a named-seed test (see the header of .github/workflows/deep-fuzz.yml)."
+          open=$(gh issue list --repo "$REPO" --state open --limit 100 --json number,title \
+            --jq "[.[] | select(.title == \"$title\")][0].number // empty")
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --repo "$REPO" --body "$body"
+          else
+            gh issue create --repo "$REPO" --title "$title" --body "$body"
+          fi
