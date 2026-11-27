@@ -124,6 +124,15 @@ final class DeviceWireDecodingTests: XCTestCase {
         XCTAssertEqual(w.reason, "server_unreachable")
     }
 
+    // A satellite tells its local `devices` followers its uplink dropped with this frame under no request id.
+    func testDeviceAdminErrorWithAnEmptyRequestIdDecodes() {
+        guard case .deviceAdminError(let w) = decode([
+            "type": "device_admin_error", "request_id": "", "reason": "server_unreachable",
+        ]) else { return XCTFail("an unsolicited device_admin_error must decode") }
+        XCTAssertEqual(w.requestId, "")
+        XCTAssertEqual(w.reason, "server_unreachable")
+    }
+
     func testDeviceAdminLevelFrameCarriesTheLevelAndWhereToPairFrom() {
         guard case .deviceAdminLevel(let w) = decode([
             "type": "device_admin_level", "level": "revoke_only", "pair_from": ["sendai", "tokyo"],
