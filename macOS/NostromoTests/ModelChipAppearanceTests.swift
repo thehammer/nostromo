@@ -174,8 +174,11 @@ final class ModelChipAppearanceTests: XCTestCase {
 
     /// Lay `chip` on the bar background in a window that reports itself key (or inactive), the chip
     /// holding keyboard focus or not.
+    /// `windowGivesTheChipFocus` plays what Full Keyboard Access (`AppleKeyboardUIMode = 2`) does on a
+    /// laptop that has it on: ordering the window in hands its first key view, the chip, the keyboard.
+    /// Whatever the machine's setting is, the host ends with the chip focused exactly when `focused` says so.
     private func makeHost(_ chipPresentation: ModelPresentation.Chip, keyWindow: Bool,
-                          focused: Bool = false) -> (host: NSView, chip: ModelChip) {
+                          focused: Bool = false, windowGivesTheChipFocus: Bool = false) -> (host: NSView, chip: ModelChip) {
         let window = windows.makeStateWindow(key: keyWindow)
         let host = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 60))
         host.wantsLayer = true
@@ -185,8 +188,12 @@ final class ModelChipAppearanceTests: XCTestCase {
         chip.frame = Self.chipFrame
         host.addSubview(chip)
         chip.apply(chipPresentation)
-        if focused { _ = chip.becomeFirstResponder() }
         window.orderFront(nil)
+        if windowGivesTheChipFocus { _ = window.makeFirstResponder(chip) }
+        // Settle the keyboard deliberately, both ways, so the measurement never depends on whether this
+        // machine's window hands the chip first responder when it comes forward.
+        _ = window.makeFirstResponder(focused ? chip : nil)
+        XCTAssertEqual(chip.hasKeyboardFocus, focused, "precondition: the chip is \(focused ? "" : "not ")drawing a focus ring")
         XCTAssertEqual(window.isKeyWindow, keyWindow, "precondition: the host window is \(keyWindow ? "key" : "inactive")")
         return (host, chip)
     }
@@ -305,6 +312,19 @@ final class ModelChipAppearanceTests: XCTestCase {
         }
         for (side, ratio) in without {
             XCTAssertLessThan(ratio, 3.0, "an unfocused chip has no ring on the \(side) edge (got \(ratio):1)")
+        }
+    }
+
+    func testAnUnfocusedChipHasNoRingEvenWhenTheWindowHandsItTheKeyboardOnOrderFront() {
+        let background = modelRelativeLuminance(NSColor(cgColor: barBackground()) ?? .black)
+        // Full Keyboard Access on: the window gives the chip first responder. Off: it does not. Both ways.
+        for windowGivesTheChipFocus in [true, false] {
+            let (host, chip) = makeHost(presentation(style: .normal), keyWindow: true, focused: false,
+                                        windowGivesTheChipFocus: windowGivesTheChipFocus)
+            XCTAssertFalse(chip.hasKeyboardFocus, "window gives focus \(windowGivesTheChipFocus)")
+            for (side, ratio) in edgeContrast(host: host, background: background) {
+                XCTAssertLessThan(ratio, 3.0, "window gives focus \(windowGivesTheChipFocus): no ring on the \(side) edge (got \(ratio):1)")
+            }
         }
     }
 
