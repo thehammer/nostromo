@@ -2897,4 +2897,119 @@ mod tests {
         scope.refresh(std::slice::from_ref(&meta));
         assert!(scope.tag_is_shareable("cody-w"), "no pointer, no PHI by it");
     }
+
+    /// The one frame a `devices` follower is sent when the uplink goes down.
+    fn is_unsolicited_unreachable(m: &ServerMsg) -> bool {
+        matches!(
+            m,
+            ServerMsg::DeviceAdminError { request_id, reason }
+                if request_id.is_empty() && reason == SERVER_UNREACHABLE
+        )
+    }
+
+    #[test]
+    fn a_devices_follower_is_told_server_unreachable_when_the_uplink_drops() {
+        let (relay, _up, _tx, _rx) = relay_pair(SatelliteAdmin::Full);
+        let (sub_tx, mut sub_rx) = mpsc::unbounded_channel();
+        relay.subscribe_devices("s", &sub_tx);
+        assert!(sub_rx.try_recv().is_err(), "nothing yet: the uplink is up");
+        relay.set_up(None);
+        let first = sub_rx.try_recv().expect("told that the server is gone");
+        assert!(is_unsolicited_unreachable(&first), "{first:?}");
+        assert!(sub_rx.try_recv().is_err(), "told once, and only that");
+    }
+
+    #[test]
+    fn every_follower_is_told_but_a_connection_that_went_away_is_not() {
+        let (relay, _up, _tx, _rx) = relay_pair(SatelliteAdmin::Full);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        let (gone_tx, mut gone_rx) = mpsc::unbounded_channel();
+        relay.subscribe_devices("a", &a_tx);
+        relay.subscribe_devices("b", &b_tx);
+        relay.subscribe_devices("gone", &gone_tx);
+        relay.drop_connection("gone");
+        relay.set_up(None);
+        for rx in [&mut a_rx, &mut b_rx] {
+            let m = rx.try_recv().expect("each follower is told");
+            assert!(is_unsolicited_unreachable(&m), "{m:?}");
+            assert!(rx.try_recv().is_err());
+        }
+        assert!(
+            gone_rx.try_recv().is_err(),
+            "a closed follower hears nothing"
+        );
+    }
+
+    #[test]
+    fn followers_hear_nothing_when_an_uplink_that_never_was_up_is_reported_down() {
+        let relay = UplinkRelay::new(SatelliteAdmin::Full);
+        let (sub_tx, mut sub_rx) = mpsc::unbounded_channel();
+        relay.subscribe_devices("s", &sub_tx);
+        relay.set_up(None);
+        assert!(
+            sub_rx.try_recv().is_err(),
+            "it was never up, so nothing fell"
+        );
+    }
+
+    #[test]
+    fn a_second_down_report_tells_the_followers_nothing_more() {
+        let (relay, _up, _tx, _rx) = relay_pair(SatelliteAdmin::Full);
+        let (sub_tx, mut sub_rx) = mpsc::unbounded_channel();
+        relay.subscribe_devices("s", &sub_tx);
+        relay.set_up(None);
+        let m = sub_rx.try_recv().expect("told on the way down");
+        assert!(is_unsolicited_unreachable(&m), "{m:?}");
+        relay.set_up(None);
+        assert!(sub_rx.try_recv().is_err(), "already down: nothing new");
+    }
+
+    #[test]
+    fn a_follower_is_told_again_each_time_a_reconnected_uplink_drops_again() {
+        let (relay, _up, _tx, _rx) = relay_pair(SatelliteAdmin::Full);
+        let (sub_tx, mut sub_rx) = mpsc::unbounded_channel();
+        relay.subscribe_devices("s", &sub_tx);
+        relay.set_up(None);
+        assert!(is_unsolicited_unreachable(&sub_rx.try_recv().unwrap()));
+        let (up_tx, _up_rx) = mpsc::channel(64);
+        relay.set_up(Some(up_tx));
+        relay.set_up(None);
+        let m = sub_rx.try_recv().expect("the second drop is told too");
+        assert!(is_unsolicited_unreachable(&m), "{m:?}");
+    }
+
+    #[test]
+    fn a_follower_is_not_sent_anything_when_the_uplink_comes_up() {
+        let relay = UplinkRelay::new(SatelliteAdmin::Full);
+        let (sub_tx, mut sub_rx) = mpsc::unbounded_channel();
+        relay.subscribe_devices("s", &sub_tx);
+        let (up_tx, _up_rx) = mpsc::channel(64);
+        relay.set_up(Some(up_tx));
+        assert!(
+            sub_rx.try_recv().is_err(),
+            "a connect says nothing until the primary speaks"
+        );
+    }
+
+    #[test]
+    fn the_unreachable_notice_is_the_device_admin_error_shape_the_mac_decodes() {
+        let frame = ServerMsg::DeviceAdminError {
+            request_id: String::new(),
+            reason: SERVER_UNREACHABLE.to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&frame).unwrap(),
+            serde_json::json!({
+                "type": "device_admin_error",
+                "request_id": "",
+                "reason": "server_unreachable",
+            })
+        );
+        let back: ServerMsg = serde_json::from_str(
+            r#"{"type":"device_admin_error","request_id":"","reason":"server_unreachable"}"#,
+        )
+        .unwrap();
+        assert!(is_unsolicited_unreachable(&back), "{back:?}");
+    }
 }

@@ -798,6 +798,42 @@ async fn when_the_uplink_drops_every_open_pairing_reports_connection_lost() {
 }
 
 #[tokio::test]
+async fn a_local_follower_of_devices_hears_server_unreachable_when_the_primary_goes_away() {
+    let primary = Rig::new().await;
+    let sat = join(
+        &primary,
+        "sat",
+        Egress::Personal,
+        SatelliteAdmin::Full,
+        SatelliteAdmin::Full,
+    )
+    .await;
+    let mut a = follower(&sat).await;
+    // Up and heard from: the primary's level reaches the follower first.
+    a.next_matching("level", |m| matches!(m, ServerMsg::DeviceAdminLevel { .. }))
+        .await;
+    // Revoking the satellite closes its socket.
+    primary
+        .registry
+        .revoke(&sat.device_id, RevokedBy::Operator)
+        .unwrap();
+    match a
+        .next_matching("server unreachable", |m| {
+            matches!(m, ServerMsg::DeviceAdminError { .. })
+        })
+        .await
+    {
+        ServerMsg::DeviceAdminError { request_id, reason } => {
+            assert_eq!(
+                (request_id.as_str(), reason.as_str()),
+                ("", "server_unreachable")
+            );
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
 async fn closing_a_local_client_cancels_its_pairing_on_the_primary() {
     let primary = Rig::new().await;
     let sat = join(
