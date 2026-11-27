@@ -401,10 +401,9 @@ author L and either
   save that brings a removed item's old note back over a newer one is a
   conflict. (An edit's old value, a `restore_text`'s included, counts the same
   way; a move changes no field value. Only the last 1,000 log entries are
-  kept: a value that left the board, by an edit or a removal, longer ago than
-  that can no longer be recognised as one the field once had, so a removal
-  is not recognised "at any age": one older than the log cannot be, the same as
-  an aged-out edit.) A pane or agent removing an item the
+  kept, so "at any age" means "as far back as the log reaches": a value that
+  left the board, by an edit or a removal, more than 1,000 log entries ago can no
+  longer be recognised as one the field once had.) A pane or agent removing an item the
   log did not see added, across a history gap, keeps the item's markdown as a
   guess even when the only logged changes to it are its own.
 

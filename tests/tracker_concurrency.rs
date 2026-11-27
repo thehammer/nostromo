@@ -2064,6 +2064,9 @@ fn run_seed(seed: u64, extras: bool) -> Result<(), String> {
 
 /// The interleaving the long fuzz run found: a note a removal took off the
 /// board, set back by a stale save over a newer note, was silently lost.
+///
+/// Fails when `reverts` in `conflicts.rs` stops counting a `Removed` change's
+/// values as values the field once held.
 #[test]
 fn a_stale_save_restoring_a_value_a_removal_took_off_loses_no_edit() {
     pinned(0x7a11_0a5a).unwrap_or_else(|e| panic!("{e}"));
@@ -2071,6 +2074,11 @@ fn a_stale_save_restoring_a_value_a_removal_took_off_loses_no_edit() {
 
 /// Another interleaving of the same family: a removal's value coming back
 /// through a stale save.
+///
+/// Fails when `detect`'s removal rule treats any logged edit of the item as a
+/// whole known history (`born_in_log` back to "touched": an item the log did
+/// not see born, removed across a history gap, must be kept as a guess). It
+/// does not fail on the `reverts` revert above: that is the pin above's.
 #[test]
 fn a_stale_save_after_a_removal_loses_no_edit_seed_7a110c9a() {
     pinned(0x7a11_0c9a).unwrap_or_else(|e| panic!("{e}"));
@@ -2079,6 +2087,15 @@ fn a_stale_save_after_a_removal_loses_no_edit_seed_7a110c9a() {
 /// Interleavings Perri's review of #490 found (they fail on main too): a stale
 /// window floods the board past its cap, and keeping the losing value cleared
 /// an item's dropped marker while it still had conflicts (7a1228e0, 7a126120).
+///
+/// Both fail when `record_conflicts` forgets a settled item's marker without
+/// the `unseen_drop` check, and when it calls `forget_drops_of_settled` instead
+/// of `forget_recorded_drops`. Neither fails when `forget_recorded_drops`
+/// forgets the whole marker instead of the count recorded before the batch's
+/// pushes (round 1's forget): the directed
+/// `a_cap_drop_counted_in_the_batch_that_settles_the_items_other_conflict_keeps_its_marker`
+/// (`tracker_two_way_followup`) and the unit test
+/// `a_cap_drop_during_the_settling_batch_survives_the_forget` catch that.
 #[test]
 fn a_flooded_board_keeps_the_dropped_marker_seed_7a1228e0() {
     pinned(0x7a12_28e0).unwrap_or_else(|e| panic!("{e}"));
@@ -2090,6 +2107,9 @@ fn a_flooded_board_keeps_the_dropped_marker_seed_7a126120() {
 }
 
 /// Seed 7a1145aa was a lost edit (not a marker problem): kept as a pin.
+///
+/// Fails when the registry stops logging a keep-losing that changed nothing
+/// (the person's decision) for the field.
 #[test]
 fn a_flooded_board_loses_no_edit_seed_7a1145aa() {
     pinned(0x7a11_45aa).unwrap_or_else(|e| panic!("{e}"));
@@ -2099,6 +2119,9 @@ fn a_flooded_board_loses_no_edit_seed_7a1145aa() {
 /// logged as the window's own change, and the window's next keep-losing from
 /// the same view read it as the field's last write, overwriting the file's
 /// unseen save before it.
+///
+/// Fails when `latest` in `conflicts.rs` stops skipping the writer's own
+/// logged no-op (`own_no_op`).
 #[test]
 fn a_flooded_board_loses_no_edit_seed_7a126776() {
     pinned(0x7a12_6776).unwrap_or_else(|e| panic!("{e}"));
@@ -2108,6 +2131,9 @@ fn a_flooded_board_loses_no_edit_seed_7a126776() {
 /// #491 (they pass now; each was checked to fail against the code from before
 /// #491): two lost edits made by window 1 (its `done`, its text), and two
 /// dropped markers cleared too early.
+///
+/// The two lost edits (7a12b6ab, 7a16a5de) fail when the registry stops logging
+/// a keep-losing that changed nothing, the same revert as 7a1145aa's.
 #[test]
 fn a_flooded_board_loses_no_edit_seed_7a12b6ab() {
     pinned(0x7a12_b6ab).unwrap_or_else(|e| panic!("{e}"));
@@ -2118,6 +2144,10 @@ fn a_flooded_board_loses_no_edit_seed_7a16a5de() {
     pinned(0x7a16_a5de).unwrap_or_else(|e| panic!("{e}"));
 }
 
+/// The two markers cleared too early (7a159958, 7a165a50) fail when
+/// `record_conflicts` forgets a settled item's marker though the log shows a
+/// drop after the view the person settled from (no `unseen_drop` check), and
+/// when `forget_drops_of_settled` stands in for `forget_recorded_drops`.
 #[test]
 fn a_flooded_board_keeps_the_dropped_marker_until_shown_seed_7a159958() {
     pinned(0x7a15_9958).unwrap_or_else(|e| panic!("{e}"));
