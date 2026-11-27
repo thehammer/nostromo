@@ -2167,6 +2167,7 @@ mod tests {
     /// `probe_failure_warns_after_three_consecutive_failures_then_resets` in
     /// `tests/perri_targeted_relay.rs`.
     fn capture_warnings() -> (CapturedLogs, tracing::subscriber::DefaultGuard) {
+        crate::test_log::install_global_capture();
         let logs = CapturedLogs::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(logs.clone())
