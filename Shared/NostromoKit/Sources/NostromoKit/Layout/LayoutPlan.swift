@@ -6,8 +6,8 @@
 // threshold.
 //
 // This purity is not stylistic. The regular-width (iPad) presentation is the
-// one part of this PRD nobody can check automatically — there is no iOS test
-// target, no simulator in CI, and no iPad on the build machine — and the
+// one part of this PRD nobody can check automatically — there is no iPad
+// on the build machine and no automated check of the iPad rendering — and the
 // PRD's own risk section names it "the part most likely to be quietly
 // half-working". Extracting the layout DECISION is the only form in which
 // that decision is testable at all, so everything that can live here does,
