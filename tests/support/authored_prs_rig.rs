@@ -1659,33 +1659,115 @@ impl Captured {
     }
 }
 
-/// Capture every tracing event of this thread (TRACE and up) until the guard
-/// drops. The engine runs on the test's own thread, so it is captured too.
-///
-/// A process-wide subscriber that discards everything goes in first, so every
-/// callsite stays enabled. Without it, a test thread that reaches a callsite
-/// while no scoped subscriber is registered (or while another test's is being
-/// built or dropped) can leave that callsite cached as disabled for a later
-/// capture: the feature's lines silently go missing ("the feature logged
-/// something" failed about 1 in 100 whole-binary runs under load).
-pub fn capture_logs() -> (Captured, tracing::subscriber::DefaultGuard) {
-    static GLOBAL_LOG: std::sync::Once = std::sync::Once::new();
-    GLOBAL_LOG.call_once(|| {
-        let _ = tracing::subscriber::set_global_default(
+thread_local! {
+    /// The capture bound to this thread by `capture_logs`, if any.
+    static BOUND: std::cell::RefCell<Option<Captured>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Every capture that is live, whichever thread built it.
+static ACTIVE: Mutex<Vec<Captured>> = Mutex::new(Vec::new());
+
+/// Where the process-wide subscriber writes an event: into the capture bound
+/// to the emitting thread, or, when that thread has none (a worker thread, a
+/// `spawn_blocking` thread, a plain `std::thread`), into every live capture.
+#[derive(Clone, Copy)]
+struct LogRouter;
+
+struct RouterWriter;
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogRouter {
+    type Writer = RouterWriter;
+    fn make_writer(&'a self) -> RouterWriter {
+        RouterWriter
+    }
+}
+
+impl Write for RouterWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let bound = BOUND.try_with(|b| b.borrow().clone()).ok().flatten();
+        match bound {
+            Some(mut own) => own.write_all(buf)?,
+            None => {
+                let live = ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                for mut capture in live {
+                    capture.write_all(buf)?;
+                }
+            }
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Install the process-wide subscriber that `capture_logs` reads from (once).
+/// It is interested in every event at every level, so every callsite stays
+/// enabled; an event with no capture to go to is dropped. Test binaries that
+/// build their own engines without capturing call this too, so a capturing
+/// test never races them.
+pub fn install_log_router() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        tracing::subscriber::set_global_default(
             tracing_subscriber::fmt()
                 .with_max_level(tracing::Level::TRACE)
-                .with_writer(std::io::sink)
+                .with_ansi(false)
+                .with_writer(LogRouter)
                 .finish(),
-        );
+        )
+        .expect("no other subscriber is installed process-wide");
     });
+}
+
+/// Ends a capture when dropped.
+pub struct CaptureGuard {
+    captured: Captured,
+}
+
+impl Drop for CaptureGuard {
+    fn drop(&mut self) {
+        let _ = BOUND.try_with(|b| *b.borrow_mut() = None);
+        ACTIVE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|c| !Arc::ptr_eq(&c.0, &self.captured.0));
+    }
+}
+
+/// Capture every tracing event (TRACE and up) the test makes until the guard
+/// drops: the events of the calling thread, and the ones emitted on any thread
+/// that has no capture of its own.
+///
+/// A scoped subscriber (`set_default`) is thread-local, so a line logged from
+/// another thread (a multi-thread runtime's worker, `spawn_blocking`) was lost
+/// to it, and with scoped subscribers alone a callsite first reached while
+/// another test's subscriber is being built or dropped can be cached as
+/// disabled for a later capture ("the feature logged something" failed about 1
+/// in 100 whole-binary runs under load). So the subscriber is one process-wide
+/// [`install_log_router`]: always interested, routing each event to the
+/// capture bound to its thread. Under nextest (one process per test) the only
+/// live capture is the test's own, so an off-thread line is always its own;
+/// under libtest (tests share the process) an off-thread line cannot be told
+/// from another test's and goes to every live capture, but a line from a test
+/// thread never crosses to another test.
+///
+/// Call it on the thread that drives the engine. Hold one capture per thread.
+pub fn capture_logs() -> (Captured, CaptureGuard) {
+    install_log_router();
     let captured = Captured::default();
-    let writer = captured.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    (captured, tracing::subscriber::set_default(subscriber))
+    BOUND.with(|b| {
+        assert!(
+            b.borrow().is_none(),
+            "this thread already has a log capture"
+        );
+        *b.borrow_mut() = Some(captured.clone());
+    });
+    ACTIVE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(captured.clone());
+    (captured.clone(), CaptureGuard { captured })
 }
 
 /// The code of a verb answer (`ok` for success).

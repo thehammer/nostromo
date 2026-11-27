@@ -1232,6 +1232,49 @@ async fn the_usage_line_is_logged_at_info_within_a_minute_of_starting_then_hourl
     );
 }
 
+/// A line logged on a thread that has no capture of its own (a multi-thread
+/// runtime's worker, `spawn_blocking`) used to be lost to the thread-local
+/// capture, and the test then failed with "the feature logged something".
+#[test]
+fn a_line_logged_from_another_thread_is_captured() {
+    let (log, _guard) = capture_logs();
+    tracing::info!("on-the-test-thread");
+    std::thread::spawn(|| tracing::info!("on-another-thread"))
+        .join()
+        .unwrap();
+    let text = log.text();
+    assert!(text.contains("on-the-test-thread"), "{text}");
+    assert!(text.contains("on-another-thread"), "{text}");
+}
+
+/// Two tests that share a process (libtest) each see their own lines and not
+/// the other's: a line logged on a test's own thread goes to its capture only.
+#[test]
+fn a_capture_never_sees_the_lines_another_tests_thread_logs() {
+    use std::sync::mpsc::channel;
+    let (ready_tx, ready_rx) = channel::<()>();
+    let (go_tx, go_rx) = channel::<()>();
+    let other = std::thread::spawn(move || {
+        let (log, _guard) = capture_logs();
+        ready_tx.send(()).unwrap();
+        go_rx.recv().unwrap();
+        tracing::info!("line-from-the-other-test");
+        log.text()
+    });
+
+    let (log, _guard) = capture_logs();
+    ready_rx.recv().unwrap();
+    tracing::info!("line-from-this-test");
+    go_tx.send(()).unwrap();
+    let theirs = other.join().unwrap();
+
+    let mine = log.text();
+    assert!(mine.contains("line-from-this-test"), "{mine}");
+    assert!(!mine.contains("line-from-the-other-test"), "{mine}");
+    assert!(theirs.contains("line-from-the-other-test"), "{theirs}");
+    assert!(!theirs.contains("line-from-this-test"), "{theirs}");
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // The Mother jobs feed goes away
 // ═════════════════════════════════════════════════════════════════════════════
