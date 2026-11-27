@@ -21,3 +21,11 @@ reported skip. Run with:
 ```
 python3 -m unittest discover -s tests/ci_policy -v
 ```
+
+The same stdlib-only approach covers the rest of the workflow set: `test_linux_runner_pin.py`
+(every runner image pinned, both `.yml` and `.yaml`), `test_action_pins.py` (every `uses:` a full
+commit SHA with a version comment), `test_rust_toolchain_pin.py`, `test_nextest_pin.py`,
+`test_push_relay_workflow.py` (always-reporting required check, with its path classifier run
+against real merge commits in a throwaway repo) and `test_deep_fuzz_workflow.py`. `workflow_steps.py`
+is the shared `uses:` step reader (not a test module). `test_nextest_pin.py` reads
+`.config/nextest.toml` with `tomllib` (Python 3.11+).
