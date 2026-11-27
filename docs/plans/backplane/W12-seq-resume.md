@@ -190,6 +190,29 @@ read from the job's base ref, so a worker can neither add nor loosen a gate.
   Target section, the ETA band shown at about 50% and whether the job landed in
   it, gate time per pass and attempts used, and any `moved_back` reason.
 
+## W12 as built
+
+What the code does where the plan above left room (`src/ipc/seq.rs`,
+`src/ipc/server.rs`: `plan_resume`, `gap_bounds`, `forward_broadcasts`):
+
+- **`Gap { from, to }` after a daemon restart.** `Welcome.seq_epoch` names the
+  run of the daemon. A `Subscribe` whose `seq_epoch` is another run's is not
+  replayed at all, whatever its numbers: each topic it resumes gets the
+  retained snapshot and one `Gap { reason: daemon_restarted }`, even a topic
+  that has published nothing yet. The range is `from = min(1, latest)`,
+  `to = latest`, with `latest` the topic's last number in *this* run: a topic
+  with frames 1..=5 says `(1, 5)` (everything this run has is news to the
+  client), an empty topic says `(0, 0)`. It never runs backwards
+  (`from <= to`) and does not depend on the number the client sent. A client
+  that sends no `seq_epoch` is compared by number alone: a number past the
+  topic's latest is a `replay_window_exceeded` Gap with the same range rule
+  (`gap_bounds`), a number inside the ring is replayed. Pinned by the
+  `(after, latest, ...)` table in `tests/seq_resume.rs`.
+- **A frame with no topic that does not fit a client's queue.** It is in no
+  `Gap`, so a *local* client's connection is closed (it reconnects and is
+  replayed what it needs, including a pending approval); a network peer is
+  not closed and is told with the `Gap` of its topics only.
+
 ## Out of scope
 
 - Durable (on-disk) replay across daemon restarts.
