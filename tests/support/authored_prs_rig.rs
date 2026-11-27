@@ -1668,12 +1668,21 @@ thread_local! {
 static ACTIVE: Mutex<Vec<Captured>> = Mutex::new(Vec::new());
 
 /// Where the process-wide subscriber writes an event: into the capture bound
-/// to the emitting thread, or, when that thread has none (a worker thread, a
-/// `spawn_blocking` thread, a plain `std::thread`), into every live capture.
+/// to the emitting thread; or, when that thread has none and is a helper thread
+/// (unnamed, as `std::thread::spawn` makes it, or one of tokio's `tokio-*`
+/// workers), into every live capture. A thread with any other name is another
+/// test's own thread (libtest names them after the test) and its lines are
+/// nobody's: they must not leak into this test's capture.
 #[derive(Clone, Copy)]
 struct LogRouter;
 
 struct RouterWriter;
+
+fn is_helper_thread() -> bool {
+    std::thread::current()
+        .name()
+        .is_none_or(|name| name.starts_with("tokio-"))
+}
 
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogRouter {
     type Writer = RouterWriter;
@@ -1687,12 +1696,13 @@ impl Write for RouterWriter {
         let bound = BOUND.try_with(|b| b.borrow().clone()).ok().flatten();
         match bound {
             Some(mut own) => own.write_all(buf)?,
-            None => {
+            None if is_helper_thread() => {
                 let live = ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 for mut capture in live {
                     capture.write_all(buf)?;
                 }
             }
+            None => {}
         }
         Ok(buf.len())
     }
@@ -1736,8 +1746,8 @@ impl Drop for CaptureGuard {
 }
 
 /// Capture every tracing event (TRACE and up) the test makes until the guard
-/// drops: the events of the calling thread, and the ones emitted on any thread
-/// that has no capture of its own.
+/// drops: the events of the calling thread, and the ones emitted on a helper
+/// thread (see [`LogRouter`]).
 ///
 /// A scoped subscriber (`set_default`) is thread-local, so a line logged from
 /// another thread (a multi-thread runtime's worker, `spawn_blocking`) was lost
@@ -1747,10 +1757,10 @@ impl Drop for CaptureGuard {
 /// in 100 whole-binary runs under load). So the subscriber is one process-wide
 /// [`install_log_router`]: always interested, routing each event to the
 /// capture bound to its thread. Under nextest (one process per test) the only
-/// live capture is the test's own, so an off-thread line is always its own;
-/// under libtest (tests share the process) an off-thread line cannot be told
-/// from another test's and goes to every live capture, but a line from a test
-/// thread never crosses to another test.
+/// live capture is the test's own, so a helper thread's line is always its
+/// own. Under libtest (tests share the process) a helper thread's line cannot
+/// be told from another test's helper and goes to every live capture, but a
+/// line from a test thread never crosses to another test.
 ///
 /// Call it on the thread that drives the engine. Hold one capture per thread.
 pub fn capture_logs() -> (Captured, CaptureGuard) {

@@ -1247,30 +1247,58 @@ fn a_line_logged_from_another_thread_is_captured() {
     assert!(text.contains("on-another-thread"), "{text}");
 }
 
+/// The same for a multi-thread runtime's workers, where the engine's tasks run
+/// off the test thread.
+#[test]
+fn a_line_logged_on_a_multi_thread_runtimes_worker_is_captured() {
+    let (log, _guard) = capture_logs();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        tokio::spawn(async { tracing::info!("on-a-runtime-worker") })
+            .await
+            .unwrap();
+    });
+    assert!(log.text().contains("on-a-runtime-worker"), "{}", log.text());
+}
+
 /// Two tests that share a process (libtest) each see their own lines and not
-/// the other's: a line logged on a test's own thread goes to its capture only.
+/// the other's: a line logged on a test's own thread goes to its capture only,
+/// whether that test captures or not.
 #[test]
 fn a_capture_never_sees_the_lines_another_tests_thread_logs() {
     use std::sync::mpsc::channel;
     let (ready_tx, ready_rx) = channel::<()>();
     let (go_tx, go_rx) = channel::<()>();
-    let other = std::thread::spawn(move || {
-        let (log, _guard) = capture_logs();
-        ready_tx.send(()).unwrap();
-        go_rx.recv().unwrap();
-        tracing::info!("line-from-the-other-test");
-        log.text()
-    });
+    let other = std::thread::Builder::new()
+        .name("another-test".into())
+        .spawn(move || {
+            let (log, _guard) = capture_logs();
+            ready_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            tracing::info!("line-from-the-other-test");
+            log.text()
+        })
+        .unwrap();
+    // A third test that does not capture at all.
+    let bystander = std::thread::Builder::new()
+        .name("a-test-that-does-not-capture".into())
+        .spawn(|| tracing::info!("line-from-a-bystander"))
+        .unwrap();
 
     let (log, _guard) = capture_logs();
     ready_rx.recv().unwrap();
     tracing::info!("line-from-this-test");
     go_tx.send(()).unwrap();
     let theirs = other.join().unwrap();
+    bystander.join().unwrap();
 
     let mine = log.text();
     assert!(mine.contains("line-from-this-test"), "{mine}");
     assert!(!mine.contains("line-from-the-other-test"), "{mine}");
+    assert!(!mine.contains("line-from-a-bystander"), "{mine}");
     assert!(theirs.contains("line-from-the-other-test"), "{theirs}");
     assert!(!theirs.contains("line-from-this-test"), "{theirs}");
 }
