@@ -414,6 +414,12 @@ fn not_recorded() -> Value {
 #[derive(Clone, Default)]
 pub struct CurateBridge {
     active: Arc<Mutex<Option<ActiveRun>>>,
+    /// Whether `active` holds a run, written in the same critical section as
+    /// `active` itself, so [`CurateBridge::is_active`] can look without
+    /// taking the lock: a lock that is merely busy (a check in flight, a
+    /// straggler's call answered "no run") says nothing about whether a run
+    /// exists.
+    live: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for CurateBridge {
@@ -538,7 +544,7 @@ impl CurateBridge {
 
     /// True while a run is in progress.
     pub fn is_active(&self) -> bool {
-        self.active.try_lock().map_or(true, |run| run.is_some())
+        self.live.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Start a run: `huey.check_project` and `huey.publish_report` act on it
@@ -550,7 +556,8 @@ impl CurateBridge {
         digest_file: PathBuf,
     ) -> oneshot::Receiver<RunEnd> {
         let (tx, rx) = oneshot::channel();
-        *self.active.lock().await = Some(ActiveRun {
+        let mut run = self.active.lock().await;
+        *run = Some(ActiveRun {
             input,
             checks: Vec::new(),
             check_calls: 0,
@@ -560,6 +567,7 @@ impl CurateBridge {
             digest_file,
             done: Some(tx),
         });
+        self.live.store(true, std::sync::atomic::Ordering::SeqCst);
         rx
     }
 
@@ -568,17 +576,16 @@ impl CurateBridge {
     fn abandon(&self) {
         if let Ok(mut run) = self.active.try_lock() {
             run.take();
+            self.live.store(false, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
     /// End the run; its check results.
     async fn end(&self) -> Vec<CheckResult> {
-        self.active
-            .lock()
-            .await
-            .take()
-            .map(|run| run.checks)
-            .unwrap_or_default()
+        let mut run = self.active.lock().await;
+        let ended = run.take();
+        self.live.store(false, std::sync::atomic::Ordering::SeqCst);
+        ended.map(|run| run.checks).unwrap_or_default()
     }
 
     /// `huey.check_project` for the curating session: run the probe against
@@ -873,5 +880,20 @@ impl Curator for SessionCurator {
             "huey: curating session ended"
         );
         outcome
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `is_active` used to answer from `try_lock`, "busy" counting as "a run
+    /// is in progress": a straggler's call that holds the lock for a moment
+    /// to be told "no run" made a bridge with no run report one.
+    #[tokio::test]
+    async fn a_busy_lock_with_no_run_is_not_an_active_run() {
+        let bridge = CurateBridge::new();
+        let _busy = bridge.active.lock().await;
+        assert!(!bridge.is_active());
     }
 }
