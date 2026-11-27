@@ -32,10 +32,6 @@ use crate::data::work::untrusted::one_line;
 use crate::mother::MotherJob;
 
 /// How often the relay's connected flag is looked at (it has no signal for "down").
-/// A pause is judged against the wall clock but slept on the monotonic one,
-/// which stands still while the machine sleeps: look at the wall clock again at
-/// least this often, so a pause that ended meanwhile is noticed within it.
-const WALL_RECHECK: Duration = Duration::from_secs(30);
 const RELAY_STATUS_POLL: Duration = Duration::from_secs(2);
 /// Snapshots are published at most this often.
 const DEBOUNCE: Duration = Duration::from_millis(250);
@@ -1225,12 +1221,6 @@ impl Engine {
         }
         if let Some(t) = self.rate.next_change() {
             if let Ok(d) = (t - wall).to_std() {
-                // While paused the wall clock may jump past the end unseen.
-                let d = if self.posture == Posture::Paused {
-                    d.min(WALL_RECHECK)
-                } else {
-                    d
-                };
                 consider(now + d);
             }
         }
@@ -1248,6 +1238,8 @@ impl Engine {
             }
         }
         if self.posture != Posture::Idle {
+            // Also what notices a pause that ended on the wall clock while the
+            // monotonic sleep stood still (the machine slept): within this long.
             if let Some(t) = self.last_ownership {
                 consider(t + OWNERSHIP_EVERY);
             }
