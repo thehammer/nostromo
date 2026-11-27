@@ -69,6 +69,8 @@ const OUT_QUEUE: usize = 256;
 const MAX_ROUTED: usize = 32;
 /// The longest routed-request id accepted.
 const MAX_ROUTED_ID: usize = 128;
+/// How long a `DevicePairCancel` waits for room in a full uplink queue.
+const CANCEL_WAIT: Duration = Duration::from_secs(10);
 /// A session must have stayed up this long before the reconnect backoff resets.
 const STABLE_AFTER: Duration = Duration::from_secs(30);
 
@@ -88,6 +90,8 @@ pub const SERVER_UNREACHABLE: &str = "server_unreachable";
 #[derive(Debug, Clone)]
 pub struct PhiScope {
     repos: Vec<String>,
+    /// Recent [`gitdir_of`] answers (see [`GitdirCache`]).
+    gitdirs: Arc<Mutex<GitdirCache>>,
     /// Every tag in the registry.
     known: HashSet<String>,
     /// The subset whose project is a PHI repo.
@@ -110,6 +114,7 @@ impl PhiScope {
     pub fn new(repos: Vec<String>) -> Self {
         Self {
             repos: repos.iter().map(|r| norm(r)).collect(),
+            gitdirs: Arc::default(),
             known: HashSet::new(),
             phi: HashSet::new(),
         }
@@ -122,6 +127,15 @@ impl PhiScope {
         self.repos
             .iter()
             .any(|r| n == *r || n.starts_with(&format!("{r}-")) || n.starts_with(&format!("{r}.")))
+    }
+
+    /// [`gitdir_of`], remembered briefly (see [`GitdirCache`]): the same few paths are
+    /// looked up for every frame that passes, under the forwarder's lock.
+    fn gitdir(&self, dir: &str) -> Option<String> {
+        self.gitdirs
+            .lock()
+            .unwrap()
+            .get_or_read(dir, Instant::now(), gitdir_of)
     }
 
     /// Any component of the path names a PHI repo: a worktree inside the repo,
@@ -140,7 +154,7 @@ impl PhiScope {
     /// list it in `phi_repos` by that name.
     fn focus_is_phi(&self, meta: &crate::ipc::protocol::FocusMeta) -> bool {
         meta.project_path.as_deref().is_some_and(|p| {
-            self.path_is_phi(p) || gitdir_of(p).is_some_and(|g| self.path_is_phi(&g))
+            self.path_is_phi(p) || self.gitdir(p).is_some_and(|g| self.path_is_phi(&g))
         }) || meta
             .project_name
             .as_deref()
@@ -258,13 +272,62 @@ impl PhiScope {
                     _ => None,
                 };
                 if cwd.is_some_and(|c| {
-                    self.path_is_phi(c) || gitdir_of(c).is_some_and(|g| self.path_is_phi(&g))
+                    self.path_is_phi(c) || self.gitdir(c).is_some_and(|g| self.path_is_phi(&g))
                 }) {
                     return None;
                 }
                 Some(other)
             }
         }
+    }
+}
+
+/// How long a [`gitdir_of`] answer that found a pointer is reused: a stale one
+/// only withholds more (it fails closed), and a worktree's pointer does not
+/// move.
+const GITDIR_TTL_FOUND: Duration = Duration::from_secs(60);
+/// How long "this is not a worktree" is reused. A stale one fails open (a
+/// worktree whose `.git` file is written just after its first lookup would be
+/// judged by its name alone), so the window is kept to a couple of seconds:
+/// enough to spare the filesystem a read per frame, short enough that a new
+/// worktree is classified at once for practical purposes. Its path and name
+/// are judged on every frame regardless.
+const GITDIR_TTL_ABSENT: Duration = Duration::from_secs(2);
+/// Most directories remembered; past it the cache starts over.
+const GITDIR_CACHE_MAX: usize = 512;
+
+/// Recent answers of [`gitdir_of`], by directory.
+#[derive(Debug, Default)]
+struct GitdirCache {
+    entries: HashMap<String, (Instant, Option<String>)>,
+}
+
+impl GitdirCache {
+    /// The answer for `dir`: the remembered one if it is still fresh at `now`
+    /// ([`GITDIR_TTL_FOUND`] for a pointer, [`GITDIR_TTL_ABSENT`] for none),
+    /// else what `read` says (and it is remembered).
+    fn get_or_read(
+        &mut self,
+        dir: &str,
+        now: Instant,
+        read: impl FnOnce(&str) -> Option<String>,
+    ) -> Option<String> {
+        if let Some((at, answer)) = self.entries.get(dir) {
+            let ttl = if answer.is_some() {
+                GITDIR_TTL_FOUND
+            } else {
+                GITDIR_TTL_ABSENT
+            };
+            if now.saturating_duration_since(*at) < ttl {
+                return answer.clone();
+            }
+        }
+        let answer = read(dir);
+        if self.entries.len() >= GITDIR_CACHE_MAX {
+            self.entries.clear();
+        }
+        self.entries.insert(dir.to_string(), (now, answer.clone()));
+        answer
     }
 }
 
@@ -544,6 +607,30 @@ struct RelayState {
     devices: Option<ServerMsg>,
 }
 
+/// Send a `DevicePairCancel` upward so a full queue cannot lose it: a lost
+/// cancel leaves the code open on the primary until it expires. When the queue
+/// has no room the send waits for some, up to [`CANCEL_WAIT`], on a task of its
+/// own (the caller holds a lock and cannot wait). A closed queue means the
+/// uplink is gone, and the primary ends the connection's pairings itself.
+fn send_cancel(up: &mpsc::Sender<UplinkFrame>, frame: UplinkFrame) {
+    let Err(mpsc::error::TrySendError::Full(frame)) = up.try_send(frame) else {
+        return;
+    };
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        note_dropped("a pairing cancel (the uplink's queue is full)");
+        return;
+    };
+    let up = up.clone();
+    runtime.spawn(async move {
+        if tokio::time::timeout(CANCEL_WAIT, up.send(frame))
+            .await
+            .is_err()
+        {
+            note_dropped("a pairing cancel (the uplink's queue stayed full)");
+        }
+    });
+}
+
 /// Forwards the device-admin verbs of this satellite's local clients to the
 /// primary, answers each to the client that asked, and tells local `devices`
 /// subscribers their level. It holds no registry and executes nothing.
@@ -675,13 +762,16 @@ impl UplinkRelay {
             st.next_request += 1;
             let request_id = format!("s{}", st.next_request);
             if let Some(up) = &st.up {
-                let _ = up.try_send(UplinkFrame::Client {
-                    msg: ClientMsg::DevicePairCancel {
-                        request_id,
-                        pairing_id,
-                        origin: Some(conn_key.to_string()),
+                send_cancel(
+                    up,
+                    UplinkFrame::Client {
+                        msg: ClientMsg::DevicePairCancel {
+                            request_id,
+                            pairing_id,
+                            origin: Some(conn_key.to_string()),
+                        },
                     },
-                });
+                );
             }
         }
     }
