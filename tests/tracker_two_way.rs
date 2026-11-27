@@ -734,6 +734,35 @@ fn a_status_op_on_a_command_the_person_saw_is_accepted_even_after_other_changes(
     assert_eq!(rig.item("run-it").status, Status::Done);
 }
 
+/// The same line when the log no longer reaches back to the person's view: it
+/// cannot show that the item did not become a command (or change its command)
+/// meanwhile, so the status op is refused as stale. The control: a view the
+/// log still covers ticks the same command.
+#[test]
+fn a_status_op_on_a_command_from_a_view_older_than_the_log_is_refused() {
+    let rig = Rig::new();
+    rig.agent_a(&[Op::Upsert(Upsert {
+        id: Some("run-it".into()),
+        section: Some("now".into()),
+        text: Some("Run it".into()),
+        command: Some("echo one".into()),
+        ..Default::default()
+    })])
+    .unwrap();
+    let stale_base = rig.version();
+    // Nothing touches the command itself; the log just rolls past the view.
+    churn(&rig);
+    let err = rig
+        .pane_at(stale_base, vec![pane_status("run-it", "done")])
+        .expect_err("the log no longer reaches the view");
+    assert_eq!(err.code, "invalid_args");
+    assert!(err.stale, "{err:?}");
+    assert_eq!(err.index, Some(0));
+    assert_eq!(rig.item("run-it").status, Status::Todo, "nothing written");
+    rig.pane(vec![pane_status("run-it", "done")]).unwrap();
+    assert_eq!(rig.item("run-it").status, Status::Done);
+}
+
 #[test]
 fn the_pane_may_tick_a_command_item_done_and_an_agent_may_not() {
     let rig = Rig::new();
