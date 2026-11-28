@@ -991,6 +991,97 @@ fn a_notice_queued_but_unwritten_when_the_daemon_stopped_is_delivered_once_after
 }
 
 #[test]
+fn a_notice_left_waiting_by_a_build_before_jonesys_hub_is_delivered_once_with_all_it_said() {
+    let pr = "https://github.com/acme/repo/pull/12";
+    let r = Rig::with_store();
+    r.jobs(&[]);
+    r.reply(F, Reply::Down);
+    r.jobs(&[job(F, "a", "succeeded")
+        .titled("Fix the export")
+        .with_pr(pr)
+        .costing(2.5)]);
+    r.after(30 * SEC);
+    assert_eq!(
+        r.status("a").0,
+        NoticeStatus::Held,
+        "the session is not running"
+    );
+
+    // That build kept a waiting item as the notice itself, not as an event item.
+    r.edit_store_file(|json| {
+        let items = json["focuses"][F]["bucket"]["items"]
+            .as_array_mut()
+            .expect("the store holds F's waiting items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["item"]["subject"], "mother://job/a");
+        items[0]["item"] = serde_json::json!({
+            "job_id": "a",
+            "title": "Fix the export",
+            "states": ["pr_opened", "succeeded"],
+            "pr_url": pr,
+            "cost_usd": 2.5,
+        });
+    });
+
+    let r = r.restart();
+    r.jobs(&[job(F, "a", "succeeded")
+        .titled("Fix the export")
+        .with_pr(pr)
+        .costing(2.5)]);
+    r.reply(F, Reply::Queued);
+    r.user_turn_starts(F);
+    let ds = r.deliveries();
+    assert_eq!(ds.len(), 1, "delivered once after the restart");
+    let el = element_for(&ds[0].fresh, "a");
+    assert_eq!(attr(el, "state").as_deref(), Some("succeeded"));
+    assert_eq!(attr(el, "since").as_deref(), Some("pr_opened"));
+    assert_eq!(attr(el, "title").as_deref(), Some("Fix the export"));
+    assert_eq!(attr(el, "pr").as_deref(), Some(pr));
+    assert_eq!(attr(el, "cost_usd").as_deref(), Some("2.50"));
+}
+
+#[test]
+fn one_report_of_a_merge_tells_every_job_on_that_pr_and_a_report_per_job_adds_nothing() {
+    let pr = "https://github.com/acme/repo/pull/13";
+    let r = Rig::with_store();
+    r.jobs(&[]);
+    let feed = [
+        job(F, "first", "succeeded").with_pr(pr),
+        job(G, "fixup", "succeeded").with_pr(pr),
+    ];
+    r.jobs(&feed);
+    r.after(30 * SEC);
+    assert_eq!(r.deliveries().len(), 2, "each focus heard of its own job");
+
+    // The GitHub source reports the merge once, on the PR. Both focuses claimed
+    // that PR (each about its own job), so both hear it.
+    r.engine.pr_event("first", true);
+    r.after(30 * SEC);
+    let to_f = r.last_delivery(F).fresh;
+    let to_g = r.last_delivery(G).fresh;
+    assert_eq!(
+        attr(element_for(&to_f, "first"), "state").as_deref(),
+        Some("pr_merged")
+    );
+    assert_eq!(
+        attr(element_for(&to_g, "fixup"), "state").as_deref(),
+        Some("pr_merged")
+    );
+    assert_eq!(r.deliveries().len(), 4);
+
+    // The tracker's own report for the second job, and a restart, add nothing.
+    r.engine.pr_event("fixup", true);
+    r.after(HOUR);
+    let r = r.restart();
+    r.jobs(&feed);
+    r.engine.pr_event("fixup", true);
+    r.engine.pr_event("first", true);
+    r.after(HOUR);
+    assert!(r.deliveries().is_empty(), "nothing is announced again");
+    assert_eq!(r.engine.pr_candidates(), Some(Vec::new()), "nor probed");
+}
+
+#[test]
 fn a_change_dropped_by_a_switch_is_not_announced_after_a_restart_or_when_the_switch_is_back_on() {
     let r = Rig::with_store();
     r.jobs(&[]);

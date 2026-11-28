@@ -457,9 +457,10 @@ the log and the audit file.
 
 `src/mother/origin.rs` (session history, origin book, annotation, the `--origin-focus` probe),
 `src/mother/audit.rs`, `src/mother/feed.rs` (annotates on every publish), `src/mother/notices/` (the
-notice engine: `detect`, `state`, `element`, `store`, `pr_state`; batching, holds, the cap and the loop guard
-are Jonesy's delivery engine, the `jonesy-core` crate from <https://github.com/thehammer/jonesy>, pinned by
-revision in `Cargo.toml`), `src/data/relay_client.rs` (the relay hub and status), `src/mcp/tools/mother_mutators.rs`
+notice engine: `source` is the job feed as a Jonesy source, `detect` what changed, `state` the edge to
+Jonesy's hub, `element` the notice text, `store`, `pr_state`; routing by claim, batching, holds, the cap and
+the loop guard are Jonesy's, the `jonesy-core` and `jonesy-github` crates from
+<https://github.com/thehammer/jonesy>, pinned by revision in `Cargo.toml`), `src/data/relay_client.rs` (the relay hub and status), `src/mcp/tools/mother_mutators.rs`
 and `create_focus.rs` (stamping), `src/ipc/session_manager/mod.rs` (the session id in the environment, the
 history), `src/ipc/peer.rs` (network redaction), Kit `Wire/MotherJobAnnotation.swift`, Kit
 `Wire/MotherNoticeItemWire.swift` and `Transcript/WakeMarkerText.swift`, Mac `UI/Background/WakeMarkerView.swift`.

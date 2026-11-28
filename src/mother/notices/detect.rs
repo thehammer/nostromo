@@ -45,6 +45,43 @@ impl JobEvent {
         }
     }
 
+    /// The kind of Jonesy event that reports this change: the Mother source's
+    /// own for a job's changes, the GitHub source's for a PR's end.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::Queued => "job.queued",
+            Self::Ready => "job.ready",
+            Self::Running => "job.running",
+            Self::RetryStarted => "job.retry_started",
+            Self::PrOpened => "job.pr_opened",
+            Self::Awaiting => "job.awaiting",
+            Self::Succeeded => "job.succeeded",
+            Self::Failed => "job.failed",
+            Self::Cancelled => "job.cancelled",
+            Self::PrMerged => jonesy_github::PULL_MERGED,
+            Self::PrClosed => jonesy_github::PULL_CLOSED,
+        }
+    }
+
+    /// The change an event of `kind` reports; `None` for a kind notices do
+    /// not name.
+    pub fn from_kind(kind: &str) -> Option<Self> {
+        const ALL: [JobEvent; 11] = [
+            JobEvent::Queued,
+            JobEvent::Ready,
+            JobEvent::Running,
+            JobEvent::RetryStarted,
+            JobEvent::PrOpened,
+            JobEvent::Awaiting,
+            JobEvent::Succeeded,
+            JobEvent::Failed,
+            JobEvent::Cancelled,
+            JobEvent::PrMerged,
+            JobEvent::PrClosed,
+        ];
+        ALL.into_iter().find(|e| e.kind() == kind)
+    }
+
     /// Does this change open (or join as waking) a batch window?
     pub fn is_waking(self) -> bool {
         matches!(

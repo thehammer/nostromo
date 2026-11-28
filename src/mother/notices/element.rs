@@ -17,6 +17,7 @@
 //! control characters), capped with `…`, and every attribute value escapes
 //! `& < > " '`, so no value can close an element or open another.
 
+use jonesy_core::{EventItem, Facts};
 use serde::{Deserialize, Serialize};
 
 use crate::data::work::untrusted::one_line;
@@ -72,28 +73,81 @@ pub struct NoticeItem {
     pub reason: Option<String>,
 }
 
-/// A notice item is what Jonesy's delivery engine batches: its subject is the
-/// job, its states the job's changes.
-impl jonesy_core::Item for NoticeItem {
-    type State = JobEvent;
+/// A job's subject, as Jonesy's claims and events name it, starts with this.
+pub const JOB_SUBJECT_PREFIX: &str = "mother://job/";
 
-    fn subject(&self) -> &str {
-        &self.job_id
+/// The subject of job `id`.
+pub fn job_subject(id: &str) -> String {
+    format!("{JOB_SUBJECT_PREFIX}{id}")
+}
+
+/// The job a subject names; `None` when it is not a job's.
+pub fn job_id_of(subject: &str) -> Option<&str> {
+    subject
+        .strip_prefix(JOB_SUBJECT_PREFIX)
+        .filter(|id| !id.is_empty())
+}
+
+/// What a notice says about a job, as an event's facts: `title`, and `pr_url`,
+/// `cost_usd` and `reason` when there is one.
+pub fn facts_of(
+    title: &str,
+    pr_url: Option<&str>,
+    cost_usd: Option<f64>,
+    reason: Option<&str>,
+) -> Facts {
+    let mut facts = Facts::new();
+    facts.insert("title".to_owned(), title.into());
+    if let Some(pr) = pr_url {
+        facts.insert("pr_url".to_owned(), pr.into());
     }
-
-    fn states(&self) -> &[JobEvent] {
-        &self.states
+    if let Some(cost) = cost_usd.and_then(serde_json::Number::from_f64) {
+        facts.insert("cost_usd".to_owned(), cost.into());
     }
-
-    fn states_mut(&mut self) -> &mut Vec<JobEvent> {
-        &mut self.states
+    if let Some(reason) = reason {
+        facts.insert("reason".to_owned(), reason.into());
     }
+    facts
+}
 
-    fn refresh(&mut self, newer: Self) {
-        self.title = newer.title;
-        self.pr_url = newer.pr_url;
-        self.cost_usd = newer.cost_usd;
-        self.reason = newer.reason;
+/// The notice for a job's waiting item; `None` when the item is not about a
+/// job. Kinds no notice names are left out of its states.
+pub fn notice_item(item: &EventItem) -> Option<NoticeItem> {
+    let text = |key: &str| {
+        item.facts
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+    };
+    Some(NoticeItem {
+        job_id: job_id_of(&item.subject)?.to_owned(),
+        title: text("title").unwrap_or_default(),
+        states: item
+            .states
+            .iter()
+            .filter_map(|k| JobEvent::from_kind(k))
+            .collect(),
+        pr_url: text("pr_url"),
+        cost_usd: item.facts.get("cost_usd").and_then(|v| v.as_f64()),
+        reason: text("reason"),
+    })
+}
+
+/// A notice item as the store kept it before the engine batched Jonesy's
+/// event items: the same job, states and facts.
+impl From<NoticeItem> for EventItem {
+    fn from(n: NoticeItem) -> Self {
+        Self {
+            subject: job_subject(&n.job_id),
+            states: n.states.iter().map(|s| s.kind().to_owned()).collect(),
+            facts: facts_of(
+                &n.title,
+                n.pr_url.as_deref(),
+                n.cost_usd,
+                n.reason.as_deref(),
+            ),
+            content: None,
+        }
     }
 }
 

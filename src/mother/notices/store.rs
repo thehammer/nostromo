@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use jonesy_core::EventItem;
+
 use super::element::NoticeItem;
 use super::NoticeView;
 use crate::mother::origin::{load_json_checked, write_private, NotifyLevel};
@@ -55,7 +57,7 @@ impl Default for Store {
 /// last in a registry push or touched by a notice (`last_seen_ms`), what
 /// waits for it (`bucket`) and its cap and loop-guard counters (`limits`).
 /// Jonesy's record of an actor, kept under the names this file always had.
-pub type FocusRecord = jonesy_core::ActorRecord<NoticeItem>;
+pub type FocusRecord = jonesy_core::ActorRecord<EventItem>;
 
 /// What a notice says about a job beyond its state, as last seen.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -107,11 +109,60 @@ pub struct JobRecord {
     pub notice: NoticeView,
 }
 
+/// A waiting item as the file may hold it: Jonesy's event item, or the notice
+/// item a build before Jonesy's hub wrote.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredItem {
+    Event(EventItem),
+    Notice(NoticeItem),
+}
+
+impl From<StoredItem> for EventItem {
+    fn from(item: StoredItem) -> Self {
+        match item {
+            StoredItem::Event(item) => item,
+            StoredItem::Notice(item) => item.into(),
+        }
+    }
+}
+
+/// The file as read: [`Store`], with either shape of waiting item.
+#[derive(Deserialize)]
+struct StoreFile {
+    #[serde(default = "on")]
+    enabled: bool,
+    #[serde(default)]
+    focuses: BTreeMap<String, jonesy_core::ActorRecord<StoredItem>>,
+    #[serde(default)]
+    jobs: BTreeMap<String, JobRecord>,
+}
+
+impl Default for StoreFile {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            focuses: BTreeMap::new(),
+            jobs: BTreeMap::new(),
+        }
+    }
+}
+
 /// The store at `path` and whether it was loaded. A file that is missing, or
 /// present but unreadable or unparseable (kept as a `.bak`), loads nothing: the
 /// engine's first look at the feed is then silent, as on a first run.
 pub fn load(path: &Path) -> (Store, bool) {
-    load_json_checked(path)
+    let (file, existed): (StoreFile, bool) = load_json_checked(path);
+    let store = Store {
+        enabled: file.enabled,
+        focuses: file
+            .focuses
+            .into_iter()
+            .map(|(tag, focus)| (tag, focus.map_items(EventItem::from)))
+            .collect(),
+        jobs: file.jobs,
+    };
+    (store, existed)
 }
 
 /// Write `store` to `path`. A failure is logged without content.

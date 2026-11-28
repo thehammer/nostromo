@@ -14,14 +14,17 @@
 //! Only jobs whose origin the daemon verified (`OriginKind::Focus`) are ever
 //! notified, and only their own focus.
 //!
-//! When and how a focus is told is Jonesy's delivery engine
-//! (`jonesy_core::Delivery`, from <https://github.com/thehammer/jonesy>): the
-//! windows, the switches, the holds, the cap and the loop guard run there,
-//! with the focus as its actor and the job as its subject. What is Mother's
-//! stays here: reading the feed, deciding what changed and who queued it
-//! (`state`), the notice text ([`element`]), the store file ([`store`]) and
-//! the wire and audit vocabulary. `batch` and `limits` are that engine's
-//! types under this module's names.
+//! The engine is built on Jonesy (<https://github.com/thehammer/jonesy>), the
+//! event plane. The job feed is a Jonesy *source* (`source`): it reports each
+//! change as an event on the job's subject, and a claim for the focus that
+//! queued the job. A PR's end comes from Jonesy's GitHub source
+//! (`jonesy_github`), on the PR's own subject, which the focus claims *about*
+//! the job. Jonesy's hub routes events to the focuses that claimed them and
+//! decides when each is told: the windows, the switches, the holds, the cap
+//! and the loop guard, with the focus as its actor. What stays here is the
+//! edge (`state`): the notice text ([`element`]), the store file ([`store`])
+//! and the wire and audit vocabulary. `batch` and `limits` are Jonesy's types
+//! under this module's names.
 //!
 //! `pr_state` supplies the "PR merged" signal: relay events and a low-rate
 //! `gh` poll, both ending in [`NoticeEngine::pr_event`].
@@ -63,6 +66,7 @@ pub mod detect;
 pub mod element;
 pub mod limits;
 pub mod pr_state;
+mod source;
 mod state;
 pub mod store;
 mod wiring;
@@ -412,7 +416,7 @@ impl NoticeEngine {
     pub fn annotate(&self, jobs: &mut [MotherJob]) {
         let st = self.lock();
         for job in jobs.iter_mut() {
-            let (Some(ann), Some(rec)) = (job.nostromo.as_mut(), st.jobs.get(&job.id)) else {
+            let (Some(ann), Some(rec)) = (job.nostromo.as_mut(), st.jobs().get(&job.id)) else {
                 continue;
             };
             ann.notice = Some(rec.notice.clone());
@@ -421,7 +425,7 @@ impl NoticeEngine {
 
     /// One job's notice record.
     pub fn notice_of(&self, job_id: &str) -> Option<NoticeView> {
-        self.lock().jobs.get(job_id).map(|r| r.notice.clone())
+        self.lock().jobs().get(job_id).map(|r| r.notice.clone())
     }
 
     /// The `MotherNoticeState` frame.

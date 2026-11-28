@@ -1,6 +1,6 @@
 //! Per-focus batching: what waits to be told, the batch window, and why a due
-//! delivery is held. Jonesy's (`jonesy_core::batch`), over this module's
-//! [`NoticeItem`].
+//! delivery is held. Jonesy's (`jonesy_core::batch`), over its event items
+//! (a job's item is drawn as a notice by `element::notice_item`).
 //!
 //! * The first waking change opens a window. Every change for the focus while
 //!   it is open joins it (quiet ones too) and moves its end: it closes
@@ -18,11 +18,11 @@ pub use jonesy_core::batch::{
     WINDOW_QUIET_MS,
 };
 
-use super::element::NoticeItem;
+use jonesy_core::EventItem;
 
 /// Everything waiting for one focus.
-pub type Bucket = jonesy_core::batch::Bucket<NoticeItem>;
+pub type Bucket = jonesy_core::batch::Bucket<EventItem>;
 /// One job waiting to be told.
-pub type Pending = jonesy_core::batch::Pending<NoticeItem>;
+pub type Pending = jonesy_core::batch::Pending<EventItem>;
 /// Items in a message handed to the session and not yet written.
-pub type InFlight = jonesy_core::batch::InFlight<NoticeItem>;
+pub type InFlight = jonesy_core::batch::InFlight<EventItem>;
