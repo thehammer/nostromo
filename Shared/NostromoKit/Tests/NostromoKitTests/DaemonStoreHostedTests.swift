@@ -436,7 +436,9 @@ final class DaemonStoreHostedTests: XCTestCase {
         XCTAssertTrue(store.hostedFocuses.isEmpty)
         XCTAssertNil(store.hostEgress[name])
         withExtendedLifetime(store) { cache.flush() }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: cacheURL.path), "Nothing about it reaches the cache")
+        let onDisk = try String(contentsOf: cacheURL, encoding: .utf8)   // the `Hosts` frame is cached
+        XCTAssertFalse(onDisk.contains("req-x"), "None of its content reaches the cache")
+        XCTAssertFalse(onDisk.contains(#""host":"This Mac""#))
     }
 
     // MARK: - Hosts and the roster
