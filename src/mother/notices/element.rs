@@ -72,6 +72,31 @@ pub struct NoticeItem {
     pub reason: Option<String>,
 }
 
+/// A notice item is what Jonesy's delivery engine batches: its subject is the
+/// job, its states the job's changes.
+impl jonesy_core::Item for NoticeItem {
+    type State = JobEvent;
+
+    fn subject(&self) -> &str {
+        &self.job_id
+    }
+
+    fn states(&self) -> &[JobEvent] {
+        &self.states
+    }
+
+    fn states_mut(&mut self) -> &mut Vec<JobEvent> {
+        &mut self.states
+    }
+
+    fn refresh(&mut self, newer: Self) {
+        self.title = newer.title;
+        self.pr_url = newer.pr_url;
+        self.cost_usd = newer.cost_usd;
+        self.reason = newer.reason;
+    }
+}
+
 impl NoticeItem {
     /// The newest state.
     pub fn state(&self) -> Option<JobEvent> {

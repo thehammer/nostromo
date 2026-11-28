@@ -13,8 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::batch::Bucket;
-use super::limits::Limits;
+use super::element::NoticeItem;
 use super::NoticeView;
 use crate::mother::origin::{load_json_checked, write_private, NotifyLevel};
 
@@ -52,27 +51,11 @@ impl Default for Store {
     }
 }
 
-/// One focus.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct FocusRecord {
-    /// The focus's switch; `None` is the default (Wake).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<NotifyLevel>,
-    /// When the focus was last in a registry push (or touched by a notice).
-    #[serde(default)]
-    pub last_seen_ms: i64,
-    #[serde(default)]
-    pub bucket: Bucket,
-    #[serde(default)]
-    pub limits: Limits,
-}
-
-impl FocusRecord {
-    /// Nothing worth keeping beyond its last-seen time.
-    pub fn is_trivial(&self) -> bool {
-        self.mode.is_none() && self.bucket.is_empty() && self.limits.is_empty()
-    }
-}
+/// One focus: its switch (`mode`; `None` is the default, Wake), when it was
+/// last in a registry push or touched by a notice (`last_seen_ms`), what
+/// waits for it (`bucket`) and its cap and loop-guard counters (`limits`).
+/// Jonesy's record of an actor, kept under the names this file always had.
+pub type FocusRecord = jonesy_core::ActorRecord<NoticeItem>;
 
 /// What a notice says about a job beyond its state, as last seen.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
