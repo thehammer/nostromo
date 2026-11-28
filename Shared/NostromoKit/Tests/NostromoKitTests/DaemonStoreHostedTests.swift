@@ -694,9 +694,10 @@ final class DaemonStoreHostedTests: XCTestCase {
 
     func testARelaunchedPhoneDropsHeldDecisionsOnceItIsConnectedButKeepsLastKnownPerri() async throws {
         let cacheA = makeCache()
-        let (_, transportA) = await makeStore(cache: cacheA)
+        let (storeA, transportA) = await makeStore(cache: cacheA)
         try await populateHosts(via: transportA)
-        cacheA.flush()
+        // The store must outlive its frames: it is what writes them to the cache (its sinks are weak).
+        withExtendedLifetime(storeA) { cacheA.flush() }
         let (storeB, transportB) = await makeStore(cache: makeCache(), connect: false)
         XCTAssertEqual(storeB.hostedDecisions.keys.sorted(), ["kobe", "studio"])
 
@@ -710,10 +711,10 @@ final class DaemonStoreHostedTests: XCTestCase {
 
     func testAHostedCurrentPRSurvivesARelaunchAndLabelsItsFocus() async throws {
         let cacheA = makeCache()
-        let (_, transportA) = await makeStore(cache: cacheA)
+        let (storeA, transportA) = await makeStore(cache: cacheA)
         await deliver(focusFrame(host: "kobe", tags: ["t1", "t2"]), via: transportA)
         await deliver(perriFrame(host: "kobe", tag: "t1", current: currentPR("acme/api", 7)), via: transportA)
-        cacheA.flush()
+        withExtendedLifetime(storeA) { cacheA.flush() }
 
         let (storeB, _) = await makeStore(cache: makeCache(), connect: false)
 
