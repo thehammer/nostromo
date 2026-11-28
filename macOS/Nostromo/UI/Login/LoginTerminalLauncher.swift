@@ -3,8 +3,8 @@ import AppKit
 // CL2 (D8): opens a terminal for the person to run `claude auth login` in.
 //
 // Called only after `HumanGesture.permit` said `.human`. Nothing is ever typed into the
-// terminal, nothing is automated, and no credential is read. In a tmux window or the Terminal app
-// the script starts `claude auth login`; in an in-app pane nothing is run and the card copies the
+// terminal, nothing is automated, and no credential is read. A tmux window runs `claude auth login`
+// directly; the Terminal app opens a small script that runs it; in an in-app pane nothing is run and the card copies the
 // command. Either way the person completes the browser sign-in themselves.
 
 /// How the terminal was opened (the card says which).

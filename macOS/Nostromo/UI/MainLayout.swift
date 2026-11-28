@@ -527,8 +527,9 @@ class MainLayout: NSView {
         // Mother, Teri and Fred get a daemon-seeded native pane (`mother_queue`,
         // `teri_surface`, `fred_hud`) that DynamicFocusView.makeLeafView maps to
         // the native view, so their surface shows with no agent turn. The old
-        // dedicated TeriView is gone; MotherView/PerriView remain in
-        // the project, unused, until their follow-up removals.
+        // dedicated TeriView is gone. MotherView is the native view behind
+        // `mother_queue`; PerriView remains in the project, unused on macOS,
+        // until its follow-up removal.
         let v = DynamicFocusView(focus: focus, windowId: String(windowIndex))
         guard focus.isPerriFocus else {
             viewCache[focus.id] = v

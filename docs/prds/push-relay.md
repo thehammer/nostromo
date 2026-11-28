@@ -771,17 +771,18 @@ Evidence behind the table:
   registering a category and displaying the notification. The fallback is a
   Notification Content Extension that draws the buttons in the expanded view.
 - **Grace delay.** The primary (Tokyo) is always on, polls Mother every 2 s
-  (`src/bin/nostromd.rs:492`) and receives satellite frames over the uplink.
+  (the 2 s interval in `src/bin/nostromd.rs`) and receives satellite frames over the uplink.
   A hold queue keyed on the item's start time plus 120 s, checked every
   second, dispatches between 2:00 and about 2:02. An item resolved during the
   delay is dropped and logged as *skipped: resolved during grace delay*.
-- **PR size.** `PrQueueItem` (`src/data/perri_queue.rs:105-131`) and
-  `PrListItem` (`src/ipc/protocol.rs:453-476`) have no line counts. However,
+- **PR size.** *(As designed on 2026-10-10; W13 built it: `PrQueueItem` now has
+  `changed_lines`, filled from the cached pull-request body.)* `PrQueueItem` and
+  `PrListItem` had no line counts. However,
   every bucket-1/2 candidate already gets a `GET /repos/{r}/pulls/{n}` on each
-  poll (`get_pr_head_sha`, `src/data/perri_queue_native.rs:1911-1929`), and
+  poll (`get_pr_head_sha`, `src/data/perri_queue_native.rs`), and
   GitHub's response carries `additions` and `deletions`. Deserialising those
-  two fields (`PrDetail`, `:228-235`) costs no extra request. The targeted
-  GraphQL probe (`src/data/perri_queue_targeted.rs:840-880`) can add the same
+  two fields (`PrDetail`) costs no extra request. The targeted
+  GraphQL probe (`src/data/perri_queue_targeted.rs`) can add the same
   two fields.
 - **Allow-list.** Every phrase is a constant in one module. A grammar checker
   tokenises title and body on ` · ` and accepts only the PRD's productions
@@ -857,7 +858,9 @@ Evidence behind the table:
   no local Mac app on the originating host and no app connected to the
   primary. There is also a consequence for agents. Today `nostromo.ask_decision`
   fails immediately with `no_operator` when no client is connected
-  (`src/mcp/tools/ask_decision.rs:84-89`). After W13, a paired device that can
+  (`src/mcp/tools/ask_decision.rs`, the `has_operator_for` check). *[Withdrawn at sign-off (S7, operator Q4): a phone is not an operator, so
+  `has_operator_for` still counts only the verified Mac app and agents behave as
+  they do today. The rest of this item is the pre-sign-off proposal.]* After W13, a paired device that can
   receive a decision push right now also counts as an operator for
   non-sensitive sessions (decision kind on, outside quiet hours). So the agent
   blocks until its timeout instead of failing at once. Without this there

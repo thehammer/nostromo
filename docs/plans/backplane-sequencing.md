@@ -9,10 +9,13 @@
 decisions ("Decision log 2026-11-23"); **updated 2026-11-24 against
 `4cafd5e8`** after W14 (#525) and W9 (#526, #528) merged and the operator
 answered the pairing PRD's open question 4 ("Decision log 2026-11-24").
-**Status:** Draft. All product sign-offs are in and no operator question
-gates any wedge. **W14 and W9 are merged. W10 can be queued as soon as the 2026-11-24 docs PR merges** (its plan was refreshed in it); W11, W15,
-W12, W13 and W16 follow their dependencies only. No wedge waits on Ada, Apple
-or the operator.
+**Status:** Draft (the plan text below is the pre-build design; read the
+"Readiness" table for what has since merged). All product sign-offs are in and no
+operator question gates any wedge. **Every wedge W9 through W16 and iOS-T has
+merged** (checked against `origin/main` `20408a07`, 2026-11-27): W14 #525, W9 #526
+and #528, iOS-T #538, W10 #531-#533, W11 #539, W15 #540, W12 #541, W13 #542, W16 #544,
+plus follow-ups #543 and #550. The dispatch-order advice and "can be queued" wording in
+the sections below describes the plan at the time it was written.
 **Inputs:** `docs/plans/platform-evolution-sequencing.md` (bets B1–B6),
 `docs/visions/iphone.md`, `docs/visions/ipad.md`,
 `docs/prds/daemon-pairing-flow.md` (Ada, answers Q1), `docs/prds/push-relay.md`
@@ -56,16 +59,16 @@ parallel; the wedges cite decisions by id, not by PRD line.
 |---|---|---|
 | W14 linux-primary | **Merged** (#525, 2026-11-24) | — ($2.16 of a $20 cap). |
 | W9 ws-transport | **Merged** (#526 and follow-ups #528, 2026-11-24) | — ($13.57 of a $65 cap). As built: eight verbs (98–105, with `DeviceSetAdmin`), `CLIENT_MSG_VARIANTS` 106; see the W9 plan's "As built". |
-| W10 satellite-uplink | **Yes**, once the 2026-11-24 docs PR merges | W9 merged (done). Open question 4 answered yes (2026-11-24), so nothing gates its merge or install. Only the rule "no other job editing `src/ipc/{protocol,server,peer}.rs` or `src/ipc/session_manager/` at the same time". Crew delta 7 (not merged as of `4cafd5e8`: `python-test`'s `when` still lists `tests/**`, `.mother/crew.yml:30`) saves ≈ 20 min of W10's gates if merged first; it is optional. |
-| W11 ios-ws-client | After W10 merges (W9 is merged) | W10; iOS-T merged or knowingly skipped (operator's call, open question 12); no other job editing `iOS/Nostromo.xcodeproj`. **No sign-off pending.** |
-| W15 mac-device-admin | After W10 merges (and W11, as queued) | W10 (W11 only because the dispatch serialises the two Swift wedges); no other job editing `macOS/Nostromo.xcodeproj` (PR #518 has merged). **No sign-off pending.** |
-| W12 seq-resume | After W10 + W11 merge | Those two. |
-| W13 push-relay | After W12 merges | W12. **No sign-off pending.** The dedicated personal AWS account (Q6) is needed only for the operator's deploy step after merge, not to run the job. W15 merged makes S7a's "locked or idle" path live; without it W13 uses the 30-second rule, which Ada accepted. |
-| W16 ios-push-enrichment | After W13 merges | W13 only. **No Apple action** (the entitlement is not being requested). |
+| W10 satellite-uplink | **Merged** (#531, #532, #533) | Built in three PRs after W9. Crew delta 7 was optional and was not applied before it merged: `python-test`'s `when` in `.mother/crew.yml` still lists `tests/**` as of `20408a07`, so delta 7 is still open and would now save its run only for a wedge whose sole Python trigger is a Rust test. |
+| W11 ios-ws-client | **Merged** (#539) | Was: W10 merged, iOS-T merged (#538) or knowingly skipped. |
+| W15 mac-device-admin | **Merged** (#540) | Was: W10 (W11 only because the dispatch serialised the two Swift wedges). |
+| W12 seq-resume | **Merged** (#541) | Was: W10 + W11. |
+| W13 push-relay | **Merged** (#542, with the relay doc fix #543) | Was: W12. The dedicated personal AWS account (Q6) is needed only for the operator's deploy step after merge. |
+| W16 ios-push-enrichment | **Merged** (#544) | Was: W13 only. **No Apple action** (the entitlement is not being requested). |
 
 **Prerequisites outside the plan, in order** (costs use "Estimate"):
 
-1. **Merge this docs PR.** No cost. Every wedge cites it.
+1. **Merge this docs PR.** Done (#520, #522, #529 merged).
 2. **Crew delta 7** (`.mother/crew.yml`, config only): narrow `python-test`'s
    `when` from `tests/**` to the Python suite directories plus
    `tests/**/*.py`. PR #519 (timeouts 1800/2400 s, `budget_minutes: 75`) has
@@ -73,14 +76,14 @@ parallel; the wedges cite decisions by id, not by PRD line.
    edit the `Makefile`, which must stay in that list (`tests/restart_guard`
    and `tests/gates/test_python_test_split.py` read its recipe), and every
    other wedge touches Swift paths, which also trigger it. Cost: an operator
-   edit, or a $5 cap job (≈ $2). **Recommended before W10 is added, not
-   required** (still not merged on `4cafd5e8`, `.mother/crew.yml:30`; it
+   edit, or a $5 cap job (≈ $2). **Was recommended before W10, not
+   required; W10 merged without it** (still not merged on `20408a07`, `.mother/crew.yml:30`; it
    saves gate time, not correctness). Delta 8 (the CLI in the
    `phi-security` scope) can ride along.
 3. ~~Ada sign-offs~~: **done 2026-11-23.**
 4. ~~Apple notification-filtering entitlement~~: **investigated 2026-11-23,
    not to be requested** (decision log). No action.
-5. **cargo-nextest in GitHub CI** (optional; not before W9). The GitHub Rust
+5. **cargo-nextest in GitHub CI** (optional; not before W9). **Done (#534); the Rust job now takes about 12.5 min (`docs/test-time-audit.md`). The text below is the pre-merge reasoning.** The GitHub Rust
    tests job measures 14.5–17 min green, 20 min slow, with the test binaries
    running one after another for 12–14 min (`.github/workflows/ci.yml:143-150`;
    step limit 35, job 45 since #517). nextest would run binaries in parallel
@@ -92,13 +95,13 @@ parallel; the wedges cite decisions by id, not by PRD line.
    the Mac shards get faster than the Rust job. Caveats if done: nextest skips
    doctests (keep `cargo test --doc`), and each test runs in its own process.
    Cap $15, expected ≈ $6, ≈ 81 min with gates.
-6. **iOS test target and simulator test job** (recommended before W11; it
+6. **iOS test target and simulator test job** (**done, #538**; recommended before W11; it
    reverses the committed policy in `docs/ios-verification.md:131`,
    `:688-717`). See "CI prerequisites" below. Cap $20, expected ≈ $8, ≈ 106 min
    with gates; can run beside W9/W10 (it edits `iOS/Nostromo.xcodeproj` and
    `.github/workflows/ci.yml`, which neither touches).
 
-**Still with the operator.** Nothing gates a wedge. **Pairing PRD open
+**Still with the operator** (as of the 2026-11-24 update; every wedge has since merged). Nothing gates a wedge. **Pairing PRD open
 question 4 was answered yes on 2026-11-24** (Kobe's fixed-vocabulary metadata
 may leave Kobe), so W10 is no longer gated. Open questions 3 and 5 were
 answered 2026-11-23: Fred on Sendai reads Google, and calendar stays home
@@ -546,7 +549,7 @@ Every satellite has an `uplink.egress` profile, and the primary applies a
 second filter per downstream peer:
 
 - **`personal`** (Sendai): publish what FND-1 lets a network peer see today
-  (`peer::outbound` with network trust). *v1 (operator Q2, 2026-11-23; PRD
+  (`peer::outbound` with network trust). *v1 (operator Q2, 2026-11-23; pairing-PRD
   AC56):* Teri, Fred and work frames are never published, on any profile,
   and there is no flag or config key to change that (the 2026-10-10
   `publish_sensitive` switch is not built): Fred reads Microsoft 365 mail
@@ -1249,7 +1252,7 @@ first step, to be opened up later), and the entitlement finding.
 | # | Question | Answer | Lands in |
 |---|---|---|---|
 | Q1 | What may Kobe (the employer-managed Mac) do with personal devices? | New `revoke-only` level: list, revoke (and turn mail-and-todos off, once that exists; there is no such control in v1); cannot pair or widen anything. Ada's addition: an unset level means revoke-only, and Sendai becomes `full` only when set explicitly. | W9 (enum, CLI), W10 (enforcement, `DeviceAdminLevel`), W15 (definition, UI) |
-| Q2 | Should mail and todos reach the phone in v1? | No, for every host, with no checkbox, flag, command or config key anywhere that turns sharing on (PRD AC56). Sharing stays off in v1 by decision for every host (the operator later said Fred on Sendai reads Google, 2026-11-23; unconfirmed whether any account is Carefeed's). Copy: "Mail, calendar and todos aren't shared from your Macs in this version." (Mac pair window, `nostromo device pair`) and "Mail, calendar and todos stay on your Mac in this version." (device Fred, Teri, Settings). | W9 (no scope verbs or fields, `not_shared`), W10 (no `publish_sensitive`), W11, W15 (copy) |
+| Q2 | Should mail and todos reach the phone in v1? | No, for every host, with no checkbox, flag, command or config key anywhere that turns sharing on (pairing-PRD AC56). Sharing stays off in v1 by decision for every host (the operator later said Fred on Sendai reads Google, 2026-11-23; unconfirmed whether any account is Carefeed's). Copy: "Mail, calendar and todos aren't shared from your Macs in this version." (Mac pair window, `nostromo device pair`) and "Mail, calendar and todos stay on your Mac in this version." (device Fred, Teri, Settings). | W9 (no scope verbs or fields, `not_shared`), W10 (no `publish_sensitive`), W11, W15 (copy) |
 | Q3 | Do you accept that work-host notifications are never enriched? | Yes: Kobe, work and PHI notifications never carry extra detail on the phone (reverses the 2026-10-10 answer). | W16 |
 | Q4 | Does the phone answer nothing in this sequence? | Yes: no decisions, approvals, Mother questions or PRs from the phone; the iPhone vision is narrowed (Ada amends it). | all (B10) |
 | Q5 | What may a work-host notification say? | Kind, host, short ref, fixed reason. | W13 |

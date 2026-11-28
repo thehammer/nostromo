@@ -43,7 +43,7 @@ here waits on anyone.
   `replaced` reads "Replaced by re-pairing" instead of a revoke time label; no
   control on it. The window does nothing else for D6 (W9 and W11 own it).
 - **Operator Q2: mail, calendar and todos stay home in v1, with no way to
-  turn sharing on** (PRD AC56). The Pair window shows exactly **"Mail,
+  turn sharing on** (pairing-PRD AC56). The Pair window shows exactly **"Mail,
   calendar and todos aren't shared from your Macs in this version."** with no
   checkbox; the paired line is "Paired:" and the name; the Devices window has
   no mail column or toggle. Nothing else in the Mac app mentions mail,
@@ -363,7 +363,7 @@ Technical criteria:
   disabled until the client reconnects; two models over one fake daemon both
   reach `locked_out`; a `revoked_by: replaced` row reads "Replaced by
   re-pairing".
-- [ ] **W15-11** Q2 (PRD AC56, "Final v1 copy"): the Pair window says exactly "Mail,
+- [ ] **W15-11** Q2 (pairing-PRD AC56, "Final v1 copy"): the Pair window says exactly "Mail,
   calendar and todos aren't shared from your Macs in this version." with no
   checkbox, the Devices window has no mail column or toggle, and no other Mac
   string mentions mail, calendar or todos (a source-string test over the new

@@ -38,7 +38,7 @@ final class ClaudeSignInCardView: NSView {
 
     let titleLabel = NSTextField(labelWithString: "")
     let bodyLabel = NSTextField(wrappingLabelWithString: "")
-    /// "Opened tmux window …" / "Opened Terminal …" after a launch; empty before.
+    /// "Opened a terminal pane …" / "Opened tmux window …" / "Opened Terminal …" / "Couldn't open a terminal …" after a launch; empty before.
     let statusLabel = NSTextField(wrappingLabelWithString: "")
     let manualLabel = NSTextField(labelWithString: ClaudeLoginCardModel.manualCommandText)
     let openButton = NSButton(title: ClaudeLoginCardModel.openTerminalTitle, target: nil, action: nil)

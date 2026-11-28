@@ -2,11 +2,13 @@
 
 Read-only analysis. **Nothing was deleted, skipped, `#[ignore]`d, weakened or edited:** no test, workflow, Makefile or source file is changed by the PR that adds this document. Every number below has a source in "Methods" (§7). Where a number could not be measured, §6 says so.
 
+**Re-measured 2026-11-27:** the summary table in §1 uses the ten most recent green `main` push runs of `CI` (46070987595 back to 45785897068, 2026-11-26 to 2026-11-27, same `gh run view <id> --json jobs` method). `cargo nextest` has landed since the original measurement, so the Rust job fell from a median of 916 s to 752 s (710-1,018 s; three runs at 958-1,018 s). Slowest Mac shard median 1,350 s (1,176-1,425 s), Python tooling 358 s, NostromoKit 248 s, clippy 149 s, iOS simulator build 643 s (it now builds and runs hosted tests). §2 onward is the original 2026-11-23 baseline and is not re-derived.
+
 Measured 2026-11-23 on `main` (head `bfb58f02`, run 45257797577) plus nine earlier `main` pushes; times are wall-clock seconds unless marked.
 
 ## 1. Summary
 
-**The critical path of a PR is the Mac shards, not the Rust job.** Over ten green `main` runs the slowest `Mac tests shard` job took 1,217-1,490 s (median about 1,350 s, about 22 min); `Rust tests` took 898-925 s in eight of ten (median 916 s; 1,124 s in run 45067911288 and 1,566 s in run 45187785606 are out of band); `Python tooling tests` 241-400 s; `Swift tests (NostromoKit)` 188-256 s; `iOS simulator build` 90-289 s. Any Rust or Python speed-up shortens CI minutes and Mother's `python-test` gate, but shortens a PR's wall-clock time only once the Mac shards are shorter than it. The Rust job is the second-longest job (about 15 min).
+**The critical path of a PR is the Mac shards, not the Rust job.** On 2026-11-23, over ten green `main` runs, the slowest `Mac tests shard` job took 1,217-1,490 s (median about 1,350 s, about 22 min); `Rust tests` took 898-925 s in eight of ten (median 916 s; 1,124 s in run 45067911288 and 1,566 s in run 45187785606 are out of band); `Python tooling tests` 241-400 s; `Swift tests (NostromoKit)` 188-256 s; `iOS simulator build` 90-289 s. Any Rust or Python speed-up shortens CI minutes and Mother's `python-test` gate, but shortens a PR's wall-clock time only once the Mac shards are shorter than it. The Rust job is the second-longest job (about 15 min).
 
 What the time is made of:
 
@@ -16,13 +18,13 @@ What the time is made of:
 
 No test in the top ~40 is a retire candidate on evidence. Almost all are regression or contract pins added with a bug or review finding, or mutation proofs; the realistic savings are mechanical (nextest, rebalancing, removing real-time waits, a CI-size seed count behind an env var), not pruning.
 
-| Job | Current (median of 10 runs) | Biggest levers | Estimated saving | Risk |
+| Job | Current (median of 10 runs, re-measured 2026-11-27) | Biggest levers | Estimated saving | Risk |
 |---|---|---|---|---|
 | `Mac tests shard N/3` (critical path) | about 1,350 s (slowest shard) | `mac_shards.py regenerate` from fresh logs; remove two real 15 s waits; sample the nested-loop layout tests | 13-64 s (test-second rebalance, within runner noise of about 150 s; about 100 s only with a wall-aware assignment, §4.4) plus about 10 s (waits) | Low (rebalance is the documented procedure); the sampling is per-test review |
-| `Rust tests` | about 916 s | `cargo nextest` (parallel across binaries); a CI seed count; injectable timeouts | about 185-220 s (nextest vs libtest in the same sandbox, scaled to CI hardware) plus 10-60 s (seeds, timeouts) | Medium: tests run one process each; doc tests need their own step |
-| `Python tooling tests` | about 330 s | run the slow suites in parallel (`scripts/python-test-parallel.sh` exists); `scripts/qa/tests` per-file split | about 100 s (estimate: 309 s of suites bounded by `scripts/qa/tests` at 196 s) | Medium: `python-test` recipe is guarded; CI runner core count not measured |
-| `Rust clippy` | about 130 s | none worth taking | | |
-| `Swift tests (NostromoKit)` / iOS | about 215 s / about 130 s | none worth taking (they share one macOS slot) | | |
+| `Rust tests` | about 752 s (was 916 s before nextest landed) | `cargo nextest` (done); a CI seed count; injectable timeouts | nextest: about 185-220 s estimated, realised as 164 s (916 s to 752 s); remaining plus 10-60 s (seeds, timeouts) | Medium: tests run one process each; doc tests need their own step |
+| `Python tooling tests` | about 360 s | run the slow suites in parallel (`scripts/python-test-parallel.sh` exists); `scripts/qa/tests` per-file split | about 100 s (estimate: 309 s of suites bounded by `scripts/qa/tests` at 196 s) | Medium: `python-test` recipe is guarded; CI runner core count not measured |
+| `Rust clippy` | about 150 s | none worth taking | | |
+| `Swift tests (NostromoKit)` / iOS | about 250 s / about 640 s (builds and runs hosted tests) | none worth taking (they share one macOS slot) | | |
 | Tiering (PR gate vs merge/nightly) | n/a | full-range seeds and slow QA suites off the PR path | 10-60 s of Rust CPU per PR, plus the schedule's coverage | Gap stated in §4.6 |
 
 ## 2. Timing inventory

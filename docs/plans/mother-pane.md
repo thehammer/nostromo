@@ -4,8 +4,9 @@
 
 ## Finding that shapes the plan
 The Mother focus today is just an agent REPL. But the old native `MotherView`
-(`macOS/Nostromo/UI/Views/MotherView.swift`, 1,310 lines, unused since the
-dynamic-pane rewrite) already contains everything the owner asked for:
+(`macOS/Nostromo/UI/Views/MotherView.swift`, 1,310 lines at the time, unused
+since the dynamic-pane rewrite; **P1 has since hosted it**: `DynamicFocusView` builds a
+`MotherView` for pane id `mother_queue`) already contains everything the owner asked for:
 
 - `MotherCountsStrip` — running / paused / awaiting / failed counts
 - `MotherJobList` — SwiftUI list grouped by state (awaiting → running →
@@ -49,8 +50,9 @@ UI is reachable.
 - **P1 (done):** `mother_queue` hosted in the Mother focus (list + inline
   detail + actions); `scripts/qa/mother-queue.sh` passes against the fake broker
   (cancel and retry clicked in the real UI; broker received them).
-- **P2:** per-job tabs, ✕ close, selection ↔ tab sync.
-- **P2.1:** tab strip uses compact tabs (200pt, shrink to 70) and the list
+- **P2:** per-job tabs, ✕ close, selection ↔ tab sync. **Not built on `main` (2026-11-27):** `MotherView`
+  still shows the job detail inline; `mother_job:<id>` tab ids appear only in test harnesses.
+- **P2.1 (not built, depends on P2):** tab strip uses compact tabs (200pt, shrink to 70) and the list
   highlight follows the active tab (code in this PR; live check pending).
 - **P3 (done):** Escalate on failed jobs (confirm sheet, CLI `mother escalate --yes`) and a
   Mother daemon status chip with Start (CLI `mother daemon status|start`, polled every 30 s;
