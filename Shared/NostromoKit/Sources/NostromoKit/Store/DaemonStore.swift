@@ -434,6 +434,9 @@ public final class DaemonStore: ObservableObject {
                     // frame says it is (still) there.
                     self?.hostedDecisions = [:]
                     self?.resolvedHostedDecisions = []
+                    // ...and the same on disk: one answered at the Mac while the phone was away
+                    // never sends its `decision_resolved`, so the cached copy would outlive it.
+                    self?.cache?.forgetHostedDecisions()
                     // Request the current session list immediately after connecting.
                     self?.client.send(ClientSessionList())
                     // Request the focus registry immediately after connecting.
@@ -480,6 +483,8 @@ public final class DaemonStore: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] frame in
                 guard self?.isWiped == false else { return }
+                // A name the primary could not have admitted is no satellite's (see `HostName`).
+                if let host = frame.host, !HostName.isValid(host) { return }
                 if let raw = frame.raw { self?.cache?.record(host: frame.host, raw: raw) }
                 self?.handle(frame.msg, host: frame.host)
             }
@@ -589,6 +594,7 @@ public final class DaemonStore: ObservableObject {
     /// (turns, panes, layouts) are not kept: its tags may collide with the primary's.
     private func handle(_ msg: ServerMsg, host: String?) {
         guard let host else { handle(msg); return }
+        guard HostName.isValid(host) else { return }   // cached frames take this path too
         switch msg {
         case .motherJobs(let jobs):
             hostedMotherJobs[host] = jobs
@@ -758,9 +764,10 @@ public final class DaemonStore: ObservableObject {
             if reason.mayHaveMissedUpdates { missedUpdates.insert(topic) }
 
         case .hosts(let list):
-            hostInfos = list
-            hostRoster.apply(list)
-            for host in list { hostEgress[host.name] = host.egress }
+            let valid = list.filter { HostName.isValid($0.name) }
+            hostInfos = valid
+            hostRoster.apply(valid)
+            for host in valid { hostEgress[host.name] = host.egress }
 
         case .motherPeek(let snap):
             if snap.todos.isEmpty {

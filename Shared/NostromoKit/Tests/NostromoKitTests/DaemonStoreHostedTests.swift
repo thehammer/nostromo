@@ -374,6 +374,71 @@ final class DaemonStoreHostedTests: XCTestCase {
                        "A live frame that says it is still there brings it back")
     }
 
+    func testConnectingForgetsCachedHostedDecisionsFromDiskSoALateRelaunchDoesNotShowThem() async throws {
+        let cacheA = makeCache()
+        let (storeA, transportA) = await makeStore(cache: cacheA)
+        try await populateHosts(via: transportA)
+        withExtendedLifetime(storeA) { cacheA.flush() }
+        XCTAssertTrue(try String(contentsOf: cacheURL, encoding: .utf8).contains("decision_request"),
+                      "Precondition: the held decisions are on disk")
+
+        // Relaunch, connect (the primary retains none of them, and the Mac answered them while the
+        // phone was away, so no `decision_resolved` ever arrives), and let the cache write.
+        let cacheB = makeCache()
+        let (storeB, transportB) = await makeStore(cache: cacheB, connect: false)
+        XCTAssertEqual(storeB.hostedDecisions.keys.sorted(), ["kobe", "studio"])
+        await setLink(true, transportB)
+        XCTAssertTrue(storeB.hostedDecisions.isEmpty)
+        withExtendedLifetime(storeB) { cacheB.flush() }
+
+        // A second relaunch that never connects: no decision in memory, none in the file.
+        let (storeC, _) = await makeStore(cache: makeCache(), connect: false)
+        XCTAssertTrue(storeC.hostedDecisions.isEmpty, "A decision answered while away must not come back")
+        XCTAssertFalse(storeC.mergedQueue(primaryName: primaryName).contains { $0.kind == .decision })
+        let onDisk = try String(contentsOf: cacheURL, encoding: .utf8)
+        XCTAssertFalse(onDisk.contains("decision_request"), "Nor may its question text stay on disk")
+        XCTAssertFalse(onDisk.contains("req-0a1b2c3d"))
+        XCTAssertEqual(storeC.hostedPerri["kobe"]?.queue.count, 3, "The rest of the last-known content stays")
+        XCTAssertEqual(storeC.approvalCounts["kobe"], ["f-48a0007a": 2], "Approval counts are not decisions")
+    }
+
+    func testConnectingDeletesTheCacheFileWhenHeldDecisionsWereAllItHeld() async throws {
+        let cacheA = makeCache()
+        let (storeA, transportA) = await makeStore(cache: cacheA)
+        await deliver(decisionFrame(host: "kobe", id: "req-1", prompt: "Deploy the personal thing?"), via: transportA)
+        withExtendedLifetime(storeA) { cacheA.flush() }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cacheURL.path))
+
+        let (storeB, transportB) = await makeStore(cache: makeCache(), connect: false)
+        XCTAssertEqual(storeB.hostedDecisions["kobe"]?.map(\.requestId), ["req-1"])
+        await setLink(true, transportB)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cacheURL.path))
+    }
+
+    func testASatelliteNamedLikeThePrimaryDoesNotMergeWithIt() async throws {
+        // The phone's word for the primary is "This Mac"; the daemon would never admit a satellite
+        // called that (names are `^[a-z][a-z0-9-]{0,15}$`), and the phone holds satellites to it too.
+        let cache = makeCache()
+        let (store, transport) = await makeStore(cache: cache)
+        let name = "This Mac"
+        await deliver(hostsFrame([(name, "work", kobeSeenText), ("kobe", "work", kobeSeenText)]), via: transport)
+        await deliver(perriFrame(host: name, tag: "t1", queue: [queueItem("acme/api", 1)]), via: transport)
+        await deliver(decisionFrame(host: name, id: "req-x", prompt: "Not the primary's"), via: transport)
+        await deliver(focusFrame(host: name, tags: ["t1"]), via: transport)
+
+        XCTAssertEqual(store.hostEntries(primaryName: name).map(\.name), [name, "kobe"])
+        XCTAssertEqual(store.hostEntries(primaryName: name).filter(\.isPrimary).count, 1)
+        XCTAssertEqual(store.hostEntries(primaryName: name).first?.egress, .personal,
+                       "The primary's entry is not overwritten by the satellite's egress")
+        XCTAssertTrue(store.hostedPerri.isEmpty)
+        XCTAssertTrue(store.hostedDecisions.isEmpty)
+        XCTAssertTrue(store.hostedFocuses.isEmpty)
+        XCTAssertNil(store.hostEgress[name])
+        withExtendedLifetime(store) { cache.flush() }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cacheURL.path), "Nothing about it reaches the cache")
+    }
+
     // MARK: - Hosts and the roster
 
     func testAHostsFrameFillsTheRosterAndTheEntriesAndTheOptions() async throws {

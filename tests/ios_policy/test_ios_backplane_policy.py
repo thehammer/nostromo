@@ -469,6 +469,47 @@ def hosted_regions():
     return regions
 
 
+FOCUS_LIST_VIEW = os.path.join(IOS_DIR, "Views", "FocusListView.swift")
+PRIMARY_GUARD = re.compile(r"\bif\s+section\.host\.isPrimary\s*\{")
+# What only the primary's branch may do: a focus's tags collide across Macs (the fixtures share
+# `f-48a0007a`), so the primary's client, transcript or navigation reached from a satellite's row
+# would open the PRIMARY's focus with that tag.
+PRIMARY_ONLY = re.compile(r"\bDynamicFocusView\b|\bTranscriptView\b|\bNavigationLink\b|\bstore\.client\b")
+
+
+def _block_end(code, open_index):
+    """Index just past the `}` matching the `{` at `open_index` (-1 when unbalanced)."""
+    depth = 0
+    for i in range(open_index, len(code)):
+        if code[i] == "{":
+            depth += 1
+        elif code[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
+def focus_list_routing_violations(source):
+    """`FocusListView`: the primary's client, transcript and navigation are named only inside the
+    `if section.host.isPrimary { ... }` branch. Everything outside it (the satellite's `else`, the
+    sheet it opens, the rest of the file) names none of them."""
+    code = _strip_line_comments(source)
+    guards = list(PRIMARY_GUARD.finditer(code))
+    if len(guards) != 1:
+        return ["expected exactly one `if section.host.isPrimary {` branch, found %d" % len(guards)]
+    start = guards[0].end() - 1
+    end = _block_end(code, start)
+    if end < 0:
+        return ["the primary branch is not balanced"]
+    out = []
+    if not PRIMARY_ONLY.search(code[start:end]):
+        out.append("the primary branch no longer opens the primary's focus: the scan is stale")
+    outside = code[:guards[0].start()] + code[end:]
+    out += ["%r outside the primary branch" % m.group(0) for m in PRIMARY_ONLY.finditer(outside)]
+    return out
+
+
 class HostedContentReadOnlyPolicyTests(unittest.TestCase):
     def test_every_hosted_region_is_found_and_not_empty(self):
         for label, text in hosted_regions():
@@ -491,6 +532,38 @@ class HostedContentReadOnlyPolicyTests(unittest.TestCase):
     def test_ignores_comments_and_the_words_inside_other_names(self):
         ok = [("V.swift", "// Approve is hidden: the phone answers nothing\nlet approvalLine = 1\nlet x = 2")]
         self.assertEqual(answering_call_violations(ok), [])
+
+    def test_the_satellite_branch_of_the_focus_list_never_reaches_the_primarys_client(self):
+        self.assertEqual(focus_list_routing_violations(_read(FOCUS_LIST_VIEW)), [])
+
+    def test_bites_when_the_satellite_branch_is_routed_to_the_primarys_client(self):
+        real = _read(FOCUS_LIST_VIEW)
+        routed = ("DynamicFocusView(tag: meta.tag, displayName: label, agentName: meta.agentName, "
+                  "viewName: meta.displayName, client: store.client)")
+        # (a) the satellite's Button now opens the primary's focus view
+        a = real.replace("hostedSelection = HostedFocusSelection(", routed + "\n hostedSelection = HostedFocusSelection(", 1)
+        self.assertNotEqual(a, real)
+        self.assertTrue(focus_list_routing_violations(a))
+        # (b) only the client is reached from the satellite's sheet or elsewhere
+        b = real.replace("Button(\"Done\") { dismiss() }", "Button(\"Done\") { _ = store.client }", 1)
+        self.assertNotEqual(b, real)
+        self.assertTrue(focus_list_routing_violations(b))
+        # (c) the guard is dropped, so every row (satellites too) takes the primary's route
+        c = real.replace("if section.host.isPrimary {", "if true {", 1)
+        self.assertNotEqual(c, real)
+        self.assertTrue(focus_list_routing_violations(c))
+        # (d) the guard is inverted: the satellite's rows take the primary's route
+        d = real.replace("if section.host.isPrimary {", "if !section.host.isPrimary {", 1)
+        self.assertNotEqual(d, real)
+        self.assertTrue(focus_list_routing_violations(d))
+        # (e) a NavigationLink to the transcript in the satellite branch
+        e = real.replace("hostedSelection = HostedFocusSelection(", "_ = NavigationLink(destination: TranscriptView())\n hostedSelection = HostedFocusSelection(", 1)
+        self.assertTrue(focus_list_routing_violations(e))
+
+    def test_ignores_the_primary_branch_and_comments_in_the_satellite_branch(self):
+        ok = ("if section.host.isPrimary {\n NavigationLink { DynamicFocusView(client: store.client) } label: {}\n"
+              "} else {\n // not DynamicFocusView, not store.client\n Button {} label: {}\n}")
+        self.assertEqual(focus_list_routing_violations(ok), [])
 
     def test_between_finds_and_bounds_a_region(self):
         self.assertEqual(between("a START b END c", "START", "END"), "START b ")

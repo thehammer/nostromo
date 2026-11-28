@@ -11,6 +11,18 @@
 
 import Foundation
 
+/// What the daemon accepts as a satellite's name (`valid_host_name` in `src/config.rs`:
+/// `^[a-z][a-z0-9-]{0,15}$`). The phone holds a satellite to the same rule, so a name the primary
+/// could never have admitted cannot be a host here: in particular the phone's own word for the
+/// primary ("This Mac": capitals, a space) can never be a satellite's name and merge with it.
+public enum HostName {
+    public static func isValid(_ name: String) -> Bool {
+        guard name.utf8.count <= 16, let first = name.unicodeScalars.first,
+              ("a"..."z").contains(first) else { return false }
+        return name.unicodeScalars.allSatisfy { ("a"..."z").contains($0) || ("0"..."9").contains($0) || $0 == "-" }
+    }
+}
+
 public enum HostScope: Equatable, Hashable, Sendable {
     case all
     case work

@@ -99,6 +99,19 @@ public final class ContentCache: @unchecked Sendable {
         }
     }
 
+    /// Forgets every held satellite `decision_request`, in memory and on disk (waits for it). The
+    /// primary does not retain a satellite's decisions, so once the phone is connected again a held
+    /// one cannot be vouched for, and one answered at the Mac meanwhile never sends its
+    /// `decision_resolved`: without this it would sit in the file (and reappear on a cold launch).
+    public func forgetHostedDecisions() {
+        queue.sync {
+            let held = frames.filter { $0.value.type == "decision_request" && $0.value.host != nil }.keys
+            guard !held.isEmpty else { return }
+            for slot in held { frames.removeValue(forKey: slot) }
+            persistRemoval()
+        }
+    }
+
     /// Writes now (waits for it). The app calls this when it goes to the background.
     public func flush() {
         queue.sync {
@@ -128,15 +141,20 @@ public final class ContentCache: @unchecked Sendable {
         let probe = Frame(type: "decision_request", host: host, key: requestId, json: "")
         queue.async { [self] in
             guard frames.removeValue(forKey: Self.slot(probe)) != nil else { return }
-            if frames.isEmpty {
-                // `write()` keeps the file when there is nothing to write, so remove it here: the
-                // decision must not outlive its resolution on disk.
-                pendingWrite?.cancel()
-                pendingWrite = nil
-                try? FileManager.default.removeItem(at: url)
-            } else {
-                scheduleWrite()
-            }
+            persistRemoval()
+        }
+    }
+
+    /// Called after `frames` lost something: the file must not outlive it, so rewrite it now (or
+    /// delete it when nothing remains, since `write()` keeps the file when there is nothing to write).
+    /// Must run on `queue`.
+    private func persistRemoval() {
+        pendingWrite?.cancel()
+        pendingWrite = nil
+        if frames.isEmpty {
+            try? FileManager.default.removeItem(at: url)
+        } else {
+            write()
         }
     }
 
