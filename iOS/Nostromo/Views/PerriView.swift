@@ -29,19 +29,26 @@ struct PerriView: View {
     @State private var pendingApproval: PrQueueItem?
 
     var body: some View {
+        let hosted = store.perriSections(primaryName: HostNames.primary)
+        let showsPrimary = store.showsPrimary(primaryName: HostNames.primary)
+        let primaryHasContent = showsPrimary
+            && !(store.perriQueue.isEmpty && store.perriCurrentPr(for: Self.builtInTag) == nil)
         Group {
             if !store.connected && !store.hasLastKnownContent {
                 disconnectedView
-            } else if store.perriQueue.isEmpty && store.perriCurrentPr(for: Self.builtInTag) == nil {
+            } else if !primaryHasContent && hosted.isEmpty {
                 emptyView
             } else {
-                contentList
+                contentList(hosted: hosted, showsPrimary: primaryHasContent)
             }
         }
         .animation(.easeInOut(duration: 0.25), value: store.connected)
         .animation(.easeInOut(duration: 0.25), value: store.perriQueue.count)
         .safeAreaInset(edge: .top, spacing: 0) {
-            MissedUpdatesBanner(topics: MissedUpdatesNotice.perriTopics)
+            VStack(spacing: 0) {
+                HostScopePicker()
+                MissedUpdatesBanner(topics: MissedUpdatesNotice.perriTopics)
+            }
         }
         // Confirmation gate — nothing reaches GitHub until the user taps "Approve" here.
         .confirmationDialog(
@@ -68,22 +75,49 @@ struct PerriView: View {
 
     // MARK: - Main content
 
-    private var contentList: some View {
-        List {
-            if !store.perriQueue.isEmpty {
-                queueSection
+    private func contentList(hosted: [PerriHostSection], showsPrimary: Bool) -> some View {
+        // The primary's headings carry its name once another Mac is on the list or the scope is a group.
+        let scope = store.displayScope(primaryName: HostNames.primary)
+        let primaryTitle = (!hosted.isEmpty || !scope.isSingleHost) ? HostNames.primary : nil
+        return List {
+            if showsPrimary {
+                if !store.perriQueue.isEmpty {
+                    queueSection(title: primaryTitle)
+                }
+
+                if let pr = store.perriCurrentPr(for: Self.builtInTag) {
+                    currentPrSection(pr)
+                }
             }
 
-            if let pr = store.perriCurrentPr(for: Self.builtInTag) {
-                currentPrSection(pr)
+            ForEach(hosted) { section in
+                hostedSections(section)
             }
         }
         .listStyle(.insetGrouped)
     }
 
+    // MARK: - A satellite's queue (read-only)
+
+    @ViewBuilder
+    private func hostedSections(_ section: PerriHostSection) -> some View {
+        ForEach(section.groups) { group in
+            Section {
+                ForEach(group.rows) { row in
+                    HostedPerriRowView(row: row)
+                        .opacity(section.isLastKnown ? 0.55 : 1)
+                }
+            } header: {
+                Text([section.title, group.label].compactMap { $0 }.joined(separator: " · "))
+            } footer: {
+                if let label = section.lastKnownLabel { Text(label) }
+            }
+        }
+    }
+
     // MARK: - Queue section
 
-    private var queueSection: some View {
+    private func queueSection(title: String?) -> some View {
         let buckets: [(label: String, key: String)] = [
             ("Requested",   "requested"),
             ("Needs Review","needs_review"),
@@ -94,7 +128,7 @@ struct PerriView: View {
         return ForEach(buckets, id: \.key) { bucket in
             let items = store.perriQueue.filter { $0.bucket == bucket.key }
             if !items.isEmpty {
-                Section(bucket.label) {
+                Section([title, bucket.label].compactMap { $0 }.joined(separator: " · ")) {
                     ForEach(items, id: \.bucketScopedId) { item in
                         NostromoKit.PerriPRRow(
                             model:   rowModel(for: item),
@@ -248,6 +282,33 @@ struct PerriView: View {
             ciState:     item.ciState,
             newActivity: item.newActivity
         )
+    }
+}
+
+// MARK: - A satellite's PR row
+
+/// One PR from a satellite's queue, read-only: no approve, load or clear. It shows the fields the
+/// frame carried (a title, or the fixed `PR #N` line when the host sent none). Its GitHub link is
+/// offered only for a real URL, never for a pseudonymous row.
+private struct HostedPerriRowView: View {
+    let row: HostedPerriRow
+
+    var body: some View {
+        if let url = row.url {
+            Link(destination: url) { content }
+        } else {
+            content
+        }
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(row.text).font(.body)
+            if let secondary = row.secondary {
+                Text(secondary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 

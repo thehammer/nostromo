@@ -1,7 +1,9 @@
 // Nostromo iOS — FocusListView.swift
 //
-// Shows all daemon-served focuses grouped by org, with live state badges
-// joined to session state by tag.  Tapping a focus navigates to TranscriptView.
+// Shows the focuses of every Mac in the selected scope: the primary's first, then each satellite's
+// (W11 slice 2), each grouped by org with live state badges joined to session state by tag. Tapping
+// the primary's focus navigates to TranscriptView. A satellite's focus is read-only: it opens a
+// small card that says to open it on that Mac. Everything is keyed by (host, tag).
 
 import SwiftUI
 import NostromoKit
@@ -9,62 +11,39 @@ import NostromoKit
 struct FocusListView: View {
     @EnvironmentObject var store: DaemonStore
 
+    /// A satellite's focus the operator tapped: read-only, so it opens a small card, not the focus.
+    @State private var hostedSelection: HostedFocusSelection?
+
     var body: some View {
+        let sections = store.focusSections(primaryName: HostNames.primary)
         Group {
             if !store.connected && !store.hasLastKnownContent {
                 disconnectedView
-            } else if store.focusRows.isEmpty {
+            } else if sections.isEmpty {
                 emptyView
             } else {
-                focusList
+                focusList(sections)
             }
         }
         .animation(.easeInOut(duration: 0.25), value: store.connected)
-        .animation(.easeInOut(duration: 0.25), value: store.focusRows.count)
+        .animation(.easeInOut(duration: 0.25), value: sections.map(\.rows.count))
+        .safeAreaInset(edge: .top, spacing: 0) { HostScopePicker() }
+        .sheet(item: $hostedSelection) { selection in
+            HostedFocusSheet(selection: selection)
+        }
     }
 
     // MARK: - Sub-views
 
-    private var focusList: some View {
+    private func focusList(_ sections: [FocusHostSection]) -> some View {
         List {
-            ForEach(store.focusRows) { row in
-                switch row {
-                case .orgHeader(let title):
-                    Text(title)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 4, trailing: 16))
-
-                case .repoHeader(let title):
-                    Text(title)
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 2, trailing: 16))
-
-                case .focus(let meta, let label, let secondary, let indented):
-                    let session = store.sessions[meta.tag]
-                    NavigationLink {
-                        DynamicFocusView(
-                            tag:         meta.tag,
-                            displayName: label,
-                            agentName:   meta.agentName,
-                            viewName:    meta.displayName,
-                            client:      store.client
-                        )
-                        .environmentObject(store)
-                    } label: {
-                        FocusRow(
-                            label: label,
-                            secondary: secondary,
-                            state: session?.state,
-                            alive: session?.alive
-                        )
-                        .listRowInsets(EdgeInsets(
-                            top: 6, leading: indented ? 32 : 16, bottom: 6, trailing: 16
-                        ))
-                    }
+            ForEach(sections) { section in
+                if let title = section.title {
+                    hostHeader(title, lastKnown: section.lastKnownLabel)
+                }
+                ForEach(section.rows) { row in
+                    rowView(row, in: section)
+                        .opacity(section.isLastKnown ? 0.55 : 1)
                 }
             }
         }
@@ -72,6 +51,71 @@ struct FocusListView: View {
         .refreshable {
             store.refreshFocuses()
             store.refreshSessions()
+        }
+    }
+
+    private func hostHeader(_ title: String, lastKnown: String?) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.subheadline.weight(.bold))
+            LastKnownCaption(text: lastKnown)
+        }
+        .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 14, leading: 16, bottom: 2, trailing: 16))
+        .accessibilityAddTraits(.isHeader)
+    }
+
+    @ViewBuilder
+    private func rowView(_ row: NostromoKit.FocusRow, in section: FocusHostSection) -> some View {
+        switch row {
+        case .orgHeader(let title):
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 4, trailing: 16))
+
+        case .repoHeader(let title):
+            Text(title)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 2, trailing: 16))
+
+        case .focus(let meta, let label, let secondary, let indented):
+            let session = section.sessions[meta.tag]
+            let content = FocusRow(
+                label: label,
+                secondary: secondary,
+                state: session?.state,
+                alive: session?.alive
+            )
+            .listRowInsets(EdgeInsets(
+                top: 6, leading: indented ? 32 : 16, bottom: 6, trailing: 16
+            ))
+            if section.host.isPrimary {
+                NavigationLink {
+                    DynamicFocusView(
+                        tag:         meta.tag,
+                        displayName: label,
+                        agentName:   meta.agentName,
+                        viewName:    meta.displayName,
+                        client:      store.client
+                    )
+                    .environmentObject(store)
+                } label: {
+                    content
+                }
+            } else {
+                // A satellite's focus is read-only here: no transcript, pane or terminal.
+                Button {
+                    hostedSelection = HostedFocusSelection(host: section.host.name, tag: meta.tag, label: label)
+                } label: {
+                    content
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Shows where to open this focus")
+            }
         }
     }
 
@@ -103,6 +147,36 @@ struct FocusListView: View {
                 .multilineTextAlignment(.center)
         }
         .padding()
+    }
+}
+
+// MARK: - Hosted focus card
+
+/// A focus on a satellite that the operator tapped. `(host, tag)` identifies it: a tag can equal the
+/// primary's.
+struct HostedFocusSelection: Identifiable {
+    let host: String
+    let tag: String
+    let label: String
+    var id: String { "\(host)|\(tag)" }
+}
+
+/// What a satellite's focus opens in this version: nothing of its content, only where to find it.
+private struct HostedFocusSheet: View {
+    let selection: HostedFocusSelection
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Text(selection.label).font(.headline).multilineTextAlignment(.center)
+            Text("Open this focus on \(selection.host)")
+                .font(.title3.weight(.semibold))
+                .multilineTextAlignment(.center)
+            Button("Done") { dismiss() }
+                .buttonStyle(.borderedProminent)
+        }
+        .padding()
+        .presentationDetents([.height(240)])
     }
 }
 

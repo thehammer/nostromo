@@ -1,0 +1,17 @@
+{
+  "choices": [
+    {
+      "id": "c0",
+      "label": ""
+    },
+    {
+      "id": "c1",
+      "label": ""
+    }
+  ],
+  "host": "kobe",
+  "prompt": "",
+  "request_id": "req-0a1b2c3d",
+  "tag": "f-48a0007a",
+  "type": "decision_request"
+}

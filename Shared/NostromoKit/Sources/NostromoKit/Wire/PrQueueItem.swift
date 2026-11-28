@@ -54,6 +54,9 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
     /// Jira ticket keys the daemon detected (title, branch, body), at most 5.
     /// Empty when none, or when no Jira site is configured.
     public let tickets: [String]
+    /// Lines added plus lines deleted, when the daemon said (absent when unknown). A `work`
+    /// host sends it as its only size signal.
+    public let changedLines: Int?
 
     // MARK: Identifiable
 
@@ -83,6 +86,7 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
         case headSha     = "head_sha"
         case isBot       = "is_bot"
         case tickets
+        case changedLines = "changed_lines"
     }
 
     // MARK: Init
@@ -98,7 +102,8 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
         ciState: CiState,
         headSha: String,
         isBot: Bool = false,
-        tickets: [String] = []
+        tickets: [String] = [],
+        changedLines: Int? = nil
     ) {
         self.repo        = repo
         self.number      = number
@@ -111,6 +116,7 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
         self.headSha     = headSha
         self.isBot       = isBot
         self.tickets     = TicketKeys.sanitize(tickets)
+        self.changedLines = changedLines
     }
 
     // MARK: Decode with defaults
@@ -128,5 +134,6 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
         headSha     = (try? c.decode(String.self, forKey: .headSha)) ?? ""
         isBot       = (try? c.decode(Bool.self,   forKey: .isBot))   ?? false
         tickets     = TicketKeys.sanitize((try? c.decode([String].self, forKey: .tickets)) ?? [])
+        changedLines = try? c.decode(Int.self, forKey: .changedLines)
     }
 }

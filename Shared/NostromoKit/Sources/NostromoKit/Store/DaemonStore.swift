@@ -120,8 +120,26 @@ public final class DaemonStore: ObservableObject {
     @Published public private(set) var hostedSessions: [String: [SessionInfo]] = [:]
     @Published public private(set) var hostedFocuses: [String: [FocusMeta]] = [:]
 
+    /// A satellite's Perri queue and PRs under review, and the decisions it holds, by host name.
+    /// Display only: the phone answers nothing. The primary's own stay in `perriQueue` and
+    /// `pendingDecisions`.
+    @Published public private(set) var hostedPerri: [String: HostedPerriState] = [:]
+    @Published public private(set) var hostedDecisions: [String: [HostedDecision]] = [:]
+
     /// The satellites connected to the primary, from `Hosts`.
     @Published public private(set) var hostInfos: [HostInfoWire] = []
+
+    /// Every satellite heard of, kept across a disconnect so its last-known rows keep a name, an
+    /// egress and a last-seen time.
+    @Published public private(set) var hostRoster = HostRoster()
+
+    /// Permission requests held per host and focus tag (`""` is the primary), from `approval_pending`.
+    @Published public private(set) var approvalCounts: [String: [String: Int]] = [:]
+
+    /// Which Macs' content the Focuses, Perri and queue views show. Persisted (non-sensitive, per
+    /// install). Use `effectiveScope(primaryName:)` to read it: it falls back to All when it names a
+    /// host that is gone.
+    @Published public private(set) var scopeSelection: HostScope = .all
 
     /// Topics the daemon said (`gap`) may have missed updates for this client, by topic name
     /// (`"mother_jobs"`, `"perri"`, ...). A list shows `MissedUpdatesNotice.text` while its topic is
@@ -133,11 +151,80 @@ public final class DaemonStore: ObservableObject {
     @Published public private(set) var hostEgress: [String: HostEgress] = [:]
 
     /// The merged list across Macs (Q8): "needs you" first, then recency; each row carries its
-    /// Mac's name only when the rows come from more than one Mac. `primaryName` names the primary's rows.
+    /// Mac's name when the rows come from more than one Mac or the scope is a group of Macs.
+    /// `primaryName` names the primary's rows.
     public func mergedQueue(primaryName: String) -> [MergedQueueRow] {
         MergedQueue.rows(primaryJobs: motherJobs, primarySessions: sessionList,
                          hostedJobs: hostedMotherJobs, hostedSessions: hostedSessions,
-                         egress: hostEgress, primaryName: primaryName)
+                         egress: hostEgress, primaryName: primaryName,
+                         hostedDecisions: hostedDecisions,
+                         approvalCounts: approvalCounts.filter { !$0.key.isEmpty },
+                         scope: displayScope(primaryName: primaryName),
+                         hosts: hostEntries(primaryName: primaryName))
+    }
+
+    // MARK: - Hosts and scope (W11 slice 2)
+
+    /// The Macs the phone can show content for: the primary, then each satellite heard of. A
+    /// satellite that is not connected (or any, while the phone's own link is down) is last-known.
+    public func hostEntries(primaryName: String) -> [HostEntry] {
+        let withContent = Set(hostedMotherJobs.keys).union(hostedSessions.keys).union(hostedFocuses.keys)
+            .union(hostedPerri.keys).union(hostedDecisions.keys)
+            .union(approvalCounts.keys.filter { !$0.isEmpty })
+        return hostRoster.entries(primaryName: primaryName, hostsWithContent: withContent,
+                                  linkLive: connected && !isStale)
+    }
+
+    /// The selected scope, or All when it names a host that is gone (or a kind no host has).
+    public func effectiveScope(primaryName: String) -> HostScope {
+        scopeSelection.resolved(against: hostEntries(primaryName: primaryName))
+    }
+
+    /// The scope the lists are drawn with. With only one Mac there is nothing to choose between, so no
+    /// group scope applies and no Mac name is added to a row (Q8: rows from one Mac carry none).
+    public func displayScope(primaryName: String) -> HostScope {
+        let hosts = hostEntries(primaryName: primaryName)
+        return hosts.count > 1 ? scopeSelection.resolved(against: hosts) : .host(primaryName)
+    }
+
+    /// What the scope picker offers right now.
+    public func scopeOptions(primaryName: String) -> [HostScope] {
+        HostScopeOptions.options(for: hostEntries(primaryName: primaryName))
+    }
+
+    /// Choose what to show everywhere (Focuses, Perri, queue) and remember it.
+    public func selectScope(_ scope: HostScope) {
+        scopeSelection = scope
+        scopeDefaults.set(scope.storageValue, forKey: Self.scopeDefaultsKey)
+    }
+
+    /// The Focuses list's sections under the current scope: the primary's first, then each satellite's,
+    /// keyed by (host, tag).
+    public func focusSections(primaryName: String, now: Date = Date()) -> [FocusHostSection] {
+        HostedFocuses.sections(
+            primaryFocuses: Array(focuses.values), primarySessions: sessions,
+            primaryPR: { tag in
+                let pr = self.perriCurrentPr[tag]
+                return (pr?.repo, pr?.prNumber)
+            },
+            hostedFocuses: hostedFocuses, hostedSessions: hostedSessions, hostedPerri: hostedPerri,
+            hosts: hostEntries(primaryName: primaryName), scope: displayScope(primaryName: primaryName),
+            now: now)
+    }
+
+    /// The satellites' Perri sections under the current scope. The primary's own queue is drawn
+    /// separately (and only when `showsPrimary(primaryName:)`).
+    public func perriSections(primaryName: String, now: Date = Date()) -> [PerriHostSection] {
+        let scope = displayScope(primaryName: primaryName)
+        return HostedPerri.sections(hostedPerri: hostedPerri, hosts: hostEntries(primaryName: primaryName),
+                                    scope: scope, includePrimary: scope.matches(host: primaryName, egress: .personal)
+                                        && !perriQueue.isEmpty,
+                                    now: now)
+    }
+
+    /// Whether the primary's own content is in the current scope.
+    public func showsPrimary(primaryName: String) -> Bool {
+        effectiveScope(primaryName: primaryName).matches(host: primaryName, egress: .personal)
     }
 
     /// The "needs you" count per host (`""` is the primary), display only. Fed from Kit's
@@ -158,7 +245,9 @@ public final class DaemonStore: ObservableObject {
     /// instead of replacing it with "Disconnected".
     public var hasLastKnownContent: Bool {
         !motherJobs.isEmpty || !sessions.isEmpty || !focuses.isEmpty || !perriQueue.isEmpty
-            || !hostedMotherJobs.isEmpty || !hostedSessions.isEmpty
+            || !hostedMotherJobs.isEmpty || !hostedSessions.isEmpty || !hostedFocuses.isEmpty
+            || hostedPerri.values.contains { !$0.queue.isEmpty } || !hostedDecisions.isEmpty
+            || approvalCounts.contains { !$0.key.isEmpty && $0.value.values.contains { $0 > 0 } }
     }
 
     /// Whether the Fred and Teri tabs should say "Mail, calendar and todos stay on your Mac in this
@@ -225,6 +314,11 @@ public final class DaemonStore: ObservableObject {
     /// The on-disk last-known content, or `nil` for the legacy transport (which keeps no content
     /// across a drop and clears the screen on disconnect, as it always has).
     private let cache: ContentCache?
+    /// Where the scope selection is kept: `UserDefaults.standard` in the app, a throwaway suite in tests.
+    private let scopeDefaults: UserDefaults
+    static let scopeDefaultsKey = "nostromo.hostScope"
+    /// Satellite decisions already resolved, so a late `decision_request` cannot bring one back.
+    private var resolvedHostedDecisions: Set<String> = []
     private var needsYou: [String: NeedsYouAggregator] = [:]
     /// Set by `wipeAll()`: a frame already in flight must not refill the store or the cache after a
     /// wipe. Cleared by the next live connection.
@@ -234,9 +328,12 @@ public final class DaemonStore: ObservableObject {
 
     /// `cache` non-nil is the backplane mode: the cached collections survive a drop (marked
     /// `isStale`), and a relaunch starts from the saved snapshot.
-    public init(client: any DaemonTransport, cache: ContentCache? = nil) {
+    public init(client: any DaemonTransport, cache: ContentCache? = nil,
+                scopeDefaults: UserDefaults = .standard) {
         self.client = client
         self.cache = cache
+        self.scopeDefaults = scopeDefaults
+        self.scopeSelection = HostScope(storageValue: scopeDefaults.string(forKey: Self.scopeDefaultsKey))
         bind()
         hydrateFromCache()
     }
@@ -332,6 +429,14 @@ public final class DaemonStore: ObservableObject {
                     self?.isWiped = false
                     self?.isStale = false
                     self?.lastKnownAt = nil
+                    // The primary does not retain a satellite's decision requests, so one held
+                    // from before this connection cannot be vouched for: it goes until a live
+                    // frame says it is (still) there.
+                    self?.hostedDecisions = [:]
+                    self?.resolvedHostedDecisions = []
+                    // ...and the same on disk: one answered at the Mac while the phone was away
+                    // never sends its `decision_resolved`, so the cached copy would outlive it.
+                    self?.cache?.forgetHostedDecisions()
                     // Request the current session list immediately after connecting.
                     self?.client.send(ClientSessionList())
                     // Request the focus registry immediately after connecting.
@@ -378,6 +483,8 @@ public final class DaemonStore: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] frame in
                 guard self?.isWiped == false else { return }
+                // A name the primary could not have admitted is no satellite's (see `HostName`).
+                if let host = frame.host, !HostName.isValid(host) { return }
                 if let raw = frame.raw { self?.cache?.record(host: frame.host, raw: raw) }
                 self?.handle(frame.msg, host: frame.host)
             }
@@ -385,8 +492,6 @@ public final class DaemonStore: ObservableObject {
     }
 
     // MARK: - Needs you (display only)
-
-    private var approvalCounts: [String: [String: Int]] = [:]   // host -> tag -> held requests
 
     private func refreshNeedsYouMother(host: String, jobs: [MotherJob]) {
         var aggregator = needsYou[host] ?? NeedsYouAggregator()
@@ -420,6 +525,10 @@ public final class DaemonStore: ObservableObject {
         hostedMotherJobs = [:]
         hostedSessions = [:]
         hostedFocuses  = [:]
+        hostedPerri    = [:]
+        hostedDecisions = [:]
+        resolvedHostedDecisions = []
+        hostRoster     = HostRoster()
         hostInfos      = []
         hostEgress     = [:]
         needsYou       = [:]
@@ -474,6 +583,8 @@ public final class DaemonStore: ObservableObject {
         motherJobsReceived = false
         isStale = false
         lastKnownAt = nil
+        scopeSelection = .all
+        scopeDefaults.removeObject(forKey: Self.scopeDefaultsKey)
     }
 
     // MARK: - Message handling
@@ -483,6 +594,7 @@ public final class DaemonStore: ObservableObject {
     /// (turns, panes, layouts) are not kept: its tags may collide with the primary's.
     private func handle(_ msg: ServerMsg, host: String?) {
         guard let host else { handle(msg); return }
+        guard HostName.isValid(host) else { return }   // cached frames take this path too
         switch msg {
         case .motherJobs(let jobs):
             hostedMotherJobs[host] = jobs
@@ -491,6 +603,27 @@ public final class DaemonStore: ObservableObject {
             hostedSessions[host] = list
         case .focusListResp(let list), .focusRegistryUpdated(let list):
             hostedFocuses[host] = list
+            // As for the primary: a PR pinned to a focus the host no longer lists is gone.
+            if var state = hostedPerri[host] {
+                let live = Set(list.map(\.tag))
+                state.currents = state.currents.filter { live.contains($0.key) }
+                hostedPerri[host] = state
+            }
+        case .perriState(let tag, let queue, let current):
+            var state = hostedPerri[host] ?? HostedPerriState()
+            state.queue = queue
+            if let current { state.currents[tag] = current } else { state.currents.removeValue(forKey: tag) }
+            hostedPerri[host] = state
+        case .decisionRequest(let tag, let requestId, let prompt, _, _, _):
+            let key = "\(host)|\(requestId)"
+            guard !resolvedHostedDecisions.contains(key),
+                  !(hostedDecisions[host] ?? []).contains(where: { $0.requestId == requestId }) else { return }
+            hostedDecisions[host, default: []].append(
+                HostedDecision(host: host, tag: tag, requestId: requestId, prompt: prompt))
+        case .decisionResolved(_, let requestId, _, _):
+            resolvedHostedDecisions.insert("\(host)|\(requestId)")
+            hostedDecisions[host]?.removeAll { $0.requestId == requestId }
+            if hostedDecisions[host]?.isEmpty == true { hostedDecisions.removeValue(forKey: host) }
         case .approvalPending(let tag, let count):
             refreshNeedsYouApprovals(host: host, tag: tag, count: count)
         default:
@@ -631,8 +764,10 @@ public final class DaemonStore: ObservableObject {
             if reason.mayHaveMissedUpdates { missedUpdates.insert(topic) }
 
         case .hosts(let list):
-            hostInfos = list
-            for host in list { hostEgress[host.name] = host.egress }
+            let valid = list.filter { HostName.isValid($0.name) }
+            hostInfos = valid
+            hostRoster.apply(valid)
+            for host in valid { hostEgress[host.name] = host.egress }
 
         case .motherPeek(let snap):
             if snap.todos.isEmpty {

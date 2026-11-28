@@ -1,0 +1,47 @@
+{
+  "current": null,
+  "host": "kobe",
+  "queue": [
+    {
+      "author": "",
+      "bucket": "needs_review",
+      "changed_lines": 120,
+      "ci_state": "unknown",
+      "head_sha": "",
+      "is_bot": false,
+      "new_activity": false,
+      "number": 4821,
+      "repo": "r-a9c56c1a",
+      "title": "",
+      "url": ""
+    },
+    {
+      "author": "",
+      "bucket": "requested",
+      "changed_lines": 12,
+      "ci_state": "unknown",
+      "head_sha": "",
+      "is_bot": false,
+      "new_activity": false,
+      "number": 77,
+      "repo": "r-36a621b5",
+      "title": "",
+      "url": ""
+    },
+    {
+      "author": "",
+      "bucket": "dependabot",
+      "changed_lines": 480,
+      "ci_state": "unknown",
+      "head_sha": "",
+      "is_bot": false,
+      "new_activity": false,
+      "number": 5,
+      "repo": "r-a9c56c1a",
+      "title": "",
+      "url": ""
+    }
+  ],
+  "tag": "f-33acb7de",
+  "type": "perri_state"
+}

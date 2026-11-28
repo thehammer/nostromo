@@ -12,6 +12,11 @@ with no way to turn sharing on, and the only sentence in the app about them is
 So no string literal under `iOS/Nostromo/**` may mention mail, calendar or todos, and the one
 sentence lives in Kit's `PairingCopy.notShared` exactly as written.
 
+W11 slice 2 (hosts on the phone) adds one more: the code that shows a satellite's focuses, Perri
+rows and held decisions (the new Kit files, the scope picker, the merged queue list, the focus
+list, and the hosted parts of the Perri tab and of the store's hosted-frame handler) names no
+answering or mutating call and no `.send(`: the phone answers nothing for another Mac (B10).
+
 W11 fix round 1 adds five more source checks (each with a "bites" test):
   - the client's `allowedTypes` equals the daemon's `NETWORK_ALLOWED` (`src/ipc/peer.rs`), and its
     separate `pairedDeviceTypes` is exactly the five push verbs (W13's `register_push`,
@@ -412,6 +417,157 @@ class MailCalendarTodosCopyPolicyTests(unittest.TestCase):
     def test_ignores_code_and_comments_that_only_name_the_words(self):
         ok = [("iOS/Nostromo/V.swift", "// the mail tab\nlet todoCount = 3\nText(PairingCopy.notShared)")]
         self.assertEqual(topic_string_violations(ok), [])
+
+
+# W11 slice 2: what the hosted-content code may not name. Every one of these changes state on a Mac.
+ANSWERING_CALL = re.compile(
+    r"\b(?:perriApprove|perriLoadPr|perriClear|motherAction|motherResume|answerDecision|closeDecision"
+    r"|ClientPerriAction|ClientMotherAction|ClientMotherResume|ClientDecisionAnswer|ClientApproval\w*)\b"
+    r"|\.send\(|\"(?:approve|perri_action|mother_action|decision_answer)\"|swipeActions|\bApprove\b")
+
+HOSTED_WHOLE_FILES = (
+    os.path.join(KIT_DIR, "NostromoKit", "Store", "HostScope.swift"),
+    os.path.join(KIT_DIR, "NostromoKit", "Store", "HostedContent.swift"),
+    os.path.join(IOS_DIR, "Views", "HostScopePicker.swift"),
+    os.path.join(IOS_DIR, "Views", "MergedQueueList.swift"),
+    os.path.join(IOS_DIR, "Views", "FocusListView.swift"),
+)
+PERRI_VIEW = os.path.join(IOS_DIR, "Views", "PerriView.swift")
+DAEMON_STORE = os.path.join(KIT_DIR, "NostromoKit", "Store", "DaemonStore.swift")
+
+
+def between(source, start, end):
+    """The text from the first `start` to the next `end` after it ('' if either is missing)."""
+    i = source.find(start)
+    if i < 0:
+        return ""
+    j = source.find(end, i + len(start))
+    return source[i:j] if j >= 0 else source[i:]
+
+
+def answering_call_violations(files):
+    """An answering or mutating call named in code that only displays another Mac's content."""
+    out = []
+    for path, source in files:
+        for m in ANSWERING_CALL.finditer(_strip_line_comments(source)):
+            out.append((path, m.group(0)))
+    return out
+
+
+def hosted_regions():
+    """(label, text) for every piece of code that shows a satellite's content."""
+    regions = [(os.path.relpath(p, REPO_ROOT), _read(p)) for p in HOSTED_WHOLE_FILES]
+    perri = _read(PERRI_VIEW)
+    regions.append(("PerriView.swift (hosted rows)",
+                    between(perri, "// MARK: - A satellite's queue (read-only)", "// MARK: - Queue section")))
+    regions.append(("PerriView.swift (hosted row view)",
+                    between(perri, "// MARK: - A satellite's PR row", "// MARK: - Preview")))
+    store = _read(DAEMON_STORE)
+    regions.append(("DaemonStore.swift (handle(_:host:))",
+                    between(store, "private func handle(_ msg: ServerMsg, host: String?) {",
+                            "private func handle(_ msg: ServerMsg) {")))
+    return regions
+
+
+FOCUS_LIST_VIEW = os.path.join(IOS_DIR, "Views", "FocusListView.swift")
+PRIMARY_GUARD = re.compile(r"\bif\s+section\.host\.isPrimary\s*\{")
+# What only the primary's branch may do: a focus's tags collide across Macs (the fixtures share
+# `f-48a0007a`), so the primary's client, transcript or navigation reached from a satellite's row
+# would open the PRIMARY's focus with that tag.
+PRIMARY_ONLY = re.compile(r"\bDynamicFocusView\b|\bTranscriptView\b|\bNavigationLink\b|\bstore\.client\b")
+
+
+def _block_end(code, open_index):
+    """Index just past the `}` matching the `{` at `open_index` (-1 when unbalanced)."""
+    depth = 0
+    for i in range(open_index, len(code)):
+        if code[i] == "{":
+            depth += 1
+        elif code[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
+def focus_list_routing_violations(source):
+    """`FocusListView`: the primary's client, transcript and navigation are named only inside the
+    `if section.host.isPrimary { ... }` branch. Everything outside it (the satellite's `else`, the
+    sheet it opens, the rest of the file) names none of them."""
+    code = _strip_line_comments(source)
+    guards = list(PRIMARY_GUARD.finditer(code))
+    if len(guards) != 1:
+        return ["expected exactly one `if section.host.isPrimary {` branch, found %d" % len(guards)]
+    start = guards[0].end() - 1
+    end = _block_end(code, start)
+    if end < 0:
+        return ["the primary branch is not balanced"]
+    out = []
+    if not PRIMARY_ONLY.search(code[start:end]):
+        out.append("the primary branch no longer opens the primary's focus: the scan is stale")
+    outside = code[:guards[0].start()] + code[end:]
+    out += ["%r outside the primary branch" % m.group(0) for m in PRIMARY_ONLY.finditer(outside)]
+    return out
+
+
+class HostedContentReadOnlyPolicyTests(unittest.TestCase):
+    def test_every_hosted_region_is_found_and_not_empty(self):
+        for label, text in hosted_regions():
+            self.assertGreater(len(text.strip()), 200, "%s: the scan must not pass over an empty region" % label)
+
+    def test_no_hosted_code_names_an_answering_or_mutating_call(self):
+        self.assertEqual(answering_call_violations(hosted_regions()), [])
+
+    def test_the_hosted_handler_sends_nothing(self):
+        text = dict(hosted_regions())["DaemonStore.swift (handle(_:host:))"]
+        self.assertNotIn("send(", text)
+
+    def test_bites_on_each_kind_of_call(self):
+        for code in ("store.perriApprove(number: 1, repo: r)", "store.answerDecision(requestId: a, choiceId: b)",
+                     "store.motherAction(jobId: j, action: a)", "client.send(ClientFocusList())",
+                     'let verb = "decision_answer"', ".swipeActions { }", 'Button("Approve") {}',
+                     "ClientPerriAction(action: a)"):
+            self.assertEqual(len(answering_call_violations([("V.swift", code)])), 1, code)
+
+    def test_ignores_comments_and_the_words_inside_other_names(self):
+        ok = [("V.swift", "// Approve is hidden: the phone answers nothing\nlet approvalLine = 1\nlet x = 2")]
+        self.assertEqual(answering_call_violations(ok), [])
+
+    def test_the_satellite_branch_of_the_focus_list_never_reaches_the_primarys_client(self):
+        self.assertEqual(focus_list_routing_violations(_read(FOCUS_LIST_VIEW)), [])
+
+    def test_bites_when_the_satellite_branch_is_routed_to_the_primarys_client(self):
+        real = _read(FOCUS_LIST_VIEW)
+        routed = ("DynamicFocusView(tag: meta.tag, displayName: label, agentName: meta.agentName, "
+                  "viewName: meta.displayName, client: store.client)")
+        # (a) the satellite's Button now opens the primary's focus view
+        a = real.replace("hostedSelection = HostedFocusSelection(", routed + "\n hostedSelection = HostedFocusSelection(", 1)
+        self.assertNotEqual(a, real)
+        self.assertTrue(focus_list_routing_violations(a))
+        # (b) only the client is reached from the satellite's sheet or elsewhere
+        b = real.replace("Button(\"Done\") { dismiss() }", "Button(\"Done\") { _ = store.client }", 1)
+        self.assertNotEqual(b, real)
+        self.assertTrue(focus_list_routing_violations(b))
+        # (c) the guard is dropped, so every row (satellites too) takes the primary's route
+        c = real.replace("if section.host.isPrimary {", "if true {", 1)
+        self.assertNotEqual(c, real)
+        self.assertTrue(focus_list_routing_violations(c))
+        # (d) the guard is inverted: the satellite's rows take the primary's route
+        d = real.replace("if section.host.isPrimary {", "if !section.host.isPrimary {", 1)
+        self.assertNotEqual(d, real)
+        self.assertTrue(focus_list_routing_violations(d))
+        # (e) a NavigationLink to the transcript in the satellite branch
+        e = real.replace("hostedSelection = HostedFocusSelection(", "_ = NavigationLink(destination: TranscriptView())\n hostedSelection = HostedFocusSelection(", 1)
+        self.assertTrue(focus_list_routing_violations(e))
+
+    def test_ignores_the_primary_branch_and_comments_in_the_satellite_branch(self):
+        ok = ("if section.host.isPrimary {\n NavigationLink { DynamicFocusView(client: store.client) } label: {}\n"
+              "} else {\n // not DynamicFocusView, not store.client\n Button {} label: {}\n}")
+        self.assertEqual(focus_list_routing_violations(ok), [])
+
+    def test_between_finds_and_bounds_a_region(self):
+        self.assertEqual(between("a START b END c", "START", "END"), "START b ")
+        self.assertEqual(between("a b", "START", "END"), "")
 
 
 class SuiteNeverSkipsTests(unittest.TestCase):

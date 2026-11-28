@@ -1,0 +1,28 @@
+{
+  "focuses": [
+    {
+      "agent_name": "perri",
+      "display_name": "Perri",
+      "is_built_in": true,
+      "tag": "perri"
+    },
+    {
+      "agent_name": "cody",
+      "display_name": "Cody",
+      "is_built_in": false,
+      "org": "Carefeed",
+      "project_name": "admin-portal",
+      "tag": "cody-1a2b3c4d"
+    },
+    {
+      "agent_name": "claudia",
+      "display_name": "Claudia",
+      "is_built_in": false,
+      "org": "Personal",
+      "project_name": "nostromo",
+      "tag": "claudia-9e8d7c6b"
+    }
+  ],
+  "host": "studio",
+  "type": "focus_registry_updated"
+}
