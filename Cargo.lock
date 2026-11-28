@@ -1206,6 +1206,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jonesy-core"
+version = "0.1.0"
+source = "git+https://github.com/thehammer/jonesy?rev=fee7d1adf0580770b5b0b70d36dcde0caf9e6cd7#fee7d1adf0580770b5b0b70d36dcde0caf9e6cd7"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "jonesy-github"
+version = "0.1.0"
+source = "git+https://github.com/thehammer/jonesy?rev=fee7d1adf0580770b5b0b70d36dcde0caf9e6cd7#fee7d1adf0580770b5b0b70d36dcde0caf9e6cd7"
+dependencies = [
+ "jonesy-core",
+ "serde_json",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.98"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1428,6 +1447,8 @@ dependencies = [
  "feed-rs",
  "futures",
  "hostname",
+ "jonesy-core",
+ "jonesy-github",
  "libc",
  "mdns-sd",
  "nostromo",

@@ -85,6 +85,11 @@ tracing-appender = "0.2"
 directories = "5"
 dirs-next = "2"
 chrono = { version = "0.4", features = ["serde"] }
+
+# Jonesy: the event plane. Its hub and delivery engine run the Mother job
+# notices (src/mother/notices); jonesy-github is its GitHub source.
+jonesy-core = { git = "https://github.com/thehammer/jonesy", rev = "fee7d1adf0580770b5b0b70d36dcde0caf9e6cd7" }
+jonesy-github = { git = "https://github.com/thehammer/jonesy", rev = "fee7d1adf0580770b5b0b70d36dcde0caf9e6cd7" }
 chrono-tz = "0.10"
 notify = "6"
 clap = { version = "4", features = ["derive"] }

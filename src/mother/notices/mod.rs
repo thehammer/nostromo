@@ -14,6 +14,18 @@
 //! Only jobs whose origin the daemon verified (`OriginKind::Focus`) are ever
 //! notified, and only their own focus.
 //!
+//! The engine is built on Jonesy (<https://github.com/thehammer/jonesy>), the
+//! event plane. The job feed is a Jonesy *source* (`source`): it reports each
+//! change as an event on the job's subject, and a claim for the focus that
+//! queued the job. A PR's end comes from Jonesy's GitHub source
+//! (`jonesy_github`), on the PR's own subject, which the focus claims *about*
+//! the job. Jonesy's hub routes events to the focuses that claimed them and
+//! decides when each is told: the windows, the switches, the holds, the cap
+//! and the loop guard, with the focus as its actor. What stays here is the
+//! edge (`state`): the notice text ([`element`]), the store file ([`store`])
+//! and the wire and audit vocabulary. `batch` and `limits` are Jonesy's types
+//! under this module's names.
+//!
 //! `pr_state` supplies the "PR merged" signal: relay events and a low-rate
 //! `gh` poll, both ending in [`NoticeEngine::pr_event`].
 //!
@@ -54,12 +66,12 @@ pub mod detect;
 pub mod element;
 pub mod limits;
 pub mod pr_state;
+mod source;
 mod state;
 pub mod store;
 mod wiring;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -83,7 +95,7 @@ pub use self::wiring::{
 /// Jobs absent from the feed this long are forgotten.
 pub const JOB_ABSENT_MAX_MS: i64 = 7 * DAY_MS;
 /// A focus's mode is forgotten when the focus has not been seen this long.
-pub const FOCUS_UNSEEN_MAX_MS: i64 = 90 * DAY_MS;
+pub use jonesy_core::delivery::ACTOR_UNSEEN_MAX_MS as FOCUS_UNSEEN_MAX_MS;
 /// History entries kept per job.
 pub const HISTORY_MAX: usize = 10;
 
@@ -208,43 +220,9 @@ impl SettingsError {
 
 // ── clock and session port ───────────────────────────────────────────────────
 
-/// Milliseconds since the epoch. Every window, cap and expiry runs on it.
-pub trait Clock: Send + Sync {
-    fn now_ms(&self) -> i64;
-}
-
-/// The wall clock.
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now_ms(&self) -> i64 {
-        chrono::Utc::now().timestamp_millis()
-    }
-}
-
-/// A clock tests move by hand. Clones share the time.
-#[derive(Clone, Debug, Default)]
-pub struct ManualClock(Arc<AtomicI64>);
-
-impl ManualClock {
-    pub fn new(ms: i64) -> Self {
-        Self(Arc::new(AtomicI64::new(ms)))
-    }
-
-    pub fn set(&self, ms: i64) {
-        self.0.store(ms, Ordering::SeqCst);
-    }
-
-    pub fn advance(&self, ms: i64) {
-        self.0.fetch_add(ms, Ordering::SeqCst);
-    }
-}
-
-impl Clock for ManualClock {
-    fn now_ms(&self) -> i64 {
-        self.0.load(Ordering::SeqCst)
-    }
-}
+/// The clock every window, cap and expiry runs on (milliseconds since the
+/// epoch), the wall clock, and a clock tests move by hand: Jonesy's.
+pub use jonesy_core::{Clock, ManualClock, SystemClock};
 
 /// Where notices go: the session manager in the daemon, a recorder in tests.
 pub trait SessionPort: Send + Sync {
@@ -438,7 +416,7 @@ impl NoticeEngine {
     pub fn annotate(&self, jobs: &mut [MotherJob]) {
         let st = self.lock();
         for job in jobs.iter_mut() {
-            let (Some(ann), Some(rec)) = (job.nostromo.as_mut(), st.store.jobs.get(&job.id)) else {
+            let (Some(ann), Some(rec)) = (job.nostromo.as_mut(), st.jobs().get(&job.id)) else {
                 continue;
             };
             ann.notice = Some(rec.notice.clone());
@@ -447,7 +425,7 @@ impl NoticeEngine {
 
     /// One job's notice record.
     pub fn notice_of(&self, job_id: &str) -> Option<NoticeView> {
-        self.lock().store.jobs.get(job_id).map(|r| r.notice.clone())
+        self.lock().jobs().get(job_id).map(|r| r.notice.clone())
     }
 
     /// The `MotherNoticeState` frame.
@@ -455,7 +433,7 @@ impl NoticeEngine {
         let now = self.now();
         let st = self.lock();
         ServerMsg::MotherNoticeState {
-            enabled: st.store.enabled,
+            enabled: st.enabled(),
             focuses: st.focus_states(now),
         }
     }
@@ -471,7 +449,7 @@ impl NoticeEngine {
 
     /// Is the global switch on?
     pub fn enabled(&self) -> bool {
-        self.lock().store.enabled
+        self.lock().enabled()
     }
 
     // ── effects ─────────────────────────────────────────────────────────────
@@ -493,7 +471,7 @@ impl NoticeEngine {
     fn finish(&self, mut st: MutexGuard<'_, State>, effects: Vec<Effect>) {
         let snapshot = (st.take_dirty() && self.store_path.is_some()).then(|| {
             st.saves += 1;
-            (st.saves, st.store.clone())
+            (st.saves, st.store())
         });
         let audits = st.take_audits();
         let changed = st.take_changed();
@@ -514,13 +492,13 @@ impl NoticeEngine {
         }
         for effect in effects {
             match effect {
-                Effect::Withdraw { tag } => {
+                Effect::Withdraw { actor: tag } => {
                     if let Some(port) = self.port() {
                         port.withdraw(&tag);
                     }
                 }
                 Effect::Deliver {
-                    tag,
+                    actor: tag,
                     gen,
                     merged,
                     fresh,

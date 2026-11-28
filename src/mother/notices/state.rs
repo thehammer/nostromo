@@ -1,265 +1,235 @@
 //! The engine's state machine: everything computed under its one lock.
 //!
+//! Three parts, all Jonesy's shape (<https://github.com/thehammer/jonesy>):
+//!
+//! * **Sources** say what happened. [`MotherSource`] reads the job feed
+//!   (`source`); the GitHub source (`jonesy_github::Pulls`) reports a PR's
+//!   end. Neither decides who is told.
+//! * **Claims** say who hears it: the focus that queued a job claims the job
+//!   and, about the job, its PR.
+//! * The **hub** ([`jonesy_core::Hub`]) routes each event to the focuses that
+//!   claimed its subject and decides when they are told: batch windows, the
+//!   switches, holds, the cap, the loop guard. The focus is its actor.
+//!
+//! What is left here is the edge between Jonesy's vocabulary and this
+//! module's: the job records as the hub's host (each job's notice record and
+//! the notice text), the audit lines, and the engine's inputs.
+//!
 //! [`State`] never touches the session, the audit log or the change channel.
 //! Its methods record what happened (in the store, `audits`, `dirty` and
 //! `changed`) and return [`Effect`]s for the engine to run once the lock is
 //! released (see the lock-order note in the module docs).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::BTreeMap;
 
-use super::batch::{self, Bucket, Hold, HoldReason};
-use super::detect::{self, JobEvent, Seen};
-use super::element::{self, NoticeItem};
-use super::limits::{self, HOUR_MS};
+use jonesy_core::{
+    Audit, Author, DropWhy, EventItem, Host, Hub, Level, Outcome, Reason, Record, Signal, Source,
+    Status, Turn,
+};
+use jonesy_github::{PullOutcome, Pulls};
+
+use super::detect::JobEvent;
+use super::element::{self, job_id_of};
 use super::pr_state::{self, PrCandidate};
-use super::store::{FocusRecord, JobRecord, Snapshot, Store};
+use super::source::{self, MotherSource};
+use super::store::{JobRecord, Store};
 use super::{
     gen_of, FocusNoticeState, HeldSummary, NoticeHistoryEntry, NoticeReason, NoticeScope,
-    NoticeStatus, NoticeView, SettingsError, FOCUS_UNSEEN_MAX_MS, HISTORY_MAX, JOB_ABSENT_MAX_MS,
+    NoticeStatus, SettingsError, HISTORY_MAX,
 };
 use crate::ipc::session_manager::{NoticeDelivery, TurnAuthor, TurnEvent};
 use crate::mother::audit::MotherAuditEvent;
-use crate::mother::origin::{is_tag_like, NotifyLevel, OriginKind};
-use crate::mother::MotherJob;
+use crate::mother::origin::{is_tag_like, NotifyLevel};
 
-/// What triggered a delivery attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Trigger {
-    /// A batch window closed.
-    Window,
-    /// A turn started or ended (Quiet, session not running, busy).
-    AfterTurn,
-    /// The hour rolled under a cap hold.
-    CapRolled,
-    /// The user started a turn: releases every hold, cap and loop guard too.
-    UserTurn,
-    /// A notice turn started: Quiet / session-not-running items queue behind
-    /// it, but only when the delivery cannot become a turn past the cap or the
-    /// loop guard whatever this turn does.
-    DuringNoticeTurn,
-}
+/// Something to do once the engine's lock is released: Jonesy's, with the
+/// focus tag as `actor`.
+pub(super) use jonesy_core::Effect;
 
-/// Something to do once the engine's lock is released.
-#[derive(Debug)]
-pub(super) enum Effect {
-    Deliver {
-        tag: String,
-        gen: u64,
-        merged: String,
-        fresh: String,
-    },
-    Withdraw {
-        tag: String,
-    },
-}
+// ── Jonesy's vocabulary and this module's ───────────────────────────────────
 
-/// The effective level of a change: the lowest of the global switch, the
-/// focus's mode and the job's own `notify`. `Err` names why it is off.
-fn effective(
-    global: bool,
-    mode: Option<NotifyLevel>,
-    job: Option<NotifyLevel>,
-) -> Result<NotifyLevel, NoticeReason> {
-    if !global {
-        return Err(NoticeReason::GlobalOff);
-    }
-    let rank = |l: NotifyLevel| match l {
-        NotifyLevel::Off => 0,
-        NotifyLevel::Quiet => 1,
-        NotifyLevel::Wake => 2,
-    };
-    let focus = mode.unwrap_or(NotifyLevel::Wake);
-    let job = job.unwrap_or(NotifyLevel::Wake);
-    let level = if rank(job) < rank(focus) { job } else { focus };
-    if level == NotifyLevel::Off {
-        Err(NoticeReason::FocusOff)
-    } else {
-        Ok(level)
-    }
-}
-
-/// A notice turn in progress.
-struct NoticeTurn {
-    started_ms: i64,
-    /// It queued a notice-born job (loop guard).
-    born: bool,
-}
-
-/// The newest notice turn of a focus, after it ended, until another turn
-/// starts: a job the feed shows late is still matched against it.
-struct EndedTurn {
-    started_ms: i64,
-    ended_ms: i64,
-    born: bool,
-    /// The chain before the turn ended (its end reset it unless `born`).
-    chain_before: u32,
-}
-
-pub(super) struct State {
-    pub(super) store: Store,
-    /// The store existed (or the engine has looked at the feed once).
-    bootstrapped: bool,
-    /// The first look after loading compares each job with what was last
-    /// accounted for (R9).
-    restart_check: bool,
-    /// The feed was seen at least once since this engine started.
-    fed: bool,
-    /// The jobs in the newest feed (a job not in it has left the feed).
-    in_feed: HashSet<String>,
-    /// Tags the registry has reported departed (and not seen again).
-    closed: HashSet<String>,
-    /// Focuses in a notice turn now.
-    notice_turns: HashMap<String, NoticeTurn>,
-    /// Each focus's last notice turn, once over.
-    ended_turns: HashMap<String, EndedTurn>,
-    /// Deliveries handed to the engine's caller whose outcome is not applied
-    /// yet: `(focus, generation)`.
-    unsettled: HashSet<(String, u64)>,
-    /// Of those, the ones whose notice turn started before the outcome came.
-    early_started: HashSet<(String, u64)>,
-    /// Store snapshots taken, so a write can tell it is stale.
-    pub(super) saves: u64,
-    /// The store needs writing.
-    dirty: bool,
-    /// Something the app or the feed shows changed.
-    changed: bool,
-    audits: Vec<MotherAuditEvent>,
-}
-
-// ── construction and hand-off to the engine ─────────────────────────────────
-
-impl State {
-    /// State over a loaded `store`; `existed` is whether its file did.
-    pub(super) fn new(mut store: Store, existed: bool, now: i64) -> Self {
-        // A store written before `accounted_state` kept an event token where
-        // Mother's state belongs: unknown, so never announce from it.
-        let mut migrated = false;
-        for rec in store.jobs.values_mut() {
-            if rec.last_notified.take().is_some() {
-                migrated = true;
-                if rec.accounted_state.is_none() {
-                    rec.accounted_state = Some(rec.state.clone());
-                }
-            }
-        }
-        // Messages in flight died with the previous daemon's queue: they wait
-        // for the session's next turn.
-        for focus in store.focuses.values_mut() {
-            let bucket = &mut focus.bucket;
-            let lost = bucket.take_back(|f| !f.told);
-            bucket.inflight.clear();
-            if lost {
-                bucket.hold_at_least(HoldReason::SessionNotRunning, now);
-            }
-        }
-        Self {
-            store,
-            bootstrapped: existed,
-            restart_check: existed,
-            fed: false,
-            in_feed: HashSet::new(),
-            closed: HashSet::new(),
-            notice_turns: HashMap::new(),
-            ended_turns: HashMap::new(),
-            unsettled: HashSet::new(),
-            early_started: HashSet::new(),
-            saves: 0,
-            dirty: migrated,
-            changed: false,
-            audits: Vec::new(),
+impl From<NotifyLevel> for Level {
+    fn from(l: NotifyLevel) -> Self {
+        match l {
+            NotifyLevel::Wake => Self::Wake,
+            NotifyLevel::Quiet => Self::Quiet,
+            NotifyLevel::Off => Self::Off,
         }
     }
+}
 
-    /// Does the store need writing? Clears the flag.
-    pub(super) fn take_dirty(&mut self) -> bool {
-        std::mem::take(&mut self.dirty)
-    }
-
-    /// Did something the app or the feed shows change? Clears the flag.
-    pub(super) fn take_changed(&mut self) -> bool {
-        std::mem::take(&mut self.changed)
-    }
-
-    /// The audit events recorded since the last call.
-    pub(super) fn take_audits(&mut self) -> Vec<MotherAuditEvent> {
-        std::mem::take(&mut self.audits)
-    }
-
-    /// `tag` just queued a job, created at `created_ms` when known. It is
-    /// notice-born (loop guard) if `tag` is in a notice turn, or if it was
-    /// created inside the turn that just ended and the feed showed it late.
-    pub(super) fn note_job_origin(&mut self, tag: &str, created_ms: Option<i64>) {
-        if let Some(turn) = self.notice_turns.get_mut(tag) {
-            turn.born = true;
-            return;
+impl From<Level> for NotifyLevel {
+    fn from(l: Level) -> Self {
+        match l {
+            Level::Wake => Self::Wake,
+            Level::Quiet => Self::Quiet,
+            Level::Off => Self::Off,
         }
-        let Some(ended) = self.ended_turns.get_mut(tag) else {
-            return;
+    }
+}
+
+impl From<Status> for NoticeStatus {
+    fn from(s: Status) -> Self {
+        match s {
+            Status::Told => Self::Told,
+            Status::Held => Self::Held,
+            Status::Dropped => Self::Dropped,
+            Status::NotSent => Self::NotSent,
+            Status::None => Self::None,
+        }
+    }
+}
+
+impl From<Reason> for NoticeReason {
+    fn from(r: Reason) -> Self {
+        match r {
+            Reason::Batching => Self::Batching,
+            Reason::Busy => Self::Busy,
+            Reason::Cap => Self::Cap,
+            Reason::LoopGuard => Self::LoopGuard,
+            Reason::SessionNotRunning => Self::SessionNotRunning,
+            Reason::Quiet => Self::Quiet,
+            Reason::ActorOff => Self::FocusOff,
+            Reason::GlobalOff => Self::GlobalOff,
+            Reason::ActorClosed => Self::FocusClosed,
+        }
+    }
+}
+
+impl From<NoticeDelivery> for Outcome {
+    fn from(d: NoticeDelivery) -> Self {
+        match d {
+            NoticeDelivery::Woke => Self::Woke,
+            NoticeDelivery::Queued => Self::Queued,
+            NoticeDelivery::Replaced => Self::Replaced,
+        }
+    }
+}
+
+/// The session's turn event as the delivery engine names it: a turn whose
+/// message is a notice is an event turn of that notice's generation.
+fn turn_of(event: &TurnEvent) -> Turn {
+    match event {
+        TurnEvent::Started { author } => Turn::Started {
+            author: match author {
+                TurnAuthor::Injected { key, .. } if author.is_notice() => Author::Event {
+                    gen: gen_of(key).unwrap_or(0),
+                },
+                TurnAuthor::User => Author::User,
+                _ => Author::Other,
+            },
+        },
+        TurnEvent::Completed => Turn::Completed,
+        TurnEvent::Exited => Turn::Exited,
+        TurnEvent::Discarded => Turn::Discarded,
+    }
+}
+
+/// The audit line for something the delivery engine did.
+fn audit_of(audit: Audit) -> MotherAuditEvent {
+    match audit {
+        Audit::Delivered {
+            subjects,
+            actor,
+            wake,
+        } => MotherAuditEvent::JobNoticeDelivered {
+            combined: subjects.len(),
+            job_ids: subjects
+                .iter()
+                .filter_map(|s| job_id_of(s))
+                .map(str::to_owned)
+                .collect(),
+            focus: actor,
+            wake,
+        },
+        Audit::Held { actor, reason } => MotherAuditEvent::JobNoticeHeld {
+            focus: actor,
+            reason: reason.into(),
+        },
+        Audit::Dropped { actor, why } => MotherAuditEvent::JobNoticeDropped {
+            focus: actor,
+            reason: match why {
+                DropWhy::ActorOff => "focus_off",
+                DropWhy::GlobalOff => "global_off",
+                DropWhy::ActorClosed => "focus_closed",
+                DropWhy::Expired => "expired",
+            },
+        },
+        Audit::ActorModeSet { actor, mode } => MotherAuditEvent::MotherNoticeSettingsChanged {
+            scope: NoticeScope::Focus,
+            focus: Some(actor),
+            mode: Some(mode.into()),
+            enabled: None,
+        },
+        Audit::EnabledSet { enabled } => MotherAuditEvent::MotherNoticeSettingsChanged {
+            scope: NoticeScope::Global,
+            focus: None,
+            mode: None,
+            enabled: Some(enabled),
+        },
+    }
+}
+
+/// The job records as the hub's host: each job's notice record is where it
+/// writes what became of a change, and a job's item is drawn as this module's
+/// notice ([`element::render_message`]). An item that is not about a job (no
+/// source reports one yet) would be drawn as Jonesy's own element.
+struct Jobs<'a>(&'a mut BTreeMap<String, JobRecord>);
+
+impl Host<EventItem> for Jobs<'_> {
+    fn status(&self, subject: &str) -> Option<(Status, Option<Reason>)> {
+        let view = &self.0.get(job_id_of(subject)?)?.notice;
+        let status = match view.status {
+            NoticeStatus::Told => Status::Told,
+            NoticeStatus::Held => Status::Held,
+            NoticeStatus::Dropped => Status::Dropped,
+            NoticeStatus::NotSent => Status::NotSent,
+            NoticeStatus::None => Status::None,
         };
-        let inside = created_ms.is_some_and(|c| c >= ended.started_ms && c <= ended.ended_ms);
-        if inside && !ended.born {
-            ended.born = true;
-            // The turn's end reset the chain: count it as the growth it was.
-            let chain = ended.chain_before.saturating_add(1);
-            self.focus(tag).limits.chain = chain;
-            self.touch();
-        }
-    }
-
-    /// The store needs writing and the app or feed should hear of it.
-    fn touch(&mut self) {
-        self.dirty = true;
-        self.changed = true;
-    }
-
-    fn audit_dropped(&mut self, tag: &str, reason: &'static str) {
-        self.audits.push(MotherAuditEvent::JobNoticeDropped {
-            focus: tag.to_owned(),
-            reason,
+        let reason = view.reason.and_then(|r| match r {
+            NoticeReason::Batching => Some(Reason::Batching),
+            NoticeReason::Busy => Some(Reason::Busy),
+            NoticeReason::Cap => Some(Reason::Cap),
+            NoticeReason::LoopGuard => Some(Reason::LoopGuard),
+            NoticeReason::SessionNotRunning => Some(Reason::SessionNotRunning),
+            NoticeReason::Quiet => Some(Reason::Quiet),
+            NoticeReason::FocusOff => Some(Reason::ActorOff),
+            NoticeReason::GlobalOff => Some(Reason::GlobalOff),
+            NoticeReason::FocusClosed => Some(Reason::ActorClosed),
+            // The Mother source's own: the hub never set it.
+            NoticeReason::NotNotifiable => None,
         });
-    }
-}
-
-// ── records ─────────────────────────────────────────────────────────────────
-
-impl State {
-    fn focus(&mut self, tag: &str) -> &mut FocusRecord {
-        self.store.focuses.entry(tag.to_owned()).or_default()
+        Some((status, reason))
     }
 
-    /// Record a status change for `job_id`. `history` adds an entry.
-    #[allow(clippy::too_many_arguments)]
-    fn record(
-        &mut self,
-        job_id: &str,
-        status: NoticeStatus,
-        reason: Option<NoticeReason>,
-        states: &[JobEvent],
-        wake: bool,
-        history: bool,
-        now: i64,
-    ) {
-        let Some(rec) = self.store.jobs.get_mut(job_id) else {
-            return;
+    fn record(&mut self, subject: &str, rec: Record<'_, String>) -> bool {
+        let Some(job) = job_id_of(subject).and_then(|id| self.0.get_mut(id)) else {
+            return false;
         };
-        let view = &mut rec.notice;
+        let status = NoticeStatus::from(rec.status);
+        let reason = rec.reason.map(NoticeReason::from);
+        let states: Vec<JobEvent> = rec
+            .states
+            .iter()
+            .filter_map(|k| JobEvent::from_kind(k))
+            .collect();
+        let view = &mut job.notice;
         let same = view.status == status && view.reason == reason;
-        if same && !history {
-            return;
+        if same && !rec.history {
+            return false;
         }
         view.status = status;
         view.reason = reason;
         if let Some(last) = states.last() {
             view.last_state = Some(*last);
         }
-        view.at_ms = Some(now);
-        if history {
+        view.at_ms = Some(rec.at_ms);
+        if rec.history {
             view.history.push(NoticeHistoryEntry {
-                states: states.to_vec(),
+                states,
                 status,
                 reason,
-                wake,
-                at_ms: now,
+                wake: rec.wake,
+                at_ms: rec.at_ms,
             });
             let excess = view.history.len().saturating_sub(HISTORY_MAX);
             view.history.drain(..excess);
@@ -268,237 +238,145 @@ impl State {
             status,
             NoticeStatus::Told | NoticeStatus::Dropped | NoticeStatus::NotSent
         ) {
-            rec.accounted_state = Some(rec.state.clone());
+            job.accounted_state = Some(job.state.clone());
         }
-        self.touch();
-    }
-
-    /// Mark each due item of `tag`'s bucket held for `reason` (history only
-    /// when its reason changes).
-    fn record_held(&mut self, tag: &str, reason: NoticeReason, now: i64) {
-        let items: Vec<(String, Vec<JobEvent>)> = self
-            .store
-            .focuses
-            .get(tag)
-            .map(|f| {
-                f.bucket
-                    .items
-                    .iter()
-                    .filter(|p| p.due)
-                    .map(|p| (p.item.job_id.clone(), p.item.states.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        for (id, states) in items {
-            let changed = self.store.jobs.get(&id).is_some_and(|r| {
-                r.notice.status != NoticeStatus::Held || r.notice.reason != Some(reason)
-            });
-            if changed {
-                self.record(
-                    &id,
-                    NoticeStatus::Held,
-                    Some(reason),
-                    &states,
-                    false,
-                    true,
-                    now,
-                );
-            }
-        }
-    }
-
-    /// Hold `tag`'s due delivery for `reason` (audited when the reason is new).
-    fn hold(&mut self, tag: &str, reason: HoldReason, now: i64) {
-        let bucket = &mut self.focus(tag).bucket;
-        let before = bucket.hold.map(|h| h.reason);
-        bucket.hold_with(reason, now);
-        if before != Some(reason) {
-            self.audits.push(MotherAuditEvent::JobNoticeHeld {
-                focus: tag.to_owned(),
-                reason: reason.into(),
-            });
-            self.touch();
-        }
-        self.record_held(tag, reason.into(), now);
-    }
-
-    /// Drop everything waiting for `tag` with `status`/`reason`.
-    fn drop_all(
-        &mut self,
-        tag: &str,
-        status: NoticeStatus,
-        reason: NoticeReason,
-        audit: Option<&'static str>,
-        now: i64,
-    ) -> bool {
-        let Some(focus) = self.store.focuses.get_mut(tag) else {
-            return false;
-        };
-        let gone = focus.bucket.clear();
-        if gone.is_empty() {
-            return false;
-        }
-        for item in &gone {
-            self.record(
-                &item.job_id,
-                status,
-                Some(reason),
-                &item.states,
-                false,
-                true,
-                now,
-            );
-        }
-        if let Some(word) = audit {
-            self.audit_dropped(tag, word);
-        }
-        self.touch();
         true
     }
 
-    /// Forget jobs gone from the feed for a week.
-    fn forget_absent_jobs(&mut self, now: i64) {
-        let before = self.store.jobs.len();
-        self.store
-            .jobs
-            .retain(|_, r| now - r.last_seen_ms <= JOB_ABSENT_MAX_MS);
-        if self.store.jobs.len() != before {
-            self.dirty = true;
+    fn render(&self, items: &[EventItem]) -> String {
+        let notices: Vec<_> = items.iter().filter_map(element::notice_item).collect();
+        let others: Vec<EventItem> = items
+            .iter()
+            .filter(|i| job_id_of(&i.subject).is_none())
+            .cloned()
+            .collect();
+        let mut out = element::render_message(&notices);
+        if !others.is_empty() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&jonesy_core::event::render(&others));
         }
+        out
     }
 }
 
-// ── the feed ────────────────────────────────────────────────────────────────
+pub(super) struct State {
+    /// Who hears what, and when: Jonesy's claims and delivery engine.
+    hub: Hub,
+    /// The job feed as a source, and what it knows of each job.
+    mother: MotherSource,
+    /// Store snapshots taken, so a write can tell it is stale.
+    pub(super) saves: u64,
+}
+
+// ── construction and hand-off to the engine ─────────────────────────────────
 
 impl State {
-    pub(super) fn on_jobs(&mut self, jobs: &[MotherJob], now: i64) {
-        self.fed = true;
-        self.in_feed = jobs.iter().map(|j| j.id.clone()).collect();
-        if !self.bootstrapped {
-            self.bootstrap(jobs, now);
-            return;
+    /// State over a loaded `store`; `existed` is whether its file did.
+    pub(super) fn new(store: Store, existed: bool, now: i64) -> Self {
+        let mut mother = MotherSource::new(store.jobs, existed);
+        // Messages in flight died with the previous daemon's queue: the
+        // delivery engine makes them wait for the session's next turn.
+        let mut hub = Hub::new(store.enabled, store.focuses, now);
+        // Claims are not stored: the records say who queued what.
+        let claims = mother.claims();
+        hub.apply(&mut Jobs(&mut mother.jobs), claims, now);
+        Self {
+            hub,
+            mother,
+            saves: 0,
         }
-        let restart = std::mem::take(&mut self.restart_check);
-        for job in jobs {
-            let prev = self.store.jobs.get(&job.id).cloned();
-            let events = changes_since(prev.as_ref(), job, restart);
-            self.refresh_record(job, now);
-            let Some(rec) = self.store.jobs.get_mut(&job.id) else {
-                continue;
-            };
-            let Some(tag) = rec.focus.clone() else {
-                // Never notified: unverified, the user's own, or unknown.
-                rec.accounted_state = Some(job.state.clone());
-                if rec.notice.status != NoticeStatus::None
-                    || rec.notice.reason != Some(NoticeReason::NotNotifiable)
-                {
-                    rec.notice.status = NoticeStatus::None;
-                    rec.notice.reason = Some(NoticeReason::NotNotifiable);
-                    self.touch();
-                }
-                continue;
-            };
-            if rec.notice.reason == Some(NoticeReason::NotNotifiable) {
-                // An origin upgraded to verified since.
-                rec.notice.reason = None;
-                self.changed = true;
-            }
-            let notify = rec.notify;
-            // The origin book says the focus is closed (it saw a registry push
-            // without it): after a daemon restart no departure is reported for
-            // a focus closed meanwhile, so this is how the engine learns it.
-            let closed = job
-                .nostromo
-                .as_ref()
-                .is_some_and(|a| a.origin.closed == Some(true));
-            if closed && self.closed.insert(tag.clone()) {
-                self.drop_all(
-                    &tag,
-                    NoticeStatus::NotSent,
-                    NoticeReason::FocusClosed,
-                    Some("focus_closed"),
-                    now,
-                );
-            }
-            if prev.is_none() {
-                let created = job.created_at.map(|t| t.timestamp_millis());
-                self.note_job_origin(&tag, created);
-            }
-            for event in events {
-                let snapshot = item_for(job, event);
-                self.route(&job.id, &tag, notify, snapshot, event, now);
-            }
-        }
-        self.forget_absent_jobs(now);
     }
 
-    /// First run ever: what is there now was never news to anyone.
-    fn bootstrap(&mut self, jobs: &[MotherJob], now: i64) {
-        for job in jobs {
-            let mut rec = record_for(job, now);
-            rec.accounted_state = Some(job.state.clone());
-            if rec.focus.is_none() {
-                rec.notice.reason = Some(NoticeReason::NotNotifiable);
-            }
-            self.store.jobs.insert(job.id.clone(), rec);
+    /// Everything the store file holds, as of now.
+    pub(super) fn store(&self) -> Store {
+        Store {
+            enabled: self.hub.delivery().enabled(),
+            focuses: self.hub.delivery().actors().clone(),
+            jobs: self.mother.jobs.clone(),
         }
-        self.bootstrapped = true;
-        self.restart_check = false;
-        self.touch();
     }
 
-    /// Bring `job`'s record up to what the feed shows now. A record keeps what
-    /// it learned: its notice and accounting.
-    fn refresh_record(&mut self, job: &MotherJob, now: i64) {
-        let fresh = record_for(job, now);
-        match self.store.jobs.get_mut(&job.id) {
-            Some(rec) => {
-                let moved = rec.state != fresh.state
-                    || rec.has_pr != fresh.has_pr
-                    || rec.focus != fresh.focus
-                    || rec.finished_ms != fresh.finished_ms
-                    || rec.notify != fresh.notify
-                    || rec.snapshot != fresh.snapshot
-                    || now - rec.last_seen_ms > HOUR_MS;
-                rec.state = fresh.state;
-                rec.has_pr = fresh.has_pr;
-                rec.finished_ms = fresh.finished_ms;
-                rec.focus = fresh.focus;
-                rec.notify = fresh.notify;
-                rec.snapshot = fresh.snapshot;
-                rec.last_seen_ms = now;
-                self.dirty |= moved;
-            }
-            None => {
-                self.touch();
-                self.store.jobs.insert(job.id.clone(), fresh);
-            }
-        }
+    /// What is known of each job.
+    pub(super) fn jobs(&self) -> &BTreeMap<String, JobRecord> {
+        &self.mother.jobs
+    }
+
+    /// The global switch.
+    pub(super) fn enabled(&self) -> bool {
+        self.hub.delivery().enabled()
+    }
+
+    /// Does the store need writing? Clears the flag.
+    pub(super) fn take_dirty(&mut self) -> bool {
+        let delivery = self.hub.delivery_mut().take_dirty();
+        self.mother.take_dirty() | delivery
+    }
+
+    /// Did something the app or the feed shows change? Clears the flag.
+    pub(super) fn take_changed(&mut self) -> bool {
+        let delivery = self.hub.delivery_mut().take_changed();
+        self.mother.take_changed() | delivery
+    }
+
+    /// The audit events recorded since the last call.
+    pub(super) fn take_audits(&mut self) -> Vec<MotherAuditEvent> {
+        self.hub
+            .delivery_mut()
+            .take_audits()
+            .into_iter()
+            .map(audit_of)
+            .collect()
+    }
+
+    /// `tag` just queued a job, created at `created_ms` when known. It is
+    /// notice-born (loop guard) if `tag` is in a notice turn, or if it was
+    /// created inside the turn that just ended and the feed showed it late.
+    pub(super) fn note_job_origin(&mut self, tag: &str, created_ms: Option<i64>) {
+        self.hub.delivery_mut().note_origin(tag, created_ms);
+    }
+
+    /// Apply what a source reported.
+    fn apply(&mut self, signals: Vec<Signal>, now: i64) {
+        self.hub
+            .apply(&mut Jobs(&mut self.mother.jobs), signals, now);
+    }
+}
+
+// ── the sources ─────────────────────────────────────────────────────────────
+
+impl State {
+    /// A new job list from the feed: the Mother source says what it means.
+    pub(super) fn on_jobs(&mut self, jobs: &[crate::mother::MotherJob], now: i64) {
+        let signals = self.mother.ingest(jobs, now);
+        self.apply(signals, now);
     }
 
     /// See `NoticeEngine::pr_candidates`.
     pub(super) fn pr_candidates(&self, now: i64) -> Option<Vec<PrCandidate>> {
-        if !self.fed {
+        if !self.mother.fed() {
             return None;
         }
-        if !self.store.enabled {
+        let delivery = self.hub.delivery();
+        if !delivery.enabled() {
             return Some(Vec::new());
         }
         let candidates = self
-            .store
+            .mother
             .jobs
             .iter()
             .filter(|(id, rec)| {
                 rec.pr_final.is_none()
-                    && self.in_feed.contains(*id)
+                    && self.mother.in_feed(id)
                     && rec
                         .finished_ms
                         .is_none_or(|f| now - f < pr_state::TRACK_MAX_MS)
             })
             .filter_map(|(id, rec)| {
-                let tag = rec.focus.as_ref().filter(|t| !self.closed.contains(*t))?;
-                let mode = self.store.focuses.get(tag).and_then(|f| f.mode);
-                effective(true, mode, rec.notify).ok()?;
+                let tag = rec.focus.as_ref().filter(|t| !delivery.is_closed(t))?;
+                let mode = delivery.mode_of(tag);
+                jonesy_core::effective(true, mode, rec.notify.map(Level::from)).ok()?;
                 Some(PrCandidate {
                     job_id: id.clone(),
                     pr_url: rec.snapshot.pr_url.clone()?,
@@ -508,202 +386,53 @@ impl State {
         Some(candidates)
     }
 
+    /// `job_id`'s PR was merged or closed: the GitHub source reports it on the
+    /// PR's subject, and the job's focus hears it through its claim on the PR
+    /// (about the job), as does the focus of any other job on the same PR.
     pub(super) fn pr_event(&mut self, job_id: &str, merged: bool, now: i64) {
-        let Some(rec) = self.store.jobs.get_mut(job_id) else {
+        let Some(rec) = self.mother.jobs.get_mut(job_id) else {
             return;
         };
         // Once merged, nothing more is said; once closed, only a merge is news.
         if rec.pr_final == Some(true) || rec.pr_final == Some(merged) {
             return;
         }
+        // The claims as they stood before this outcome (what the PR claim has
+        // heard comes from `pr_final`), with the job's snapshot as of now.
+        let mut signals = source::claims_of(job_id, rec);
         rec.pr_final = Some(merged);
-        self.dirty = true;
-        let Some(tag) = rec.focus.clone() else {
+        self.mother.dirty = true;
+        if rec.focus.is_none() {
             return;
-        };
-        let event = if merged {
-            JobEvent::PrMerged
-        } else {
-            JobEvent::PrClosed
-        };
-        let snapshot = item_from(job_id, &rec.snapshot, None);
-        let notify = rec.notify;
-        self.route(job_id, &tag, notify, snapshot, event, now);
+        }
+        let subject = source::pr_subject(job_id, rec);
+        signals.extend(Pulls.ingest(
+            PullOutcome {
+                subject: &subject,
+                merged,
+            },
+            now,
+        ));
+        self.apply(signals, now);
+        // Another job on the same PR heard it too: its record says so, so a
+        // report for that job (or a restart) does not announce it again.
+        for claim in self.hub.claims().matching(&subject) {
+            let job = claim.about.as_ref().and_then(|a| job_id_of(&a.subject));
+            let Some(rec) = job.and_then(|id| self.mother.jobs.get_mut(id)) else {
+                continue;
+            };
+            let heard = claim.heard.map(|s| s >= jonesy_github::STAGE_MERGED);
+            if heard.is_some() && rec.pr_final != Some(true) && rec.pr_final != heard {
+                rec.pr_final = heard;
+                self.mother.dirty = true;
+            }
+        }
     }
 }
 
-// ── routing and delivery ────────────────────────────────────────────────────
+// ── turns, registry, timers and settings ────────────────────────────────────
 
 impl State {
-    /// Send one change of a verified job of `tag` where it belongs.
-    fn route(
-        &mut self,
-        job_id: &str,
-        tag: &str,
-        notify: Option<NotifyLevel>,
-        snapshot: NoticeItem,
-        event: JobEvent,
-        now: i64,
-    ) {
-        if self.closed.contains(tag) {
-            self.record(
-                job_id,
-                NoticeStatus::NotSent,
-                Some(NoticeReason::FocusClosed),
-                &[event],
-                false,
-                true,
-                now,
-            );
-            return;
-        }
-        let global = self.store.enabled;
-        let focus = self.focus(tag);
-        focus.last_seen_ms = now;
-        let mode = focus.mode;
-        let level = match effective(global, mode, notify) {
-            Ok(level) => level,
-            Err(reason) => {
-                self.record(
-                    job_id,
-                    NoticeStatus::Dropped,
-                    Some(reason),
-                    &[event],
-                    false,
-                    true,
-                    now,
-                );
-                if event.is_waking() {
-                    self.audit_dropped(
-                        tag,
-                        if reason == NoticeReason::GlobalOff {
-                            "global_off"
-                        } else {
-                            "focus_off"
-                        },
-                    );
-                }
-                return;
-            }
-        };
-        let due = event.is_waking();
-        let bucket = &mut self.focus(tag).bucket;
-        if !bucket.add(snapshot, event, due, now) {
-            // Already waiting with this state (a restart's re-check): it keeps
-            // its window or hold, and no window opens for it again.
-            return;
-        }
-        let states = bucket
-            .items
-            .iter()
-            .find(|p| p.item.job_id == job_id)
-            .map(|p| p.item.states.clone())
-            .unwrap_or_default();
-        let held = wait_for_window(bucket, level, due, now);
-        self.touch();
-        if let Some((reason, history)) = held {
-            self.record(
-                job_id,
-                NoticeStatus::Held,
-                Some(reason),
-                &states,
-                false,
-                history,
-                now,
-            );
-        }
-    }
-
-    /// Try to deliver what is due for `tag`.
-    fn attempt(&mut self, tag: &str, trigger: Trigger, now: i64) -> Option<Effect> {
-        self.clear_to_deliver(tag, trigger, now)
-            .then(|| self.hand_over(tag, now))
-    }
-
-    /// May what is due for `tag` go now? When not, says why (a hold) or drops
-    /// it (a closed focus).
-    fn clear_to_deliver(&mut self, tag: &str, trigger: Trigger, now: i64) -> bool {
-        let Some(focus) = self.store.focuses.get(tag) else {
-            return false;
-        };
-        let (has_due, chain, chain_held, capped) = (
-            focus.bucket.has_due(),
-            focus.limits.chain,
-            focus.limits.chain_held(),
-            focus.limits.capped(now),
-        );
-        if !has_due {
-            return false;
-        }
-        if self.closed.contains(tag) {
-            self.drop_all(
-                tag,
-                NoticeStatus::NotSent,
-                NoticeReason::FocusClosed,
-                None,
-                now,
-            );
-            return false;
-        }
-        if trigger == Trigger::DuringNoticeTurn {
-            // Queued behind the notice turn now running, this delivery is the
-            // next notice turn: send it only if that one stays within the cap
-            // (this turn already counted) and the loop guard even if this turn
-            // queues a job. Otherwise it waits for a later turn's start.
-            return chain + 1 < limits::CHAIN_LIMIT && !capped;
-        }
-        if trigger != Trigger::UserTurn {
-            if chain_held {
-                self.hold(tag, HoldReason::LoopGuard, now);
-                return false;
-            }
-            if capped {
-                self.hold(tag, HoldReason::Cap, now);
-                return false;
-            }
-        }
-        if self.notice_turns.contains_key(tag) {
-            self.hold(tag, HoldReason::Busy, now);
-            return false;
-        }
-        true
-    }
-
-    /// Turn what is due for `tag` into the next generation's message.
-    fn hand_over(&mut self, tag: &str, now: i64) -> Effect {
-        let bucket = &mut self.focus(tag).bucket;
-        bucket.gen += 1;
-        let gen = bucket.gen;
-        let items = bucket.take_items();
-        let fresh_items: Vec<NoticeItem> = items.iter().map(|p| p.item.clone()).collect();
-        bucket.put_in_flight(items, gen, now);
-        let merged_items: Vec<NoticeItem> =
-            bucket.untold_inflight().map(|f| f.item.clone()).collect();
-        let merged = element::render_message(&merged_items);
-        let fresh = element::render_message(&fresh_items);
-        bucket.hold = None;
-        bucket.window = None;
-        self.unsettled.insert((tag.to_owned(), gen));
-        for item in &fresh_items {
-            self.record(
-                &item.job_id,
-                NoticeStatus::Held,
-                Some(NoticeReason::Busy),
-                &item.states,
-                false,
-                false,
-                now,
-            );
-        }
-        self.touch();
-        Effect::Deliver {
-            tag: tag.to_owned(),
-            gen,
-            merged,
-            fresh,
-        }
-    }
-
     /// The outcome of handing generation `gen` to `tag`'s session (`None`: no
     /// live session).
     pub(super) fn delivered(
@@ -713,395 +442,38 @@ impl State {
         outcome: Option<NoticeDelivery>,
         now: i64,
     ) {
-        let key = (tag.to_owned(), gen);
-        self.unsettled.remove(&key);
-        // The turn that message began may have started before this outcome
-        // was applied: it left the items for this call to tell.
-        let started = self.early_started.remove(&key);
-        // A new message that began a turn on its own (it did not replace an
-        // older one) found older untold items lost with a cleared queue; the
-        // start left them for this call (`notice_turn_started`).
-        let sweep_older =
-            started && matches!(outcome, Some(NoticeDelivery::Woke | NoticeDelivery::Queued));
-        let Some(focus) = self.store.focuses.get_mut(tag) else {
-            return;
-        };
-        match outcome {
-            Some(NoticeDelivery::Woke) => {
-                let told: Vec<NoticeItem> = focus
-                    .bucket
-                    .inflight
-                    .iter_mut()
-                    .filter(|f| f.gen == gen && !f.told)
-                    .map(|f| {
-                        f.told = true;
-                        f.item.clone()
-                    })
-                    .collect();
-                if started {
-                    focus.bucket.drain_inflight(|f| f.gen == gen);
-                }
-                self.told(tag, &told, true, now);
-            }
-            Some(outcome @ (NoticeDelivery::Queued | NoticeDelivery::Replaced)) => {
-                if outcome == NoticeDelivery::Replaced {
-                    for f in focus.bucket.inflight.iter_mut().filter(|f| !f.told) {
-                        f.gen = gen;
-                    }
-                }
-                if started {
-                    let told: Vec<NoticeItem> = focus
-                        .bucket
-                        .drain_inflight(|f| f.gen == gen)
-                        .into_iter()
-                        .filter(|f| !f.told)
-                        .map(|f| f.item)
-                        .collect();
-                    self.told(tag, &told, false, now);
-                }
-            }
-            None => {
-                focus.bucket.take_back(|f| f.gen == gen && !f.told);
-                self.hold(tag, HoldReason::SessionNotRunning, now);
-            }
-        }
-        if sweep_older {
-            self.take_back_lost_older(tag, gen, now);
-        }
-        self.touch();
+        self.hub.delivery_mut().delivered(
+            &mut Jobs(&mut self.mother.jobs),
+            tag,
+            gen,
+            outcome.map(Outcome::from),
+            now,
+        );
     }
 
-    /// Items of generations older than `gen` that are still untold when
-    /// `gen`'s notice turn has started were lost with a cleared queue: they
-    /// wait again, and go when that turn ends. Returns whether any did.
-    fn take_back_lost_older(&mut self, tag: &str, gen: u64, now: i64) -> bool {
-        let bucket = &mut self.focus(tag).bucket;
-        let lost = bucket.take_back(|f| f.gen < gen && !f.told);
-        bucket.inflight.retain(|f| f.gen >= gen);
-        if lost {
-            // The turn may be over by the time a late outcome is applied: its
-            // end found nothing to wait for, so the next turn start releases.
-            let reason = if self.notice_turns.contains_key(tag) {
-                HoldReason::Busy
-            } else {
-                HoldReason::SessionNotRunning
-            };
-            self.hold(tag, reason, now);
-        }
-        lost
-    }
-
-    /// `items` reached `tag`'s agent.
-    fn told(&mut self, tag: &str, items: &[NoticeItem], wake: bool, now: i64) {
-        if items.is_empty() {
-            return;
-        }
-        for item in items {
-            self.record(
-                &item.job_id,
-                NoticeStatus::Told,
-                None,
-                &item.states,
-                wake,
-                true,
-                now,
-            );
-        }
-        self.audits.push(MotherAuditEvent::JobNoticeDelivered {
-            job_ids: items.iter().map(|i| i.job_id.clone()).collect(),
-            focus: tag.to_owned(),
-            wake,
-            combined: items.len(),
-        });
-    }
-}
-
-// ── turns ───────────────────────────────────────────────────────────────────
-
-impl State {
     pub(super) fn on_turn(&mut self, tag: &str, event: &TurnEvent, now: i64) -> Vec<Effect> {
-        match event {
-            TurnEvent::Started { author } if author.is_notice() => {
-                let TurnAuthor::Injected { key, .. } = author else {
-                    return Vec::new();
-                };
-                self.notice_turn_started(tag, gen_of(key).unwrap_or(0), now)
-            }
-            TurnEvent::Started { author } => {
-                // A turn of any other author: a notice turn before it is over.
-                self.end_notice_turn(tag, now);
-                self.other_turn_started(tag, matches!(author, TurnAuthor::User), now)
-            }
-            TurnEvent::Discarded => {
-                // The notice turn that "started" was a phantom: the real turn's
-                // Started follows. Undo its count; its items stay told.
-                if self.notice_turns.remove(tag).is_some() {
-                    let limits = &mut self.focus(tag).limits;
-                    limits.wakes.pop();
-                    self.touch();
-                }
-                Vec::new()
-            }
-            TurnEvent::Completed | TurnEvent::Exited => {
-                let was_notice = self.end_notice_turn(tag, now);
-                // Only what was due to wake and waited for this notice turn
-                // goes now (the session is idle, so it wakes). Quiet and
-                // not-running holds never wake: they wait for a turn to start.
-                let busy = was_notice
-                    && self
-                        .store
-                        .focuses
-                        .get(tag)
-                        .and_then(|f| f.bucket.hold.map(|h| h.reason))
-                        == Some(HoldReason::Busy);
-                if matches!(event, TurnEvent::Exited) {
-                    self.session_exited(tag, busy, now);
-                    return Vec::new();
-                }
-                if !busy {
-                    return Vec::new();
-                }
-                self.attempt(tag, Trigger::AfterTurn, now)
-                    .into_iter()
-                    .collect()
-            }
-        }
+        self.hub
+            .delivery_mut()
+            .on_turn(&mut Jobs(&mut self.mother.jobs), tag, turn_of(event), now)
     }
 
-    /// The session exited: nothing is running to wait for, and no turn of the
-    /// user's is needed to move it on. What was handed to its queue and not
-    /// written died with it, whichever turn was running. `busy`: the notice
-    /// turn that just ended had due items waiting behind it.
-    fn session_exited(&mut self, tag: &str, busy: bool, now: i64) {
-        let bucket = &mut self.focus(tag).bucket;
-        let lost = bucket.take_back(|f| !f.told);
-        let stronger = matches!(
-            bucket.hold.map(|h| h.reason),
-            Some(HoldReason::Cap | HoldReason::LoopGuard)
-        );
-        if (lost || busy) && !stronger {
-            self.hold(tag, HoldReason::SessionNotRunning, now);
-        } else if lost {
-            // A cap or loop-guard hold stays; the lost items are recorded under it.
-            let reason = bucket.hold.map(|h| h.reason.into());
-            if let Some(reason) = reason {
-                self.record_held(tag, reason, now);
-            }
-        }
-        if lost {
-            self.touch();
-        }
-    }
-
-    /// Generation `gen`'s notice turn started: its items are told, older
-    /// untold ones were lost with a cleared queue.
-    fn notice_turn_started(&mut self, tag: &str, gen: u64, now: i64) -> Vec<Effect> {
-        let mut effects = Vec::new();
-        self.notice_turns.insert(
-            tag.to_owned(),
-            NoticeTurn {
-                started_ms: now,
-                born: false,
-            },
-        );
-        self.ended_turns.remove(tag);
-        // The outcome of the delivery that began this turn is not applied
-        // yet: leave its items for that call, which knows if it woke.
-        let early = self.unsettled.contains(&(tag.to_owned(), gen));
-        if early {
-            self.early_started.insert((tag.to_owned(), gen));
-        }
-        let focus = self.focus(tag);
-        focus.limits.note_notice_turn(now);
-        let bucket = &mut focus.bucket;
-        let told: Vec<NoticeItem> = if early {
-            Vec::new()
-        } else {
-            bucket
-                .drain_inflight(|f| f.gen == gen)
-                .into_iter()
-                .filter(|f| !f.told)
-                .map(|f| f.item)
-                .collect()
-        };
-        // While the outcome is pending, older untold items may belong to the
-        // message that replaced them: `delivered` settles them.
-        let after_turn = matches!(
-            bucket.hold.map(|h| h.reason),
-            Some(HoldReason::Quiet | HoldReason::SessionNotRunning)
-        );
-        self.told(tag, &told, false, now);
-        // Lost from a cleared queue: they go when this turn ends.
-        let lost_any = !early && self.take_back_lost_older(tag, gen, now);
-        if !lost_any && after_turn {
-            // Quiet and not-running holds go behind any turn that starts, this
-            // one included, when that is safe.
-            effects.extend(self.attempt(tag, Trigger::DuringNoticeTurn, now));
-        }
-        self.touch();
-        effects
-    }
-
-    /// A turn started that no notice began (`user`: the user's own).
-    fn other_turn_started(&mut self, tag: &str, user: bool, now: i64) -> Vec<Effect> {
-        let mut effects = Vec::new();
-        let Some(focus) = self.store.focuses.get_mut(tag) else {
-            return effects;
-        };
-        if user && focus.limits.chain > 0 {
-            focus.limits.user_turn();
-            self.dirty = true;
-            self.changed = true;
-        }
-        if user {
-            self.ended_turns.remove(tag);
-        }
-        // A notice still in flight is left alone: turn events reach the engine
-        // after the fact, so it may already be written. One lost to a cleared
-        // queue is found at the next notice turn's start (its generation is
-        // older) and sent again then.
-        let release = match focus.bucket.hold.map(|h| h.reason) {
-            None => false,
-            Some(_) if user => true,
-            Some(r) => matches!(r, HoldReason::Quiet | HoldReason::SessionNotRunning),
-        };
-        if release {
-            let trigger = if user {
-                Trigger::UserTurn
-            } else {
-                Trigger::AfterTurn
-            };
-            effects.extend(self.attempt(tag, trigger, now));
-        }
-        effects
-    }
-
-    /// End `tag`'s notice turn, if it is in one: grow or end the chain.
-    fn end_notice_turn(&mut self, tag: &str, now: i64) -> bool {
-        let Some(turn) = self.notice_turns.remove(tag) else {
-            return false;
-        };
-        let limits = &mut self.focus(tag).limits;
-        let before = limits.chain;
-        limits.notice_turn_ended(turn.born);
-        if limits.chain != before {
-            self.touch();
-        }
-        self.ended_turns.insert(
-            tag.to_owned(),
-            EndedTurn {
-                started_ms: turn.started_ms,
-                ended_ms: now,
-                born: turn.born,
-                chain_before: before,
-            },
-        );
-        true
-    }
-}
-
-// ── registry, timers and settings ───────────────────────────────────────────
-
-impl State {
     pub(super) fn on_registry(&mut self, present: &[String], departed: &[String], now: i64) {
-        for tag in present {
-            self.closed.remove(tag);
-            if let Some(focus) = self.store.focuses.get_mut(tag) {
-                if now - focus.last_seen_ms > HOUR_MS {
-                    focus.last_seen_ms = now;
-                    self.dirty = true;
-                }
-            }
-        }
-        for tag in departed {
-            self.closed.insert(tag.clone());
-            self.notice_turns.remove(tag);
-            self.ended_turns.remove(tag);
-            self.drop_all(
-                tag,
-                NoticeStatus::NotSent,
-                NoticeReason::FocusClosed,
-                Some("focus_closed"),
-                now,
-            );
-        }
-        // Modes of focuses unseen for 90 days go; departed ones keep theirs
-        // until then (a recreated focus gets its tag back).
-        let before = self.store.focuses.len();
-        self.store
-            .focuses
-            .retain(|_, f| !(now - f.last_seen_ms > FOCUS_UNSEEN_MAX_MS && f.bucket.is_empty()));
-        if self.store.focuses.len() != before {
-            self.touch();
-        }
+        self.hub.delivery_mut().on_registry(
+            &mut Jobs(&mut self.mother.jobs),
+            present,
+            departed,
+            now,
+        );
     }
 
     pub(super) fn tick(&mut self, now: i64) -> Vec<Effect> {
-        let mut effects = Vec::new();
-        let tags: Vec<String> = self.store.focuses.keys().cloned().collect();
-        for tag in tags {
-            self.expire(&tag, now);
-            let Some(focus) = self.store.focuses.get_mut(&tag) else {
-                continue;
-            };
-            if focus.bucket.window.is_some_and(|w| now >= w.closes_at()) {
-                focus.bucket.window = None;
-                effects.extend(self.attempt(&tag, Trigger::Window, now));
-                continue;
-            }
-            let rolled = focus.bucket.hold.map(|h| h.reason) == Some(HoldReason::Cap)
-                && !focus.limits.capped(now);
-            if rolled {
-                if focus.mode == Some(NotifyLevel::Quiet) {
-                    // A Quiet focus is never woken: back to "after a turn".
-                    self.hold(&tag, HoldReason::Quiet, now);
-                } else {
-                    effects.extend(self.attempt(&tag, Trigger::CapRolled, now));
-                }
-            }
-        }
-        self.forget_absent_jobs(now);
+        let effects = self
+            .hub
+            .delivery_mut()
+            .tick(&mut Jobs(&mut self.mother.jobs), now);
+        let forgotten = self.mother.forget_absent(now);
+        self.apply(forgotten, now);
         effects
-    }
-
-    /// Drop `tag`'s items (waiting or in flight) older than 24 h.
-    fn expire(&mut self, tag: &str, now: i64) {
-        let Some(focus) = self.store.focuses.get_mut(tag) else {
-            return;
-        };
-        let old = |t: i64| now - t > batch::HOLD_MAX_MS;
-        let mut gone: Vec<NoticeItem> = Vec::new();
-        let (expired, kept): (Vec<batch::Pending>, Vec<batch::Pending>) =
-            std::mem::take(&mut focus.bucket.items)
-                .into_iter()
-                .partition(|p| old(p.updated_ms));
-        focus.bucket.items = kept;
-        gone.extend(expired.into_iter().map(|p| p.item));
-        // An untold item in flight is already in the session's queue and can
-        // still run: it is not ours to drop (a cleared queue is found at the
-        // next notice turn's start). Told ones are only bookkeeping.
-        focus
-            .bucket
-            .drain_inflight(|f| f.told && now - f.at_ms > HOUR_MS);
-        if !focus.bucket.has_due() && focus.bucket.window.is_none() {
-            focus.bucket.hold = None;
-        }
-        if gone.is_empty() {
-            return;
-        }
-        for item in &gone {
-            self.record(
-                &item.job_id,
-                NoticeStatus::Dropped,
-                None,
-                &item.states,
-                false,
-                true,
-                now,
-            );
-        }
-        self.audit_dropped(tag, "expired");
-        self.touch();
     }
 
     pub(super) fn apply_settings(
@@ -1112,76 +484,22 @@ impl State {
         enabled: Option<bool>,
         now: i64,
     ) -> Result<Vec<Effect>, SettingsError> {
-        let mut effects = Vec::new();
+        let host = &mut Jobs(&mut self.mother.jobs);
+        let delivery = self.hub.delivery_mut();
         match scope {
             NoticeScope::Focus => {
                 let (Some(tag), Some(mode)) = (tag.filter(|t| is_tag_like(t)), mode) else {
                     return Err(SettingsError::FocusNeedsTagAndMode);
                 };
-                let focus = self.focus(tag);
-                focus.mode = (mode != NotifyLevel::Wake).then_some(mode);
-                focus.last_seen_ms = now;
-                match mode {
-                    NotifyLevel::Off => {
-                        self.drop_all(
-                            tag,
-                            NoticeStatus::Dropped,
-                            NoticeReason::FocusOff,
-                            Some("focus_off"),
-                            now,
-                        );
-                        effects.push(Effect::Withdraw {
-                            tag: tag.to_owned(),
-                        });
-                    }
-                    NotifyLevel::Quiet => {
-                        let bucket = &mut self.focus(tag).bucket;
-                        if bucket.window.take().is_some() && bucket.has_due() {
-                            self.hold(tag, HoldReason::Quiet, now);
-                        }
-                    }
-                    // Quiet to Wake does not wake for what is held: it goes
-                    // after the next turn, as it would have.
-                    NotifyLevel::Wake => {}
-                }
-                self.audits
-                    .push(MotherAuditEvent::MotherNoticeSettingsChanged {
-                        scope,
-                        focus: Some(tag.to_owned()),
-                        mode: Some(mode),
-                        enabled: None,
-                    });
+                Ok(delivery.set_actor_mode(host, tag, mode.into(), now))
             }
             NoticeScope::Global => {
                 let Some(enabled) = enabled else {
                     return Err(SettingsError::GlobalNeedsEnabled);
                 };
-                self.store.enabled = enabled;
-                if !enabled {
-                    let tags: Vec<String> = self.store.focuses.keys().cloned().collect();
-                    for tag in tags {
-                        if self.drop_all(
-                            &tag,
-                            NoticeStatus::Dropped,
-                            NoticeReason::GlobalOff,
-                            Some("global_off"),
-                            now,
-                        ) {
-                            effects.push(Effect::Withdraw { tag });
-                        }
-                    }
-                }
-                self.audits
-                    .push(MotherAuditEvent::MotherNoticeSettingsChanged {
-                        scope,
-                        focus: None,
-                        mode: None,
-                        enabled: Some(enabled),
-                    });
+                Ok(delivery.set_enabled(host, enabled, now))
             }
         }
-        self.touch();
-        Ok(effects)
     }
 }
 
@@ -1189,142 +507,20 @@ impl State {
 
 impl State {
     pub(super) fn focus_states(&self, now: i64) -> Vec<FocusNoticeState> {
-        self.store
-            .focuses
-            .iter()
-            .filter(|(_, f)| !f.is_trivial())
-            .map(|(tag, f)| {
-                let b = &f.bucket;
-                let waiting =
-                    b.items.iter().filter(|p| p.due).count() + b.untold_inflight().count();
-                let reason = match (b.hold, b.window, b.untold_inflight().next()) {
-                    (Some(Hold { reason, .. }), _, _) => Some(reason.into()),
-                    (None, Some(_), _) => Some(NoticeReason::Batching),
-                    (None, None, Some(_)) => Some(NoticeReason::Busy),
-                    _ => None,
-                };
-                FocusNoticeState {
-                    tag: tag.clone(),
-                    mode: f.mode.unwrap_or(NotifyLevel::Wake),
-                    held: reason.filter(|_| waiting > 0).map(|reason| HeldSummary {
-                        count: waiting,
-                        reason,
-                    }),
-                    chain_held: f.limits.chain_held(),
-                    wakes_by_day: f.limits.wakes_by_day(now),
-                }
+        self.hub
+            .delivery()
+            .actor_states(now)
+            .into_iter()
+            .map(|a| FocusNoticeState {
+                tag: a.actor,
+                mode: a.mode.into(),
+                held: a.held.map(|h| HeldSummary {
+                    count: h.count,
+                    reason: h.reason.into(),
+                }),
+                chain_held: a.chain_held,
+                wakes_by_day: a.wakes_by_day,
             })
             .collect()
-    }
-}
-
-// ── helpers ─────────────────────────────────────────────────────────────────
-
-/// The changes to report for `job`, given the record `prev` of the last look.
-/// On the first look after a restart (`restart`), a job that moved without the
-/// engine seeing it is reported as its current state, unless that state was
-/// already accounted for (the state in the record, not the last event).
-fn changes_since(prev: Option<&JobRecord>, job: &MotherJob, restart: bool) -> Vec<JobEvent> {
-    let mut events = detect::changes(
-        prev.map(|p| Seen {
-            state: &p.state,
-            has_pr: p.has_pr,
-        }),
-        job,
-    );
-    if restart && events.is_empty() {
-        if let Some(p) = prev {
-            if p.accounted_state.as_deref() != Some(job.state.as_str()) {
-                events.extend(JobEvent::from_state(&job.state));
-            }
-        }
-    }
-    events
-}
-
-/// Open or join the window for a change at `level`, or hold it. Returns the
-/// reason the job now waits and whether it earns a history entry.
-fn wait_for_window(
-    bucket: &mut Bucket,
-    level: NotifyLevel,
-    due: bool,
-    now: i64,
-) -> Option<(NoticeReason, bool)> {
-    match level {
-        NotifyLevel::Wake => {
-            if due || bucket.window.is_some() {
-                bucket.touch_window(now);
-            }
-            due.then(|| {
-                let reason = match bucket.hold.map(|h| h.reason) {
-                    Some(r @ (HoldReason::Cap | HoldReason::LoopGuard)) => r.into(),
-                    _ => NoticeReason::Batching,
-                };
-                (reason, false)
-            })
-        }
-        NotifyLevel::Quiet => {
-            // It joins an open window (moving its end) but never opens one.
-            if bucket.window.is_some() {
-                bucket.touch_window(now);
-            }
-            due.then(|| {
-                bucket.hold_at_least(HoldReason::Quiet, now);
-                let reason = bucket
-                    .hold
-                    .map(|h| h.reason.into())
-                    .unwrap_or(NoticeReason::Quiet);
-                (reason, true)
-            })
-        }
-        NotifyLevel::Off => None,
-    }
-}
-
-/// What a notice says about `job`, as of now (title and PR cleaned).
-fn snapshot_of(job: &MotherJob) -> Snapshot {
-    Snapshot {
-        title: element::clean_title(&job.title),
-        pr_url: job.pr_url.as_deref().and_then(element::clean_pr),
-        cost_usd: job.actual_cost_usd,
-    }
-}
-
-/// A job's record as the feed shows it now (accounting fields empty).
-fn record_for(job: &MotherJob, now: i64) -> JobRecord {
-    let focus = job
-        .nostromo
-        .as_ref()
-        .filter(|a| a.origin.kind == OriginKind::Focus)
-        .and_then(|a| a.origin.focus_tag.clone());
-    JobRecord {
-        state: job.state.clone(),
-        has_pr: job.pr_url.is_some(),
-        last_seen_ms: now,
-        finished_ms: job.finished_at.map(|t| t.timestamp_millis()),
-        accounted_state: None,
-        last_notified: None,
-        focus,
-        notify: job.nostromo.as_ref().and_then(|a| a.notify),
-        snapshot: snapshot_of(job),
-        pr_final: None,
-        notice: NoticeView::default(),
-    }
-}
-
-/// What a notice says about `job` for `event` (states filled in by the batch).
-fn item_for(job: &MotherJob, event: JobEvent) -> NoticeItem {
-    item_from(&job.id, &snapshot_of(job), element::reason_for(job, event))
-}
-
-/// A notice item for `job_id` from its `snapshot` (states filled in by the batch).
-fn item_from(job_id: &str, snapshot: &Snapshot, reason: Option<String>) -> NoticeItem {
-    NoticeItem {
-        job_id: job_id.to_owned(),
-        title: snapshot.title.clone(),
-        states: Vec::new(),
-        pr_url: snapshot.pr_url.clone(),
-        cost_usd: snapshot.cost_usd,
-        reason,
     }
 }
